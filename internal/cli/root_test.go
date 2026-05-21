@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,7 +53,7 @@ func TestRunInitCreatesState(t *testing.T) {
 }
 
 func TestRunSubcommandHelpSucceeds(t *testing.T) {
-	for _, command := range []string{"init", "doctor"} {
+	for _, command := range []string{"init", "doctor", "version"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 
@@ -62,5 +63,57 @@ func TestRunSubcommandHelpSucceeds(t *testing.T) {
 				t.Fatalf("%s --help exit code = %d, stderr=%s", command, code, stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunVersionPrintsBuildAndPaths(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+
+	code := Run([]string{"version", "--home", home}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("version exit code = %d, stderr=%s", code, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"gitmoot dev",
+		"commit: unknown",
+		"built: unknown",
+		"go: go",
+		filepath.Join(home, ".gitmoot", "config.toml"),
+		filepath.Join(home, ".gitmoot", "gitmoot.db"),
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("version output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunVersionJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+
+	code := Run([]string{"version", "--home", home, "--json"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("version --json exit code = %d, stderr=%s", code, stderr.String())
+	}
+	var output struct {
+		Version  string `json:"version"`
+		Commit   string `json:"commit"`
+		Date     string `json:"date"`
+		Go       string `json:"go"`
+		Config   string `json:"config"`
+		Database string `json:"database"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("version JSON did not parse: %v\n%s", err, stdout.String())
+	}
+	if output.Version != "dev" || output.Commit != "unknown" || output.Date != "unknown" {
+		t.Fatalf("unexpected build info: %+v", output)
+	}
+	if output.Go == "" || output.Config == "" || output.Database == "" {
+		t.Fatalf("missing version fields: %+v", output)
 	}
 }
