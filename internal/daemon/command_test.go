@@ -57,6 +57,19 @@ func TestParseJobRecoveryCommands(t *testing.T) {
 	}
 }
 
+func TestParseHelpCommand(t *testing.T) {
+	command, ok := ParseCommand("/gitmoot help")
+	if !ok {
+		t.Fatal("ParseCommand did not parse help command")
+	}
+	if command.Action != "help" || command.Agent != "" {
+		t.Fatalf("help command = %+v", command)
+	}
+	if err := command.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
 func TestValidateRejectsUnsupportedCommand(t *testing.T) {
 	if err := (Command{Action: "deploy", Agent: "audit"}).Validate(); err == nil {
 		t.Fatal("Validate accepted unsupported action")

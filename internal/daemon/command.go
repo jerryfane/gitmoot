@@ -33,7 +33,7 @@ func ParseCommand(line string) (Command, bool) {
 	}
 
 	switch fields[1] {
-	case "status", "merge":
+	case "status", "merge", "help":
 		return Command{Action: fields[1], Instructions: trailing(fields, 2)}, true
 	case "retry", "cancel":
 		if len(fields) < 3 {
@@ -55,14 +55,14 @@ func ParseCommand(line string) (Command, bool) {
 
 func (c Command) Validate() error {
 	switch c.Action {
-	case "review", "implement", "ask", "status", "merge", "retry", "cancel":
+	case "review", "implement", "ask", "status", "merge", "retry", "cancel", "help":
 	default:
 		return fmt.Errorf("unsupported command action %q", c.Action)
 	}
 	if (c.Action == "retry" || c.Action == "cancel") && c.JobID == "" {
 		return fmt.Errorf("command %q requires a job id", c.Action)
 	}
-	if c.Action != "status" && c.Action != "merge" && c.Action != "retry" && c.Action != "cancel" && c.Agent == "" {
+	if c.Action != "status" && c.Action != "merge" && c.Action != "retry" && c.Action != "cancel" && c.Action != "help" && c.Agent == "" {
 		return fmt.Errorf("command %q requires an agent", c.Action)
 	}
 	return nil
