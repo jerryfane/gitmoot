@@ -474,7 +474,7 @@ func (d Daemon) handleRecoveryComment(ctx context.Context, pull github.PullReque
 
 func onlyJobRecoveryCommands(commands []Command) bool {
 	for _, command := range commands {
-		if command.Action != "retry" && command.Action != "cancel" {
+		if command.Action != "retry" && command.Action != "cancel" && command.Action != "help" {
 			return false
 		}
 	}
@@ -486,6 +486,8 @@ func (d Daemon) handleCommand(ctx context.Context, pull github.PullRequest, comm
 		return d.ack(ctx, pull.Number, fmt.Sprintf("Gitmoot could not route comment %d: %v.", comment.ID, err))
 	}
 	switch command.Action {
+	case "help":
+		return d.handleHelpCommand(ctx, pull)
 	case "status":
 		return d.handleStatusCommand(ctx, pull, comment)
 	case "merge":
@@ -559,6 +561,44 @@ func (d Daemon) handleCommand(ctx context.Context, pull github.PullRequest, comm
 		}
 	}
 	return d.ack(ctx, pull.Number, fmt.Sprintf("Gitmoot queued `%s` job `%s` for `%s`.", command.Action, job.ID, agent.Name))
+}
+
+func (d Daemon) handleHelpCommand(ctx context.Context, pull github.PullRequest) error {
+	lines := []string{
+		fmt.Sprintf("Gitmoot help for `%s` PR #%d:", d.Repo.FullName(), pull.Number),
+		"- `/gitmoot help`",
+		"- `/gitmoot status`",
+		"- `/gitmoot retry <job-id>`",
+		"- `/gitmoot cancel <job-id>`",
+		"- `/gitmoot merge`",
+	}
+	agents, err := d.Store.ListAgents(ctx)
+	if err != nil {
+		return err
+	}
+	allowed := []string{}
+	for _, agent := range agents {
+		canAccess, err := d.Store.AgentCanAccessRepo(ctx, agent.Name, d.Repo.FullName())
+		if err != nil {
+			return err
+		}
+		if !canAccess {
+			continue
+		}
+		caps := strings.Join(agent.Capabilities, ",")
+		if caps == "" {
+			caps = "none"
+		}
+		allowed = append(allowed, fmt.Sprintf("- `%s`: %s", agent.Name, caps))
+	}
+	if len(allowed) == 0 {
+		lines = append(lines, "- agents: none allowed for this repo")
+	} else {
+		lines = append(lines, "- agents:")
+		lines = append(lines, allowed...)
+		lines = append(lines, "- agent command: `/gitmoot <agent> <review|implement|ask> <instructions>`")
+	}
+	return d.ack(ctx, pull.Number, strings.Join(lines, "\n"))
 }
 
 func (d Daemon) handleRetryCommand(ctx context.Context, pull github.PullRequest, command Command) error {

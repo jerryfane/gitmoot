@@ -64,6 +64,7 @@ planned tasks. `task run` starts one task branch and records its branch lock.
 4. Initialize Gitmoot state and subscribe the agents.
 
    ```sh
+   gitmoot setup --repo owner/project --path . --agent lead --runtime codex --session <codex-session-id>
    gitmoot init
    gitmoot doctor --repo .
    gitmoot agent subscribe lead --runtime codex --session <codex-session-id> --role lead --repo owner/project --capability implement --capability review --capability ask
@@ -98,6 +99,7 @@ planned tasks. `task run` starts one task branch and records its branch lock.
    A repository writer can ask a subscribed agent to work from a PR comment:
 
    ```text
+   /gitmoot help
    /gitmoot audit review focus on correctness and missed edge cases
    /gitmoot lead implement fix the review findings without broad refactors
    /gitmoot retry <job-id>

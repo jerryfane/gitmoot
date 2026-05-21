@@ -23,7 +23,9 @@ contract.
 
 ```text
 gitmoot init
+gitmoot setup --repo owner/repo --path . --agent <name> --runtime codex|claude|shell --session <ref>
 gitmoot doctor --repo .
+gitmoot config path|show
 gitmoot daemon start --repo owner/repo --poll 30s
 gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
 gitmoot agent list
@@ -33,6 +35,7 @@ gitmoot agent remove <name>
 
 ```text
 gitmoot status
+gitmoot events --repo owner/repo
 gitmoot goal import --file <path>
 gitmoot task run <id> --repo owner/repo --owner <agent>
 gitmoot job list|show|events|run|retry|cancel

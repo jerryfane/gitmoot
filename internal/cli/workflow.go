@@ -49,33 +49,75 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 
 	var agents []db.Agent
 	var goals []db.Goal
+	var repos []db.Repo
 	var tasks []db.Task
 	var prs []db.PullRequest
+	var jobs []db.Job
+	var locks []db.BranchLock
+	repoFullName := ""
+	if strings.TrimSpace(*repo) != "" {
+		var ok bool
+		repoFullName, ok = normalizeOptionalRepoFlag(*repo, stderr)
+		if !ok {
+			return 2
+		}
+	}
 	if err := withStore(*home, func(store *db.Store) error {
 		var err error
 		if agents, err = store.ListAgents(context.Background()); err != nil {
 			return err
 		}
+		if strings.TrimSpace(repoFullName) != "" {
+			filtered := []db.Agent{}
+			for _, agent := range agents {
+				allowed, err := store.AgentCanAccessRepo(context.Background(), agent.Name, repoFullName)
+				if err != nil {
+					return err
+				}
+				if allowed {
+					filtered = append(filtered, agent)
+				}
+			}
+			agents = filtered
+		}
 		if goals, err = store.ListGoals(context.Background()); err != nil {
 			return err
 		}
-		if strings.TrimSpace(*repo) == "" {
+		if repos, err = store.ListRepos(context.Background()); err != nil {
+			return err
+		}
+		if strings.TrimSpace(repoFullName) == "" {
 			if tasks, err = store.ListTasks(context.Background()); err != nil {
 				return err
 			}
 		} else {
-			if tasks, err = store.ListTasksByRepo(context.Background(), *repo); err != nil {
+			if tasks, err = store.ListTasksByRepo(context.Background(), repoFullName); err != nil {
 				return err
 			}
 		}
-		prs, err = store.ListPullRequests(context.Background(), *repo)
+		if prs, err = store.ListPullRequests(context.Background(), repoFullName); err != nil {
+			return err
+		}
+		if jobs, err = store.ListJobs(context.Background()); err != nil {
+			return err
+		}
+		locks, err = store.ListBranchLocks(context.Background(), repoFullName)
 		return err
 	}); err != nil {
 		fmt.Fprintf(stderr, "status: %v\n", err)
 		return 1
 	}
 
+	if strings.TrimSpace(repoFullName) == "" {
+		fmt.Fprintln(stdout, "scope: global")
+	} else {
+		fmt.Fprintf(stdout, "scope: %s\n", repoFullName)
+	}
+	fmt.Fprintf(stdout, "repos: %d\n", countRepos(repos, repoFullName))
 	fmt.Fprintf(stdout, "agents: %d\n", len(agents))
+	for _, agent := range agents {
+		fmt.Fprintf(stdout, "  %s: %s %s\n", agent.Name, agent.Runtime, strings.Join(agent.Capabilities, ","))
+	}
 	fmt.Fprintf(stdout, "goals: %d\n", len(goals))
 	fmt.Fprintf(stdout, "tasks: %d\n", len(tasks))
 	counts := taskStateCounts(tasks)
@@ -88,6 +130,13 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "  %s: %d\n", state, counts[state])
 	}
 	fmt.Fprintf(stdout, "pull_requests: %d\n", len(prs))
+	filteredJobCount := countJobs(jobs, repoFullName)
+	jobCounts := jobStateCounts(jobs, repoFullName)
+	fmt.Fprintf(stdout, "jobs: %d\n", filteredJobCount)
+	for _, state := range sortedCountKeys(jobCounts) {
+		fmt.Fprintf(stdout, "  %s: %d\n", state, jobCounts[state])
+	}
+	fmt.Fprintf(stdout, "locks: %d\n", len(locks))
 	return 0
 }
 
@@ -350,6 +399,57 @@ func taskStateCounts(tasks []db.Task) map[string]int {
 		counts[state]++
 	}
 	return counts
+}
+
+func countRepos(repos []db.Repo, repoFullName string) int {
+	if strings.TrimSpace(repoFullName) == "" {
+		return len(repos)
+	}
+	for _, repo := range repos {
+		if repo.FullName() == repoFullName {
+			return 1
+		}
+	}
+	return 0
+}
+
+func countJobs(jobs []db.Job, repoFullName string) int {
+	return len(filterJobsByRepo(jobs, repoFullName))
+}
+
+func jobStateCounts(jobs []db.Job, repoFullName string) map[string]int {
+	counts := map[string]int{}
+	for _, job := range filterJobsByRepo(jobs, repoFullName) {
+		state := strings.TrimSpace(job.State)
+		if state == "" {
+			state = "unknown"
+		}
+		counts[state]++
+	}
+	return counts
+}
+
+func filterJobsByRepo(jobs []db.Job, repoFullName string) []db.Job {
+	if strings.TrimSpace(repoFullName) == "" {
+		return jobs
+	}
+	filtered := make([]db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		payload, err := daemonJobPayload(job)
+		if err == nil && payload.Repo == repoFullName {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
+func sortedCountKeys(counts map[string]int) []string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func firstNonEmpty(values ...string) string {

@@ -1110,6 +1110,50 @@ func TestPollOnceReportsStatusCommand(t *testing.T) {
 	}
 }
 
+func TestPollOnceReportsHelpCommand(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:           "audit",
+		Role:           "reviewer",
+		Runtime:        "codex",
+		RuntimeRef:     "last",
+		RepoScope:      repo.FullName(),
+		Capabilities:   []string{"review", "ask"},
+		AutonomyPolicy: "auto",
+		HealthStatus:   "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent returned error: %v", err)
+	}
+	client := &fakeGitHub{
+		pulls: []github.PullRequest{{
+			Number:  10,
+			Title:   "Task 10",
+			State:   "open",
+			URL:     "https://github.com/jerryfane/gitmoot/pull/10",
+			HeadRef: "task-10",
+			BaseRef: "main",
+			HeadSHA: "abc123",
+		}},
+		comments: map[int64][]github.IssueComment{
+			10: {{ID: 709, Body: "/gitmoot help", Author: "alice"}},
+		},
+	}
+
+	if err := (Daemon{Repo: repo, Store: store, GitHub: client}).PollOnce(ctx); err != nil {
+		t.Fatalf("PollOnce returned error: %v", err)
+	}
+	if len(client.posted) != 1 {
+		t.Fatalf("posted = %+v, want one help comment", client.posted)
+	}
+	for _, want := range []string{"Gitmoot help for `jerryfane/gitmoot` PR #10", "`audit`: review,ask", "/gitmoot <agent> <review|implement|ask>"} {
+		if !strings.Contains(client.posted[0].body, want) {
+			t.Fatalf("help output missing %q:\n%s", want, client.posted[0].body)
+		}
+	}
+}
+
 func TestPollOnceRetriesJobFromComment(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
