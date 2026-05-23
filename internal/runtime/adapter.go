@@ -97,6 +97,14 @@ func ValidateAgent(agent Agent) error {
 	return nil
 }
 
+func ValidateStartRequest(request StartRequest) error {
+	adapter, err := (Factory{}).Adapter(request.Agent.Runtime)
+	if err != nil {
+		return err
+	}
+	return validateStartRequest(request.Agent, adapter.Name(), request.Prompt)
+}
+
 func validateStartRequest(agent Agent, runtimeName string, prompt string) error {
 	if err := validateAgentFields(agent, false); err != nil {
 		return err

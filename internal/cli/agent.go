@@ -16,12 +16,18 @@ import (
 	"github.com/jerryfane/gitmoot/internal/runtime"
 )
 
+var newRuntimeFactory = func() runtime.Factory {
+	return runtime.Factory{}
+}
+
 func runAgent(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printAgentUsage(stdout)
 		return 0
 	}
 	switch args[0] {
+	case "start":
+		return runAgentStart(args[1:], stdout, stderr)
 	case "subscribe":
 		return runAgentSubscribe(args[1:], stdout, stderr)
 	case "list":
@@ -45,6 +51,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 
 func printAgentUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  gitmoot agent start <name> --runtime codex|claude --repo owner/repo [--path .] [--preset <preset-id>] [--start-daemon]")
 	fmt.Fprintln(w, "  gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> [--repo owner/repo...] --capability <capability>")
 	fmt.Fprintln(w, "    Codex sessions may use a UUID, thread name, or last. Claude sessions may use a UUID or last. Shell sessions are commands.")
 	fmt.Fprintln(w, "  gitmoot agent allow <name> --repo owner/repo")
@@ -53,6 +60,153 @@ func printAgentUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot agent list")
 	fmt.Fprintln(w, "  gitmoot agent remove <name>")
 	fmt.Fprintln(w, "  gitmoot agent doctor <name>")
+}
+
+func runAgentStart(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("agent start", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	runtimeName := fs.String("runtime", "", "agent runtime: codex or claude")
+	repoFlag := fs.String("repo", "", "allowed repo as owner/repo")
+	path := fs.String("path", ".", "local checkout path")
+	role := fs.String("role", "", "agent role")
+	presetID := fs.String("preset", "", "agent prompt preset")
+	policy := fs.String("policy", "auto", "autonomy policy")
+	updatePreset := fs.Bool("update-preset", false, "install or refresh the preset before starting")
+	startDaemon := fs.Bool("start-daemon", false, "start the background daemon after setup")
+	var capabilities repeatedFlag
+	fs.Var(&capabilities, "capability", "agent capability, repeatable")
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		fs.Usage()
+		if len(args) == 0 {
+			fmt.Fprintln(stderr, "agent start requires exactly one name")
+			return 2
+		}
+		return 0
+	}
+	name := args[0]
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "agent start requires exactly one name")
+		return 2
+	}
+	if strings.TrimSpace(*runtimeName) == "" {
+		fmt.Fprintln(stderr, "agent start requires --runtime")
+		return 2
+	}
+	if strings.TrimSpace(*repoFlag) == "" {
+		fmt.Fprintln(stderr, "agent start requires --repo")
+		return 2
+	}
+	if *updatePreset && strings.TrimSpace(*presetID) == "" {
+		fmt.Fprintln(stderr, "agent start --update-preset requires --preset")
+		return 2
+	}
+	repo, err := daemon.ParseRepository(*repoFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid repo: %v\n", err)
+		return 2
+	}
+	record, err := repoRecordFromPath(context.Background(), repo, *path)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent start: %v\n", err)
+		return 1
+	}
+	resolvedRole, resolvedCapabilities, err := resolveAgentDefaults(*presetID, *role, capabilities, "agent", []string{"ask", "review", "implement"})
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid preset: %v\n", err)
+		return 2
+	}
+	agent := runtime.Agent{
+		Name:           name,
+		Role:           resolvedRole,
+		Runtime:        strings.TrimSpace(*runtimeName),
+		RepoScope:      repo.FullName(),
+		PresetID:       strings.TrimSpace(*presetID),
+		Capabilities:   resolvedCapabilities,
+		AutonomyPolicy: *policy,
+		HealthStatus:   "unknown",
+	}
+	if err := runtime.ValidateStartRequest(runtime.StartRequest{Agent: agent, Prompt: "preflight"}); err != nil {
+		fmt.Fprintf(stderr, "invalid agent: %v\n", err)
+		return 2
+	}
+	if agent.Runtime == runtime.ShellRuntime {
+		fmt.Fprintln(stderr, "start runtime: shell runtime does not support agent start; use gitmoot agent subscribe --runtime shell --session <command>")
+		return 1
+	}
+	var cachedPreset db.Preset
+	if err := withStore(*home, func(store *db.Store) error {
+		if _, err := store.GetAgent(context.Background(), agent.Name); err == nil {
+			return fmt.Errorf("agent %s already exists", agent.Name)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if agent.PresetID == "" {
+			return nil
+		}
+		if *updatePreset {
+			updated, err := preset.Update(context.Background(), store, newPresetFetcher(), agent.PresetID)
+			if err != nil {
+				return err
+			}
+			cachedPreset = updated
+			return nil
+		}
+		installed, err := loadInstalledPreset(context.Background(), store, agent.PresetID)
+		if err != nil {
+			return err
+		}
+		cachedPreset = installed
+		return nil
+	}); err != nil {
+		if strings.HasPrefix(err.Error(), "preset ") {
+			fmt.Fprintf(stderr, "%v\n", err)
+		} else {
+			fmt.Fprintf(stderr, "agent start: %v\n", err)
+		}
+		return 1
+	}
+	prompt := agentStartupPrompt(agent, cachedPreset)
+	adapter, err := runtimeStartAdapter(newRuntimeFactory(), agent.Runtime, record.CheckoutPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load adapter: %v\n", err)
+		return 1
+	}
+	started, err := adapter.Start(context.Background(), runtime.StartRequest{Agent: agent, Prompt: prompt})
+	if err != nil {
+		fmt.Fprintf(stderr, "start runtime: %v\n", err)
+		return 1
+	}
+	agent.RuntimeRef = strings.TrimSpace(started.RuntimeRef)
+	if err := runtime.ValidateAgent(agent); err != nil {
+		fmt.Fprintf(stderr, "invalid started agent: %v\n", err)
+		return 1
+	}
+	if err := withStore(*home, func(store *db.Store) error {
+		if err := store.UpsertRepo(context.Background(), record); err != nil {
+			return err
+		}
+		return persistAgentSubscription(context.Background(), store, agent, []string{repo.FullName()})
+	}); err != nil {
+		fmt.Fprintf(stderr, "agent start: %v\n", err)
+		return 1
+	}
+	writeLine(stdout, "started %s (%s) for %s", agent.Name, agent.Runtime, repo.FullName())
+	writeLine(stdout, "session: %s", agent.RuntimeRef)
+	writeLine(stdout, "invoke: /gitmoot %s review", agent.Name)
+	if *startDaemon {
+		writeLine(stdout, "step: start background daemon")
+		return runDaemonStartWithWorkDir([]string{"--home", *home, "--repo", repo.FullName()}, record.CheckoutPath, stdout, stderr)
+	}
+	writeLine(stdout, "next: cd %s", shellArg(record.CheckoutPath))
+	writeLine(stdout, "next: %s", daemonStartHint(*home, repo.FullName()))
+	return 0
 }
 
 func runAgentSubscribe(args []string, stdout, stderr io.Writer) int {
@@ -119,17 +273,11 @@ func runAgentSubscribe(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := withStore(*home, func(store *db.Store) error {
 		if agent.PresetID != "" {
-			if _, err := store.GetPreset(context.Background(), agent.PresetID); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return fmt.Errorf("preset %s is not installed; run gitmoot preset update %s", agent.PresetID, agent.PresetID)
-				}
+			if _, err := loadInstalledPreset(context.Background(), store, agent.PresetID); err != nil {
 				return err
 			}
 		}
-		if err := store.UpsertAgent(context.Background(), dbAgent(agent)); err != nil {
-			return err
-		}
-		return store.ReplaceAgentRepos(context.Background(), agent.Name, normalizedRepos)
+		return persistAgentSubscription(context.Background(), store, agent, normalizedRepos)
 	}); err != nil {
 		if strings.HasPrefix(err.Error(), "preset ") {
 			fmt.Fprintf(stderr, "%v\n", err)
@@ -147,10 +295,20 @@ func runAgentSubscribe(args []string, stdout, stderr io.Writer) int {
 }
 
 func resolvePresetDefaults(presetID string, role string, capabilities []string) (string, []string, error) {
+	return resolveAgentDefaults(presetID, role, capabilities, "", nil)
+}
+
+func resolveAgentDefaults(presetID string, role string, capabilities []string, fallbackRole string, fallbackCapabilities []string) (string, []string, error) {
 	presetID = strings.TrimSpace(presetID)
 	role = strings.TrimSpace(role)
 	resolvedCapabilities := compactValues(capabilities)
 	if presetID == "" {
+		if role == "" {
+			role = fallbackRole
+		}
+		if len(resolvedCapabilities) == 0 {
+			resolvedCapabilities = append([]string{}, fallbackCapabilities...)
+		}
 		return role, resolvedCapabilities, nil
 	}
 	definition, ok := preset.Lookup(presetID)
@@ -167,6 +325,84 @@ func resolvePresetDefaults(presetID string, role string, capabilities []string) 
 		return "", nil, fmt.Errorf("preset %s does not allow implement capability", definition.ID)
 	}
 	return role, resolvedCapabilities, nil
+}
+
+func loadInstalledPreset(ctx context.Context, store *db.Store, presetID string) (db.Preset, error) {
+	cached, err := store.GetPreset(ctx, presetID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Preset{}, fmt.Errorf("preset %s is not installed; run gitmoot preset update %s", presetID, presetID)
+	}
+	return cached, err
+}
+
+func persistAgentSubscription(ctx context.Context, store *db.Store, agent runtime.Agent, repos []string) error {
+	if err := store.UpsertAgent(ctx, dbAgent(agent)); err != nil {
+		return err
+	}
+	return store.ReplaceAgentRepos(ctx, agent.Name, repos)
+}
+
+func agentStartupPrompt(agent runtime.Agent, cachedPreset db.Preset) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "You are a Gitmoot-managed agent named %s.\n", agent.Name)
+	fmt.Fprintf(&builder, "Runtime: %s\n", agent.Runtime)
+	fmt.Fprintf(&builder, "Allowed repo: %s\n", agent.RepoScope)
+	fmt.Fprintf(&builder, "Role: %s\n", agent.Role)
+	fmt.Fprintf(&builder, "Capabilities: %s\n", strings.Join(agent.Capabilities, ","))
+	if agent.PresetID != "" {
+		fmt.Fprintf(&builder, "Preset: %s", agent.PresetID)
+		if cachedPreset.ResolvedCommit != "" {
+			fmt.Fprintf(&builder, " @ %s", cachedPreset.ResolvedCommit)
+		}
+		builder.WriteString("\n\nPreset instructions:\n")
+		builder.WriteString(strings.TrimRight(cachedPreset.Content, "\n"))
+		builder.WriteString("\n\n")
+	}
+	builder.WriteString("Initialize this session for future Gitmoot jobs. Do not edit files, run long tasks, create commits, or open pull requests now. Reply with a short readiness acknowledgment only.")
+	return builder.String()
+}
+
+func runtimeStartAdapter(factory runtime.Factory, runtimeName string, checkout string) (runtime.Adapter, error) {
+	switch runtimeName {
+	case runtime.CodexRuntime:
+		return runtime.CodexAdapter{Runner: factory.Runner, Dir: checkout}, nil
+	case runtime.ClaudeRuntime:
+		return runtime.ClaudeAdapter{Runner: factory.Runner, Dir: checkout}, nil
+	case runtime.ShellRuntime:
+		return runtime.ShellAdapter{Runner: factory.Runner, Dir: checkout}, nil
+	default:
+		return nil, fmt.Errorf("unsupported runtime: %s", runtimeName)
+	}
+}
+
+func daemonStartHint(home string, repo string) string {
+	args := []string{"gitmoot", "daemon", "start"}
+	if strings.TrimSpace(home) != "" {
+		args = append(args, "--home", home)
+	}
+	args = append(args, "--repo", repo)
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellArg(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellArg(value string) string {
+	if value == "" {
+		return "''"
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '_', '-', '.', '/', ':', '@', '%', '+', '=', ',':
+			continue
+		}
+		return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+	}
+	return value
 }
 
 func compactValues(values []string) []string {
