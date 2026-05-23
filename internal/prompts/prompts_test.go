@@ -8,17 +8,24 @@ import (
 
 func TestRenderJobIncludesContextAndContract(t *testing.T) {
 	prompt := RenderJob(JobPrompt{
-		Repo:         "jerryfane/gitmoot",
-		Branch:       "task-005",
-		PullRequest:  5,
-		Task:         "task-5: Job Mailbox",
-		Sender:       "octocat",
-		Action:       "review",
-		Instructions: "focus on state transitions",
-		Constraints:  []string{"Preserve existing behavior", "", "Return JSON"},
+		Repo:                 "jerryfane/gitmoot",
+		Branch:               "task-005",
+		PullRequest:          5,
+		Task:                 "task-5: Job Mailbox",
+		Sender:               "octocat",
+		Action:               "review",
+		Instructions:         "focus on state transitions",
+		Constraints:          []string{"Preserve existing behavior", "", "Return JSON"},
+		PresetID:             "thermo",
+		PresetResolvedCommit: "abc123",
+		PresetInstructions:   "Review deeply.",
 	})
 
 	for _, want := range []string{
+		"Preset: thermo",
+		"Preset source commit: abc123",
+		"Preset instructions:\nReview deeply.",
+		"Job context:",
 		"Repo: jerryfane/gitmoot",
 		"Branch: task-005",
 		"Pull request: #5",

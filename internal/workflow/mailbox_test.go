@@ -50,6 +50,95 @@ func TestMailboxEnqueueCreatesQueuedJobAndEvent(t *testing.T) {
 	}
 }
 
+func TestMailboxEnqueueSnapshotsAgentPreset(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+	if err := store.UpsertPreset(ctx, db.Preset{
+		ID:             "thermo",
+		Name:           "Thermo",
+		SourceRepo:     "cursor/plugins",
+		SourceRef:      "main",
+		SourcePath:     "cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md",
+		ResolvedCommit: "abc123",
+		Content:        "Review deeply.",
+	}); err != nil {
+		t.Fatalf("UpsertPreset returned error: %v", err)
+	}
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:         "audit",
+		Role:         "reviewer",
+		Runtime:      "codex",
+		RuntimeRef:   "last",
+		RepoScope:    "jerryfane/gitmoot",
+		PresetID:     "thermo",
+		Capabilities: []string{"review"},
+	}); err != nil {
+		t.Fatalf("UpsertAgent returned error: %v", err)
+	}
+
+	if _, err := mailbox.Enqueue(ctx, JobRequest{
+		ID:     "job-1",
+		Agent:  "audit",
+		Action: "review",
+		Repo:   "jerryfane/gitmoot",
+	}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+	if err := store.UpsertPreset(ctx, db.Preset{
+		ID:             "thermo",
+		Name:           "Thermo",
+		SourceRepo:     "cursor/plugins",
+		SourceRef:      "main",
+		SourcePath:     "cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md",
+		ResolvedCommit: "def456",
+		Content:        "Updated instructions.",
+	}); err != nil {
+		t.Fatalf("second UpsertPreset returned error: %v", err)
+	}
+
+	stored, err := store.GetJob(ctx, "job-1")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	payload, err := unmarshalPayload(stored.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.PresetID != "thermo" || payload.PresetResolvedCommit != "abc123" || payload.PresetContent != "Review deeply." {
+		t.Fatalf("payload preset snapshot = %+v", payload)
+	}
+}
+
+func TestMailboxRunIncludesPresetSnapshotInPrompt(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	adapter := &fakeDelivery{outputs: []string{
+		`{"gitmoot_result":{"decision":"approved","summary":"clean","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}`,
+	}}
+	payload, err := marshalPayload(JobPayload{
+		Repo:                 "jerryfane/gitmoot",
+		PresetID:             "thermo",
+		PresetResolvedCommit: "abc123",
+		PresetContent:        "Review deeply.",
+	})
+	if err != nil {
+		t.Fatalf("marshalPayload returned error: %v", err)
+	}
+	if err := store.CreateJob(ctx, db.Job{ID: "job-1", Agent: "audit", Type: "review", State: string(JobQueued), Payload: payload}); err != nil {
+		t.Fatalf("CreateJob returned error: %v", err)
+	}
+
+	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(adapter.prompts) != 1 || !strings.Contains(adapter.prompts[0], "Preset instructions:\nReview deeply.") {
+		t.Fatalf("prompt = %+v", adapter.prompts)
+	}
+}
+
 func TestMailboxRunStoresResultAndSucceeds(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
