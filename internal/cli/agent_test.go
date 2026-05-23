@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -239,6 +240,52 @@ func TestRunAgentStartAppliesInstalledPresetDefaults(t *testing.T) {
 	}
 }
 
+func TestRunAgentStartUsesInstalledCustomPreset(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	promptPath := filepath.Join(t.TempDir(), "frontend.md")
+	if err := os.WriteFile(promptPath, []byte("Review frontend behavior.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"preset", "add", "frontend-reviewer", "--home", home, "--file", promptPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("preset add exit code = %d, stderr=%s", code, stderr.String())
+	}
+	runner := &agentStartRunner{results: []subprocess.Result{{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440022"}` + "\n"}}}
+	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
+	defer restoreFactory()
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{
+		"agent", "start", "frontend-reviewer",
+		"--home", home,
+		"--runtime", "codex",
+		"--repo", "owner/repo",
+		"--path", repoDir,
+		"--preset", "frontend-reviewer",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("start exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	agent, err := store.GetAgent(context.Background(), "frontend-reviewer")
+	if err != nil {
+		t.Fatalf("GetAgent returned error: %v", err)
+	}
+	if agent.Role != "agent" || agent.PresetID != "frontend-reviewer" || strings.Join(agent.Capabilities, ",") != "ask,review,implement" {
+		t.Fatalf("agent = %+v", agent)
+	}
+	prompt := runner.calls[0].args[len(runner.calls[0].args)-1]
+	if !strings.Contains(prompt, "Preset: frontend-reviewer @ sha256:") || !strings.Contains(prompt, "Review frontend behavior.") {
+		t.Fatalf("startup prompt missing custom preset content:\n%s", prompt)
+	}
+}
+
 func TestRunAgentStartRejectsMissingPresetBeforeRuntime(t *testing.T) {
 	home := t.TempDir()
 	repoDir := t.TempDir()
@@ -261,6 +308,36 @@ func TestRunAgentStartRejectsMissingPresetBeforeRuntime(t *testing.T) {
 		t.Fatalf("start exit code = %d, want 1", code)
 	}
 	want := "preset thermo-nuclear-code-quality-review is not installed; run gitmoot preset update thermo-nuclear-code-quality-review"
+	if strings.TrimSpace(stderr.String()) != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runtime was started before preset validation: %+v", runner.calls)
+	}
+}
+
+func TestRunAgentStartRejectsMissingCustomPresetBeforeRuntime(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	runner := &agentStartRunner{}
+	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
+	defer restoreFactory()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"agent", "start", "frontend-reviewer",
+		"--home", home,
+		"--runtime", "codex",
+		"--repo", "owner/repo",
+		"--path", repoDir,
+		"--preset", "frontend-reviewer",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("start exit code = %d, want 1", code)
+	}
+	want := "preset frontend-reviewer is not installed; run gitmoot preset add frontend-reviewer --file <path>"
 	if strings.TrimSpace(stderr.String()) != want {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -416,10 +493,85 @@ func TestRunAgentSubscribeAppliesInstalledPresetDefaults(t *testing.T) {
 	}
 }
 
+func TestRunAgentSubscribeUsesInstalledCustomPreset(t *testing.T) {
+	home := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "frontend.md")
+	if err := os.WriteFile(promptPath, []byte("Review frontend behavior.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"preset", "add", "frontend-reviewer", "--home", home, "--file", promptPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("preset add exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{
+		"agent", "subscribe", "frontend-reviewer",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440001",
+		"--repo", "jerryfane/gitmoot",
+		"--preset", "frontend-reviewer",
+		"--role", "reviewer",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("subscribe without capabilities exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "does not define default capabilities") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"agent", "subscribe", "frontend-reviewer",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440001",
+		"--repo", "jerryfane/gitmoot",
+		"--preset", "frontend-reviewer",
+		"--role", "reviewer",
+		"--capability", "ask",
+		"--capability", "review",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("subscribe exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	agent, err := store.GetAgent(context.Background(), "frontend-reviewer")
+	if err != nil {
+		t.Fatalf("GetAgent returned error: %v", err)
+	}
+	if agent.Role != "reviewer" || agent.PresetID != "frontend-reviewer" || strings.Join(agent.Capabilities, ",") != "ask,review" {
+		t.Fatalf("agent = %+v", agent)
+	}
+}
+
 func TestRunAgentSubscribeRejectsMissingPresetAndImplementCapability(t *testing.T) {
 	home := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{
+		"agent", "subscribe", "frontend-reviewer",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440001",
+		"--repo", "jerryfane/gitmoot",
+		"--preset", "frontend-reviewer",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("missing custom preset exit code = %d, want 1", code)
+	}
+	want := "preset frontend-reviewer is not installed; run gitmoot preset add frontend-reviewer --file <path>"
+	if strings.TrimSpace(stderr.String()) != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
 		"agent", "subscribe", "thermo-review",
 		"--home", home,
 		"--runtime", "codex",
@@ -430,7 +582,7 @@ func TestRunAgentSubscribeRejectsMissingPresetAndImplementCapability(t *testing.
 	if code != 1 {
 		t.Fatalf("missing preset exit code = %d, want 1", code)
 	}
-	want := "preset thermo-nuclear-code-quality-review is not installed; run gitmoot preset update thermo-nuclear-code-quality-review"
+	want = "preset thermo-nuclear-code-quality-review is not installed; run gitmoot preset update thermo-nuclear-code-quality-review"
 	if strings.TrimSpace(stderr.String()) != want {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
