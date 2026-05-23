@@ -34,8 +34,9 @@ gitmoot daemon run [--repo owner/repo] [--poll 30s]
 gitmoot daemon stop|restart|status|logs
 gitmoot preset list
 gitmoot preset show|update|diff thermo-nuclear-code-quality-review
+gitmoot agent start <name> --runtime codex|claude --repo owner/repo [--path .] [--preset <preset-id>] [--start-daemon]
 gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
-gitmoot agent subscribe thermo-review --runtime codex --session <session-id-or-last> --repo owner/repo --preset thermo-nuclear-code-quality-review
+gitmoot agent start thermo-review --runtime codex --repo owner/repo --preset thermo-nuclear-code-quality-review
 gitmoot agent allow|deny|repos
 gitmoot agent list
 gitmoot agent doctor <name>
@@ -63,13 +64,17 @@ queued job so retries remain reproducible.
 
 ```sh
 gitmoot preset update thermo-nuclear-code-quality-review
-gitmoot agent subscribe thermo-review \
+gitmoot agent start thermo-review \
   --runtime codex \
-  --session <session-id-or-last> \
   --repo owner/repo \
-  --preset thermo-nuclear-code-quality-review
+  --preset thermo-nuclear-code-quality-review \
+  --start-daemon
 gitmoot agent doctor thermo-review
 ```
+
+Use `agent start` for a new Gitmoot-managed Codex or Claude session. Use
+`agent subscribe` when the runtime session already exists, or for shell command
+adapters.
 
 Ask it to review from a PR comment:
 

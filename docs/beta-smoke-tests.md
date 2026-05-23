@@ -80,19 +80,29 @@ Goal: PR comment -> queued review job -> Codex resume with cached thermo preset
 instructions -> attributed PR result comment. Run this with a Gitmoot build that
 includes `gitmoot preset` commands.
 
-1. Cache the preset and subscribe a Codex review agent.
+1. Cache the preset and start a Gitmoot-managed Codex review agent.
 
    ```sh
    gitmoot preset update thermo-nuclear-code-quality-review
-   gitmoot agent subscribe thermo-review \
+   gitmoot agent start thermo-review \
      --runtime codex \
-     --session <session-id-or-last> \
      --repo owner/project \
+     --path . \
      --preset thermo-nuclear-code-quality-review
    gitmoot agent doctor thermo-review
    ```
 
-2. Start the daemon for the test repo.
+   Gitmoot prints the created session id. To inspect that Codex thread later:
+
+   ```sh
+   codex resume <session-id>
+   ```
+
+   If you prefer registering an already-open Codex session, use
+   `gitmoot agent subscribe ... --session <session-id-or-last>` instead.
+
+2. Start the daemon for the test repo, or pass `--start-daemon` to
+   `agent start`.
 
    ```sh
    gitmoot daemon start --repo owner/project --poll 10s
@@ -130,6 +140,67 @@ Expected signals:
    ```sh
    gitmoot preset diff thermo-nuclear-code-quality-review
    gitmoot preset update thermo-nuclear-code-quality-review
+   ```
+
+## Agent Start Smoke Test
+
+Goal: prove `gitmoot agent start` can create a Codex session, store the session
+reference, start the daemon, and route a PR comment job through that new
+session.
+
+1. Build a local test binary and use an isolated Gitmoot home.
+
+   ```sh
+   GOTOOLCHAIN=go1.26.0 go build -o /tmp/gitmoot-current ./cmd/gitmoot
+   export GITMOOT_SMOKE_HOME=/tmp/gitmoot-agent-start-smoke
+   rm -rf "$GITMOOT_SMOKE_HOME"
+   /tmp/gitmoot-current init --home "$GITMOOT_SMOKE_HOME"
+   ```
+
+2. From the test repo checkout, cache the preset and start the agent.
+
+   ```sh
+   cd /path/to/project
+   /tmp/gitmoot-current preset update --home "$GITMOOT_SMOKE_HOME" thermo-nuclear-code-quality-review
+   /tmp/gitmoot-current agent start thermo-start-smoke \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --runtime codex \
+     --repo owner/project \
+     --path . \
+     --preset thermo-nuclear-code-quality-review \
+     --start-daemon
+   /tmp/gitmoot-current agent list --home "$GITMOOT_SMOKE_HOME"
+   /tmp/gitmoot-current daemon status --home "$GITMOOT_SMOKE_HOME"
+   ```
+
+3. Open a disposable PR, then comment:
+
+   ```text
+   /gitmoot thermo-start-smoke review
+   ```
+
+4. Verify the job and PR comments.
+
+   ```sh
+   /tmp/gitmoot-current job list --home "$GITMOOT_SMOKE_HOME" --repo owner/project
+   /tmp/gitmoot-current events --home "$GITMOOT_SMOKE_HOME" --repo owner/project
+   gh pr view <number> --repo owner/project --comments
+   ```
+
+Expected signals:
+
+- `agent list` shows `thermo-start-smoke` with a generated Codex session id.
+- The PR receives a queued-job acknowledgement.
+- The job succeeds and the result comment includes agent, runtime, preset, and
+  job metadata.
+- `codex resume <session-id>` opens the created session if manual inspection is
+  needed.
+
+5. Stop the isolated daemon.
+
+   ```sh
+   /tmp/gitmoot-current daemon stop --home "$GITMOOT_SMOKE_HOME"
+   /tmp/gitmoot-current daemon status --home "$GITMOOT_SMOKE_HOME"
    ```
 
 ## Two-Repo Smoke Test
