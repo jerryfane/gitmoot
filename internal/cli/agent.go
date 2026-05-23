@@ -151,7 +151,7 @@ func runAgentStart(args []string, stdout, stderr io.Writer) int {
 			return nil
 		}
 		if *updatePreset {
-			updated, err := preset.Update(context.Background(), store, newPresetFetcher(), agent.PresetID)
+			updated, err := updatePresetByID(context.Background(), store, agent.PresetID)
 			if err != nil {
 				return err
 			}
@@ -251,6 +251,22 @@ func runAgentSubscribe(args []string, stdout, stderr io.Writer) int {
 	if len(normalizedRepos) > 0 {
 		repoScope = normalizedRepos[0]
 	}
+	trimmedPresetID := strings.TrimSpace(*presetID)
+	if trimmedPresetID != "" {
+		if _, ok := preset.Lookup(trimmedPresetID); !ok {
+			if err := withStore(*home, func(store *db.Store) error {
+				_, err := loadInstalledPreset(context.Background(), store, trimmedPresetID)
+				return err
+			}); err != nil {
+				if strings.HasPrefix(err.Error(), "preset ") {
+					fmt.Fprintf(stderr, "%v\n", err)
+				} else {
+					fmt.Fprintf(stderr, "subscribe agent: %v\n", err)
+				}
+				return 1
+			}
+		}
+	}
 	resolvedRole, resolvedCapabilities, err := resolvePresetDefaults(*presetID, *role, capabilities)
 	if err != nil {
 		fmt.Fprintf(stderr, "invalid preset: %v\n", err)
@@ -313,7 +329,22 @@ func resolveAgentDefaults(presetID string, role string, capabilities []string, f
 	}
 	definition, ok := preset.Lookup(presetID)
 	if !ok {
-		return "", nil, fmt.Errorf("unknown preset %q", presetID)
+		if err := preset.ValidateID(presetID); err != nil {
+			return "", nil, err
+		}
+		if role == "" {
+			if fallbackRole == "" {
+				return "", nil, fmt.Errorf("preset %s does not define a default role; pass --role", presetID)
+			}
+			role = fallbackRole
+		}
+		if len(resolvedCapabilities) == 0 {
+			if len(fallbackCapabilities) == 0 {
+				return "", nil, fmt.Errorf("preset %s does not define default capabilities; pass --capability", presetID)
+			}
+			resolvedCapabilities = append([]string{}, fallbackCapabilities...)
+		}
+		return role, resolvedCapabilities, nil
 	}
 	if role == "" {
 		role = definition.DefaultRole
@@ -330,6 +361,9 @@ func resolveAgentDefaults(presetID string, role string, capabilities []string, f
 func loadInstalledPreset(ctx context.Context, store *db.Store, presetID string) (db.Preset, error) {
 	cached, err := store.GetPreset(ctx, presetID)
 	if errors.Is(err, sql.ErrNoRows) {
+		if _, ok := preset.Lookup(presetID); !ok {
+			return db.Preset{}, fmt.Errorf("preset %s is not installed; run gitmoot preset add %s --file <path>", presetID, presetID)
+		}
 		return db.Preset{}, fmt.Errorf("preset %s is not installed; run gitmoot preset update %s", presetID, presetID)
 	}
 	return cached, err

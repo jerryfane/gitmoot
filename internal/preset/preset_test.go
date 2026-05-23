@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/subprocess"
 )
 
@@ -57,6 +60,120 @@ func TestDiffReportsChangedContent(t *testing.T) {
 		if !strings.Contains(diff, want) {
 			t.Fatalf("diff missing %q:\n%s", want, diff)
 		}
+	}
+}
+
+func TestDiffExactReportsTrailingNewlineChange(t *testing.T) {
+	diff := DiffExact("same\n", "same\n\n")
+	if strings.Contains(diff, "up to date") || !strings.Contains(diff, "+++ upstream") {
+		t.Fatalf("diff = %s", diff)
+	}
+}
+
+func TestValidateID(t *testing.T) {
+	for _, id := range []string{"frontend-reviewer", "reviewer2", "a"} {
+		if err := ValidateID(id); err != nil {
+			t.Fatalf("ValidateID(%q) returned error: %v", id, err)
+		}
+	}
+	for _, id := range []string{"", "Frontend", "-bad", "bad-", "bad--id", "bad_id", "bad.id"} {
+		if err := ValidateID(id); err == nil {
+			t.Fatalf("ValidateID(%q) returned nil", id)
+		}
+	}
+}
+
+func TestAddLocalInstallsCustomPreset(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	promptPath := filepath.Join(t.TempDir(), "reviewer.md")
+	if err := os.WriteFile(promptPath, []byte("Review UI changes.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	added, err := AddLocal(ctx, store, "frontend-reviewer", promptPath, "", "")
+	if err != nil {
+		t.Fatalf("AddLocal returned error: %v", err)
+	}
+
+	if added.ID != "frontend-reviewer" || added.Name != "frontend-reviewer" || added.Description != DefaultLocalDescription {
+		t.Fatalf("added preset metadata = %+v", added)
+	}
+	if added.SourceRepo != LocalSourceRepo || added.SourceRef != LocalSourceRef || !filepath.IsAbs(added.SourcePath) {
+		t.Fatalf("added preset source = %+v", added)
+	}
+	if added.ResolvedCommit != HashContent("Review UI changes.\n") || added.Content != "Review UI changes.\n" {
+		t.Fatalf("added preset content = %+v", added)
+	}
+}
+
+func TestAddLocalRejectsInvalidInputs(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	dir := t.TempDir()
+	emptyPath := filepath.Join(dir, "empty.md")
+	if err := os.WriteFile(emptyPath, []byte(" \n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	validPath := filepath.Join(dir, "valid.md")
+	if err := os.WriteFile(validPath, []byte("Prompt."), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cases := []struct {
+		id   string
+		path string
+	}{
+		{id: "Bad", path: validPath},
+		{id: ThermoNuclearCodeQualityReviewID, path: validPath},
+		{id: "missing", path: filepath.Join(dir, "missing.md")},
+		{id: "directory", path: dir},
+		{id: "empty", path: emptyPath},
+	}
+	for _, tc := range cases {
+		if _, err := AddLocal(ctx, store, tc.id, tc.path, "", ""); err == nil {
+			t.Fatalf("AddLocal(%q, %q) returned nil", tc.id, tc.path)
+		}
+	}
+}
+
+func TestUpdateLocalRefreshesFromStoredPath(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	promptPath := filepath.Join(t.TempDir(), "reviewer.md")
+	if err := os.WriteFile(promptPath, []byte("Old prompt.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	added, err := AddLocal(ctx, store, "frontend-reviewer", promptPath, "Frontend Reviewer", "Reviews UI.")
+	if err != nil {
+		t.Fatalf("AddLocal returned error: %v", err)
+	}
+	if err := os.WriteFile(promptPath, []byte("New prompt.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	updated, err := UpdateLocal(ctx, store, added)
+	if err != nil {
+		t.Fatalf("UpdateLocal returned error: %v", err)
+	}
+
+	if updated.Name != "Frontend Reviewer" || updated.Description != "Reviews UI." {
+		t.Fatalf("UpdateLocal changed metadata: %+v", updated)
+	}
+	if updated.Content != "New prompt.\n" || updated.ResolvedCommit != HashContent("New prompt.\n") {
+		t.Fatalf("UpdateLocal content = %+v", updated)
 	}
 }
 
