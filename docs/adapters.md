@@ -10,6 +10,7 @@ An adapter implements `runtime.Adapter`:
 ```go
 type Adapter interface {
     Name() string
+    Start(ctx context.Context, request StartRequest) (StartResult, error)
     Validate(ctx context.Context, agent Agent) error
     Deliver(ctx context.Context, agent Agent, job Job) (Result, error)
     Health(ctx context.Context, agent Agent) error
@@ -19,7 +20,10 @@ type Adapter interface {
 
 Responsibilities:
 
-- `Name` returns the runtime key used by `gitmoot agent subscribe`.
+- `Name` returns the runtime key used by `gitmoot agent start` and
+  `gitmoot agent subscribe`.
+- `Start` creates a new runtime session for `gitmoot agent start` and returns
+  the runtime reference Gitmoot should store.
 - `Validate` checks the agent record without doing unnecessary work.
 - `Deliver` resumes or invokes the runtime with the rendered job prompt and
   returns raw output.
@@ -50,6 +54,40 @@ type Agent struct {
 `PresetID` is Gitmoot-owned metadata. Adapters do not fetch or interpret preset
 content; Gitmoot snapshots cached preset instructions into the rendered prompt
 before delivery.
+
+## Session Startup
+
+`gitmoot agent start` uses the adapter `Start` method to create a new session
+without leaving an interactive terminal open. The startup prompt tells the
+runtime to initialize only, make no file edits, and reply with a short readiness
+acknowledgment.
+
+Codex startup runs in the repo checkout path:
+
+```sh
+codex exec --json -- '<startup-prompt>'
+```
+
+The adapter parses JSONL stdout and stores the first
+`thread.started.thread_id`. Future jobs resume that session with:
+
+```sh
+codex exec resume <session-id> -- '<job-prompt>'
+```
+
+Claude startup generates a UUID before invocation, then runs:
+
+```sh
+claude --session-id <uuid> -p --output-format json -- '<startup-prompt>'
+```
+
+The UUID is stored only after the command succeeds. Future jobs use the Claude
+adapter's resume path. This depends on the installed Claude Code CLI supporting
+the documented `--session-id`, `-p`, `--output-format json`, and `--resume`
+contract.
+
+Shell adapters do not support `agent start`; register shell commands with
+`agent subscribe`.
 
 ## Job Input
 
@@ -84,9 +122,11 @@ output must be preserved for parsing and diagnostics.
 2. Implement an adapter type in `internal/runtime`.
 3. Register it in `runtime.Factory.Adapter`.
 4. Extend `ValidateAgent` only for runtime-specific reference rules.
-5. Add tests for validation, command arguments, error handling, health checks,
-   and capability reporting.
-6. Add or update docs for the runtime-specific `--session` value.
+5. Implement startup semantics or return a clear unsupported error from
+   `Start`.
+6. Add tests for startup command arguments, validation, delivery command
+   arguments, error handling, health checks, and capability reporting.
+7. Add or update docs for the runtime-specific `--session` and startup values.
 
 Keep runtime-specific command names, flags, JSON modes, session lookup, and
 fallback behavior inside the adapter package. Do not leak Codex or Claude
@@ -105,9 +145,8 @@ gitmoot preset update thermo-nuclear-code-quality-review
 After it is cached, bind it to a normal runtime-backed agent:
 
 ```sh
-gitmoot agent subscribe thermo-review \
+gitmoot agent start thermo-review \
   --runtime codex \
-  --session <session-id-or-last> \
   --repo owner/repo \
   --preset thermo-nuclear-code-quality-review
 ```

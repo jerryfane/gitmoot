@@ -16,8 +16,9 @@ gitmoot setup --repo owner/repo --path . --agent lead --runtime codex --session 
 gitmoot doctor --repo .
 gitmoot preset list
 gitmoot preset update thermo-nuclear-code-quality-review
+gitmoot agent start <name> --runtime codex|claude --repo owner/repo --path . --preset thermo-nuclear-code-quality-review --start-daemon
 gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
-gitmoot agent subscribe thermo-review --runtime codex --session <session-id-or-last> --repo owner/repo --preset thermo-nuclear-code-quality-review
+gitmoot agent start thermo-review --runtime codex --repo owner/repo --preset thermo-nuclear-code-quality-review
 gitmoot agent allow <name> --repo owner/repo
 gitmoot agent repos <name>
 gitmoot agent list
@@ -60,38 +61,64 @@ planned tasks. `task run` starts one task branch and records its branch lock.
    gitmoot goal import --file GOAL.md --repo owner/project
    ```
 
-3. Start persistent agent sessions on the same machine.
+3. Initialize Gitmoot state and start Gitmoot-managed agents.
 
-   For Codex, start a normal session and note its session id or thread name.
-   Using `last` works for quick demos, but explicit ids are safer because the
-   newest session can change.
-
-   For Claude Code, start the session and note its UUID. Claude sessions may use
-   a UUID or `last`.
-
-4. Initialize Gitmoot state and subscribe the agents.
+   `agent start` creates a new runtime session, stores the returned session
+   reference, grants the repo, and can start the background daemon. For Codex it
+   runs `codex exec --json -- <startup-prompt>` and records the emitted
+   `thread.started.thread_id`. For Claude Code it creates a session id and uses
+   the installed Claude CLI's non-interactive print mode.
 
    ```sh
-   gitmoot setup --repo owner/project --path . --agent lead --runtime codex --session <codex-session-id> --role lead
+   gitmoot init
    gitmoot doctor --repo .
-   gitmoot agent subscribe audit --runtime claude --session <claude-session-id> --role reviewer --repo owner/project --capability review --capability ask
+   gitmoot agent start lead \
+     --runtime codex \
+     --repo owner/project \
+     --path . \
+     --role lead \
+     --capability ask \
+     --capability review \
+     --capability implement
    gitmoot agent list
    gitmoot agent doctor lead
-   gitmoot agent doctor audit
    ```
 
-   To add the built-in strict review preset, fetch and cache it explicitly,
-   then subscribe a Codex-backed review agent. `--preset` supplies the default
-   reviewer role and `ask,review` capabilities when those flags are omitted.
+   To add the built-in strict review preset, fetch and cache it explicitly.
+   `--preset` supplies the default reviewer role and `ask,review` capabilities
+   when those flags are omitted.
 
    ```sh
    gitmoot preset update thermo-nuclear-code-quality-review
-   gitmoot agent subscribe thermo-review \
+   gitmoot agent start thermo-review \
      --runtime codex \
-     --session <session-id-or-last> \
      --repo owner/project \
      --preset thermo-nuclear-code-quality-review
    gitmoot agent doctor thermo-review
+   ```
+
+   If the preset is not cached yet, `agent start --preset ...` fails with the
+   same explicit `gitmoot preset update <preset>` guidance as `agent subscribe`.
+   Add `--update-preset` when you want startup to refresh the cached preset
+   before creating the runtime session.
+
+   After startup, open a created Codex session later with the session id printed
+   by Gitmoot:
+
+   ```sh
+   codex resume <session-id>
+   ```
+
+4. Subscribe existing sessions or shell adapters when needed.
+
+   Use `agent subscribe` when a Codex or Claude session already exists, or when
+   registering a shell command adapter. Using `last` works for quick demos, but
+   explicit ids are safer because the newest session can change.
+
+   ```sh
+   gitmoot agent subscribe audit --runtime claude --session <claude-session-id> --role reviewer --repo owner/project --capability review --capability ask
+   gitmoot agent subscribe shell-smoke --runtime shell --session "printf '%s\n' '{\"gitmoot_result\":{\"decision\":\"approved\",\"summary\":\"ok\",\"findings\":[],\"changes_made\":[],\"tests_run\":[\"shell\"],\"needs\":[],\"next_agents\":[]}}'" --role reviewer --repo owner/project --capability ask
+   gitmoot agent list
    ```
 
    Preset updates are explicit and auditable. Diff upstream content before
@@ -116,8 +143,10 @@ planned tasks. `task run` starts one task branch and records its branch lock.
    ```
 
    The daemon validates that the current checkout's `origin` remote matches
-   `--repo`. Use `gitmoot daemon start` without `--repo` after registering all
-   intended repos if one daemon should supervise the whole Gitmoot home.
+   `--repo`. `agent start --start-daemon` runs this same background start path
+   for the selected checkout. Use `gitmoot daemon start` without `--repo` after
+   registering all intended repos if one daemon should supervise the whole
+   Gitmoot home.
 
 6. Start and open the first task PR.
 
