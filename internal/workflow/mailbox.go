@@ -37,21 +37,24 @@ type JobRequest struct {
 }
 
 type JobPayload struct {
-	Repo         string       `json:"repo"`
-	Branch       string       `json:"branch"`
-	PullRequest  int          `json:"pull_request"`
-	HeadSHA      string       `json:"head_sha,omitempty"`
-	GoalID       string       `json:"goal_id,omitempty"`
-	TaskID       string       `json:"task_id"`
-	TaskTitle    string       `json:"task_title"`
-	LeadAgent    string       `json:"lead_agent,omitempty"`
-	Reviewers    []string     `json:"reviewers,omitempty"`
-	ReviewRound  string       `json:"review_round,omitempty"`
-	Sender       string       `json:"sender"`
-	Instructions string       `json:"instructions"`
-	Constraints  []string     `json:"constraints"`
-	RawOutputs   []string     `json:"raw_outputs,omitempty"`
-	Result       *AgentResult `json:"result,omitempty"`
+	Repo                 string       `json:"repo"`
+	Branch               string       `json:"branch"`
+	PullRequest          int          `json:"pull_request"`
+	HeadSHA              string       `json:"head_sha,omitempty"`
+	GoalID               string       `json:"goal_id,omitempty"`
+	TaskID               string       `json:"task_id"`
+	TaskTitle            string       `json:"task_title"`
+	LeadAgent            string       `json:"lead_agent,omitempty"`
+	Reviewers            []string     `json:"reviewers,omitempty"`
+	ReviewRound          string       `json:"review_round,omitempty"`
+	Sender               string       `json:"sender"`
+	Instructions         string       `json:"instructions"`
+	Constraints          []string     `json:"constraints"`
+	PresetID             string       `json:"preset_id,omitempty"`
+	PresetResolvedCommit string       `json:"preset_resolved_commit,omitempty"`
+	PresetContent        string       `json:"preset_content,omitempty"`
+	RawOutputs           []string     `json:"raw_outputs,omitempty"`
+	Result               *AgentResult `json:"result,omitempty"`
 }
 
 type DeliveryAdapter interface {
@@ -66,20 +69,28 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		return db.Job{}, err
 	}
 
+	snapshot, err := m.presetSnapshot(ctx, request.Agent)
+	if err != nil {
+		return db.Job{}, err
+	}
+
 	payload, err := marshalPayload(JobPayload{
-		Repo:         request.Repo,
-		Branch:       request.Branch,
-		PullRequest:  request.PullRequest,
-		HeadSHA:      request.HeadSHA,
-		GoalID:       request.GoalID,
-		TaskID:       request.TaskID,
-		TaskTitle:    request.TaskTitle,
-		LeadAgent:    request.LeadAgent,
-		Reviewers:    compactStrings(request.Reviewers),
-		ReviewRound:  request.ReviewRound,
-		Sender:       request.Sender,
-		Instructions: request.Instructions,
-		Constraints:  compactStrings(request.Constraints),
+		Repo:                 request.Repo,
+		Branch:               request.Branch,
+		PullRequest:          request.PullRequest,
+		HeadSHA:              request.HeadSHA,
+		GoalID:               request.GoalID,
+		TaskID:               request.TaskID,
+		TaskTitle:            request.TaskTitle,
+		LeadAgent:            request.LeadAgent,
+		Reviewers:            compactStrings(request.Reviewers),
+		ReviewRound:          request.ReviewRound,
+		Sender:               request.Sender,
+		Instructions:         request.Instructions,
+		Constraints:          compactStrings(request.Constraints),
+		PresetID:             snapshot.ID,
+		PresetResolvedCommit: snapshot.ResolvedCommit,
+		PresetContent:        snapshot.Content,
 	})
 	if err != nil {
 		return db.Job{}, err
@@ -96,6 +107,27 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		return db.Job{}, err
 	}
 	return job, nil
+}
+
+func (m Mailbox) presetSnapshot(ctx context.Context, agentName string) (db.Preset, error) {
+	agent, err := m.Store.GetAgent(ctx, agentName)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return db.Preset{}, nil
+		}
+		return db.Preset{}, err
+	}
+	if strings.TrimSpace(agent.PresetID) == "" {
+		return db.Preset{}, nil
+	}
+	preset, err := m.Store.GetPreset(ctx, agent.PresetID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return db.Preset{}, fmt.Errorf("agent %q references missing preset %q", agent.Name, agent.PresetID)
+		}
+		return db.Preset{}, err
+	}
+	return preset, nil
 }
 
 func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, adapter DeliveryAdapter) (AgentResult, error) {
@@ -288,14 +320,17 @@ func (m Mailbox) savePayload(ctx context.Context, jobID string, payload JobPaylo
 
 func (p JobPayload) prompt(action string) prompts.JobPrompt {
 	return prompts.JobPrompt{
-		Repo:         p.Repo,
-		Branch:       p.Branch,
-		PullRequest:  p.PullRequest,
-		Task:         taskLabel(p.TaskID, p.TaskTitle),
-		Sender:       p.Sender,
-		Action:       action,
-		Instructions: p.Instructions,
-		Constraints:  p.Constraints,
+		Repo:                 p.Repo,
+		Branch:               p.Branch,
+		PullRequest:          p.PullRequest,
+		Task:                 taskLabel(p.TaskID, p.TaskTitle),
+		Sender:               p.Sender,
+		Action:               action,
+		Instructions:         p.Instructions,
+		Constraints:          p.Constraints,
+		PresetID:             p.PresetID,
+		PresetResolvedCommit: p.PresetResolvedCommit,
+		PresetInstructions:   p.PresetContent,
 	}
 }
 

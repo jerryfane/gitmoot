@@ -29,6 +29,7 @@ func TestOpenMigratesSchema(t *testing.T) {
 		"lock_events",
 		"merge_gates",
 		"agent_repos",
+		"presets",
 	} {
 		ok, err := store.HasTable(ctx, table)
 		if err != nil {
@@ -105,7 +106,33 @@ func TestRepositoryMethods(t *testing.T) {
 	if err := store.UpsertRepo(ctx, repo); err != nil {
 		t.Fatalf("restore UpsertRepo returned error: %v", err)
 	}
-	if err := store.UpsertAgent(ctx, Agent{Name: "audit", Role: "reviewer", Runtime: "codex", RuntimeRef: "session", RepoScope: "jerryfane/gitmoot", Capabilities: []string{"review"}, AutonomyPolicy: "auto", HealthStatus: "ok"}); err != nil {
+	if err := store.UpsertPreset(ctx, Preset{
+		ID:             "thermo",
+		Name:           "Thermo",
+		Description:    "Strict review",
+		SourceRepo:     "cursor/plugins",
+		SourceRef:      "main",
+		SourcePath:     "cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md",
+		ResolvedCommit: "abc123",
+		Content:        "Review deeply.",
+	}); err != nil {
+		t.Fatalf("UpsertPreset returned error: %v", err)
+	}
+	preset, err := store.GetPreset(ctx, "thermo")
+	if err != nil {
+		t.Fatalf("GetPreset returned error: %v", err)
+	}
+	if preset.ResolvedCommit != "abc123" || preset.Content != "Review deeply." || preset.CreatedAt == "" || preset.UpdatedAt == "" {
+		t.Fatalf("preset = %+v", preset)
+	}
+	presets, err := store.ListPresets(ctx)
+	if err != nil {
+		t.Fatalf("ListPresets returned error: %v", err)
+	}
+	if len(presets) != 1 || presets[0].ID != "thermo" {
+		t.Fatalf("presets = %+v", presets)
+	}
+	if err := store.UpsertAgent(ctx, Agent{Name: "audit", Role: "reviewer", Runtime: "codex", RuntimeRef: "session", RepoScope: "jerryfane/gitmoot", PresetID: "thermo", Capabilities: []string{"review"}, AutonomyPolicy: "auto", HealthStatus: "ok"}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
 	allowed, err := store.AgentCanAccessRepo(ctx, "audit", "jerryfane/gitmoot")
@@ -159,7 +186,7 @@ func TestRepositoryMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAgent returned error: %v", err)
 	}
-	if agent.Name != "audit" || agent.Capabilities[0] != "review" {
+	if agent.Name != "audit" || agent.PresetID != "thermo" || agent.Capabilities[0] != "review" {
 		t.Fatalf("agent = %+v", agent)
 	}
 	agents, err := store.ListAgents(ctx)

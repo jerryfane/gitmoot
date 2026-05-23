@@ -34,9 +34,23 @@ type Agent struct {
 	Runtime        string
 	RuntimeRef     string
 	RepoScope      string
+	PresetID       string
 	Capabilities   []string
 	AutonomyPolicy string
 	HealthStatus   string
+}
+
+type Preset struct {
+	ID             string
+	Name           string
+	Description    string
+	SourceRepo     string
+	SourceRef      string
+	SourcePath     string
+	ResolvedCommit string
+	Content        string
+	CreatedAt      string
+	UpdatedAt      string
 }
 
 type AgentRepo struct {
@@ -288,18 +302,19 @@ func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, role, runtime, runtime_ref, repo_scope, capabilities_json, autonomy_policy, health_status, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, role, runtime, runtime_ref, repo_scope, preset_id, capabilities_json, autonomy_policy, health_status, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			ON CONFLICT(name) DO UPDATE SET
 				role = excluded.role,
 				runtime = excluded.runtime,
 				runtime_ref = excluded.runtime_ref,
 				repo_scope = excluded.repo_scope,
+				preset_id = excluded.preset_id,
 				capabilities_json = excluded.capabilities_json,
 				autonomy_policy = excluded.autonomy_policy,
 				health_status = excluded.health_status,
 				updated_at = CURRENT_TIMESTAMP`,
-		agent.Name, agent.Role, agent.Runtime, agent.RuntimeRef, agent.RepoScope, string(capabilities), agent.AutonomyPolicy, agent.HealthStatus); err != nil {
+		agent.Name, agent.Role, agent.Runtime, agent.RuntimeRef, agent.RepoScope, agent.PresetID, string(capabilities), agent.AutonomyPolicy, agent.HealthStatus); err != nil {
 		return err
 	}
 	if strings.TrimSpace(agent.RepoScope) != "" {
@@ -312,13 +327,13 @@ func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
 }
 
 func (s *Store) GetAgent(ctx context.Context, name string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, capabilities_json, autonomy_policy, health_status
+	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, preset_id, capabilities_json, autonomy_policy, health_status
 		FROM agents WHERE name = ?`, name)
 	return scanAgent(row)
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, capabilities_json, autonomy_policy, health_status
+	rows, err := s.db.QueryContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, preset_id, capabilities_json, autonomy_policy, health_status
 		FROM agents ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -436,6 +451,46 @@ func (s *Store) ListAgentRepos(ctx context.Context, agentName string) ([]string,
 		repos = append(repos, repo)
 	}
 	return repos, rows.Err()
+}
+
+func (s *Store) UpsertPreset(ctx context.Context, preset Preset) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO presets(id, name, description, source_repo, source_ref, source_path, resolved_commit, content, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name,
+			description = excluded.description,
+			source_repo = excluded.source_repo,
+			source_ref = excluded.source_ref,
+			source_path = excluded.source_path,
+			resolved_commit = excluded.resolved_commit,
+			content = excluded.content,
+			updated_at = CURRENT_TIMESTAMP`,
+		preset.ID, preset.Name, preset.Description, preset.SourceRepo, preset.SourceRef, preset.SourcePath, preset.ResolvedCommit, preset.Content)
+	return err
+}
+
+func (s *Store) GetPreset(ctx context.Context, id string) (Preset, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, description, source_repo, source_ref, source_path, resolved_commit, content, created_at, updated_at
+		FROM presets WHERE id = ?`, id)
+	return scanPreset(row)
+}
+
+func (s *Store) ListPresets(ctx context.Context) ([]Preset, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, source_repo, source_ref, source_path, resolved_commit, content, created_at, updated_at
+		FROM presets ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	presets := []Preset{}
+	for rows.Next() {
+		preset, err := scanPreset(rows)
+		if err != nil {
+			return nil, err
+		}
+		presets = append(presets, preset)
+	}
+	return presets, rows.Err()
 }
 
 func (s *Store) AgentCanAccessRepo(ctx context.Context, agentName string, repoFullName string) (bool, error) {
@@ -1130,13 +1185,25 @@ type agentScanner interface {
 func scanAgent(scanner agentScanner) (Agent, error) {
 	var agent Agent
 	var capabilities string
-	if err := scanner.Scan(&agent.Name, &agent.Role, &agent.Runtime, &agent.RuntimeRef, &agent.RepoScope, &capabilities, &agent.AutonomyPolicy, &agent.HealthStatus); err != nil {
+	if err := scanner.Scan(&agent.Name, &agent.Role, &agent.Runtime, &agent.RuntimeRef, &agent.RepoScope, &agent.PresetID, &capabilities, &agent.AutonomyPolicy, &agent.HealthStatus); err != nil {
 		return Agent{}, err
 	}
 	if err := json.Unmarshal([]byte(capabilities), &agent.Capabilities); err != nil {
 		return Agent{}, err
 	}
 	return agent, nil
+}
+
+type presetScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanPreset(scanner presetScanner) (Preset, error) {
+	var preset Preset
+	if err := scanner.Scan(&preset.ID, &preset.Name, &preset.Description, &preset.SourceRepo, &preset.SourceRef, &preset.SourcePath, &preset.ResolvedCommit, &preset.Content, &preset.CreatedAt, &preset.UpdatedAt); err != nil {
+		return Preset{}, err
+	}
+	return preset, nil
 }
 
 func requireAffected(result sql.Result, subject string, id string) error {
@@ -1309,5 +1376,21 @@ CREATE TABLE IF NOT EXISTS lock_events (
 	message TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+	`,
+	`
+CREATE TABLE presets (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	source_repo TEXT NOT NULL,
+	source_ref TEXT NOT NULL,
+	source_path TEXT NOT NULL,
+	resolved_commit TEXT NOT NULL,
+	content TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE agents ADD COLUMN preset_id TEXT NOT NULL DEFAULT '';
 	`,
 }
