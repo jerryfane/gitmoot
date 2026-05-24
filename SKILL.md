@@ -12,7 +12,7 @@ metadata:
 
 This root `SKILL.md` is kept as a raw compatibility entrypoint for agents and
 `gitmoot.io/SKILL.md`. The canonical Agent Skills package lives at
-`skills/gitmoot/`.
+`skills/gitmoot/`, with deeper reference files under `skills/gitmoot/references/`.
 
 Gitmoot is a local-first coordinator for AI agents working through GitHub pull
 requests. Use this skill when the user wants PR-comment agent workflows,
@@ -30,24 +30,111 @@ inspection.
    unless the user asks or the current task clearly requires it.
 5. Prefer read-only status commands before mutating Gitmoot state.
 
-## Common Commands
+## Install And Update
 
-Use `gitmoot status --repo owner/repo` for repo status, `gitmoot daemon status`
-for daemon state, `gitmoot agent list` for registered agents, and
-`gitmoot job list --repo owner/repo` for queued or recent jobs.
+If `gitmoot` is not installed, install the latest beta:
 
-For complete command examples, read
-`skills/gitmoot/references/CLI.md`. For end-to-end workflows, read
-`skills/gitmoot/references/WORKFLOWS.md`.
+```sh
+curl -fsSL https://gitmoot.io/install.sh | sh
+```
+
+Verify the install and GitHub access before using Gitmoot:
+
+```sh
+gitmoot version
+gitmoot update --check
+gh auth status
+```
+
+## Common Local Commands
+
+```sh
+gitmoot status --repo owner/repo
+gitmoot events --repo owner/repo
+gitmoot daemon start --repo owner/repo --poll 30s
+gitmoot daemon status
+gitmoot agent list
+gitmoot agent doctor <agent>
+gitmoot job list --repo owner/repo
+gitmoot job show <job-id>
+gitmoot job events <job-id>
+gitmoot lock list --repo owner/repo
+gitmoot lock show owner/repo <branch>
+```
+
+Use `gitmoot daemon start` for the background daemon. Use `gitmoot daemon run`
+only when the user explicitly wants a foreground process.
+
+## PR Comment Commands
+
+Use GitHub PR comments as the public audit trail:
+
+```text
+/gitmoot help
+/gitmoot status
+/gitmoot <agent> review [instructions]
+/gitmoot <agent> implement [instructions]
+/gitmoot ask <agent> [question]
+/gitmoot retry <job-id>
+/gitmoot cancel <job-id>
+/gitmoot merge
+```
+
+## Preset Agents
+
+Install or refresh the built-in thermo review preset:
+
+```sh
+gitmoot preset update thermo-nuclear-code-quality-review
+gitmoot agent start thermo-review \
+  --runtime codex \
+  --repo owner/repo \
+  --preset thermo-nuclear-code-quality-review \
+  --start-daemon
+```
+
+Create a local custom prompt preset:
+
+```sh
+gitmoot preset add frontend-reviewer --file agents/frontend-reviewer.md
+gitmoot agent start frontend-reviewer \
+  --runtime codex \
+  --repo owner/repo \
+  --preset frontend-reviewer \
+  --role reviewer \
+  --capability ask \
+  --capability review
+```
+
+After editing a local prompt file, refresh Gitmoot's cached snapshot explicitly:
+
+```sh
+gitmoot preset diff frontend-reviewer
+gitmoot preset update frontend-reviewer
+```
 
 ## Agent Job Contract
 
 Every Gitmoot job should return a concise and truthful `gitmoot_result` JSON
-object. Use `blocked` when work cannot continue without human input or external
-state, and `failed` when an attempted action errored.
+object:
 
-For the required result shape and decision meanings, read
-`skills/gitmoot/references/RESULT_CONTRACT.md`.
+```json
+{
+  "gitmoot_result": {
+    "decision": "approved|changes_requested|blocked|implemented|failed",
+    "summary": "Brief outcome.",
+    "findings": [],
+    "changes_made": [],
+    "tests_run": [],
+    "needs": [],
+    "next_agents": []
+  }
+}
+```
+
+Use `blocked` when work cannot continue without human input or external state.
+Use `failed` when the attempted action errored. Do not report tests, changes, or
+approvals that were not actually verified.
 
 ## Safety Rules
 
@@ -56,7 +143,13 @@ scoped to the target repo. Do not commit generated data, caches, logs, secrets,
 session archives, cloned helper repos, or large outputs unless explicitly
 requested. Respect Gitmoot branch locks for implementation jobs.
 
-For detailed safety and lock rules, read `skills/gitmoot/references/SAFETY.md`.
+Implementation jobs must not edit or push an implementation branch unless
+Gitmoot assigned the job and the branch lock is held by the assigned agent.
+Review and ask jobs should inspect and report without mutating branches unless
+the task explicitly instructs otherwise.
+
+Redact secrets from GitHub comments, job summaries, raw examples, and copied
+command output.
 
 ## When Unsure
 
