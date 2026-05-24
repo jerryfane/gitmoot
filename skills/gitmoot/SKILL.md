@@ -30,7 +30,9 @@ inspection.
 
 Use `gitmoot status --repo owner/repo` for repo status, `gitmoot daemon status`
 for daemon state, `gitmoot agent list` for registered agents, and
-`gitmoot job list --repo owner/repo` for queued or recent jobs.
+`gitmoot job list --repo owner/repo` for queued or recent jobs. Use
+`gitmoot plugin doctor` when checking whether Codex or Claude Code can discover
+Gitmoot through an installed runtime plugin.
 
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).

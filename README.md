@@ -29,6 +29,10 @@ gitmoot config path|show
 gitmoot version [--json]
 gitmoot update --check
 gitmoot update [--restart-daemon]
+gitmoot plugin build codex|claude
+gitmoot plugin install codex|claude
+gitmoot plugin doctor [codex|claude]
+gitmoot plugin path codex|claude
 gitmoot daemon start [--repo owner/repo] [--poll 30s]
 gitmoot daemon run [--repo owner/repo] [--poll 30s]
 gitmoot daemon stop|restart|status|logs
@@ -57,6 +61,23 @@ Agents should read the canonical Agent Skills package at
 [skills/gitmoot/SKILL.md](skills/gitmoot/SKILL.md) for the Gitmoot job contract,
 branch lock expectations, and safe behavior rules. The root [SKILL.md](SKILL.md)
 remains as a raw compatibility entrypoint for agents and `gitmoot.io/SKILL.md`.
+
+## Runtime Plugins
+
+Gitmoot can package the canonical Agent Skill for Codex and Claude Code so the
+runtime can discover Gitmoot guidance from its plugin system.
+
+```sh
+curl -fsSL https://gitmoot.io/install.sh | sh
+gitmoot plugin install codex
+gitmoot plugin install claude
+gitmoot plugin doctor
+```
+
+The plugins do not run a hosted service or replace the Gitmoot daemon. They
+install the local skill package and point agents back to the `gitmoot` CLI for
+repo setup, daemon status, jobs, locks, and PR-comment workflows. See
+[docs/plugins.md](docs/plugins.md) for install details and troubleshooting.
 
 ## Thermo Review Preset
 
@@ -122,6 +143,7 @@ gitmoot preset update frontend-reviewer
 ## Documentation
 
 - [Agent Skills package](skills/gitmoot/SKILL.md)
+- [Codex and Claude plugins](docs/plugins.md)
 - [Local workflow walkthrough](docs/local-workflow.md)
 - [Beta smoke tests](docs/beta-smoke-tests.md)
 - [Runtime adapter authoring](docs/adapters.md)

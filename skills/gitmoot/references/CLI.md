@@ -18,6 +18,31 @@ Verify GitHub access before PR workflows:
 gh auth status
 ```
 
+## Runtime Plugins
+
+Install Gitmoot's Agent Skill into Codex or Claude Code when the user wants the
+runtime to discover Gitmoot workflow guidance from its plugin system:
+
+```sh
+gitmoot plugin install codex
+gitmoot plugin install claude
+gitmoot plugin doctor
+```
+
+Inspect or build packages without installing:
+
+```sh
+gitmoot plugin build codex
+gitmoot plugin build claude
+gitmoot plugin path codex
+gitmoot plugin path claude
+gitmoot plugin doctor codex
+gitmoot plugin doctor claude
+```
+
+Claude scopes are supported with `--scope user|project|local`. Codex ignores
+`--scope` because the current Codex plugin install command does not use it.
+
 ## Repo And Daemon Status
 
 ```sh

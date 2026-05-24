@@ -14,6 +14,9 @@ registration, plan import, task branch startup, status, recovery, and updates:
 ```sh
 gitmoot setup --repo owner/repo --path . --agent lead --runtime codex --session <session-ref> --role lead
 gitmoot doctor --repo .
+gitmoot plugin install codex
+gitmoot plugin install claude
+gitmoot plugin doctor
 gitmoot preset list
 gitmoot preset add frontend-reviewer --file agents/frontend-reviewer.md
 gitmoot preset update thermo-nuclear-code-quality-review
@@ -40,6 +43,22 @@ gitmoot daemon status
 
 Goal import turns Markdown headings shaped like `### Task N: Title` into local
 planned tasks. `task run` starts one task branch and records its branch lock.
+
+## Runtime Plugin Setup
+
+Install the Codex or Claude plugin when you want the runtime to discover
+Gitmoot's Agent Skill through its plugin system:
+
+```sh
+curl -fsSL https://gitmoot.io/install.sh | sh
+gitmoot plugin install codex
+gitmoot plugin install claude
+gitmoot plugin doctor
+```
+
+The plugins are guidance and discovery surfaces. They do not replace
+`gitmoot daemon start`, agent registration, GitHub CLI authentication, or the
+local SQLite workflow state.
 
 ## End-To-End Demo Path
 
@@ -73,6 +92,8 @@ planned tasks. `task run` starts one task branch and records its branch lock.
    ```sh
    gitmoot init
    gitmoot doctor --repo .
+   gitmoot plugin install codex
+   gitmoot plugin doctor codex
    gitmoot agent start lead \
      --runtime codex \
      --repo owner/project \

@@ -57,6 +57,15 @@ gitmoot update --check
 gh auth status
 ```
 
+Install runtime plugin guidance when the user wants Codex or Claude Code to
+discover Gitmoot from its plugin system:
+
+```sh
+gitmoot plugin install codex
+gitmoot plugin install claude
+gitmoot plugin doctor
+```
+
 ## Common Local Commands
 
 ```sh
@@ -64,6 +73,7 @@ gitmoot status --repo owner/repo
 gitmoot events --repo owner/repo
 gitmoot daemon start --repo owner/repo --poll 30s
 gitmoot daemon status
+gitmoot plugin doctor
 gitmoot agent list
 gitmoot agent doctor <agent>
 gitmoot job list --repo owner/repo

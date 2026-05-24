@@ -17,6 +17,74 @@ gitmoot doctor --repo .
 Use a test repository or a disposable branch. Keep generated logs, cloned
 helper repos, session archives, and large outputs untracked.
 
+## Plugin Package Smoke Test
+
+Goal: prove Gitmoot can build runtime plugin packages, register local
+marketplaces in isolated homes, and diagnose the generated packages without
+writing into the real user runtime state.
+
+1. Build a local test binary and use an isolated Gitmoot home.
+
+   ```sh
+   GOTOOLCHAIN=go1.26.0 go build -o /tmp/gitmoot-current ./cmd/gitmoot
+   export GITMOOT_SMOKE_HOME=/tmp/gitmoot-plugin-smoke
+   export GITMOOT_RUNTIME_HOME=/tmp/gitmoot-plugin-runtime-smoke
+   rm -rf "$GITMOOT_SMOKE_HOME"
+   rm -rf "$GITMOOT_RUNTIME_HOME"
+   mkdir -p "$GITMOOT_RUNTIME_HOME"
+   /tmp/gitmoot-current init --home "$GITMOOT_SMOKE_HOME"
+   ```
+
+2. Build both plugin packages.
+
+   ```sh
+   /tmp/gitmoot-current plugin build codex --home "$GITMOOT_SMOKE_HOME"
+   /tmp/gitmoot-current plugin build claude --home "$GITMOOT_SMOKE_HOME"
+   /tmp/gitmoot-current plugin path codex --home "$GITMOOT_SMOKE_HOME"
+   /tmp/gitmoot-current plugin path claude --home "$GITMOOT_SMOKE_HOME"
+   ```
+
+3. Diagnose the built packages.
+
+   ```sh
+   /tmp/gitmoot-current plugin doctor --home "$GITMOOT_SMOKE_HOME" || true
+   /tmp/gitmoot-current plugin doctor codex --home "$GITMOOT_SMOKE_HOME" || true
+   /tmp/gitmoot-current plugin doctor claude --home "$GITMOOT_SMOKE_HOME" || true
+   ```
+
+   Missing runtime CLIs are valid in this smoke path. Continue when doctor
+   reports `runtime-cli` failures for missing `codex` or `claude`.
+
+4. Install with an isolated runtime home.
+
+   ```sh
+   HOME="$GITMOOT_RUNTIME_HOME" /tmp/gitmoot-current plugin install codex --home "$GITMOOT_SMOKE_HOME" --force
+   HOME="$GITMOOT_RUNTIME_HOME" /tmp/gitmoot-current plugin install claude --home "$GITMOOT_SMOKE_HOME" --scope user --force
+   ```
+
+   If `codex` or `claude` is not installed, the command should keep generated
+   files and print manual install commands instead of failing after partial
+   destructive work.
+
+5. Validate diagnostics again after install.
+
+   ```sh
+   /tmp/gitmoot-current plugin doctor --home "$GITMOOT_SMOKE_HOME" || true
+   /tmp/gitmoot-current plugin doctor codex --home "$GITMOOT_SMOKE_HOME" || true
+   /tmp/gitmoot-current plugin doctor claude --home "$GITMOOT_SMOKE_HOME" || true
+   ```
+
+Expected signals:
+
+- `plugin path codex` and `plugin path claude` point under
+  `$GITMOOT_SMOKE_HOME/.gitmoot/plugins/build`.
+- Each generated package contains `skills/gitmoot/SKILL.md`.
+- Doctor reports readable manifests and copied skill files.
+- Runtime marketplace or install state is written under `$GITMOOT_RUNTIME_HOME`,
+  not the real user home.
+- Missing runtime CLIs are reported as diagnostics with next steps, not as
+  corrupt generated packages.
+
 ## One-Repo Smoke Test
 
 Goal: PR comment -> queued ask job -> adapter result -> attributed PR comment
