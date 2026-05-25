@@ -1,17 +1,44 @@
+<p align="center">
+  <img src="docs/assets/gitmoot-hero.png" alt="Gitmoot coordinates local agent runtimes through GitHub pull request workflows" width="900">
+</p>
+
 # Gitmoot
 
-Gitmoot is a local-first multi-agent orchestration tool for GitHub pull request
-workflows. It coordinates persistent AI agent sessions running on a user's
-machine and uses GitHub PRs as the public audit trail.
+Local-first multi-agent coordination for GitHub pull request workflows.
 
-V1 is intentionally local-only:
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-black.svg)](./LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/jerryfane/gitmoot?include_prereleases&color=black)](https://github.com/jerryfane/gitmoot/releases)
+[![Go module](https://img.shields.io/badge/go-module-black.svg)](./go.mod)
+
+Gitmoot lets humans and AI agents collaborate through the place software teams
+already audit work: GitHub pull requests. It runs on the user's machine, keeps
+workflow state in local SQLite, routes PR comments to registered agent
+runtimes, and writes the agent's work back into the repo and PR discussion.
+
+V1 is intentionally local-only. There is no hosted dashboard, webhook receiver,
+cloud runner, or remote control plane.
+
+## Why Gitmoot
+
+AI agents can already edit code, review diffs, and run local tools. The hard
+part is coordinating that work across sessions without losing the human audit
+trail. Gitmoot makes the repository and its pull requests the shared surface:
+
+- PR comments become agent tasks, review requests, retries, and merge signals.
+- Local SQLite records agents, repos, jobs, goals, tasks, PRs, and branch locks.
+- Runtime adapters keep Codex, Claude Code, and future runtimes behind the same
+  Gitmoot agent model.
+- Presets and job snapshots make agent instructions explicit and reproducible.
+- Humans can follow progress from GitHub while agents keep working locally.
+
+## How It Works
 
 ```text
 GitHub PR comments/state
   -> local gitmoot daemon
   -> local SQLite state machine and job mailbox
   -> registered runtime adapter
-  -> Codex, Claude Code, or another agent runtime
+  -> Codex, Claude Code, shell, or another agent runtime
   -> GitHub PR comments, statuses, branches, PRs, and merges
 ```
 
@@ -19,75 +46,89 @@ The core primitive is a runtime-neutral Gitmoot agent, not a Codex-specific
 session. Codex and Claude Code are adapters behind the same internal runtime
 contract.
 
-## Current Command Surface
-
-```text
-gitmoot init
-gitmoot setup --repo owner/repo --path . --agent <name> --runtime codex|claude|shell --session <ref>
-gitmoot doctor --repo .
-gitmoot config path|show
-gitmoot version [--json]
-gitmoot update --check
-gitmoot update [--restart-daemon]
-gitmoot plugin build codex|claude
-gitmoot plugin install codex|claude
-gitmoot plugin doctor [codex|claude]
-gitmoot plugin path codex|claude
-gitmoot daemon start [--repo owner/repo] [--poll 30s]
-gitmoot daemon run [--repo owner/repo] [--poll 30s]
-gitmoot daemon stop|restart|status|logs
-gitmoot preset list
-gitmoot preset add <preset-id> --file ./agents/<preset-id>.md
-gitmoot preset show|update|diff <preset-id>
-gitmoot goal template
-gitmoot goal import --file <path> [--repo owner/repo]
-gitmoot agent start <name> --runtime codex|claude --repo owner/repo [--path .] [--preset <preset-id>] [--start-daemon]
-gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
-gitmoot agent ask <name> "message" [--repo owner/repo] [--json]
-gitmoot agent start planner --runtime codex --repo owner/repo --preset gitmoot-plan-and-goal
-gitmoot agent start thermo-review --runtime codex --repo owner/repo --preset thermo-nuclear-code-quality-review
-gitmoot agent allow|deny|repos
-gitmoot agent list
-gitmoot agent doctor <name>
-gitmoot agent remove <name>
-```
-
-```text
-gitmoot status
-gitmoot events --repo owner/repo
-gitmoot task run <id> --repo owner/repo --owner <agent>
-gitmoot job list|show|events|run|retry|cancel
-gitmoot lock list|show|release
-```
-
-Agents should read the canonical Agent Skills package at
-[skills/gitmoot/SKILL.md](skills/gitmoot/SKILL.md) for the Gitmoot job contract,
-branch lock expectations, and safe behavior rules. The root [SKILL.md](SKILL.md)
-remains as a raw compatibility entrypoint for agents and `gitmoot.io/SKILL.md`.
-
-## Runtime Plugins
-
-Gitmoot can package the canonical Agent Skill for Codex and Claude Code so the
-runtime can discover Gitmoot guidance from its plugin system.
+## Install
 
 ```sh
 curl -fsSL https://gitmoot.io/install.sh | sh
+gitmoot version
+gh auth status
+```
+
+Install runtime plugin guidance when you want Codex or Claude Code to discover
+Gitmoot's Agent Skill from their plugin systems:
+
+```sh
 gitmoot plugin install codex
 gitmoot plugin install claude
 gitmoot plugin doctor
 ```
 
-The plugins do not run a hosted service or replace the Gitmoot daemon. They
-install the local skill package and point agents back to the `gitmoot` CLI for
-repo setup, daemon status, jobs, locks, and PR-comment workflows. See
-[docs/plugins.md](docs/plugins.md) for install details and troubleshooting.
+The plugins are discovery and guidance surfaces. The `gitmoot` CLI and local
+daemon remain the execution path.
 
-## Planner Preset
+## Quick Start
+
+From a project checkout:
+
+```sh
+gitmoot init
+gitmoot repo add owner/repo --path . --poll 30s
+gitmoot doctor --repo .
+```
+
+Start a Gitmoot-managed Codex agent and daemon:
+
+```sh
+gitmoot agent start planner \
+  --runtime codex \
+  --repo owner/repo \
+  --path . \
+  --preset gitmoot-plan-and-goal \
+  --start-daemon
+```
+
+Ask the registered agent directly from a local shell or from a runtime chat that
+can call shell commands:
+
+```sh
+gitmoot agent ask planner --repo owner/repo "Write the implementation plan and goal file."
+```
+
+Route work through PR comments:
+
+```text
+/gitmoot planner ask Write a task-by-task implementation plan for this PR.
+/gitmoot thermo-review review
+/gitmoot retry <job-id>
+```
+
+For the full walkthrough, see [docs/local-workflow.md](docs/local-workflow.md).
+
+## Core Concepts
+
+- **Repo**: a GitHub repository plus local checkout path that Gitmoot is allowed
+  to monitor and mutate.
+- **Daemon**: the local background process that polls GitHub PRs and routes
+  queued jobs.
+- **Agent**: a named Gitmoot identity with repo access, role, capabilities, and
+  a runtime adapter.
+- **Runtime adapter**: the bridge from Gitmoot jobs to Codex, Claude Code,
+  shell commands, or future runtimes.
+- **Preset**: cached prompt content attached to an agent and snapshotted into
+  each job.
+- **Job**: a routed unit of work created from a PR comment, local ask, task run,
+  retry, or merge action.
+- **Goal and task**: Markdown implementation plans imported into local Gitmoot
+  state with `gitmoot goal import`.
+- **Branch lock**: local coordination state that prevents multiple agents from
+  racing on the same branch.
+
+## Common Workflows
+
+### Planner Agent
 
 Gitmoot includes `gitmoot-plan-and-goal` for structured implementation planning
-and standard goal-file writing. It uses the canonical goal template from
-`gitmoot goal template`, then writes plan tasks as `### Task N: ...` headings so
-`gitmoot goal import` can track them.
+and standard goal-file writing.
 
 ```sh
 gitmoot preset update gitmoot-plan-and-goal
@@ -99,25 +140,10 @@ gitmoot agent start planner \
   --start-daemon
 ```
 
-Ask it from a PR comment:
+### Review Agent
 
-```text
-/gitmoot planner ask Write a task-by-task implementation plan for this feature, then create the goal file prompt.
-```
-
-Ask it directly from a local Codex or Claude chat by having the runtime call the
-Gitmoot CLI:
-
-```sh
-gitmoot agent ask planner --repo owner/repo "Write a task-by-task implementation plan for this feature, then create the goal file prompt."
-```
-
-## Thermo Review Preset
-
-Gitmoot includes one built-in preset agent profile,
-`thermo-nuclear-code-quality-review`, for strict review-only work. Preset
-content is fetched explicitly and cached locally, then snapshotted into each
-queued job so retries remain reproducible.
+Gitmoot includes `thermo-nuclear-code-quality-review` for strict review-only
+work.
 
 ```sh
 gitmoot preset update thermo-nuclear-code-quality-review
@@ -126,27 +152,15 @@ gitmoot agent start thermo-review \
   --repo owner/repo \
   --preset thermo-nuclear-code-quality-review \
   --start-daemon
-gitmoot agent doctor thermo-review
 ```
 
-Use `agent start` for a new Gitmoot-managed Codex or Claude session. Use
-`agent subscribe` when the runtime session already exists, or for shell command
-adapters.
-
-Ask it to review from a PR comment:
+Ask it from a PR comment:
 
 ```text
 /gitmoot thermo-review review
 ```
 
-Check upstream changes before refreshing the cached preset:
-
-```sh
-gitmoot preset diff thermo-nuclear-code-quality-review
-gitmoot preset update thermo-nuclear-code-quality-review
-```
-
-## Custom Prompt Presets
+### Custom Prompt Agents
 
 Custom presets let you keep a local prompt file and bind its snapshotted
 instructions to any Gitmoot agent.
@@ -164,31 +178,67 @@ gitmoot agent start frontend-reviewer \
   --capability review
 ```
 
-Gitmoot copies the file content into local SQLite when you run `preset add` or
-`preset update`. Jobs use that cached snapshot. After editing the prompt file,
-run:
+After editing the prompt file, refresh the cached snapshot:
 
 ```sh
 gitmoot preset diff frontend-reviewer
 gitmoot preset update frontend-reviewer
 ```
 
+### Jobs, Locks, And Recovery
+
+```sh
+gitmoot status --repo owner/repo
+gitmoot events --repo owner/repo
+gitmoot job list --repo owner/repo
+gitmoot job show <job-id>
+gitmoot daemon logs
+gitmoot lock list --repo owner/repo
+gitmoot lock release owner/repo <branch> --owner <agent>
+```
+
+Detailed command coverage lives in
+[skills/gitmoot/references/CLI.md](skills/gitmoot/references/CLI.md).
+
+## Plugins
+
+Gitmoot can package its Agent Skill for Codex and Claude Code so the runtime
+can discover Gitmoot guidance from its plugin system.
+
+```sh
+gitmoot plugin install codex
+gitmoot plugin install claude
+gitmoot plugin doctor
+```
+
+Plugins do not start a hosted service, replace the daemon, subscribe agents, or
+mutate repository state by themselves. See [docs/plugins.md](docs/plugins.md)
+for install details and troubleshooting.
+
 ## Documentation
 
 - [Agent Skills package](skills/gitmoot/SKILL.md)
+- [CLI reference](skills/gitmoot/references/CLI.md)
 - [Codex and Claude plugins](docs/plugins.md)
 - [Local workflow walkthrough](docs/local-workflow.md)
 - [Beta smoke tests](docs/beta-smoke-tests.md)
 - [Runtime adapter authoring](docs/adapters.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
-## V1 Limits
+## Status And V1 Limits
 
 - Local-only: no hosted dashboard, GitHub App bot identity, cloud runner, or
   remote control plane.
 - Polling watches GitHub PRs; there is no webhook receiver in V1.
 - GitHub comments are authored by the authenticated `gh` user. Agent identity
   appears in the comment body.
+- Local SQLite remains the workflow source of truth.
+
+## Contributing
+
+Gitmoot is early. Keep changes scoped, preserve local-first behavior, and add
+focused tests for runtime, CLI, daemon, plugin, or workflow changes. Before
+opening a PR, run the relevant checks for the files you touched.
 
 ## License
 
