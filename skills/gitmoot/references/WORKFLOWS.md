@@ -90,11 +90,17 @@ Ask from a PR comment:
 /gitmoot planner ask Write a task-by-task implementation plan for this feature, then create the goal file prompt.
 ```
 
-Ask directly from a Codex plugin session:
+Ask directly from a local Codex or Claude Code chat by having the runtime call
+the Gitmoot CLI:
 
-```text
-$gitmoot:gitmoot Use the planner workflow to create a plan and goal file for this feature: ...
+```sh
+gitmoot agent ask planner --repo owner/repo "Write a task-by-task implementation plan for this feature, then create the goal file prompt."
 ```
+
+If the Codex plugin exposes a Gitmoot command bridge in chat, the equivalent
+form is `$gitmoot:gitmoot agent ask planner --repo owner/repo "..."`. The
+important part is that the request goes through `gitmoot agent ask`, not a
+separate skill-only planning path.
 
 If the planner writes a goal file and the user wants Gitmoot to track it, import
 it explicitly:

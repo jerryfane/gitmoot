@@ -22,6 +22,7 @@ gitmoot preset add frontend-reviewer --file agents/frontend-reviewer.md
 gitmoot preset update thermo-nuclear-code-quality-review
 gitmoot agent start <name> --runtime codex|claude --repo owner/repo --path . --preset thermo-nuclear-code-quality-review --start-daemon
 gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
+gitmoot agent ask <name> "message" --repo owner/repo
 gitmoot agent start thermo-review --runtime codex --repo owner/repo --preset thermo-nuclear-code-quality-review
 gitmoot agent allow <name> --repo owner/repo
 gitmoot agent repos <name>
@@ -59,6 +60,10 @@ gitmoot plugin doctor
 The plugins are guidance and discovery surfaces. They do not replace
 `gitmoot daemon start`, agent registration, GitHub CLI authentication, or the
 local SQLite workflow state.
+
+If a Codex or Claude chat wants to invoke a registered Gitmoot agent directly,
+it should run `gitmoot agent ask <agent> --repo owner/repo "..."`. That uses the
+same local agent registry and runtime adapter path as PR-comment ask jobs.
 
 ## End-To-End Demo Path
 
@@ -228,6 +233,14 @@ local SQLite workflow state.
    Implement jobs require the agent to hold the branch lock. Review and ask jobs
    are routed through the runtime adapter and must return the `gitmoot_result`
    JSON contract.
+
+   For a local chat ask that should not go through a PR comment, call the same
+   registered agent directly:
+
+   ```sh
+   gitmoot agent ask planner --repo owner/project "Write a task-by-task implementation plan and goal file prompt."
+   gitmoot job show <job-id>
+   ```
 
    Stale branch locks can be inspected and released locally:
 

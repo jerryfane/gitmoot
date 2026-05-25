@@ -76,6 +76,7 @@ gitmoot daemon status
 gitmoot plugin doctor
 gitmoot agent list
 gitmoot agent doctor <agent>
+gitmoot agent ask <agent> --repo owner/repo "question or instructions"
 gitmoot job list --repo owner/repo
 gitmoot job show <job-id>
 gitmoot job events <job-id>
@@ -85,6 +86,11 @@ gitmoot lock show owner/repo <branch>
 
 Use `gitmoot daemon start` for the background daemon. Use `gitmoot daemon run`
 only when the user explicitly wants a foreground process.
+
+Use `gitmoot agent ask` when the user wants to invoke a registered Gitmoot
+agent from the current local chat. This is the same agent registry and runtime
+adapter path used by PR-comment ask jobs; the plugin only helps the runtime
+discover this skill and does not replace the `gitmoot` CLI.
 
 ## PR Comment Commands
 

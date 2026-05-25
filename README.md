@@ -43,6 +43,7 @@ gitmoot goal template
 gitmoot goal import --file <path> [--repo owner/repo]
 gitmoot agent start <name> --runtime codex|claude --repo owner/repo [--path .] [--preset <preset-id>] [--start-daemon]
 gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
+gitmoot agent ask <name> "message" [--repo owner/repo] [--json]
 gitmoot agent start planner --runtime codex --repo owner/repo --preset gitmoot-plan-and-goal
 gitmoot agent start thermo-review --runtime codex --repo owner/repo --preset thermo-nuclear-code-quality-review
 gitmoot agent allow|deny|repos
@@ -102,6 +103,13 @@ Ask it from a PR comment:
 
 ```text
 /gitmoot planner ask Write a task-by-task implementation plan for this feature, then create the goal file prompt.
+```
+
+Ask it directly from a local Codex or Claude chat by having the runtime call the
+Gitmoot CLI:
+
+```sh
+gitmoot agent ask planner --repo owner/repo "Write a task-by-task implementation plan for this feature, then create the goal file prompt."
 ```
 
 ## Thermo Review Preset

@@ -30,10 +30,16 @@ agents, custom prompt agents, job status, or branch lock inspection.
 
 Use `gitmoot status --repo owner/repo` for repo status, `gitmoot daemon status`
 for daemon state, `gitmoot agent list` for registered agents, and
+`gitmoot agent ask <agent> --repo owner/repo "..."` to invoke a registered
+Gitmoot agent from the current local chat. Use
 `gitmoot job list --repo owner/repo` for queued or recent jobs. Use
 `gitmoot plugin doctor` when checking whether Codex or Claude Code can discover
 Gitmoot through an installed runtime plugin. Use `gitmoot goal template` when
 writing a standard task-by-task goal file.
+
+The plugin is only the runtime discovery surface for this skill. Local agent
+invocation still goes through the `gitmoot` CLI and the same registered agent,
+repo access, runtime adapter, and job history model used by PR-comment jobs.
 
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).

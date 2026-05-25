@@ -92,6 +92,18 @@ gitmoot agent repos reviewer
 gitmoot agent doctor reviewer
 ```
 
+Ask a registered agent from the current local chat:
+
+```sh
+gitmoot agent ask planner --repo owner/repo "Write the implementation plan and goal file."
+gitmoot agent ask planner --repo owner/repo --json "Return the plan status."
+```
+
+This uses the same agent registry, repo access grants, cached preset snapshot,
+runtime adapter, and local job history as PR-comment ask jobs. The runtime
+plugin helps Codex or Claude Code discover Gitmoot guidance, but it does not
+replace `gitmoot agent ask`.
+
 ## Presets
 
 Install or refresh the built-in thermo review preset:
