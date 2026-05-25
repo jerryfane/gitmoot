@@ -1,6 +1,6 @@
 ---
 name: gitmoot
-description: Use Gitmoot for local-first multi-agent coordination through GitHub PR comments, structured implementation plans, standard goal files, repo-scoped agent subscriptions, daemon checks, jobs, branch locks, presets, custom prompt agents, and Codex or Claude Code runtime workflows.
+description: Use Gitmoot for local-first AI agent coordination across repositories, goals, reviews, PR comments, daemon jobs, branch locks, presets, custom prompt agents, and Codex or Claude Code runtime workflows.
 license: Apache-2.0
 compatibility: Requires the gitmoot CLI, git, GitHub CLI authentication, network access to GitHub, and a supported runtime such as Codex or Claude Code.
 metadata:
@@ -10,11 +10,12 @@ metadata:
 
 # Gitmoot Agent Skill
 
-Gitmoot is a local-first coordinator for AI agents working through GitHub pull
-requests. Use this skill when the user wants PR-comment agent workflows,
-repo-scoped agent subscriptions, background daemon checks, Codex or Claude Code
-agent startup, structured implementation plans, standard goal files, preset
-agents, custom prompt agents, job status, or branch lock inspection.
+Gitmoot is a local-first coordinator for AI agents working across repositories,
+goals, reviews, PR comments, and runtime workflows. Use this skill when the
+user wants PR-comment agent workflows, repo-scoped agent subscriptions,
+background daemon checks, Codex or Claude Code agent startup, structured
+implementation plans, standard goal files, preset agents, custom prompt agents,
+job status, or branch lock inspection.
 
 ## Before Acting
 
