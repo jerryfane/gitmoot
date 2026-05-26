@@ -110,6 +110,11 @@ gitmoot agent ask planner --repo owner/repo --background "Write the implementati
 gitmoot job watch <job-id>
 ```
 
+Background jobs are conservative by default. The daemon starts with one worker,
+runtime session locks serialize jobs for the same Codex or Claude session, repo
+checkout locks protect local checkouts, and branch locks protect implementation
+ownership.
+
 Route work through PR comments:
 
 ```text
@@ -315,6 +320,12 @@ chat. In an installed Gitmoot skill package, use the packaged
 background `gitmoot agent ask` unless the user explicitly asks for background
 execution, PR-comment routing, or job tracking.
 
+For background work, keep Gitmoot's resource model explicit: repo checkout
+locks protect local checkouts, runtime session locks serialize delivery for the
+same Codex or Claude session, and branch locks protect implementation ownership.
+The daemon default is `--workers 1`; raise it only for independent runtime
+sessions or managed agent types with `max_background` greater than one.
+
 ## Before Acting
 
 1. Check whether `gitmoot` is installed with `gitmoot version`.
@@ -497,6 +508,10 @@ gitmoot preset update thermo-nuclear-code-quality-review
 gitmoot agent start <name> --runtime codex|claude --repo owner/repo --path . --preset thermo-nuclear-code-quality-review --start-daemon
 gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
 gitmoot agent ask <name> "message" --repo owner/repo
+gitmoot agent ask <name> --background --repo owner/repo "message"
+gitmoot agent type list
+gitmoot agent type show planner
+gitmoot agent gc
 gitmoot agent start thermo-review --runtime codex --repo owner/repo --preset thermo-nuclear-code-quality-review
 gitmoot agent allow <name> --repo owner/repo
 gitmoot agent repos <name>
@@ -506,12 +521,13 @@ gitmoot goal import --file GOAL.md --repo owner/repo
 gitmoot task run task-001 --repo owner/repo --owner lead --base main
 gitmoot job list
 gitmoot job show <job-id>
+gitmoot job watch <job-id>
 gitmoot job retry <job-id>
 gitmoot job cancel <job-id>
 gitmoot status --repo owner/repo
 gitmoot version --json
 gitmoot update --check
-gitmoot daemon start --repo owner/repo --poll 30s
+gitmoot daemon start --repo owner/repo --poll 30s --workers 1
 gitmoot daemon start
 gitmoot daemon status
 ```
@@ -543,6 +559,33 @@ a background planner job.
 If a Codex or Claude chat wants to invoke a registered Gitmoot agent directly,
 it should run `gitmoot agent ask <agent> --repo owner/repo "..."`. That uses the
 same local agent registry and runtime adapter path as PR-comment ask jobs.
+
+## Execution Model
+
+Gitmoot has two execution paths:
+
+- **Here**: the current Codex or Claude chat reads Gitmoot skill and preset
+  instructions directly. This does not create a Gitmoot job and is the fastest
+  path for planning when the current chat already has context.
+- **Background**: Gitmoot creates a job, records events in SQLite, and the
+  daemon or `gitmoot job run <job-id>` delivers that job through the runtime
+  adapter.
+
+Background execution uses separate resource categories:
+
+- **Repo checkout locks**: daemon-side mutexes that prevent two enabled repo
+  ticks from mutating the same checkout at once.
+- **Runtime session locks**: SQLite resource locks keyed as
+  `runtime:<runtime>:<runtime_ref>`, shared by daemon jobs, `job run`, and
+  synchronous `agent ask`, so one Codex or Claude session is never resumed by
+  two jobs at the same time.
+- **Branch locks**: workflow ownership records used for implementation and
+  merge safety.
+
+The daemon defaults to `--workers 1`. Raise `--workers` only when the Gitmoot
+home has independent runtime sessions or managed agent types with
+`max_background` greater than one. Jobs that target the same runtime session or
+same checkout remain serialized even when the worker count is higher.
 
 ## End-To-End Demo Path
 
@@ -1397,6 +1440,33 @@ longer recoverable:
 gitmoot lock release owner/repo <branch> --force
 ```
 
+## Runtime Session Lock Waits
+
+Symptoms:
+
+- `gitmoot agent ask` fails with `runtime session ... is busy`.
+- A background job remains queued and its events include `runtime_lock_wait`.
+- Increasing `--workers` does not make two jobs run against the same Codex or
+  Claude session.
+
+Checks:
+
+```sh
+gitmoot job show <job-id>
+gitmoot job events <job-id>
+gitmoot daemon status
+gitmoot agent list
+```
+
+Fixes:
+
+- Wait for the active job using the same runtime session to finish.
+- Use a different registered agent or managed background instance when the work
+  is independent.
+- Keep `gitmoot daemon start --workers 1` unless you have multiple independent
+  runtime sessions or an agent type with `max_background` greater than one.
+- Use `gitmoot agent gc` to remove expired managed background instances.
+
 ## Malformed Agent Output
 
 Symptoms:
@@ -1990,6 +2060,50 @@ Expected signals:
   gitmoot agent repos shell-smoke
   ```
 
+## Execution Model Smoke Test
+
+Goal: verify the final `here` versus `background` execution model and the
+resource scheduling rules.
+
+1. Confirm fast planner guidance does not start a background runtime job.
+
+   In a Codex or Claude chat with the Gitmoot skill installed, ask:
+
+   ```text
+   Use the Gitmoot planner here. Write a task-by-task implementation plan for a README wording update.
+   ```
+
+   Expected signal: the answer appears directly in the current chat, and
+   `gitmoot job list --repo owner/project` does not gain a new planner job.
+
+2. Queue two background asks to the same registered Codex or Claude agent.
+
+   ```sh
+   gitmoot agent ask planner --repo owner/project --background "Say first OK."
+   gitmoot agent ask planner --repo owner/project --background "Say second OK."
+   gitmoot job watch <first-job-id>
+   gitmoot job watch <second-job-id>
+   ```
+
+   Expected signal: both jobs finish, but their `job events` do not show
+   overlapping runtime delivery for the same `runtime:<runtime>:<runtime_ref>`.
+   If the session is already busy, the later job records `runtime_lock_wait` and
+   remains queued until a worker can retry it.
+
+3. Queue background asks that can use independent managed instances.
+
+   ```sh
+   gitmoot agent type set planner --runtime codex --preset gitmoot-plan-lite --max-background 2 --idle-timeout 20m
+   gitmoot daemon start --repo owner/project --workers 2
+   gitmoot agent ask planner --repo owner/project --background "Say planner A OK."
+   gitmoot agent ask planner --repo owner/project --background "Say planner B OK."
+   gitmoot job list --repo owner/project
+   ```
+
+   Expected signal: Gitmoot may create or reuse up to two managed planner
+   instances, different runtime references can run concurrently, and
+   `gitmoot agent gc` later removes expired idle instances.
+
 ## Recovery Checks
 
 Run these against one smoke job if you need to verify recovery UX:
@@ -2043,6 +2157,12 @@ For fast planning, "use the Gitmoot planner here" means read and apply the
 packaged `presets/gitmoot-plan-lite.md` instructions in this current chat. Do
 not route that request through a background `gitmoot agent ask` unless the user
 explicitly asks for background execution, PR-comment routing, or job tracking.
+
+For background work, keep Gitmoot's resource model explicit: repo checkout
+locks protect local checkouts, runtime session locks serialize delivery for the
+same Codex or Claude session, and branch locks protect implementation ownership.
+The daemon default is `--workers 1`; raise it only for independent runtime
+sessions or managed agent types with `max_background` greater than one.
 
 ## Before Acting
 
@@ -2239,14 +2359,16 @@ Claude scopes are supported with `--scope user|project|local`. Codex ignores
 ```sh
 gitmoot status --repo owner/repo
 gitmoot events --repo owner/repo
-gitmoot daemon start --repo owner/repo --poll 30s
+gitmoot daemon start --repo owner/repo --poll 30s --workers 1
 gitmoot daemon status
 gitmoot daemon logs
 gitmoot daemon stop
 ```
 
 Use `daemon start` for the background daemon. Use `daemon run` only when the
-user explicitly wants a foreground process.
+user explicitly wants a foreground process. Keep the default `--workers 1`
+unless the Gitmoot home has multiple independent runtime sessions or managed
+agent types with `max_background` greater than one.
 
 ## Agent Setup
 
@@ -2286,14 +2408,25 @@ gitmoot agent doctor reviewer
 Ask a registered agent from the current local chat:
 
 ```sh
+gitmoot agent ask planner --repo owner/repo "Return the plan status."
 gitmoot agent ask planner --repo owner/repo --background "Write the implementation plan and goal file."
-gitmoot agent ask planner --repo owner/repo --json "Return the plan status."
+gitmoot job watch <job-id>
 ```
 
 This uses the same agent registry, repo access grants, cached preset snapshot,
 runtime adapter, and local job history as PR-comment ask jobs. The runtime
 plugin helps Codex or Claude Code discover Gitmoot guidance, but it does not
-replace `gitmoot agent ask`.
+replace `gitmoot agent ask`. Synchronous asks and queued jobs both use the same
+runtime session locks.
+
+Configure managed background agent types:
+
+```sh
+gitmoot agent type list
+gitmoot agent type show planner
+gitmoot agent type set planner --runtime codex --preset gitmoot-plan-lite --max-background 2 --idle-timeout 20m
+gitmoot agent gc
+```
 
 ## Presets
 
@@ -2391,6 +2524,7 @@ Use GitHub PR comments as the public audit trail:
 ```sh
 gitmoot job list --repo owner/repo
 gitmoot job show <job-id>
+gitmoot job watch <job-id>
 gitmoot job events <job-id>
 gitmoot job retry <job-id>
 gitmoot job cancel <job-id>
@@ -2531,6 +2665,24 @@ it explicitly:
 ```sh
 gitmoot goal import --file GOAL-feature.md --repo owner/repo
 ```
+
+## Execution Model
+
+Use `here` when the current chat should answer directly from the Gitmoot skill.
+Use `background` when Gitmoot should create a tracked job, store events, and run
+through a runtime adapter.
+
+Background jobs are scheduled against three distinct resources:
+
+- repo checkout mutexes for daemon ticks that use the same local checkout;
+- runtime session locks keyed as `runtime:<runtime>:<runtime_ref>` for Codex
+  and Claude delivery;
+- branch locks for implementation ownership and merge safety.
+
+The daemon default is `--workers 1`. Users can raise it when jobs target
+different runtime sessions or managed agent types with `max_background` greater
+than one. Gitmoot still serializes jobs for the same runtime session or checkout
+even when more workers are configured.
 
 ## Multi-Repo Work
 

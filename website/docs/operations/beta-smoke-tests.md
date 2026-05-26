@@ -31,6 +31,20 @@ gitmoot events --repo owner/project
 gh pr view <number> --repo owner/project --comments
 ```
 
+## Execution Model Smoke
+
+Use the Gitmoot planner here from the current chat for fast planning, then use
+background asks when you need tracked jobs:
+
+```sh
+gitmoot agent ask planner --repo owner/project --background "Say OK."
+gitmoot job watch <job-id>
+gitmoot job events <job-id>
+```
+
+For concurrency checks, keep `--workers 1` by default and raise it only when
+jobs use independent runtime sessions or a managed agent type with
+`max_background` greater than one.
+
 For the detailed release smoke path, see
 [`docs/beta-smoke-tests.md`](https://github.com/jerryfane/gitmoot/blob/main/docs/beta-smoke-tests.md).
-

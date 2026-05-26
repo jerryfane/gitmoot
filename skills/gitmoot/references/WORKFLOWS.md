@@ -128,6 +128,24 @@ it explicitly:
 gitmoot goal import --file GOAL-feature.md --repo owner/repo
 ```
 
+## Execution Model
+
+Use `here` when the current chat should answer directly from the Gitmoot skill.
+Use `background` when Gitmoot should create a tracked job, store events, and run
+through a runtime adapter.
+
+Background jobs are scheduled against three distinct resources:
+
+- repo checkout mutexes for daemon ticks that use the same local checkout;
+- runtime session locks keyed as `runtime:<runtime>:<runtime_ref>` for Codex
+  and Claude delivery;
+- branch locks for implementation ownership and merge safety.
+
+The daemon default is `--workers 1`. Users can raise it when jobs target
+different runtime sessions or managed agent types with `max_background` greater
+than one. Gitmoot still serializes jobs for the same runtime session or checkout
+even when more workers are configured.
+
 ## Multi-Repo Work
 
 Agents are global identities with explicit per-repo access. When working across

@@ -100,6 +100,11 @@ gitmoot agent ask planner --repo owner/repo --background "Write the implementati
 gitmoot job watch <job-id>
 ```
 
+Background jobs are conservative by default. The daemon starts with one worker,
+runtime session locks serialize jobs for the same Codex or Claude session, repo
+checkout locks protect local checkouts, and branch locks protect implementation
+ownership.
+
 Route work through PR comments:
 
 ```text

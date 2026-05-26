@@ -22,6 +22,12 @@ packaged `presets/gitmoot-plan-lite.md` instructions in this current chat. Do
 not route that request through a background `gitmoot agent ask` unless the user
 explicitly asks for background execution, PR-comment routing, or job tracking.
 
+For background work, keep Gitmoot's resource model explicit: repo checkout
+locks protect local checkouts, runtime session locks serialize delivery for the
+same Codex or Claude session, and branch locks protect implementation ownership.
+The daemon default is `--workers 1`; raise it only for independent runtime
+sessions or managed agent types with `max_background` greater than one.
+
 ## Before Acting
 
 1. Check whether `gitmoot` is installed with `gitmoot version`.

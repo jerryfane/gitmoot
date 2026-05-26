@@ -48,14 +48,16 @@ Claude scopes are supported with `--scope user|project|local`. Codex ignores
 ```sh
 gitmoot status --repo owner/repo
 gitmoot events --repo owner/repo
-gitmoot daemon start --repo owner/repo --poll 30s
+gitmoot daemon start --repo owner/repo --poll 30s --workers 1
 gitmoot daemon status
 gitmoot daemon logs
 gitmoot daemon stop
 ```
 
 Use `daemon start` for the background daemon. Use `daemon run` only when the
-user explicitly wants a foreground process.
+user explicitly wants a foreground process. Keep the default `--workers 1`
+unless the Gitmoot home has multiple independent runtime sessions or managed
+agent types with `max_background` greater than one.
 
 ## Agent Setup
 
@@ -95,14 +97,25 @@ gitmoot agent doctor reviewer
 Ask a registered agent from the current local chat:
 
 ```sh
+gitmoot agent ask planner --repo owner/repo "Return the plan status."
 gitmoot agent ask planner --repo owner/repo --background "Write the implementation plan and goal file."
-gitmoot agent ask planner --repo owner/repo --json "Return the plan status."
+gitmoot job watch <job-id>
 ```
 
 This uses the same agent registry, repo access grants, cached preset snapshot,
 runtime adapter, and local job history as PR-comment ask jobs. The runtime
 plugin helps Codex or Claude Code discover Gitmoot guidance, but it does not
-replace `gitmoot agent ask`.
+replace `gitmoot agent ask`. Synchronous asks and queued jobs both use the same
+runtime session locks.
+
+Configure managed background agent types:
+
+```sh
+gitmoot agent type list
+gitmoot agent type show planner
+gitmoot agent type set planner --runtime codex --preset gitmoot-plan-lite --max-background 2 --idle-timeout 20m
+gitmoot agent gc
+```
 
 ## Presets
 
@@ -200,6 +213,7 @@ Use GitHub PR comments as the public audit trail:
 ```sh
 gitmoot job list --repo owner/repo
 gitmoot job show <job-id>
+gitmoot job watch <job-id>
 gitmoot job events <job-id>
 gitmoot job retry <job-id>
 gitmoot job cancel <job-id>

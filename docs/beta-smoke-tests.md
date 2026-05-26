@@ -521,6 +521,50 @@ Expected signals:
   gitmoot agent repos shell-smoke
   ```
 
+## Execution Model Smoke Test
+
+Goal: verify the final `here` versus `background` execution model and the
+resource scheduling rules.
+
+1. Confirm fast planner guidance does not start a background runtime job.
+
+   In a Codex or Claude chat with the Gitmoot skill installed, ask:
+
+   ```text
+   Use the Gitmoot planner here. Write a task-by-task implementation plan for a README wording update.
+   ```
+
+   Expected signal: the answer appears directly in the current chat, and
+   `gitmoot job list --repo owner/project` does not gain a new planner job.
+
+2. Queue two background asks to the same registered Codex or Claude agent.
+
+   ```sh
+   gitmoot agent ask planner --repo owner/project --background "Say first OK."
+   gitmoot agent ask planner --repo owner/project --background "Say second OK."
+   gitmoot job watch <first-job-id>
+   gitmoot job watch <second-job-id>
+   ```
+
+   Expected signal: both jobs finish, but their `job events` do not show
+   overlapping runtime delivery for the same `runtime:<runtime>:<runtime_ref>`.
+   If the session is already busy, the later job records `runtime_lock_wait` and
+   remains queued until a worker can retry it.
+
+3. Queue background asks that can use independent managed instances.
+
+   ```sh
+   gitmoot agent type set planner --runtime codex --preset gitmoot-plan-lite --max-background 2 --idle-timeout 20m
+   gitmoot daemon start --repo owner/project --workers 2
+   gitmoot agent ask planner --repo owner/project --background "Say planner A OK."
+   gitmoot agent ask planner --repo owner/project --background "Say planner B OK."
+   gitmoot job list --repo owner/project
+   ```
+
+   Expected signal: Gitmoot may create or reuse up to two managed planner
+   instances, different runtime references can run concurrently, and
+   `gitmoot agent gc` later removes expired idle instances.
+
 ## Recovery Checks
 
 Run these against one smoke job if you need to verify recovery UX:

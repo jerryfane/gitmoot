@@ -23,6 +23,10 @@ gitmoot preset update thermo-nuclear-code-quality-review
 gitmoot agent start <name> --runtime codex|claude --repo owner/repo --path . --preset thermo-nuclear-code-quality-review --start-daemon
 gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
 gitmoot agent ask <name> "message" --repo owner/repo
+gitmoot agent ask <name> --background --repo owner/repo "message"
+gitmoot agent type list
+gitmoot agent type show planner
+gitmoot agent gc
 gitmoot agent start thermo-review --runtime codex --repo owner/repo --preset thermo-nuclear-code-quality-review
 gitmoot agent allow <name> --repo owner/repo
 gitmoot agent repos <name>
@@ -32,12 +36,13 @@ gitmoot goal import --file GOAL.md --repo owner/repo
 gitmoot task run task-001 --repo owner/repo --owner lead --base main
 gitmoot job list
 gitmoot job show <job-id>
+gitmoot job watch <job-id>
 gitmoot job retry <job-id>
 gitmoot job cancel <job-id>
 gitmoot status --repo owner/repo
 gitmoot version --json
 gitmoot update --check
-gitmoot daemon start --repo owner/repo --poll 30s
+gitmoot daemon start --repo owner/repo --poll 30s --workers 1
 gitmoot daemon start
 gitmoot daemon status
 ```
@@ -69,6 +74,33 @@ a background planner job.
 If a Codex or Claude chat wants to invoke a registered Gitmoot agent directly,
 it should run `gitmoot agent ask <agent> --repo owner/repo "..."`. That uses the
 same local agent registry and runtime adapter path as PR-comment ask jobs.
+
+## Execution Model
+
+Gitmoot has two execution paths:
+
+- **Here**: the current Codex or Claude chat reads Gitmoot skill and preset
+  instructions directly. This does not create a Gitmoot job and is the fastest
+  path for planning when the current chat already has context.
+- **Background**: Gitmoot creates a job, records events in SQLite, and the
+  daemon or `gitmoot job run <job-id>` delivers that job through the runtime
+  adapter.
+
+Background execution uses separate resource categories:
+
+- **Repo checkout locks**: daemon-side mutexes that prevent two enabled repo
+  ticks from mutating the same checkout at once.
+- **Runtime session locks**: SQLite resource locks keyed as
+  `runtime:<runtime>:<runtime_ref>`, shared by daemon jobs, `job run`, and
+  synchronous `agent ask`, so one Codex or Claude session is never resumed by
+  two jobs at the same time.
+- **Branch locks**: workflow ownership records used for implementation and
+  merge safety.
+
+The daemon defaults to `--workers 1`. Raise `--workers` only when the Gitmoot
+home has independent runtime sessions or managed agent types with
+`max_background` greater than one. Jobs that target the same runtime session or
+same checkout remain serialized even when the worker count is higher.
 
 ## End-To-End Demo Path
 

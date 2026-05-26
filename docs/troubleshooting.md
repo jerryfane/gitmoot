@@ -200,6 +200,33 @@ longer recoverable:
 gitmoot lock release owner/repo <branch> --force
 ```
 
+## Runtime Session Lock Waits
+
+Symptoms:
+
+- `gitmoot agent ask` fails with `runtime session ... is busy`.
+- A background job remains queued and its events include `runtime_lock_wait`.
+- Increasing `--workers` does not make two jobs run against the same Codex or
+  Claude session.
+
+Checks:
+
+```sh
+gitmoot job show <job-id>
+gitmoot job events <job-id>
+gitmoot daemon status
+gitmoot agent list
+```
+
+Fixes:
+
+- Wait for the active job using the same runtime session to finish.
+- Use a different registered agent or managed background instance when the work
+  is independent.
+- Keep `gitmoot daemon start --workers 1` unless you have multiple independent
+  runtime sessions or an agent type with `max_background` greater than one.
+- Use `gitmoot agent gc` to remove expired managed background instances.
+
 ## Malformed Agent Output
 
 Symptoms:

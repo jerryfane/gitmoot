@@ -67,6 +67,8 @@ func TestCanonicalSkillDocumentsResultAndRereadGuidance(t *testing.T) {
 		"blocked",
 		"failed",
 		"branch locks",
+		"runtime session locks",
+		"--workers 1",
 		"Reread this `SKILL.md`",
 	} {
 		if !strings.Contains(text, want) {
@@ -99,6 +101,8 @@ func TestCanonicalSkillDocumentsLocalAgentAsk(t *testing.T) {
 			want: []string{
 				"gitmoot agent ask planner --repo owner/repo",
 				"replace `gitmoot agent ask`",
+				"gitmoot agent type set planner",
+				"gitmoot job watch <job-id>",
 			},
 		},
 		{
@@ -107,6 +111,8 @@ func TestCanonicalSkillDocumentsLocalAgentAsk(t *testing.T) {
 			want: []string{
 				"gitmoot agent ask planner --repo owner/repo",
 				"Planner Here",
+				"Execution Model",
+				"runtime:<runtime>:<runtime_ref>",
 			},
 		},
 	} {
@@ -148,6 +154,7 @@ func TestRootSkillCompatibilityEntrypoint(t *testing.T) {
 		"gitmoot.io/SKILL.md",
 		"gitmoot_result",
 		"branch locks",
+		"runtime session locks",
 		"gitmoot agent ask <agent>",
 	} {
 		if !strings.Contains(text, want) {

@@ -17,7 +17,7 @@ gitmoot plugin doctor
 gitmoot init
 gitmoot repo add owner/repo --path . --poll 30s
 gitmoot status --repo owner/repo
-gitmoot daemon start --repo owner/repo --poll 30s
+gitmoot daemon start --repo owner/repo --poll 30s --workers 1
 gitmoot daemon status
 ```
 
@@ -28,6 +28,8 @@ gitmoot agent start <name> --runtime codex --repo owner/repo --preset <preset>
 gitmoot agent subscribe <name> --runtime codex --session <id> --repo owner/repo
 gitmoot agent ask <name> --repo owner/repo "question"
 gitmoot agent ask <name> --repo owner/repo --background "queued task"
+gitmoot agent type list
+gitmoot agent gc
 gitmoot agent list
 gitmoot agent doctor <name>
 ```
@@ -47,6 +49,7 @@ gitmoot preset diff <id>
 ```sh
 gitmoot job list --repo owner/repo
 gitmoot job show <job-id>
+gitmoot job watch <job-id>
 gitmoot job retry <job-id>
 gitmoot lock list --repo owner/repo
 ```

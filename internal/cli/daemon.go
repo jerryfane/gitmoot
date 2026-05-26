@@ -54,8 +54,8 @@ func runDaemon(args []string, stdout, stderr io.Writer) int {
 
 func printDaemonUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  gitmoot daemon start [--repo owner/repo] [--poll 30s]")
-	fmt.Fprintln(w, "  gitmoot daemon run [--repo owner/repo] [--poll 30s]")
+	fmt.Fprintln(w, "  gitmoot daemon start [--repo owner/repo] [--poll 30s] [--workers 1]")
+	fmt.Fprintln(w, "  gitmoot daemon run [--repo owner/repo] [--poll 30s] [--workers 1]")
 	fmt.Fprintln(w, "  gitmoot daemon stop")
 	fmt.Fprintln(w, "  gitmoot daemon restart")
 	fmt.Fprintln(w, "  gitmoot daemon status")
@@ -1347,23 +1347,7 @@ func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repo
 		}
 	}
 	for len(pending) > 0 {
-		queued := make([]db.Job, 0, limit)
-		remaining := make([]db.Job, 0, len(pending))
-		selectedCheckouts := map[string]bool{}
-		selectedRuntimeResources := map[string]bool{}
-		for _, job := range pending {
-			checkoutKey := queuedJobCheckoutKey(job)
-			runtimeKey := queuedJobRuntimeResourceKey(ctx, worker.Store, job)
-			if len(queued) == limit || selectedCheckouts[checkoutKey] || (runtimeKey != "" && selectedRuntimeResources[runtimeKey]) {
-				remaining = append(remaining, job)
-				continue
-			}
-			queued = append(queued, job)
-			selectedCheckouts[checkoutKey] = true
-			if runtimeKey != "" {
-				selectedRuntimeResources[runtimeKey] = true
-			}
-		}
+		queued, remaining := selectRunnableQueuedJobs(ctx, worker.Store, pending, limit)
 		if len(queued) == 0 {
 			return nil
 		}
@@ -1388,6 +1372,49 @@ func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repo
 		}
 	}
 	return nil
+}
+
+type queuedJobResourceSelector struct {
+	limit     int
+	checkouts map[string]bool
+	runtimes  map[string]bool
+}
+
+func selectRunnableQueuedJobs(ctx context.Context, store *db.Store, pending []db.Job, limit int) ([]db.Job, []db.Job) {
+	if limit <= 0 {
+		return nil, pending
+	}
+	selector := queuedJobResourceSelector{
+		limit:     limit,
+		checkouts: map[string]bool{},
+		runtimes:  map[string]bool{},
+	}
+	queued := make([]db.Job, 0, min(limit, len(pending)))
+	remaining := make([]db.Job, 0, len(pending))
+	for _, job := range pending {
+		if selector.selects(ctx, store, job, len(queued)) {
+			queued = append(queued, job)
+			continue
+		}
+		remaining = append(remaining, job)
+	}
+	return queued, remaining
+}
+
+func (s queuedJobResourceSelector) selects(ctx context.Context, store *db.Store, job db.Job, selected int) bool {
+	if selected >= s.limit {
+		return false
+	}
+	checkoutKey := queuedJobCheckoutKey(job)
+	runtimeKey := queuedJobRuntimeResourceKey(ctx, store, job)
+	if s.checkouts[checkoutKey] || (runtimeKey != "" && s.runtimes[runtimeKey]) {
+		return false
+	}
+	s.checkouts[checkoutKey] = true
+	if runtimeKey != "" {
+		s.runtimes[runtimeKey] = true
+	}
+	return true
 }
 
 func queuedJobMatchesRepo(job db.Job, repoFilter string) bool {
