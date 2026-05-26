@@ -120,6 +120,15 @@ type BranchLockEvent struct {
 	Message      string
 }
 
+type ResourceLock struct {
+	ResourceKey string
+	OwnerJobID  string
+	OwnerToken  string
+	AcquiredAt  string
+	UpdatedAt   string
+	ExpiresAt   string
+}
+
 type MergeGate struct {
 	RepoFullName string
 	PullRequest  int64
@@ -967,6 +976,100 @@ func (s *Store) ListJobEvents(ctx context.Context, jobID string) ([]JobEvent, er
 	return events, rows.Err()
 }
 
+func (s *Store) AcquireResourceLock(ctx context.Context, lock ResourceLock, now time.Time) (bool, error) {
+	resourceKey := strings.TrimSpace(lock.ResourceKey)
+	ownerJobID := strings.TrimSpace(lock.OwnerJobID)
+	ownerToken := strings.TrimSpace(lock.OwnerToken)
+	if resourceKey == "" {
+		return false, errors.New("resource lock key is required")
+	}
+	if ownerJobID == "" {
+		return false, errors.New("resource lock owner job id is required")
+	}
+	if ownerToken == "" {
+		return false, errors.New("resource lock owner token is required")
+	}
+	expiresAt := strings.TrimSpace(lock.ExpiresAt)
+	if expiresAt == "" {
+		return false, errors.New("resource lock expiry is required")
+	}
+	parsedExpiresAt, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil {
+		return false, fmt.Errorf("resource lock expiry must be RFC3339: %w", err)
+	}
+	expiresAt = formatResourceLockTime(parsedExpiresAt)
+	nowText := formatResourceLockTime(now)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_locks
+		WHERE resource_key = ?
+			AND expires_at <= ?
+			AND NOT EXISTS (
+				SELECT 1 FROM jobs
+				WHERE jobs.id = resource_locks.owner_job_id
+					AND jobs.state = 'running'
+			)`, resourceKey, nowText); err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO resource_locks(resource_key, owner_job_id, owner_token, acquired_at, updated_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, resourceKey, ownerJobID, ownerToken, nowText, nowText, expiresAt)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 1 {
+		return true, tx.Commit()
+	}
+	return false, tx.Commit()
+}
+
+func (s *Store) GetResourceLock(ctx context.Context, resourceKey string) (ResourceLock, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT resource_key, owner_job_id, owner_token, acquired_at, updated_at, expires_at FROM resource_locks WHERE resource_key = ?`, resourceKey)
+	var lock ResourceLock
+	if err := row.Scan(&lock.ResourceKey, &lock.OwnerJobID, &lock.OwnerToken, &lock.AcquiredAt, &lock.UpdatedAt, &lock.ExpiresAt); err != nil {
+		return ResourceLock{}, err
+	}
+	return lock, nil
+}
+
+func (s *Store) ReleaseResourceLock(ctx context.Context, resourceKey string, ownerJobID string, ownerToken string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM resource_locks WHERE resource_key = ? AND owner_job_id = ? AND owner_token = ?`, resourceKey, ownerJobID, ownerToken)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+func (s *Store) DeleteExpiredResourceLocks(ctx context.Context, now time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM resource_locks
+		WHERE expires_at <= ?
+			AND NOT EXISTS (
+				SELECT 1 FROM jobs
+				WHERE jobs.id = resource_locks.owner_job_id
+					AND jobs.state = 'running'
+			)`, formatResourceLockTime(now))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func formatResourceLockTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
+}
+
 func (s *Store) AcquireLock(ctx context.Context, lock BranchLock) (bool, error) {
 	created, err := s.CreateLock(ctx, lock)
 	if err != nil {
@@ -1392,5 +1495,17 @@ CREATE TABLE presets (
 );
 
 ALTER TABLE agents ADD COLUMN preset_id TEXT NOT NULL DEFAULT '';
+	`,
+	`
+CREATE TABLE resource_locks (
+	resource_key TEXT PRIMARY KEY,
+	owner_job_id TEXT NOT NULL,
+	acquired_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL
+);
+	`,
+	`
+ALTER TABLE resource_locks ADD COLUMN owner_token TEXT NOT NULL DEFAULT '';
 	`,
 }

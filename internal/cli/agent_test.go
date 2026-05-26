@@ -11,10 +11,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
 func TestRunAgentSubscribeListRemove(t *testing.T) {
@@ -593,6 +595,74 @@ func TestRunAgentAskValidatesInputAndAccess(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), `agent "outsider" is not allowed on "owner/repo"`) {
 		t.Fatalf("disallowed repo stderr = %q", stderr.String())
+	}
+}
+
+func TestRunAgentAskCancelsQueuedJobWhenRuntimeSessionBusy(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	t.Chdir(repoDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{
+		"agent", "subscribe", "planner",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440041",
+		"--role", "planner",
+		"--repo", "owner/repo",
+		"--capability", "ask",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("subscribe planner exit code = %d, stderr=%s", code, stderr.String())
+	}
+	store := openCLIJobStore(t, home)
+	if acquired, err := store.AcquireResourceLock(context.Background(), db.ResourceLock{
+		ResourceKey: "runtime:codex:550e8400-e29b-41d4-a716-446655440041",
+		OwnerJobID:  "other-job",
+		OwnerToken:  "other-token",
+		ExpiresAt:   time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano),
+	}, time.Now().UTC()); err != nil || !acquired {
+		t.Fatalf("AcquireResourceLock returned acquired=%v err=%v", acquired, err)
+	}
+	store.Close()
+
+	runner := &agentStartRunner{}
+	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
+	defer restoreFactory()
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "ask", "planner", "Write a plan", "--home", home, "--repo", "owner/repo"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("busy ask exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "runtime session runtime:codex:550e8400-e29b-41d4-a716-446655440041 is busy") {
+		t.Fatalf("busy ask stderr = %q", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runtime calls = %+v, want none", runner.calls)
+	}
+	store = openCLIJobStore(t, home)
+	defer store.Close()
+	jobs, err := store.ListJobs(context.Background())
+	if err != nil {
+		t.Fatalf("ListJobs returned error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %+v, want one cancelled job", jobs)
+	}
+	if jobs[0].State != string(workflow.JobCancelled) {
+		t.Fatalf("job state = %q, want cancelled", jobs[0].State)
+	}
+	events, err := store.ListJobEvents(context.Background(), jobs[0].ID)
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	if !hasCLIJobEvent(events, string(workflow.JobCancelled)) || !hasCLIJobEvent(events, "runtime_lock_wait") {
+		t.Fatalf("events = %+v, want cancellation and runtime_lock_wait", events)
 	}
 }
 

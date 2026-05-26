@@ -789,6 +789,9 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 		poller.CheckoutLocks = checkoutLocks
 		var workerErr <-chan error
 		if !dryRun {
+			if err := recoverExpiredRuntimeSessionLocks(ctx, store, stdout, time.Now().UTC()); err != nil {
+				return err
+			}
 			if err := recoverCancelledRunningJobsForEnabledRepos(ctx, store, stdout); err != nil {
 				return err
 			}
@@ -821,6 +824,9 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 }
 
 func runSingleRepoSupervisor(ctx context.Context, d daemon.Daemon, store *db.Store, workers int, stdout io.Writer) error {
+	if err := recoverExpiredRuntimeSessionLocks(ctx, store, stdout, time.Now().UTC()); err != nil {
+		return err
+	}
 	if err := recoverRunningJobsForRepo(ctx, store, stdout, d.Repo.FullName()); err != nil {
 		return err
 	}
@@ -1106,6 +1112,8 @@ const daemonRunningJobStaleAfter = 30 * time.Minute
 const daemonJobCancelPollInterval = 250 * time.Millisecond
 const daemonWorkerLoopInterval = 1 * time.Second
 
+var errRuntimeSessionBusy = errors.New("runtime session is busy")
+
 func defaultJobWorker(store *db.Store, stdout io.Writer) jobWorker {
 	worker := jobWorker{Store: store, Stdout: stdout}
 	worker.AdapterFactory = worker.defaultAdapter
@@ -1116,6 +1124,17 @@ func defaultJobWorker(store *db.Store, stdout io.Writer) jobWorker {
 
 func recoverRunningJobs(ctx context.Context, store *db.Store, stdout io.Writer) error {
 	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, time.Now().UTC().Add(-daemonRunningJobStaleAfter), "")
+}
+
+func recoverExpiredRuntimeSessionLocks(ctx context.Context, store *db.Store, stdout io.Writer, now time.Time) error {
+	deleted, err := store.DeleteExpiredResourceLocks(ctx, now)
+	if err != nil {
+		return err
+	}
+	if deleted > 0 {
+		writeLine(stdout, "recovered %d expired runtime session locks", deleted)
+	}
+	return nil
 }
 
 func recoverRunningJobsBefore(ctx context.Context, store *db.Store, stdout io.Writer, before time.Time) error {
@@ -1220,6 +1239,9 @@ func runDaemonWorkerTick(ctx context.Context, store *db.Store, worker jobWorker,
 	if err := recoverRunningJobsBeforeForRepo(ctx, store, stdout, now.Add(-daemonRunningJobStaleAfter), repoFilter); err != nil {
 		return err
 	}
+	if err := recoverExpiredRuntimeSessionLocks(ctx, store, stdout, now); err != nil {
+		return err
+	}
 	if err := retryPendingJobAdvancements(ctx, worker, repoFilter); err != nil {
 		return err
 	}
@@ -1322,14 +1344,19 @@ func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repo
 		queued := make([]db.Job, 0, limit)
 		remaining := make([]db.Job, 0, len(pending))
 		selectedCheckouts := map[string]bool{}
+		selectedRuntimeResources := map[string]bool{}
 		for _, job := range pending {
 			checkoutKey := queuedJobCheckoutKey(job)
-			if len(queued) == limit || selectedCheckouts[checkoutKey] {
+			runtimeKey := queuedJobRuntimeResourceKey(ctx, worker.Store, job)
+			if len(queued) == limit || selectedCheckouts[checkoutKey] || (runtimeKey != "" && selectedRuntimeResources[runtimeKey]) {
 				remaining = append(remaining, job)
 				continue
 			}
 			queued = append(queued, job)
 			selectedCheckouts[checkoutKey] = true
+			if runtimeKey != "" {
+				selectedRuntimeResources[runtimeKey] = true
+			}
 		}
 		if len(queued) == 0 {
 			return nil
@@ -1349,7 +1376,7 @@ func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repo
 		wg.Wait()
 		close(errs)
 		for err := range errs {
-			if err != nil {
+			if err != nil && !errors.Is(err, errRuntimeSessionBusy) {
 				return err
 			}
 		}
@@ -1372,6 +1399,21 @@ func queuedJobCheckoutKey(job db.Job) string {
 		return "job:" + job.ID
 	}
 	return "repo:" + payload.Repo
+}
+
+func queuedJobRuntimeResourceKey(ctx context.Context, store *db.Store, job db.Job) string {
+	if store == nil {
+		return ""
+	}
+	agent, err := store.GetAgent(ctx, job.Agent)
+	if err != nil {
+		return ""
+	}
+	key, ok := runtimeSessionResourceKey(runtimeAgent(agent))
+	if !ok {
+		return ""
+	}
+	return key
 }
 
 func (w jobWorker) run(ctx context.Context, job db.Job) error {
@@ -1404,6 +1446,27 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 		_ = w.postJobResultComment(ctx, job.ID, agent, checkout, err)
 		return nil
 	}
+	releaseLock, acquired, lockKey, err := acquireRuntimeSessionLock(ctx, w.Store, job.ID, agent, time.Now().UTC(), daemonRunningJobStaleAfter)
+	if err != nil {
+		if finishErr := w.finishQueuedJob(ctx, job.ID, workflow.JobFailed, err); finishErr != nil {
+			return finishErr
+		}
+		_ = w.postJobResultComment(ctx, job.ID, agent, checkout, err)
+		return nil
+	}
+	if !acquired {
+		message := fmt.Sprintf("runtime session %s is busy", lockKey)
+		if eventErr := w.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "runtime_lock_wait", Message: message}); eventErr != nil {
+			return eventErr
+		}
+		writeLine(w.Stdout, "job %s waiting: %s", job.ID, message)
+		return fmt.Errorf("%w: %s", errRuntimeSessionBusy, message)
+	}
+	defer func() {
+		if err := releaseLock(context.Background()); err != nil {
+			writeLine(w.Stdout, "job %s runtime lock release failed: %v", job.ID, err)
+		}
+	}()
 	writeLine(w.Stdout, "running job %s for %s in %s", job.ID, agent.Name, payload.Repo)
 	engine := w.WorkflowFactory(checkout)
 	runCtx, stopRun := w.runningJobContext(ctx, job.ID)
