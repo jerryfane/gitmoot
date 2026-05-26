@@ -68,6 +68,23 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	if err != nil {
 		return localAgentJobOutput{}, err
 	}
+	releaseLock, acquired, lockKey, err := acquireRuntimeSessionLock(ctx, store, job.ID, runtimeAgent(agent), time.Now().UTC(), daemonRunningJobStaleAfter)
+	if err != nil {
+		return localAgentJobOutput{}, err
+	}
+	if !acquired {
+		message := fmt.Sprintf("runtime session %s is busy; synchronous ask was not run", lockKey)
+		_, _ = store.TransitionJobStateWithEvent(ctx, job.ID, string(workflow.JobQueued), string(workflow.JobCancelled), db.JobEvent{
+			JobID:   job.ID,
+			Kind:    string(workflow.JobCancelled),
+			Message: message,
+		})
+		_ = store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "runtime_lock_wait", Message: message})
+		return localAgentJobOutput{}, fmt.Errorf("runtime session %s is busy; queued job %s was not run", lockKey, job.ID)
+	}
+	defer func() {
+		_ = releaseLock(context.Background())
+	}()
 	if _, err := (workflow.Mailbox{Store: store}).Run(ctx, job.ID, runtimeAgent(agent), adapter); err != nil {
 		return localAgentJobOutput{}, err
 	}

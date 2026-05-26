@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenMigratesSchema(t *testing.T) {
@@ -27,6 +28,7 @@ func TestOpenMigratesSchema(t *testing.T) {
 		"job_events",
 		"branch_locks",
 		"lock_events",
+		"resource_locks",
 		"merge_gates",
 		"agent_repos",
 		"presets",
@@ -42,6 +44,184 @@ func TestOpenMigratesSchema(t *testing.T) {
 
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("second Migrate returned error: %v", err)
+	}
+}
+
+func TestResourceLockMethods(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	lock := ResourceLock{
+		ResourceKey: "runtime:codex:session-a",
+		OwnerJobID:  "job-a",
+		OwnerToken:  "token-a",
+		ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339Nano),
+	}
+	acquired, err := store.AcquireResourceLock(ctx, lock, now)
+	if err != nil {
+		t.Fatalf("AcquireResourceLock returned error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("first AcquireResourceLock did not acquire")
+	}
+	acquired, err = store.AcquireResourceLock(ctx, ResourceLock{
+		ResourceKey: lock.ResourceKey,
+		OwnerJobID:  "job-b",
+		OwnerToken:  "token-b",
+		ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339Nano),
+	}, now)
+	if err != nil {
+		t.Fatalf("conflicting AcquireResourceLock returned error: %v", err)
+	}
+	if acquired {
+		t.Fatal("conflicting AcquireResourceLock acquired busy resource")
+	}
+	acquired, err = store.AcquireResourceLock(ctx, ResourceLock{
+		ResourceKey: lock.ResourceKey,
+		OwnerJobID:  "job-a",
+		OwnerToken:  "token-c",
+		ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339Nano),
+	}, now.Add(10*time.Second))
+	if err != nil {
+		t.Fatalf("same-job duplicate AcquireResourceLock returned error: %v", err)
+	}
+	if acquired {
+		t.Fatal("same-job duplicate AcquireResourceLock acquired busy resource")
+	}
+	stored, err := store.GetResourceLock(ctx, lock.ResourceKey)
+	if err != nil {
+		t.Fatalf("GetResourceLock returned error: %v", err)
+	}
+	if stored.OwnerJobID != "job-a" || stored.OwnerToken != "token-a" || stored.AcquiredAt == "" || stored.UpdatedAt == "" || stored.ExpiresAt == "" {
+		t.Fatalf("resource lock = %+v", stored)
+	}
+	if stored.ExpiresAt != formatResourceLockTime(now.Add(time.Minute)) {
+		t.Fatalf("resource lock expiry = %q, want fixed-width timestamp", stored.ExpiresAt)
+	}
+	released, err := store.ReleaseResourceLock(ctx, lock.ResourceKey, "job-b", "token-a")
+	if err != nil {
+		t.Fatalf("wrong-owner ReleaseResourceLock returned error: %v", err)
+	}
+	if released {
+		t.Fatal("wrong owner released resource lock")
+	}
+	released, err = store.ReleaseResourceLock(ctx, lock.ResourceKey, "job-a", "token-c")
+	if err != nil {
+		t.Fatalf("wrong-token ReleaseResourceLock returned error: %v", err)
+	}
+	if released {
+		t.Fatal("wrong token released resource lock")
+	}
+	released, err = store.ReleaseResourceLock(ctx, lock.ResourceKey, "job-a", "token-a")
+	if err != nil {
+		t.Fatalf("ReleaseResourceLock returned error: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseResourceLock did not release")
+	}
+	if _, err := store.GetResourceLock(ctx, lock.ResourceKey); err == nil || err != sql.ErrNoRows {
+		t.Fatalf("GetResourceLock after release error = %v, want no rows", err)
+	}
+}
+
+func TestResourceLockRecoversExpiredLock(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	if acquired, err := store.AcquireResourceLock(ctx, ResourceLock{
+		ResourceKey: "runtime:codex:session-a",
+		OwnerJobID:  "job-a",
+		OwnerToken:  "token-a",
+		ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339Nano),
+	}, now); err != nil || !acquired {
+		t.Fatalf("AcquireResourceLock returned acquired=%v err=%v", acquired, err)
+	}
+	acquired, err := store.AcquireResourceLock(ctx, ResourceLock{
+		ResourceKey: "runtime:codex:session-a",
+		OwnerJobID:  "job-b",
+		OwnerToken:  "token-b",
+		ExpiresAt:   now.Add(3 * time.Minute).Format(time.RFC3339Nano),
+	}, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("expired AcquireResourceLock returned error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expired AcquireResourceLock did not acquire")
+	}
+	stored, err := store.GetResourceLock(ctx, "runtime:codex:session-a")
+	if err != nil {
+		t.Fatalf("GetResourceLock returned error: %v", err)
+	}
+	if stored.OwnerJobID != "job-b" {
+		t.Fatalf("resource lock owner = %q, want job-b", stored.OwnerJobID)
+	}
+	deleted, err := store.DeleteExpiredResourceLocks(ctx, now.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("DeleteExpiredResourceLocks returned error: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expired locks deleted = %d, want 1", deleted)
+	}
+}
+
+func TestResourceLockDoesNotRecoverExpiredRunningOwner(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	if err := store.CreateJob(ctx, Job{ID: "job-a", Agent: "audit", Type: "ask", State: "running", Payload: `{"repo":"owner/repo"}`}); err != nil {
+		t.Fatalf("CreateJob returned error: %v", err)
+	}
+	if acquired, err := store.AcquireResourceLock(ctx, ResourceLock{
+		ResourceKey: "runtime:codex:session-a",
+		OwnerJobID:  "job-a",
+		OwnerToken:  "token-a",
+		ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339Nano),
+	}, now); err != nil || !acquired {
+		t.Fatalf("AcquireResourceLock returned acquired=%v err=%v", acquired, err)
+	}
+	acquired, err := store.AcquireResourceLock(ctx, ResourceLock{
+		ResourceKey: "runtime:codex:session-a",
+		OwnerJobID:  "job-b",
+		OwnerToken:  "token-b",
+		ExpiresAt:   now.Add(3 * time.Minute).Format(time.RFC3339Nano),
+	}, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("expired running-owner AcquireResourceLock returned error: %v", err)
+	}
+	if acquired {
+		t.Fatal("expired running-owner AcquireResourceLock acquired active resource")
+	}
+	deleted, err := store.DeleteExpiredResourceLocks(ctx, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("DeleteExpiredResourceLocks returned error: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expired running-owner locks deleted = %d, want 0", deleted)
+	}
+	if err := store.UpdateJobState(ctx, "job-a", "queued"); err != nil {
+		t.Fatalf("UpdateJobState returned error: %v", err)
+	}
+	deleted, err = store.DeleteExpiredResourceLocks(ctx, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("DeleteExpiredResourceLocks after requeue returned error: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expired non-running-owner locks deleted = %d, want 1", deleted)
 	}
 }
 
