@@ -20,7 +20,6 @@ import (
 
 const ThermoNuclearCodeQualityReviewID = "thermo-nuclear-code-quality-review"
 const PlannerTemplateID = "planner"
-const PlannerHereTemplateID = "planner-here"
 const LocalSourceRepo = "local"
 const LocalSourceRef = "file"
 const DefaultLocalDescription = "Local custom prompt agent template."
@@ -63,7 +62,7 @@ var builtins = []Definition{
 	{
 		ID:                  PlannerTemplateID,
 		Name:                "Gitmoot Planner",
-		Description:         "Structured planning and standard goal-file agent template for Gitmoot workflows.",
+		Description:         "Structured planning and standard goal-file agent template for Gitmoot workflows, usable in current chat or as a managed agent.",
 		DefaultRole:         "planner",
 		DefaultCapabilities: []string{"ask"},
 		Mutation:            true,
@@ -71,17 +70,10 @@ var builtins = []Definition{
 		SourceRef:           "main",
 		SourcePath:          "skills/gitmoot/agent-templates/planner.md",
 	},
-	{
-		ID:                  PlannerHereTemplateID,
-		Name:                "Gitmoot Planner Here",
-		Description:         "Fast structured planning agent template for current-chat Gitmoot workflows.",
-		DefaultRole:         "planner",
-		DefaultCapabilities: []string{"ask"},
-		Mutation:            false,
-		SourceRepo:          "jerryfane/gitmoot",
-		SourceRef:           "main",
-		SourcePath:          "skills/gitmoot/agent-templates/planner-here.md",
-	},
+}
+
+var retiredIDs = map[string]struct{}{
+	"planner-" + "here": {},
 }
 
 func Builtins() []Definition {
@@ -98,6 +90,11 @@ func Lookup(id string) (Definition, bool) {
 		}
 	}
 	return Definition{}, false
+}
+
+func IsRetired(id string) bool {
+	_, ok := retiredIDs[strings.TrimSpace(id)]
+	return ok
 }
 
 func ValidateID(id string) error {
@@ -121,6 +118,9 @@ func AddLocal(ctx context.Context, store *db.Store, id string, path string, name
 	}
 	if _, ok := Lookup(id); ok {
 		return db.AgentTemplate{}, fmt.Errorf("agent template %s is built in and cannot be replaced with a local template", id)
+	}
+	if IsRetired(id) {
+		return db.AgentTemplate{}, fmt.Errorf("agent template %s is retired; use %s", id, PlannerTemplateID)
 	}
 	local, err := readLocal(path)
 	if err != nil {

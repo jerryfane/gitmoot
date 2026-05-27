@@ -67,13 +67,16 @@ The plugins are guidance and discovery surfaces. They do not replace
 local SQLite workflow state.
 
 For fast planning in the current Codex or Claude chat, ask the runtime to use
-the Gitmoot planner here. That applies the lightweight `planner-here`
-instructions directly in the current conversation and avoids the startup cost of
-a background planner job.
+the Gitmoot planner here. That applies the same `planner` template instructions
+directly in the current conversation and avoids the startup cost of a background
+planner job.
 
-If a Codex or Claude chat wants to invoke a registered Gitmoot agent directly,
-it should run `gitmoot agent ask <agent> --repo owner/repo "..."`. That uses the
-same local agent registry and runtime adapter path as PR-comment ask jobs.
+If a Codex or Claude chat wants to reuse a registered Gitmoot agent prompt in
+the current chat, it should run `gitmoot agent prompt <agent-or-template>` and
+apply the returned prompt content locally. If it wants to invoke a registered
+Gitmoot agent through the runtime adapter path, it should run
+`gitmoot agent ask <agent> --repo owner/repo "..."`. That uses the same local
+agent registry and runtime adapter path as PR-comment ask jobs.
 
 ## Execution Model
 

@@ -1016,6 +1016,70 @@ func TestRunAgentTypeSetValidatesTemplate(t *testing.T) {
 	}
 }
 
+func TestManagedAgentAskRejectsRetiredCachedTemplate(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	t.Chdir(repoDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"init", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("init exit code = %d, stderr=%s", code, stderr.String())
+	}
+	retiredID := "planner-" + "here"
+	configPath := filepath.Join(home, ".gitmoot", "config.toml")
+	configContent, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile config returned error: %v", err)
+	}
+	configContent = append(configContent, []byte(`
+
+[agents.legacy-planner]
+runtime = "codex"
+template = "`+retiredID+`"
+role = "planner"
+capabilities = ["ask"]
+max_background = 1
+idle_timeout = "20m"
+job_timeout = "10m"
+`)...)
+	if err := os.WriteFile(configPath, configContent, 0o600); err != nil {
+		t.Fatalf("WriteFile config returned error: %v", err)
+	}
+	store := openCLIJobStore(t, home)
+	if err := store.UpsertAgentTemplate(context.Background(), db.AgentTemplate{
+		ID:             retiredID,
+		Name:           "Retired Planner",
+		SourceRepo:     "jerryfane/gitmoot",
+		SourceRef:      "main",
+		SourcePath:     "skills/gitmoot/agent-templates/" + retiredID + ".md",
+		ResolvedCommit: "old",
+		Content:        "Old planner prompt.\n",
+	}); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	store.Close()
+
+	runner := &agentStartRunner{}
+	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
+	defer restoreFactory()
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "ask", "legacy-planner", "Plan", "--home", home, "--repo", "owner/repo", "--background"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("agent ask exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "agent template "+retiredID+" is retired; use planner") {
+		t.Fatalf("stderr missing retired guidance:\n%s", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runtime start calls = %+v, want none", runner.calls)
+	}
+}
+
 func TestRunAgentTypeSetRejectsConfigUnsafeName(t *testing.T) {
 	home := t.TempDir()
 	var stdout, stderr bytes.Buffer

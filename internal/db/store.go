@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -174,6 +175,21 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func OpenReadOnly(path string) (*Store, error) {
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.PingContext(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error {

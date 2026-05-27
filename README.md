@@ -93,6 +93,9 @@ For fast planning in the current Codex or Claude chat, ask the runtime:
 Use the Gitmoot planner here. Write the implementation plan.
 ```
 
+That uses the same `planner` template as the background agent, but imports the
+prompt into the current chat instead of creating a Gitmoot job.
+
 Ask the registered background planner when you want a queued Gitmoot job:
 
 ```sh
@@ -194,6 +197,19 @@ After editing the prompt file, refresh the cached snapshot:
 ```sh
 gitmoot agent template diff frontend-reviewer
 gitmoot agent template update frontend-reviewer
+```
+
+Reuse a custom agent prompt in the current Codex or Claude chat without
+starting a background job:
+
+```text
+Use frontend-reviewer here. Review this diff.
+```
+
+The runtime should load the prompt with:
+
+```sh
+gitmoot agent prompt frontend-reviewer
 ```
 
 ### Jobs, Locks, And Recovery

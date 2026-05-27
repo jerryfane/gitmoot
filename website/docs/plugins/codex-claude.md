@@ -19,6 +19,15 @@ For fast planning in the current chat, ask the runtime:
 Use the Gitmoot planner here. Write the implementation plan.
 ```
 
+For any cached custom agent or template prompt, ask the runtime to use that
+agent here. The skill should load the prompt with:
+
+```sh
+gitmoot agent prompt <agent-or-template>
+```
+
+This keeps the work in the current chat and does not create a Gitmoot job.
+
 For registered background-agent work from a runtime chat that supports command
 execution:
 

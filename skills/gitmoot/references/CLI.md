@@ -113,7 +113,7 @@ Configure managed background agent types:
 ```sh
 gitmoot agent type list
 gitmoot agent type show planner
-gitmoot agent type set planner --runtime codex --template planner-here --max-background 2 --idle-timeout 20m
+gitmoot agent type set planner --runtime codex --template planner --max-background 2 --idle-timeout 20m
 gitmoot agent gc
 ```
 
@@ -142,22 +142,23 @@ gitmoot agent start project-planner \
   --start-daemon
 ```
 
-Install or refresh the lightweight planner template when you want to run a
-planner as a registered background-capable agent:
+For fast current-chat planning, use the Gitmoot skill with the same packaged
+`agent-templates/planner.md` instructions instead of starting a background job:
 
-```sh
-gitmoot agent template update planner-here
-gitmoot agent start project-planner-lite \
-  --runtime codex \
-  --repo owner/repo \
-  --path . \
-  --template planner-here \
-  --start-daemon
+```text
+Use the Gitmoot planner here. Write the implementation plan.
 ```
 
-For fast current-chat planning, use the Gitmoot skill with the packaged
-`agent-templates/planner-here.md` instructions instead of starting a background
-job. The CLI cannot control an already-running Codex or Claude chat.
+The current chat can also import any cached custom agent or template prompt:
+
+```sh
+gitmoot agent prompt frontend-reviewer
+gitmoot agent prompt frontend-reviewer --json
+```
+
+This prints the prompt content for the current chat to apply locally. It does
+not create a job, start a daemon, resume a runtime session, or post a PR
+comment.
 
 Create a local custom prompt template:
 

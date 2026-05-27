@@ -236,11 +236,8 @@ it on a real PR.
    ```sh
    /tmp/gitmoot-current goal template | grep "codex exec review is clean; ready for manual /review."
    /tmp/gitmoot-current agent template list --home "$GITMOOT_SMOKE_HOME" | grep planner
-   /tmp/gitmoot-current agent template list --home "$GITMOOT_SMOKE_HOME" | grep planner-here
    /tmp/gitmoot-current agent template update --home "$GITMOOT_SMOKE_HOME" planner
-   /tmp/gitmoot-current agent template update --home "$GITMOOT_SMOKE_HOME" planner-here
    /tmp/gitmoot-current agent template show --home "$GITMOOT_SMOKE_HOME" planner
-   /tmp/gitmoot-current agent template show --home "$GITMOOT_SMOKE_HOME" planner-here
    ```
 
 3. From the test repo checkout, start the planner agent.
@@ -289,8 +286,6 @@ Expected signals:
 - `goal template` prints the canonical PR-per-task prompt.
 - `agent template show` displays `default role: planner`, `default capabilities: ask`,
   and `mutation: true`.
-- `agent template show planner-here` displays `default role: planner`,
-  `default capabilities: ask`, and `mutation: false`.
 - `agent doctor project-planner-smoke` succeeds.
 - `agent ask project-planner-smoke` prints `state: succeeded`, `agent: project-planner-smoke`,
   `action: ask`, and a planner summary.
@@ -554,7 +549,7 @@ resource scheduling rules.
 3. Queue background asks that can use independent managed instances.
 
    ```sh
-   gitmoot agent type set project-planner --runtime codex --template planner-here --max-background 2 --idle-timeout 20m
+   gitmoot agent type set project-planner --runtime codex --template planner --max-background 2 --idle-timeout 20m
    gitmoot daemon start --repo owner/project --workers 2
    gitmoot agent ask project-planner --repo owner/project --background "Say planner A OK."
    gitmoot agent ask project-planner --repo owner/project --background "Say planner B OK."

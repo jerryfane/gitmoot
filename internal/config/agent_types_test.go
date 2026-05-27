@@ -14,7 +14,7 @@ func TestLoadAndSaveAgentTypes(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
 [agents.planner]
 runtime = "codex"
-template = "planner-here"
+template = "planner"
 role = "planner"
 capabilities = ["ask", "review"]
 max_background = 2
@@ -28,7 +28,7 @@ job_timeout = "5m"
 		t.Fatalf("LoadAgentTypes returned error: %v", err)
 	}
 	planner := types["planner"]
-	if planner.Runtime != "codex" || planner.Template != "planner-here" || planner.Role != "planner" || planner.MaxBackground != 2 || planner.IdleTimeout != "15m" || strings.Join(planner.Capabilities, ",") != "ask,review" {
+	if planner.Runtime != "codex" || planner.Template != "planner" || planner.Role != "planner" || planner.MaxBackground != 2 || planner.IdleTimeout != "15m" || strings.Join(planner.Capabilities, ",") != "ask,review" {
 		t.Fatalf("planner type = %+v", planner)
 	}
 
@@ -54,7 +54,7 @@ func TestLoadAgentTypesAcceptsLegacyPresetKey(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
 [agents.planner]
 runtime = "codex"
-preset = "planner-here"
+preset = "planner"
 `), 0o600); err != nil {
 		t.Fatalf("write config returned error: %v", err)
 	}
@@ -63,8 +63,8 @@ preset = "planner-here"
 	if err != nil {
 		t.Fatalf("LoadAgentTypes returned error: %v", err)
 	}
-	if got := types["planner"].Template; got != "planner-here" {
-		t.Fatalf("legacy preset key loaded template %q, want planner-here", got)
+	if got := types["planner"].Template; got != "planner" {
+		t.Fatalf("legacy preset key loaded template %q, want planner", got)
 	}
 
 	if err := SaveAgentType(paths, types["planner"]); err != nil {
@@ -77,7 +77,7 @@ preset = "planner-here"
 	if strings.Contains(string(content), "preset =") {
 		t.Fatalf("SaveAgentType preserved legacy preset key:\n%s", string(content))
 	}
-	if !strings.Contains(string(content), `template = "planner-here"`) {
+	if !strings.Contains(string(content), `template = "planner"`) {
 		t.Fatalf("SaveAgentType did not write template key:\n%s", string(content))
 	}
 }

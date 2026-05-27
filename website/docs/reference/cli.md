@@ -26,6 +26,7 @@ gitmoot daemon status
 ```sh
 gitmoot agent start <name> --runtime codex --repo owner/repo --template <template>
 gitmoot agent subscribe <name> --runtime codex --session <id> --repo owner/repo
+gitmoot agent prompt <agent-or-template>
 gitmoot agent ask <name> --repo owner/repo "question"
 gitmoot agent ask <name> --repo owner/repo --background "queued task"
 gitmoot agent type list

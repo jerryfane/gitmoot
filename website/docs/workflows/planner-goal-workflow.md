@@ -19,6 +19,10 @@ For fast planning in the current Codex or Claude chat, ask the runtime:
 Use the Gitmoot planner here. Write the implementation plan.
 ```
 
+This uses the same `planner` template as the background agent, imported into
+the current chat with `gitmoot agent prompt planner` when cached or from the
+packaged skill instructions.
+
 Ask the registered background planner when you want a queued Gitmoot job:
 
 ```sh

@@ -36,6 +36,8 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		return runAgentType(args[1:], stdout, stderr)
 	case "template":
 		return runAgentTemplate(args[1:], stdout, stderr)
+	case "prompt":
+		return runAgentPrompt(args[1:], stdout, stderr)
 	case "gc":
 		return runAgentGC(args[1:], stdout, stderr)
 	case "subscribe":
@@ -65,6 +67,7 @@ func printAgentUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot agent ask <name> \"message\" [--repo owner/repo] [--background] [--home path] [--json]")
 	fmt.Fprintln(w, "  gitmoot agent type list|show|set ...")
 	fmt.Fprintln(w, "  gitmoot agent template list|show|add|update|diff ...")
+	fmt.Fprintln(w, "  gitmoot agent prompt <agent-or-template> [--json]")
 	fmt.Fprintln(w, "  gitmoot agent gc")
 	fmt.Fprintln(w, "  gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> [--repo owner/repo...] --capability <capability>")
 	fmt.Fprintln(w, "    Codex sessions may use a UUID, thread name, or last. Claude sessions may use a UUID or last. Shell sessions are commands.")
@@ -825,6 +828,9 @@ func resolveAgentDefaults(templateID string, role string, capabilities []string,
 }
 
 func loadInstalledTemplate(ctx context.Context, store *db.Store, templateID string) (db.AgentTemplate, error) {
+	if agenttemplate.IsRetired(templateID) {
+		return db.AgentTemplate{}, retiredAgentTemplateError(templateID)
+	}
 	cached, err := store.GetAgentTemplate(ctx, templateID)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, ok := agenttemplate.Lookup(templateID); !ok {

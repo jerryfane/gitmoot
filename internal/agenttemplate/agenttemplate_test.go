@@ -16,8 +16,8 @@ import (
 
 func TestBuiltinsIncludesPlannerAndThermoTemplates(t *testing.T) {
 	definitions := Builtins()
-	if len(definitions) != 3 {
-		t.Fatalf("builtin count = %d, want 3", len(definitions))
+	if len(definitions) != 2 {
+		t.Fatalf("builtin count = %d, want 2", len(definitions))
 	}
 	thermo, ok := Lookup(ThermoNuclearCodeQualityReviewID)
 	if !ok {
@@ -35,16 +35,6 @@ func TestBuiltinsIncludesPlannerAndThermoTemplates(t *testing.T) {
 	}
 	if planner.SourceRepo != "jerryfane/gitmoot" || planner.SourcePath != "skills/gitmoot/agent-templates/planner.md" {
 		t.Fatalf("planner source = %+v", planner)
-	}
-	lite, ok := Lookup(PlannerHereTemplateID)
-	if !ok {
-		t.Fatal("lite planner template missing")
-	}
-	if lite.Mutation || lite.DefaultRole != "planner" || !reflect.DeepEqual(lite.DefaultCapabilities, []string{"ask"}) {
-		t.Fatalf("lite planner definition = %+v", lite)
-	}
-	if lite.SourceRepo != "jerryfane/gitmoot" || lite.SourcePath != "skills/gitmoot/agent-templates/planner-here.md" {
-		t.Fatalf("lite planner source = %+v", lite)
 	}
 }
 
@@ -64,25 +54,6 @@ func TestUpdatePlannerTemplate(t *testing.T) {
 	}
 	if updated.SourceRepo != "jerryfane/gitmoot" || updated.SourcePath != "skills/gitmoot/agent-templates/planner.md" {
 		t.Fatalf("updated source = %+v", updated)
-	}
-}
-
-func TestUpdatePlannerHereTemplate(t *testing.T) {
-	ctx := context.Background()
-	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
-	if err != nil {
-		t.Fatalf("Open returned error: %v", err)
-	}
-	defer store.Close()
-	updated, err := Update(ctx, store, fakeFetcher{commit: "fed789", content: "Plan quickly."}, PlannerHereTemplateID)
-	if err != nil {
-		t.Fatalf("Update returned error: %v", err)
-	}
-	if updated.ID != PlannerHereTemplateID || updated.ResolvedCommit != "fed789" || updated.Content != "Plan quickly." {
-		t.Fatalf("updated lite planner template = %+v", updated)
-	}
-	if updated.SourceRepo != "jerryfane/gitmoot" || updated.SourcePath != "skills/gitmoot/agent-templates/planner-here.md" {
-		t.Fatalf("updated lite source = %+v", updated)
 	}
 }
 

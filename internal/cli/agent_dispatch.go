@@ -212,7 +212,7 @@ func ensureManagedAgentInstance(ctx context.Context, store *db.Store, home strin
 	var cachedTemplate db.AgentTemplate
 	if instanceAgent.TemplateID != "" {
 		var err error
-		cachedTemplate, err = store.GetAgentTemplate(ctx, instanceAgent.TemplateID)
+		cachedTemplate, err = loadInstalledTemplate(ctx, store, instanceAgent.TemplateID)
 		if err != nil {
 			return db.Agent{}, noopAgentReservationRelease, err
 		}

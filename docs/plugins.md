@@ -98,9 +98,19 @@ planner unless the user asks for a queued job. Ask Codex:
 Use the Gitmoot planner here. Write the implementation plan.
 ```
 
-Codex should apply the packaged `agent-templates/planner-here.md` instructions,
+Codex should apply the same `planner` template used by managed planner agents,
 inspect the relevant repo files, search only for current external contracts when
 needed, and return the plan directly in the current conversation.
+
+For any cached custom agent or template prompt, ask Codex to use that agent
+here. The Gitmoot skill should load the prompt with:
+
+```sh
+gitmoot agent prompt <agent-or-template>
+```
+
+Then Codex should apply the returned prompt content in the current chat without
+creating a Gitmoot job.
 
 When you want the current Codex chat to invoke a registered background-capable
 Gitmoot agent, route that request through the CLI:

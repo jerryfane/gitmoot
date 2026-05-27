@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jerryfane/gitmoot/internal/agenttemplate"
+	"github.com/jerryfane/gitmoot/internal/db"
 )
 
 func TestAgentTemplateUpdateInstallsThermoPreset(t *testing.T) {
@@ -42,7 +44,7 @@ func TestAgentTemplateUpdateInstallsThermoPreset(t *testing.T) {
 	}
 }
 
-func TestAgentTemplateUpdateInstallsLitePlannerPreset(t *testing.T) {
+func TestAgentTemplateUpdateRejectsRemovedPlannerHereTemplate(t *testing.T) {
 	restore := replaceAgentTemplateFetcher(fakeAgentTemplateFetcher{
 		commit:  "fed789",
 		content: "Plan quickly.",
@@ -50,26 +52,15 @@ func TestAgentTemplateUpdateInstallsLitePlannerPreset(t *testing.T) {
 	defer restore()
 	var stdout, stderr bytes.Buffer
 	home := t.TempDir()
+	removedPlannerHereID := "planner-" + "here"
 
-	code := Run([]string{"agent", "template", "update", "--home", home, "planner-here"}, &stdout, &stderr)
+	code := Run([]string{"agent", "template", "update", "--home", home, removedPlannerHereID}, &stdout, &stderr)
 
-	if code != 0 {
-		t.Fatalf("template update exit code = %d, stderr=%s", code, stderr.String())
+	if code == 0 {
+		t.Fatalf("template update exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "updated planner-here at fed789") {
-		t.Fatalf("stdout = %s", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	code = Run([]string{"agent", "template", "show", "--home", home, "planner-here"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("template show exit code = %d, stderr=%s", code, stderr.String())
-	}
-	for _, want := range []string{"name: Gitmoot Planner Here", "default role: planner", "default capabilities: ask", "mutation: false", "Plan quickly."} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("show output missing %q:\n%s", want, stdout.String())
-		}
+	if !strings.Contains(stderr.String(), "agent template "+removedPlannerHereID+" is retired; use planner") {
+		t.Fatalf("stderr missing retired planner guidance:\n%s", stderr.String())
 	}
 }
 
@@ -123,8 +114,12 @@ func TestAgentTemplateListShowsAvailableBuiltin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("template list exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "thermo-nuclear-code-quality-review") || !strings.Contains(stdout.String(), "planner") || !strings.Contains(stdout.String(), "planner-here") || !strings.Contains(stdout.String(), "available") {
+	if !strings.Contains(stdout.String(), "thermo-nuclear-code-quality-review") || !strings.Contains(stdout.String(), "planner") || !strings.Contains(stdout.String(), "available") {
 		t.Fatalf("stdout = %s", stdout.String())
+	}
+	removedPlannerHereID := "planner-" + "here"
+	if strings.Contains(stdout.String(), removedPlannerHereID) {
+		t.Fatalf("removed planner id should not be listed as a builtin:\n%s", stdout.String())
 	}
 }
 
@@ -294,6 +289,224 @@ func TestAgentTemplateDiffReportsExactTrailingNewlineChanges(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "template content is up to date") || !strings.Contains(stdout.String(), "+++ upstream") {
 		t.Fatalf("diff did not report exact newline change:\n%s", stdout.String())
+	}
+}
+
+func TestAgentPromptPrintsCustomTemplateContent(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "review-fe.md")
+	if err := os.WriteFile(promptPath, []byte("Review frontend changes.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if code := Run([]string{"agent", "template", "add", "review-fe", "--home", home, "--file", promptPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template add exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "prompt", "--home", home, "review-fe"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("agent prompt exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != "Review frontend changes.\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestAgentPromptResolvesRegisteredAgentBeforeTemplate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	templateDir := t.TempDir()
+	reviewPath := filepath.Join(templateDir, "review-fe.md")
+	if err := os.WriteFile(reviewPath, []byte("Review frontend changes.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	clashPath := filepath.Join(templateDir, "clash.md")
+	if err := os.WriteFile(clashPath, []byte("Wrong direct template.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if code := Run([]string{"agent", "template", "add", "review-fe", "--home", home, "--file", reviewPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template add review-fe exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"agent", "template", "add", "clash", "--home", home, "--file", clashPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template add clash exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "subscribe", "clash",
+		"--home", home,
+		"--runtime", "shell",
+		"--session", "cat",
+		"--role", "reviewer",
+		"--template", "review-fe",
+		"--capability", "ask",
+		"--capability", "review",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("agent subscribe exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"agent", "prompt", "--home", home, "clash"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("agent prompt exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != "Review frontend changes.\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestAgentPromptJSONIncludesAgentMetadata(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "review-fe.md")
+	if err := os.WriteFile(promptPath, []byte("Review frontend changes.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if code := Run([]string{"agent", "template", "add", "review-fe", "--home", home, "--file", promptPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template add exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"agent", "subscribe", "review-fe-agent",
+		"--home", home,
+		"--runtime", "shell",
+		"--session", "cat",
+		"--role", "reviewer",
+		"--template", "review-fe",
+		"--capability", "ask",
+		"--capability", "review",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("agent subscribe exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "prompt", "review-fe-agent", "--home", home, "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("agent prompt --json exit code = %d, stderr=%s", code, stderr.String())
+	}
+	var output agentPromptOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("prompt JSON did not parse: %v\n%s", err, stdout.String())
+	}
+	if output.Kind != "agent" || output.Name != "review-fe-agent" || output.TemplateID != "review-fe" || output.Runtime != "shell" || output.Role != "reviewer" {
+		t.Fatalf("prompt JSON metadata = %+v", output)
+	}
+	if strings.Join(output.Capabilities, ",") != "ask,review" || output.Content != "Review frontend changes.\n" || !strings.HasPrefix(output.ResolvedCommit, "sha256:") {
+		t.Fatalf("prompt JSON content = %+v", output)
+	}
+}
+
+func TestAgentPromptReportsMissingTemplateGuidance(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	if code := Run([]string{"init", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("init exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	code := Run([]string{"agent", "prompt", "--home", home, "planner"}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("agent prompt exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "agent template planner is not installed; run gitmoot agent template update planner") {
+		t.Fatalf("stderr missing planner update guidance:\n%s", stderr.String())
+	}
+}
+
+func TestAgentPromptDoesNotInitializeMissingHome(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+
+	code := Run([]string{"agent", "prompt", "--home", home, "planner"}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("agent prompt exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Gitmoot state is not initialized") || !strings.Contains(stderr.String(), "run gitmoot init first") {
+		t.Fatalf("stderr missing initialization guidance:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gitmoot")); !os.IsNotExist(err) {
+		t.Fatalf("agent prompt initialized Gitmoot home, stat err=%v", err)
+	}
+}
+
+func TestRetiredPlannerHereTemplateIsHiddenAndBlocked(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	if code := Run([]string{"init", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("init exit code = %d, stderr=%s", code, stderr.String())
+	}
+	retiredID := "planner-" + "here"
+	seedCachedAgentTemplate(t, home, db.AgentTemplate{
+		ID:             retiredID,
+		Name:           "Retired Planner",
+		Description:    "Old cached builtin",
+		SourceRepo:     "jerryfane/gitmoot",
+		SourceRef:      "main",
+		SourcePath:     "skills/gitmoot/agent-templates/" + retiredID + ".md",
+		ResolvedCommit: "old",
+		Content:        "Old planner prompt.\n",
+	})
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"agent", "template", "list", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template list exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), retiredID) {
+		t.Fatalf("retired template should be hidden from list:\n%s", stdout.String())
+	}
+
+	for _, args := range [][]string{
+		{"agent", "template", "show", "--home", home, retiredID},
+		{"agent", "template", "diff", "--home", home, retiredID},
+		{"agent", "template", "update", "--home", home, retiredID},
+		{"agent", "prompt", "--home", home, retiredID},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		code := Run(args, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("%v exit code = 0, stdout=%s stderr=%s", args, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "agent template "+retiredID+" is retired; use planner") {
+			t.Fatalf("%v stderr missing retired guidance:\n%s", args, stderr.String())
+		}
+	}
+
+	promptPath := filepath.Join(t.TempDir(), "retired.md")
+	if err := os.WriteFile(promptPath, []byte("Do not revive.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "template", "add", retiredID, "--home", home, "--file", promptPath}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("template add retired exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "agent template "+retiredID+" is retired; use planner") {
+		t.Fatalf("add retired stderr missing guidance:\n%s", stderr.String())
+	}
+}
+
+func seedCachedAgentTemplate(t *testing.T, home string, template db.AgentTemplate) {
+	t.Helper()
+	store, err := db.Open(filepath.Join(home, ".gitmoot", "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	if err := store.UpsertAgentTemplate(context.Background(), template); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
 	}
 }
 

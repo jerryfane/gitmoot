@@ -17,12 +17,15 @@ background daemon checks, Codex or Claude Code agent startup, structured
 implementation plans, standard goal files, agent template workflows, custom
 prompt agents, job status, or branch lock inspection.
 
-For current-chat template import, "use Gitmoot agent template <template-id>
-here" means read and apply the packaged or local template instructions in this
-current chat. The natural phrase "use the Gitmoot planner here" maps to
-`agent-templates/planner-here.md`. Do not route a "here" request through a
-background `gitmoot agent ask` unless the user explicitly asks for background
-execution, PR-comment routing, or job tracking.
+For current-chat prompt import, "use <agent> here" or "use Gitmoot agent
+<agent> here" means run `gitmoot agent prompt <agent>` and apply the returned
+prompt content in this current chat. This is prompt import, not true
+system-prompt injection. The natural phrase "use the Gitmoot planner here" maps
+to the same `planner` template used by managed planner agents. If the planner
+template is not cached, read and apply the packaged
+`agent-templates/planner.md` instructions directly. Do not route a "here"
+request through a background `gitmoot agent ask` unless the user explicitly
+asks for background execution, PR-comment routing, or job tracking.
 
 For background work, keep Gitmoot's resource model explicit: repo checkout
 locks protect local checkouts, runtime session locks serialize delivery for the
@@ -44,12 +47,14 @@ sessions or managed agent types with `max_background` greater than one.
 
 Use `gitmoot status --repo owner/repo` for repo status, `gitmoot daemon status`
 for daemon state, `gitmoot agent list` for registered agents, and
-`gitmoot agent ask <agent> --repo owner/repo "..."` to invoke a registered
-Gitmoot agent from the current local chat. Add `--background` only when the user
-wants a queued background job. Use `gitmoot job list --repo owner/repo` for
-queued or recent jobs. Use `gitmoot plugin doctor` when checking whether Codex
-or Claude Code can discover Gitmoot through an installed runtime plugin. Use
-`gitmoot goal template` when writing a standard task-by-task goal file.
+`gitmoot agent prompt <agent-or-template>` to import an agent prompt into the
+current chat. Use `gitmoot agent ask <agent> --repo owner/repo "..."` to invoke
+a registered Gitmoot agent through the runtime adapter path. Add `--background`
+only when the user wants a queued background job. Use
+`gitmoot job list --repo owner/repo` for queued or recent jobs. Use
+`gitmoot plugin doctor` when checking whether Codex or Claude Code can discover
+Gitmoot through an installed runtime plugin. Use `gitmoot goal template` when
+writing a standard task-by-task goal file.
 
 The plugin is only the runtime discovery surface for this skill. Local agent
 invocation still goes through the `gitmoot` CLI and the same registered agent,

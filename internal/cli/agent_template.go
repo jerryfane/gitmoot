@@ -126,6 +126,9 @@ func runAgentTemplateList(args []string, stdout, stderr io.Writer) int {
 			if _, ok := agenttemplate.Lookup(cached.ID); ok {
 				continue
 			}
+			if agenttemplate.IsRetired(cached.ID) {
+				continue
+			}
 			status := "installed@" + shortCommit(cached.ResolvedCommit)
 			fmt.Fprintf(stdout, "%-36s %-18s %s:%s\n", cached.ID, status, cached.SourceRepo, cached.SourcePath)
 		}
@@ -149,6 +152,9 @@ func runAgentTemplateShow(args []string, stdout, stderr io.Writer) int {
 	}
 	id := fs.Arg(0)
 	return withStoreExit(*home, stderr, "show agent template", func(store *db.Store) error {
+		if agenttemplate.IsRetired(id) {
+			return retiredAgentTemplateError(id)
+		}
 		if definition, ok := agenttemplate.Lookup(id); ok {
 			cached, err := store.GetAgentTemplate(context.Background(), definition.ID)
 			installed := true
@@ -218,6 +224,9 @@ func runAgentTemplateDiff(args []string, stdout, stderr io.Writer) int {
 	}
 	id := fs.Arg(0)
 	return withStoreExit(*home, stderr, "diff agent template", func(store *db.Store) error {
+		if agenttemplate.IsRetired(id) {
+			return retiredAgentTemplateError(id)
+		}
 		cached, err := store.GetAgentTemplate(context.Background(), id)
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, ok := agenttemplate.Lookup(id); ok {
@@ -259,6 +268,9 @@ func runAgentTemplateDiff(args []string, stdout, stderr io.Writer) int {
 }
 
 func updateTemplateByID(ctx context.Context, store *db.Store, id string) (db.AgentTemplate, error) {
+	if agenttemplate.IsRetired(id) {
+		return db.AgentTemplate{}, retiredAgentTemplateError(id)
+	}
 	if _, ok := agenttemplate.Lookup(id); ok {
 		return agenttemplate.Update(ctx, store, newAgentTemplateFetcher(), id)
 	}
@@ -273,6 +285,10 @@ func updateTemplateByID(ctx context.Context, store *db.Store, id string) (db.Age
 		return db.AgentTemplate{}, fmt.Errorf("agent template %s is not a local custom template and has no built-in source", id)
 	}
 	return agenttemplate.UpdateLocal(ctx, store, cached)
+}
+
+func retiredAgentTemplateError(id string) error {
+	return fmt.Errorf("agent template %s is retired; use %s", id, agenttemplate.PlannerTemplateID)
 }
 
 func installedTemplateMap(templates []db.AgentTemplate) map[string]db.AgentTemplate {

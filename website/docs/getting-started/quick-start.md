@@ -28,6 +28,9 @@ For fast planning in the current Codex or Claude chat, ask the runtime:
 Use the Gitmoot planner here. Write the implementation plan.
 ```
 
+That imports the same `planner` prompt in the current chat. For custom agents,
+use the same pattern, for example `Use frontend-reviewer here`.
+
 Ask the registered background planner when you want a queued Gitmoot job:
 
 ```sh

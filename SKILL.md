@@ -32,12 +32,16 @@ background daemon checks, Codex or Claude Code agent startup, structured
 implementation plans, standard goal files, agent template workflows, custom prompt agents,
 job status, or branch lock inspection.
 
-For fast planning, "use the Gitmoot planner here" means read and apply the
-repo `skills/gitmoot/agent-templates/planner-here.md` instructions in this current
-chat. In an installed Gitmoot skill package, use the packaged
-`agent-templates/planner-here.md` path. Do not route that request through a
-background `gitmoot agent ask` unless the user explicitly asks for background
-execution, PR-comment routing, or job tracking.
+For current-chat prompt import, "use <agent> here" means run
+`gitmoot agent prompt <agent>` and apply the returned prompt content in this
+current chat. This is prompt import, not true system-prompt injection. Do not
+route a "here" request through a background `gitmoot agent ask` unless the user
+explicitly asks for background execution, PR-comment routing, or job tracking.
+
+For fast planning, "use the Gitmoot planner here" is the natural-language
+shortcut for `gitmoot agent prompt planner`. If the planner template is not
+cached, read and apply the packaged `skills/gitmoot/agent-templates/planner.md`
+instructions directly.
 
 For background work, keep Gitmoot's resource model explicit: repo checkout
 locks protect local checkouts, runtime session locks serialize delivery for the
@@ -90,6 +94,7 @@ gitmoot daemon status
 gitmoot plugin doctor
 gitmoot agent list
 gitmoot agent doctor <agent>
+gitmoot agent prompt <agent-or-template>
 gitmoot agent ask <agent> --repo owner/repo "question or instructions"
 gitmoot job list --repo owner/repo
 gitmoot job show <job-id>
@@ -101,11 +106,13 @@ gitmoot lock show owner/repo <branch>
 Use `gitmoot daemon start` for the background daemon. Use `gitmoot daemon run`
 only when the user explicitly wants a foreground process.
 
-Use `gitmoot agent ask` when the user wants to invoke a registered Gitmoot
-agent from the current local chat. Add `--background` only when the user wants a
-queued background job. This is the same agent registry and runtime adapter path
-used by PR-comment ask jobs; the plugin only helps the runtime discover this
-skill and does not replace the `gitmoot` CLI.
+Use `gitmoot agent prompt <agent-or-template>` when the user wants to reuse a
+Gitmoot agent prompt in the current chat. Use `gitmoot agent ask` when the user
+wants to invoke a registered Gitmoot agent through the Gitmoot runtime path. Add
+`--background` only when the user wants a queued background job. This is the
+same agent registry and runtime adapter path used by PR-comment ask jobs; the
+plugin only helps the runtime discover this skill and does not replace the
+`gitmoot` CLI.
 
 ## PR Comment Commands
 

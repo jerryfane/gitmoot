@@ -16,7 +16,6 @@ const sources = [
   'docs/beta-smoke-tests.md',
   'skills/gitmoot/SKILL.md',
   'skills/gitmoot/agent-templates/planner.md',
-  'skills/gitmoot/agent-templates/planner-here.md',
   'skills/gitmoot/references/CLI.md',
   'skills/gitmoot/references/WORKFLOWS.md',
   'skills/gitmoot/references/SAFETY.md',
