@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jerryfane/gitmoot/internal/agenttemplate"
@@ -25,8 +27,12 @@ func runAgentTemplate(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "add":
 		return runAgentTemplateAdd(args[1:], stdout, stderr)
+	case "draft":
+		return runAgentTemplateDraft(args[1:], stdout, stderr)
 	case "list":
 		return runAgentTemplateList(args[1:], stdout, stderr)
+	case "validate":
+		return runAgentTemplateValidate(args[1:], stdout, stderr)
 	case "show":
 		return runAgentTemplateShow(args[1:], stdout, stderr)
 	case "update":
@@ -43,6 +49,8 @@ func runAgentTemplate(args []string, stdout, stderr io.Writer) int {
 func printAgentTemplateUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot agent template add <template-id> --file ./agents/<template-id>.md [--name <name>] [--description <text>]")
+	fmt.Fprintln(w, "  gitmoot agent template draft <template-id> [--output .gitmoot/templates/<template-id>.md] [--force]")
+	fmt.Fprintln(w, "  gitmoot agent template validate <file>")
 	fmt.Fprintln(w, "  gitmoot agent template list")
 	fmt.Fprintln(w, "  gitmoot agent template show thermo-nuclear-code-quality-review")
 	fmt.Fprintln(w, "  gitmoot agent template update thermo-nuclear-code-quality-review")
@@ -93,6 +101,89 @@ func leadingID(args []string) (string, []string) {
 		return "", args
 	}
 	return args[0], args[1:]
+}
+
+func runAgentTemplateDraft(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("agent template draft", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	_ = fs.String("home", "", "accepted for command consistency; not used")
+	output := fs.String("output", "", "path to write the draft template")
+	force := fs.Bool("force", false, "overwrite an existing draft file")
+	id, flagArgs := leadingID(args)
+	if err := fs.Parse(flagArgs); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if id == "" {
+		if fs.NArg() == 1 {
+			id = fs.Arg(0)
+		} else {
+			fmt.Fprintln(stderr, "agent template draft requires exactly one template id")
+			return 2
+		}
+	} else if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "agent template draft requires exactly one template id")
+		return 2
+	}
+	content, err := agenttemplate.DraftCaptureTemplate(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "draft agent template: %v\n", err)
+		return 1
+	}
+	path := strings.TrimSpace(*output)
+	if path == "" {
+		path = filepath.Join(".gitmoot", "templates", id+".md")
+	}
+	if err := writeAgentTemplateDraft(path, content, *force); err != nil {
+		fmt.Fprintf(stderr, "draft agent template: %v\n", err)
+		return 1
+	}
+	writeLine(stdout, "drafted %s at %s", id, path)
+	return 0
+}
+
+func writeAgentTemplateDraft(path string, content string, force bool) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("output path is required")
+	}
+	if _, err := os.Stat(path); err == nil && !force {
+		return fmt.Errorf("template draft %s already exists; pass --force to overwrite", path)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect template draft %s: %w", path, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create template draft directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write template draft %s: %w", path, err)
+	}
+	return nil
+}
+
+func runAgentTemplateValidate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("agent template validate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	_ = fs.String("home", "", "accepted for command consistency; not used")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(stderr, "agent template validate requires exactly one file path")
+		return 2
+	}
+	path := fs.Arg(0)
+	if err := agenttemplate.ValidateCaptureTemplateFile(path); err != nil {
+		fmt.Fprintf(stderr, "validate agent template: %v\n", err)
+		return 1
+	}
+	writeLine(stdout, "valid agent template: %s", path)
+	return 0
 }
 
 func runAgentTemplateList(args []string, stdout, stderr io.Writer) int {

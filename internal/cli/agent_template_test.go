@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -180,6 +182,118 @@ func TestAgentTemplateAddRejectsInvalidLocalFiles(t *testing.T) {
 		if code := Run(args, &stdout, &stderr); code == 0 {
 			t.Fatalf("Run(%v) exit code = 0, stdout=%s stderr=%s", args, stdout.String(), stderr.String())
 		}
+	}
+}
+
+func TestAgentTemplateDraftWritesDefaultTemplatePath(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cwd := chdirTemp(t)
+
+	code := Run([]string{"agent", "template", "draft", "release-planner"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("template draft exit code = %d, stderr=%s", code, stderr.String())
+	}
+	path := filepath.Join(cwd, ".gitmoot", "templates", "release-planner.md")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	for _, want := range []string{"# Release Planner", "## Role", "## Non-Goals"} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("draft missing %q:\n%s", want, string(content))
+		}
+	}
+	if !strings.Contains(stdout.String(), "drafted release-planner at "+filepath.Join(".gitmoot", "templates", "release-planner.md")) {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func TestAgentTemplateDraftOutputOverwriteRules(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	path := filepath.Join(t.TempDir(), "custom.md")
+
+	code := Run([]string{"agent", "template", "draft", "custom-reviewer", "--output", path}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("template draft exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Stat returned error: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"agent", "template", "draft", "custom-reviewer", "--output", path}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("template draft overwrite exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "already exists; pass --force") {
+		t.Fatalf("stderr missing overwrite guidance:\n%s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"agent", "template", "draft", "custom-reviewer", "--output", path, "--force"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("template draft --force exit code = %d, stderr=%s", code, stderr.String())
+	}
+}
+
+func TestAgentTemplateValidateAcceptsDraftedTemplate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	path := filepath.Join(t.TempDir(), "planner.md")
+	if code := Run([]string{"agent", "template", "draft", "planner-reviewer", "--output", path}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template draft exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "template", "validate", path}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("template validate exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "valid agent template: "+path) {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func TestAgentTemplateValidateRejectsIncompleteTemplate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	path := filepath.Join(t.TempDir(), "bad.md")
+	if err := os.WriteFile(path, []byte("# Bad\n\n## Role\n\nTODO\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	code := Run([]string{"agent", "template", "validate", path}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("template validate exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "missing required section") {
+		t.Fatalf("stderr missing validation detail:\n%s", stderr.String())
+	}
+}
+
+func TestAgentTemplateValidateRejectsNonRegularFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture is not portable to windows")
+	}
+	var stdout, stderr bytes.Buffer
+	path := filepath.Join(t.TempDir(), "template.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	defer listener.Close()
+
+	code := Run([]string{"agent", "template", "validate", path}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("template validate exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "is not a regular file") {
+		t.Fatalf("stderr missing non-regular-file detail:\n%s", stderr.String())
 	}
 }
 
@@ -531,4 +645,22 @@ func (f fakeAgentTemplateFetcher) ResolveRef(context.Context, string, string) (s
 
 func (f fakeAgentTemplateFetcher) FetchFile(context.Context, string, string, string) (agenttemplate.File, error) {
 	return agenttemplate.File{Content: f.content}, nil
+}
+
+func chdirTemp(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd returned error: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Fatalf("restore Chdir returned error: %v", err)
+		}
+	})
+	return dir
 }

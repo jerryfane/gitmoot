@@ -25,6 +25,19 @@ const LocalSourceRef = "file"
 const DefaultLocalDescription = "Local custom prompt agent template."
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+var obviousPlaceholderPattern = regexp.MustCompile(`(?i)(<\s*template\s+name\s*>|\bTODO\b)`)
+
+var CaptureTemplateSections = []string{
+	"Role",
+	"When To Use",
+	"Workflow",
+	"Inputs And Context",
+	"Commands And Tools",
+	"Output Contract",
+	"Safety Rules",
+	"Examples",
+	"Non-Goals",
+}
 
 type Definition struct {
 	ID                  string
@@ -106,6 +119,115 @@ func ValidateID(id string) error {
 		return fmt.Errorf("invalid agent template id %q; use lowercase letters, numbers, and single dashes", id)
 	}
 	return nil
+}
+
+func DraftCaptureTemplate(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if err := ValidateID(id); err != nil {
+		return "", err
+	}
+	name := titleFromID(id)
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "# %s\n\n", name)
+	builder.WriteString("## Role\n\n")
+	builder.WriteString("Describe the durable responsibility this agent should handle.\n\n")
+	builder.WriteString("## When To Use\n\n")
+	builder.WriteString("- Use this template for requests that match the repeated workflow being captured.\n")
+	builder.WriteString("- Keep the scope explicit so future sessions know when to import or run it.\n\n")
+	builder.WriteString("## Workflow\n\n")
+	builder.WriteString("1. Inspect the relevant visible conversation context and repo files.\n")
+	builder.WriteString("2. Apply the captured workflow rules in order.\n")
+	builder.WriteString("3. Return the agreed output without performing extra implementation unless requested.\n\n")
+	builder.WriteString("## Inputs And Context\n\n")
+	builder.WriteString("- Current user request and visible conversation context.\n")
+	builder.WriteString("- Relevant repository files, command output, and documentation checked during the task.\n\n")
+	builder.WriteString("## Commands And Tools\n\n")
+	builder.WriteString("- Prefer local commands for repo state and verification.\n")
+	builder.WriteString("- Use official sources for external contracts that may change.\n")
+	builder.WriteString("- Preserve unrelated local changes.\n\n")
+	builder.WriteString("## Output Contract\n\n")
+	builder.WriteString("Return the concrete artifact requested by the user, plus concise verification notes when checks run.\n\n")
+	builder.WriteString("## Safety Rules\n\n")
+	builder.WriteString("- Do not expose secrets or private state.\n")
+	builder.WriteString("- Do not mutate files, install templates, or start background work unless explicitly requested.\n")
+	builder.WriteString("- Ask for clarification when required scope or approval is missing.\n\n")
+	builder.WriteString("## Examples\n\n")
+	builder.WriteString("- \"Use this template here to draft the workflow.\" Return the drafted output in chat.\n")
+	builder.WriteString("- \"Install this template.\" Validate the file, then add it with Gitmoot.\n\n")
+	builder.WriteString("## Non-Goals\n\n")
+	builder.WriteString("- Do not capture one-off debugging details, temporary mistakes, secrets, or hidden model state.\n")
+	return builder.String(), nil
+}
+
+func ValidateCaptureTemplateFile(path string) error {
+	local, err := readLocal(path)
+	if err != nil {
+		return err
+	}
+	return ValidateCaptureTemplateContent(local.Content)
+}
+
+func ValidateCaptureTemplateContent(content string) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return errors.New("template content is empty")
+	}
+	title, ok := firstMarkdownTitle(content)
+	if !ok {
+		return errors.New("template must start with a markdown title heading")
+	}
+	if obviousPlaceholderPattern.MatchString(title) {
+		return errors.New("template title contains an unresolved placeholder")
+	}
+	for _, section := range CaptureTemplateSections {
+		if !hasMarkdownHeading(content, 2, section) {
+			return fmt.Errorf("template missing required section %q", section)
+		}
+	}
+	if obviousPlaceholderPattern.MatchString(content) {
+		return errors.New("template contains unresolved placeholder text")
+	}
+	return nil
+}
+
+func firstMarkdownTitle(content string) (string, bool) {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "# ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "# ")), true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func hasMarkdownHeading(content string, level int, title string) bool {
+	prefix := strings.Repeat("#", level) + " "
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		heading := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		if strings.EqualFold(heading, title) {
+			return true
+		}
+	}
+	return false
+}
+
+func titleFromID(id string) string {
+	parts := strings.Split(id, "-")
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		parts[index] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ")
 }
 
 func AddLocal(ctx context.Context, store *db.Store, id string, path string, name string, description string) (db.AgentTemplate, error) {
@@ -318,8 +440,8 @@ func readLocal(path string) (localFile, error) {
 	if err != nil {
 		return localFile{}, fmt.Errorf("read template file %s: %w", abs, err)
 	}
-	if info.IsDir() {
-		return localFile{}, fmt.Errorf("template file %s is a directory", abs)
+	if !info.Mode().IsRegular() {
+		return localFile{}, fmt.Errorf("template file %s is not a regular file", abs)
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
