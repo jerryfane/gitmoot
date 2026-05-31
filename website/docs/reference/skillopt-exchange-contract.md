@@ -106,3 +106,13 @@ comments and de-duplicates repeated imports by GitHub comment URL.
 The complete review loop is: import a candidate, collect feedback with either
 the Markdown packet or GitHub collector, inspect the candidate with
 `gitmoot skillopt candidate show <version-id>`, then promote or reject it.
+
+## Future Live Pairwise Evaluation
+
+The MVP compares candidates against saved baseline outputs so local review stays
+deterministic and inexpensive. Future live pairwise evaluation is tracked in
+[GitHub issue #77](https://github.com/jerryfane/gitmoot/issues/77): it would run
+the current promoted template and pending candidate live for every validation
+item before collecting blind A/B feedback. This is more faithful and protects
+against stale baselines, but adds latency, token cost, and runtime/session
+complexity.
