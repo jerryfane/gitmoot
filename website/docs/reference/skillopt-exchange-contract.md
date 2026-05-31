@@ -27,3 +27,35 @@ The candidate package contains full agent-template Markdown with YAML
 frontmatter, matching metadata, an optional eval report, and an optional summary.
 Importing stores the candidate as a pending template version and never promotes
 it automatically.
+
+## Markdown Feedback Packet
+
+```sh
+gitmoot skillopt feedback markdown export \
+  --run run-2026-05-31 \
+  --output .gitmoot/evals/run-2026-05-31
+```
+
+The packet contains `index.md`, one Markdown file per item, editable
+`feedback.yml`, and hidden `.assignments.json` metadata that lets Gitmoot recover
+the blind A/B mapping.
+
+Humans fill `feedback.yml` with `a`, `b`, `tie`, `neither`, or `skip`:
+
+```yaml
+run_id: run-2026-05-31
+reviewer: alice
+items:
+  - item_id: item-001
+    choice: b
+    reasoning: More concrete and easier to execute.
+```
+
+```sh
+gitmoot skillopt feedback markdown import \
+  --packet .gitmoot/evals/run-2026-05-31
+```
+
+Gitmoot validates the complete file before writing events. It uses the hidden
+assignment metadata to de-blind `a` and `b`, so exported feedback events use
+`a` for baseline and `b` for candidate.

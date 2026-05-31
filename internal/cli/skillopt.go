@@ -11,7 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jerryfane/gitmoot/internal/artifact"
+	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/feedback"
 	"github.com/jerryfane/gitmoot/internal/skillopt"
 )
 
@@ -25,6 +28,8 @@ func runSkillOpt(args []string, stdout, stderr io.Writer) int {
 		return runSkillOptExport(args[1:], stdout, stderr)
 	case "import":
 		return runSkillOptImport(args[1:], stdout, stderr)
+	case "feedback":
+		return runSkillOptFeedback(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown skillopt command %q\n\n", args[0])
 		printSkillOptUsage(stderr)
@@ -36,6 +41,8 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot skillopt export --run <run-id> [--output package.json]")
 	fmt.Fprintln(w, "  gitmoot skillopt import --file candidate.json")
+	fmt.Fprintln(w, "  gitmoot skillopt feedback markdown export --run <run-id> --output .gitmoot/evals/<run-id>")
+	fmt.Fprintln(w, "  gitmoot skillopt feedback markdown import --packet .gitmoot/evals/<run-id> [--reviewer name]")
 }
 
 func runSkillOptExport(args []string, stdout, stderr io.Writer) int {
@@ -142,4 +149,115 @@ func writeSkillOptFile(path string, content []byte) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 	return os.WriteFile(path, content, 0o644)
+}
+
+func runSkillOptFeedback(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		printSkillOptUsage(stdout)
+		return 0
+	}
+	if args[0] != "markdown" {
+		fmt.Fprintf(stderr, "unknown skillopt feedback collector %q\n\n", args[0])
+		printSkillOptUsage(stderr)
+		return 2
+	}
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "skillopt feedback markdown requires export or import")
+		printSkillOptUsage(stderr)
+		return 2
+	}
+	switch args[1] {
+	case "export":
+		return runSkillOptFeedbackMarkdownExport(args[2:], stdout, stderr)
+	case "import":
+		return runSkillOptFeedbackMarkdownImport(args[2:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown skillopt feedback markdown command %q\n\n", args[1])
+		printSkillOptUsage(stderr)
+		return 2
+	}
+}
+
+func runSkillOptFeedbackMarkdownExport(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("skillopt feedback markdown export", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	runID := fs.String("run", "", "eval run id")
+	output := fs.String("output", "", "packet output directory")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "skillopt feedback markdown export does not accept positional arguments")
+		return 2
+	}
+	if strings.TrimSpace(*runID) == "" || strings.TrimSpace(*output) == "" {
+		fmt.Fprintln(stderr, "skillopt feedback markdown export requires --run and --output")
+		return 2
+	}
+	if err := withSkillOptStore(*home, func(paths config.Paths, store *db.Store) error {
+		collector := feedback.MarkdownCollector{BlobStore: artifact.NewStore(paths.ArtifactBlobs)}
+		return collector.WritePacket(context.Background(), store, *runID, *output)
+	}); err != nil {
+		fmt.Fprintf(stderr, "skillopt feedback markdown export: %v\n", err)
+		return 1
+	}
+	writeLine(stdout, "wrote markdown feedback packet for %s to %s", *runID, *output)
+	return 0
+}
+
+func runSkillOptFeedbackMarkdownImport(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("skillopt feedback markdown import", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	packet := fs.String("packet", "", "packet directory containing feedback.yml")
+	reviewer := fs.String("reviewer", "", "reviewer name override")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "skillopt feedback markdown import does not accept positional arguments")
+		return 2
+	}
+	if strings.TrimSpace(*packet) == "" {
+		fmt.Fprintln(stderr, "skillopt feedback markdown import requires --packet")
+		return 2
+	}
+	var count int
+	if err := withSkillOptStore(*home, func(paths config.Paths, store *db.Store) error {
+		collector := feedback.MarkdownCollector{BlobStore: artifact.NewStore(paths.ArtifactBlobs)}
+		events, err := collector.ImportPacket(context.Background(), store, *packet, *reviewer)
+		if err != nil {
+			return err
+		}
+		count = len(events)
+		return nil
+	}); err != nil {
+		fmt.Fprintf(stderr, "skillopt feedback markdown import: %v\n", err)
+		return 1
+	}
+	writeLine(stdout, "imported %d feedback events", count)
+	return 0
+}
+
+func withSkillOptStore(home string, fn func(config.Paths, *db.Store) error) error {
+	paths, err := pathsFromFlag(home)
+	if err != nil {
+		return err
+	}
+	if err := config.Initialize(paths); err != nil {
+		return err
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return fn(paths, store)
 }

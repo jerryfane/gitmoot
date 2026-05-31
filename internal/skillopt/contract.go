@@ -149,6 +149,10 @@ func ExportTrainingPackage(ctx context.Context, store *db.Store, runID string) (
 	if err != nil {
 		return TrainingPackage{}, err
 	}
+	feedbackEvents, err := loadFeedbackEvents(ctx, store, run.ID)
+	if err != nil {
+		return TrainingPackage{}, err
+	}
 	metadata, err := rawJSON(run.MetadataJSON)
 	if err != nil {
 		return TrainingPackage{}, fmt.Errorf("eval run metadata_json: %w", err)
@@ -167,7 +171,7 @@ func ExportTrainingPackage(ctx context.Context, store *db.Store, runID string) (
 		},
 		Items:           exportItems,
 		Artifacts:       artifacts,
-		FeedbackEvents:  []FeedbackEvent{},
+		FeedbackEvents:  feedbackEvents,
 		EvaluatorConfig: metadata,
 	}, nil
 }
@@ -321,6 +325,27 @@ func loadArtifactRefs(ctx context.Context, store *db.Store, ids map[string]struc
 		})
 	}
 	return refs, nil
+}
+
+func loadFeedbackEvents(ctx context.Context, store *db.Store, runID string) ([]FeedbackEvent, error) {
+	events, err := store.ListFeedbackEvents(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	output := make([]FeedbackEvent, 0, len(events))
+	for _, event := range events {
+		output = append(output, FeedbackEvent{
+			RunID:     event.RunID,
+			ItemID:    event.ItemID,
+			Choice:    event.Choice,
+			Reasoning: event.Reasoning,
+			Reviewer:  event.Reviewer,
+			Source:    event.Source,
+			SourceURL: event.SourceURL,
+			CreatedAt: event.CreatedAt,
+		})
+	}
+	return output, nil
 }
 
 func rawJSON(value string) (json.RawMessage, error) {

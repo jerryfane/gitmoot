@@ -183,6 +183,18 @@ type EvalReviewItem struct {
 	UpdatedAt           string
 }
 
+type FeedbackEvent struct {
+	ID        string
+	RunID     string
+	ItemID    string
+	Choice    string
+	Reasoning string
+	Reviewer  string
+	Source    string
+	SourceURL string
+	CreatedAt string
+}
+
 type BranchLock struct {
 	RepoFullName string
 	Branch       string
@@ -1530,6 +1542,78 @@ func scanEvalReviewItem(row interface{ Scan(dest ...any) error }) (EvalReviewIte
 	return item, nil
 }
 
+func (s *Store) UpsertFeedbackEvent(ctx context.Context, event FeedbackEvent) error {
+	if strings.TrimSpace(event.ID) == "" {
+		event.ID = feedbackEventID(event)
+	}
+	if strings.TrimSpace(event.RunID) == "" {
+		return errors.New("feedback event run id is required")
+	}
+	if strings.TrimSpace(event.ItemID) == "" {
+		return errors.New("feedback event item id is required")
+	}
+	if strings.TrimSpace(event.Choice) == "" {
+		return errors.New("feedback event choice is required")
+	}
+	if strings.TrimSpace(event.Reviewer) == "" {
+		return errors.New("feedback event reviewer is required")
+	}
+	if strings.TrimSpace(event.Source) == "" {
+		return errors.New("feedback event source is required")
+	}
+	if strings.TrimSpace(event.CreatedAt) == "" {
+		event.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO feedback_events(id, run_id, item_id, choice, reasoning, reviewer, source, source_url, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id, item_id, reviewer, source, source_url) DO UPDATE SET
+			id = excluded.id,
+			choice = excluded.choice,
+			reasoning = excluded.reasoning,
+			reviewer = excluded.reviewer,
+			source = excluded.source,
+			source_url = excluded.source_url,
+			created_at = excluded.created_at`,
+		event.ID, event.RunID, event.ItemID, event.Choice, event.Reasoning, event.Reviewer, event.Source, event.SourceURL, event.CreatedAt)
+	return err
+}
+
+func (s *Store) ListFeedbackEvents(ctx context.Context, runID string) ([]FeedbackEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, run_id, item_id, choice, reasoning, reviewer, source, source_url, created_at
+		FROM feedback_events WHERE run_id = ? ORDER BY item_id, reviewer, source, source_url`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []FeedbackEvent
+	for rows.Next() {
+		event, err := scanFeedbackEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func scanFeedbackEvent(row interface{ Scan(dest ...any) error }) (FeedbackEvent, error) {
+	var event FeedbackEvent
+	if err := row.Scan(&event.ID, &event.RunID, &event.ItemID, &event.Choice, &event.Reasoning, &event.Reviewer, &event.Source, &event.SourceURL, &event.CreatedAt); err != nil {
+		return FeedbackEvent{}, err
+	}
+	return event, nil
+}
+
+func feedbackEventID(event FeedbackEvent) string {
+	parts := []string{event.RunID, event.ItemID, event.Reviewer, event.Source, event.SourceURL}
+	for index, part := range parts {
+		parts[index] = strings.TrimSpace(part)
+	}
+	content, _ := json.Marshal(parts)
+	sum := sha256.Sum256(content)
+	return "feedback:" + hex.EncodeToString(sum[:])
+}
+
 func (s *Store) AcquireResourceLock(ctx context.Context, lock ResourceLock, now time.Time) (bool, error) {
 	resourceKey := strings.TrimSpace(lock.ResourceKey)
 	ownerJobID := strings.TrimSpace(lock.OwnerJobID)
@@ -2276,6 +2360,20 @@ CREATE TABLE eval_review_items (
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	UNIQUE(run_id, item_id)
+);
+	`,
+	`
+CREATE TABLE feedback_events (
+	id TEXT PRIMARY KEY,
+	run_id TEXT NOT NULL,
+	item_id TEXT NOT NULL,
+	choice TEXT NOT NULL,
+	reasoning TEXT NOT NULL DEFAULT '',
+	reviewer TEXT NOT NULL,
+	source TEXT NOT NULL,
+	source_url TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(run_id, item_id, reviewer, source, source_url)
 );
 	`,
 }

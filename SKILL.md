@@ -115,6 +115,8 @@ gitmoot lock list --repo owner/repo
 gitmoot lock show owner/repo <branch>
 gitmoot skillopt export --run <run-id> [--output training.json]
 gitmoot skillopt import --file candidate.json
+gitmoot skillopt feedback markdown export --run <run-id> --output .gitmoot/evals/<run-id>
+gitmoot skillopt feedback markdown import --packet .gitmoot/evals/<run-id>
 ```
 
 Use `gitmoot daemon start` for the background daemon. Use `gitmoot daemon run`

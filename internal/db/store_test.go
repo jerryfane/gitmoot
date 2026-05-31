@@ -36,6 +36,7 @@ func TestOpenMigratesSchema(t *testing.T) {
 		"eval_artifacts",
 		"eval_runs",
 		"eval_review_items",
+		"feedback_events",
 	} {
 		ok, err := store.HasTable(ctx, table)
 		if err != nil {
@@ -119,6 +120,78 @@ func TestEvalStorageMethods(t *testing.T) {
 	}
 	if items[0].ID != "run-1/item-001" || items[0].DiffArtifactID != artifact.ID || items[0].MetadataJSON != `{"path":"README.md"}` {
 		t.Fatalf("review item = %+v", items[0])
+	}
+}
+
+func TestFeedbackEventMethods(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	event := FeedbackEvent{
+		RunID:     "run-1",
+		ItemID:    "item-001",
+		Choice:    "b",
+		Reasoning: "More concrete.",
+		Reviewer:  "jerry",
+		Source:    "markdown",
+		SourceURL: "packet",
+		CreatedAt: "2026-05-31T10:00:00Z",
+	}
+	if err := store.UpsertFeedbackEvent(ctx, event); err != nil {
+		t.Fatalf("UpsertFeedbackEvent returned error: %v", err)
+	}
+	event.Choice = "tie"
+	event.Reasoning = "Both work."
+	if err := store.UpsertFeedbackEvent(ctx, event); err != nil {
+		t.Fatalf("second UpsertFeedbackEvent returned error: %v", err)
+	}
+	events, err := store.ListFeedbackEvents(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("ListFeedbackEvents returned error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want 1", len(events))
+	}
+	if events[0].Choice != "tie" || events[0].Reasoning != "Both work." || events[0].ID == "" {
+		t.Fatalf("event = %+v", events[0])
+	}
+
+	collisionA := FeedbackEvent{
+		RunID:     "a/b",
+		ItemID:    "c",
+		Choice:    "a",
+		Reviewer:  "reviewer",
+		Source:    "markdown",
+		CreatedAt: "2026-05-31T10:00:00Z",
+	}
+	collisionB := FeedbackEvent{
+		RunID:     "a",
+		ItemID:    "b/c",
+		Choice:    "b",
+		Reviewer:  "reviewer",
+		Source:    "markdown",
+		CreatedAt: "2026-05-31T10:00:00Z",
+	}
+	if err := store.UpsertFeedbackEvent(ctx, collisionA); err != nil {
+		t.Fatalf("collisionA UpsertFeedbackEvent returned error: %v", err)
+	}
+	if err := store.UpsertFeedbackEvent(ctx, collisionB); err != nil {
+		t.Fatalf("collisionB UpsertFeedbackEvent returned error: %v", err)
+	}
+	aEvents, err := store.ListFeedbackEvents(ctx, "a/b")
+	if err != nil {
+		t.Fatalf("ListFeedbackEvents a/b returned error: %v", err)
+	}
+	bEvents, err := store.ListFeedbackEvents(ctx, "a")
+	if err != nil {
+		t.Fatalf("ListFeedbackEvents a returned error: %v", err)
+	}
+	if len(aEvents) != 1 || len(bEvents) != 1 || aEvents[0].ItemID != "c" || bEvents[0].ItemID != "b/c" {
+		t.Fatalf("collision events a=%+v b=%+v", aEvents, bEvents)
 	}
 }
 
