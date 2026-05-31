@@ -183,3 +183,16 @@ Complete GitHub review path:
 4. `gitmoot skillopt feedback github sync --run <run-id> --repo owner/reviews --issue <number>`
 5. `gitmoot skillopt candidate show <version-id>`
 6. `gitmoot skillopt candidate promote <version-id>` or `gitmoot skillopt candidate reject <version-id>`
+
+## Future Live Pairwise Evaluation
+
+The MVP exchange contract compares candidates against saved baseline outputs.
+This keeps local review deterministic and avoids rerunning every baseline for
+each candidate import.
+
+Future live pairwise mode is tracked in
+[GitHub issue #77](https://github.com/jerryfane/gitmoot/issues/77). That mode
+would run the current promoted template and the pending candidate live for every
+validation item before collecting blind A/B feedback. The tradeoff is more
+faithful comparisons and better protection against stale baseline outputs, at
+the cost of higher latency, token spend, and runtime/session complexity.
