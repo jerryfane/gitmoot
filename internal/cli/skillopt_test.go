@@ -34,11 +34,29 @@ func TestSkillOptExportAndImportCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAgentTemplate returned error: %v", err)
 	}
+	blobStore := artifact.NewStore(paths.ArtifactBlobs)
+	baselineBlob, err := blobStore.Put([]byte("baseline"))
+	if err != nil {
+		t.Fatalf("Put baseline returned error: %v", err)
+	}
+	candidateBlob, err := blobStore.Put([]byte("candidate"))
+	if err != nil {
+		t.Fatalf("Put candidate returned error: %v", err)
+	}
 	if err := store.UpsertEvalArtifact(context.Background(), db.EvalArtifact{
 		ID:        "baseline",
-		Hash:      artifact.ContentHash([]byte("baseline")),
+		Hash:      baselineBlob.Hash,
 		MediaType: "text/markdown",
-		SizeBytes: int64(len("baseline")),
+		SizeBytes: baselineBlob.Size,
+		Driver:    "text",
+	}); err != nil {
+		t.Fatalf("UpsertEvalArtifact returned error: %v", err)
+	}
+	if err := store.UpsertEvalArtifact(context.Background(), db.EvalArtifact{
+		ID:        "candidate",
+		Hash:      candidateBlob.Hash,
+		MediaType: "text/markdown",
+		SizeBytes: candidateBlob.Size,
 		Driver:    "text",
 	}); err != nil {
 		t.Fatalf("UpsertEvalArtifact returned error: %v", err)
@@ -54,9 +72,10 @@ func TestSkillOptExportAndImportCommands(t *testing.T) {
 		t.Fatalf("UpsertEvalRun returned error: %v", err)
 	}
 	if err := store.UpsertEvalReviewItem(context.Background(), db.EvalReviewItem{
-		RunID:              "run-1",
-		ItemID:             "item-001",
-		BaselineArtifactID: "baseline",
+		RunID:               "run-1",
+		ItemID:              "item-001",
+		BaselineArtifactID:  "baseline",
+		CandidateArtifactID: "candidate",
 	}); err != nil {
 		t.Fatalf("UpsertEvalReviewItem returned error: %v", err)
 	}
@@ -81,8 +100,34 @@ func TestSkillOptExportAndImportCommands(t *testing.T) {
 	if err := json.Unmarshal(exportedContent, &training); err != nil {
 		t.Fatalf("decode training package: %v\n%s", err, string(exportedContent))
 	}
-	if training.Template.VersionID != installed.VersionID || len(training.Items) != 1 || len(training.Artifacts) != 1 {
+	if training.Template.VersionID != installed.VersionID || len(training.Items) != 1 || len(training.Artifacts) != 2 {
 		t.Fatalf("training package = %+v", training)
+	}
+	packetDir := filepath.Join(t.TempDir(), "packet")
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "feedback", "markdown", "export", "--home", home, "--run", "run-1", "--output", packetDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("skillopt feedback markdown export exit code = %d, stderr=%s", code, stderr.String())
+	}
+	feedbackYAML := `run_id: run-1
+reviewer: jerry
+items:
+  - item_id: item-001
+    choice: a
+    reasoning: Clearer.
+`
+	if err := os.WriteFile(filepath.Join(packetDir, "feedback.yml"), []byte(feedbackYAML), 0o644); err != nil {
+		t.Fatalf("write feedback.yml: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "feedback", "markdown", "import", "--home", home, "--packet", packetDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("skillopt feedback markdown import exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "imported 1 feedback events") {
+		t.Fatalf("feedback import stdout = %q", stdout.String())
 	}
 
 	candidateContent := cliSkillOptTemplateContent("planner", "Plan the work and include risks.")
@@ -135,6 +180,68 @@ func TestSkillOptExportAndImportCommands(t *testing.T) {
 	}
 	if latest.VersionID != "planner@v2" || latest.Content != candidateContent {
 		t.Fatalf("latest = %+v", latest)
+	}
+	events, err := store.ListFeedbackEvents(context.Background(), "run-1")
+	if err != nil {
+		t.Fatalf("ListFeedbackEvents returned error: %v", err)
+	}
+	if len(events) != 1 || events[0].Choice != "a" {
+		t.Fatalf("feedback events = %+v", events)
+	}
+}
+
+func TestSkillOptFeedbackRejectsIncompleteCommands(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantErr      string
+		wantStdout   string
+		wantExitCode int
+		wantNoStderr bool
+		wantNoStdout bool
+	}{
+		{
+			name:         "feedback help",
+			args:         []string{"skillopt", "feedback", "--help"},
+			wantStdout:   "gitmoot skillopt feedback markdown export",
+			wantExitCode: 0,
+			wantNoStderr: true,
+		},
+		{
+			name:         "unknown collector",
+			args:         []string{"skillopt", "feedback", "json"},
+			wantErr:      `unknown skillopt feedback collector "json"`,
+			wantExitCode: 2,
+			wantNoStdout: true,
+		},
+		{
+			name:         "missing markdown subcommand",
+			args:         []string{"skillopt", "feedback", "markdown"},
+			wantErr:      "skillopt feedback markdown requires export or import",
+			wantExitCode: 2,
+			wantNoStdout: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(tt.args, &stdout, &stderr)
+			if code != tt.wantExitCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%s stderr=%s", code, tt.wantExitCode, stdout.String(), stderr.String())
+			}
+			if tt.wantStdout != "" && !strings.Contains(stdout.String(), tt.wantStdout) {
+				t.Fatalf("stdout = %q, want substring %q", stdout.String(), tt.wantStdout)
+			}
+			if tt.wantErr != "" && !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Fatalf("stderr = %q, want substring %q", stderr.String(), tt.wantErr)
+			}
+			if tt.wantNoStdout && stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			if tt.wantNoStderr && stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
 	}
 }
 

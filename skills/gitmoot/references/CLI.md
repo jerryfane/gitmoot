@@ -258,10 +258,15 @@ gitmoot lock show owner/repo <branch>
 ```sh
 gitmoot skillopt export --run <run-id> [--output training.json]
 gitmoot skillopt import --file candidate.json
+gitmoot skillopt feedback markdown export --run <run-id> --output .gitmoot/evals/<run-id>
+gitmoot skillopt feedback markdown import --packet .gitmoot/evals/<run-id> [--reviewer name]
 ```
 
 `skillopt export` writes a JSON training package with the template snapshot,
 eval run, review items, artifact manifests, feedback events when present, and
 evaluator config. `skillopt import` validates a candidate package and stores the
 candidate template as a pending version; it never promotes the candidate
-automatically.
+automatically. The Markdown feedback collector writes blind A/B review packets
+with `index.md`, per-item Markdown files, editable `feedback.yml`, and hidden
+assignment metadata that Gitmoot uses to validate the full response and import
+de-blinded canonical feedback events.

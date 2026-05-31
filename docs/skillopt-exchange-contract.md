@@ -52,3 +52,49 @@ The imported package must have:
 Importing never promotes a candidate. Gitmoot stores it as a pending template
 version so later review and promotion commands can decide whether it becomes
 current.
+
+## Markdown Feedback Packet
+
+Generate a local blind A/B review packet:
+
+```sh
+gitmoot skillopt feedback markdown export \
+  --run run-2026-05-31 \
+  --output .gitmoot/evals/run-2026-05-31
+```
+
+The packet contains:
+
+- `index.md`: review instructions and item links
+- `items/*.md`: one file per item with Option A and Option B
+- `feedback.yml`: the editable response file
+- `.assignments.json`: hidden A/B assignment metadata used by Gitmoot on import
+
+Humans fill `feedback.yml` with choices:
+
+```yaml
+run_id: run-2026-05-31
+reviewer: alice
+items:
+  - item_id: item-001
+    choice: b
+    reasoning: More concrete and easier to execute.
+  - item_id: item-002
+    choice: tie
+```
+
+Allowed choices are exactly `a`, `b`, `tie`, `neither`, and `skip`. Reasoning is
+optional.
+
+Import the completed feedback:
+
+```sh
+gitmoot skillopt feedback markdown import \
+  --packet .gitmoot/evals/run-2026-05-31
+```
+
+Gitmoot validates the full response before writing any events. On import, it
+uses `.assignments.json` to de-blind `a` and `b` so stored canonical feedback
+events use `choice: a` for the baseline artifact and `choice: b` for the
+candidate artifact. Each event includes `run_id`, `item_id`, `choice`, optional
+`reasoning`, `reviewer`, `source`, optional `source_url`, and `created_at`.

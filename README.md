@@ -275,6 +275,8 @@ gitmoot lock release owner/repo <branch> --owner <agent>
 ```sh
 gitmoot skillopt export --run <run-id> --output training.json
 gitmoot skillopt import --file candidate.json
+gitmoot skillopt feedback markdown export --run <run-id> --output .gitmoot/evals/<run-id>
+gitmoot skillopt feedback markdown import --packet .gitmoot/evals/<run-id>
 ```
 
 The export/import boundary lets a future external `gitmoot-skillopt` optimizer

@@ -55,6 +55,17 @@ func TestExportTrainingPackage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertEvalReviewItem returned error: %v", err)
 	}
+	if err := store.UpsertFeedbackEvent(ctx, db.FeedbackEvent{
+		RunID:     "run-1",
+		ItemID:    "item-001",
+		Choice:    "b",
+		Reasoning: "More specific.",
+		Reviewer:  "jerry",
+		Source:    "markdown",
+		CreatedAt: "2026-05-31T10:00:00Z",
+	}); err != nil {
+		t.Fatalf("UpsertFeedbackEvent returned error: %v", err)
+	}
 
 	pkg, err := ExportTrainingPackage(ctx, store, "run-1")
 	if err != nil {
@@ -75,6 +86,9 @@ func TestExportTrainingPackage(t *testing.T) {
 	}
 	if string(pkg.EvaluatorConfig) != `{"driver":"planner"}` {
 		t.Fatalf("evaluator config = %s", string(pkg.EvaluatorConfig))
+	}
+	if len(pkg.FeedbackEvents) != 1 || pkg.FeedbackEvents[0].Choice != "b" {
+		t.Fatalf("feedback events = %+v", pkg.FeedbackEvents)
 	}
 	if _, err := json.Marshal(pkg); err != nil {
 		t.Fatalf("exported package did not marshal: %v", err)
