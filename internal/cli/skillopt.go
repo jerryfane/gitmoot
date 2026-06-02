@@ -407,6 +407,7 @@ func runSkillOptReviewStatus(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "state: %s\n", status.Run.State)
 	fmt.Fprintf(stdout, "items: %d\n", itemCount)
 	fmt.Fprintf(stdout, "feedback: %d\n", feedbackCount)
+	fmt.Fprintf(stdout, "pairwise_preferences: %d\n", len(status.PairwisePreferences))
 	fmt.Fprintf(stdout, "packet_blockers: %d\n", len(status.PacketBlockers))
 	fmt.Fprintf(stdout, "training_blockers: %d\n", len(status.TrainingBlockers))
 	fmt.Fprintf(stdout, "ready_for_packet: %t\n", status.PacketReady)
@@ -421,14 +422,15 @@ func runSkillOptReviewStatus(args []string, stdout, stderr io.Writer) int {
 }
 
 type skillOptReviewStatus struct {
-	Run              db.EvalRun
-	Items            []db.EvalReviewItem
-	Feedback         []db.FeedbackEvent
-	RankedFeedback   []db.RankedFeedbackEvent
-	PacketBlockers   []string
-	TrainingBlockers []string
-	PacketReady      bool
-	TrainingReady    bool
+	Run                 db.EvalRun
+	Items               []db.EvalReviewItem
+	Feedback            []db.FeedbackEvent
+	RankedFeedback      []db.RankedFeedbackEvent
+	PairwisePreferences []db.PairwisePreference
+	PacketBlockers      []string
+	TrainingBlockers    []string
+	PacketReady         bool
+	TrainingReady       bool
 }
 
 func loadSkillOptReviewStatus(ctx context.Context, store *db.Store, blobStore artifact.Store, runID string) (skillOptReviewStatus, error) {
@@ -451,17 +453,22 @@ func loadSkillOptReviewStatus(ctx context.Context, store *db.Store, blobStore ar
 	if err != nil {
 		return skillOptReviewStatus{}, err
 	}
+	pairwisePreferences, err := store.ListPairwisePreferences(ctx, run.ID)
+	if err != nil {
+		return skillOptReviewStatus{}, err
+	}
 	packetBlockers := reviewPacketBlockers(ctx, store, blobStore, run, items)
 	trainingBlockers := reviewTrainingBlockers(ctx, store, run, items, events, rankedEvents)
 	return skillOptReviewStatus{
-		Run:              run,
-		Items:            items,
-		Feedback:         events,
-		RankedFeedback:   rankedEvents,
-		PacketBlockers:   packetBlockers,
-		TrainingBlockers: trainingBlockers,
-		PacketReady:      len(packetBlockers) == 0,
-		TrainingReady:    len(packetBlockers) == 0 && len(trainingBlockers) == 0,
+		Run:                 run,
+		Items:               items,
+		Feedback:            events,
+		RankedFeedback:      rankedEvents,
+		PairwisePreferences: pairwisePreferences,
+		PacketBlockers:      packetBlockers,
+		TrainingBlockers:    trainingBlockers,
+		PacketReady:         len(packetBlockers) == 0,
+		TrainingReady:       len(packetBlockers) == 0 && len(trainingBlockers) == 0,
 	}, nil
 }
 

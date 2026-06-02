@@ -1506,6 +1506,113 @@ func TestSkillOptReviewStatusRequiresExportableArtifacts(t *testing.T) {
 	}
 }
 
+func TestSkillOptReviewStatusShowsRankedPairwisePreferences(t *testing.T) {
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	template := cliSkillOptTemplate("planner", "Plan the work.")
+	if err := store.UpsertAgentTemplate(context.Background(), template); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	installed, err := store.GetAgentTemplate(context.Background(), "planner")
+	if err != nil {
+		t.Fatalf("GetAgentTemplate returned error: %v", err)
+	}
+	blobStore := artifact.NewStore(paths.ArtifactBlobs)
+	optionLabels := []string{"a", "b", "c", "d"}
+	for _, label := range optionLabels {
+		blob, err := blobStore.Put([]byte("option " + label))
+		if err != nil {
+			t.Fatalf("Put option %s returned error: %v", label, err)
+		}
+		artifactID := "option-" + label
+		if err := store.UpsertEvalArtifact(context.Background(), db.EvalArtifact{
+			ID:        artifactID,
+			Hash:      blob.Hash,
+			MediaType: "text/markdown",
+			SizeBytes: blob.Size,
+			Driver:    "text",
+		}); err != nil {
+			t.Fatalf("UpsertEvalArtifact %s returned error: %v", artifactID, err)
+		}
+	}
+	if err := store.UpsertEvalRun(context.Background(), db.EvalRun{
+		ID:                "planner-ranked-1",
+		TemplateID:        "planner",
+		TemplateVersionID: installed.VersionID,
+		TargetRepo:        "owner/repo",
+		State:             "review",
+		Mode:              db.EvalRunModeExplore,
+		ExplorationLevel:  db.ExplorationLevelHigh,
+		OptionsCount:      4,
+		MetadataJSON:      `{"driver":"manual-review"}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalRun returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewItem(context.Background(), db.EvalReviewItem{
+		RunID:  "planner-ranked-1",
+		ItemID: "item-001",
+		Title:  "Landing page",
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem returned error: %v", err)
+	}
+	for _, label := range optionLabels {
+		if err := store.UpsertEvalReviewOption(context.Background(), db.EvalReviewOption{
+			RunID:      "planner-ranked-1",
+			ItemID:     "item-001",
+			Label:      label,
+			ArtifactID: "option-" + label,
+		}); err != nil {
+			t.Fatalf("UpsertEvalReviewOption %s returned error: %v", label, err)
+		}
+	}
+	ranking, err := json.Marshal([]string{"c", "a", "d", "b"})
+	if err != nil {
+		t.Fatalf("marshal ranking: %v", err)
+	}
+	if err := store.UpsertRankedFeedbackEvent(context.Background(), db.RankedFeedbackEvent{
+		RunID:       "planner-ranked-1",
+		ItemID:      "item-001",
+		RankingJSON: string(ranking),
+		Winner:      "c",
+		Reasoning:   "C explains the product most clearly.",
+		Reviewer:    "jerry",
+		Source:      "github",
+		CreatedAt:   "2026-06-02T10:00:00Z",
+	}); err != nil {
+		t.Fatalf("UpsertRankedFeedbackEvent returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"skillopt", "review", "status", "--home", home, "--run", "planner-ranked-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("skillopt review status exit code = %d, stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"items: 1",
+		"feedback: 1",
+		"pairwise_preferences: 6",
+		"packet_blockers: 0",
+		"training_blockers: 1",
+		"ready_for_packet: true",
+		"ready_for_training: false",
+		"training_blocker: ranked feedback export is not implemented yet",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("status stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
 func TestSkillOptReviewStatusRequiresExportableMetadata(t *testing.T) {
 	home := t.TempDir()
 	paths := config.PathsForHome(home)
