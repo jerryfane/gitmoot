@@ -120,9 +120,20 @@ func (c GitHubCollector) rankedBody(ctx context.Context, store *db.Store, run db
 	var builder strings.Builder
 	builder.WriteString(githubFeedbackPacketMarker + "\n")
 	fmt.Fprintf(&builder, "# Gitmoot SkillOpt Feedback: %s\n\n", run.ID)
-	builder.WriteString("Rank every option for each item from best to worst. Use the option labels exactly as shown.\n\n")
+	if iteration, err := store.GetSkillOptTrainIterationByEvalRun(ctx, run.ID); err == nil {
+		fmt.Fprintf(&builder, "- Train session: `%s`\n", iteration.SessionID)
+		fmt.Fprintf(&builder, "- Train iteration: `%s`\n", iteration.ID)
+	}
+	builder.WriteString("- Compare each item across the option links below.\n")
+	builder.WriteString("- Rank every option from best to worst using the exact labels shown.\n")
+	builder.WriteString("- Optional `quality`, `continue_mode`, and `promote` fields help Gitmoot decide whether to explore more, refine, validate, or promote.\n\n")
 	writePhaseRecommendation(&builder, recommendation)
-	builder.WriteString("Reply in a comment with this format:\n\n")
+	builder.WriteString("## Review Table\n\n")
+	writeGitHubRankedReviewTable(&builder, items, assignments)
+	if err := c.writeUnlinkedRankedOptionContent(ctx, store, &builder, items, assignments); err != nil {
+		return "", err
+	}
+	builder.WriteString("## Copy-Paste YAML Reply\n\n")
 	builder.WriteString("```yaml\n")
 	replyYAML, err := rankedReplyYAML(run.ID, items, assignments)
 	if err != nil {
@@ -130,22 +141,64 @@ func (c GitHubCollector) rankedBody(ctx context.Context, store *db.Store, run db
 	}
 	builder.WriteString(replyYAML)
 	builder.WriteString("```\n\n")
-	builder.WriteString("## Items\n")
+	return builder.String(), nil
+}
+
+func (c GitHubCollector) writeUnlinkedRankedOptionContent(ctx context.Context, store *db.Store, builder *strings.Builder, items []db.EvalReviewItem, assignments map[string]githubAssignment) error {
+	wroteHeader := false
 	for _, item := range items {
 		assignment := assignments[item.ItemID]
-		fmt.Fprintf(&builder, "\n### %s\n\n", itemTitle(item))
-		writeGitHubOptionReferenceTable(&builder, assignment.Options)
+		wroteItem := false
 		for _, option := range assignment.Options {
+			if optionReference(option, false) != "" {
+				continue
+			}
 			content, err := c.optionText(ctx, store, option.ArtifactID)
 			if err != nil {
-				return "", fmt.Errorf("item %s option %s: %w", item.ItemID, option.Label, err)
+				return fmt.Errorf("item %s option %s: %w", item.ItemID, option.Label, err)
 			}
-			fmt.Fprintf(&builder, "#### Option %s\n\n", displayOptionLabel(option.Label))
-			writeMarkdownFence(&builder, content)
+			if !wroteHeader {
+				builder.WriteString("## Inline Options Without Public Links\n\n")
+				builder.WriteString("These options do not have preview URLs yet, so their content is included here to keep the review actionable.\n\n")
+				wroteHeader = true
+			}
+			if !wroteItem {
+				fmt.Fprintf(builder, "### %s\n\n", itemTitle(item))
+				wroteItem = true
+			}
+			fmt.Fprintf(builder, "#### Option %s\n\n", displayOptionLabel(option.Label))
+			writeMarkdownFence(builder, content)
 			builder.WriteString("\n")
 		}
 	}
-	return builder.String(), nil
+	return nil
+}
+
+func writeGitHubRankedReviewTable(builder *strings.Builder, items []db.EvalReviewItem, assignments map[string]githubAssignment) {
+	builder.WriteString("| Item | What to compare | Options |\n")
+	builder.WriteString("| --- | --- | --- |\n")
+	for _, item := range items {
+		assignment := assignments[item.ItemID]
+		optionRefs := make([]string, 0, len(assignment.Options))
+		for _, option := range assignment.Options {
+			ref := optionReference(option, false)
+			if ref == "" {
+				ref = "`" + strings.ReplaceAll(option.ArtifactID, "`", "") + "`"
+			}
+			optionRefs = append(optionRefs, fmt.Sprintf("Option %s: %s", displayOptionLabel(option.Label), ref))
+		}
+		fmt.Fprintf(builder, "| `%s` | %s | %s |\n", item.ItemID, markdownTableCell(itemTitle(item)), markdownTableCell(strings.Join(optionRefs, "<br>")))
+	}
+	builder.WriteString("\n")
+}
+
+func markdownTableCell(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\n", " ")
+	value = strings.ReplaceAll(value, "|", "\\|")
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func rankedReplyYAML(runID string, items []db.EvalReviewItem, assignments map[string]githubAssignment) (string, error) {
@@ -157,9 +210,12 @@ func rankedReplyYAML(runID string, items []db.EvalReviewItem, assignments map[st
 	for _, item := range items {
 		labels := displayOptionLabels(assignments[item.ItemID].Options)
 		packet.Items = append(packet.Items, feedbackFileEntry{
-			ItemID:    item.ItemID,
-			Ranking:   []string{fmt.Sprintf("<replace with ranked option labels, e.g. %s>", strings.Join(labels, " > "))},
-			Reasoning: "",
+			ItemID:       item.ItemID,
+			Ranking:      []string{fmt.Sprintf("<replace with ranked option labels, e.g. %s>", strings.Join(labels, " > "))},
+			Quality:      "",
+			ContinueMode: "",
+			Promote:      "",
+			Reasoning:    "",
 		})
 	}
 	content, err := yaml.Marshal(packet)
@@ -207,7 +263,7 @@ func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, ru
 	for _, comment := range comments {
 		parsed, ok, err := ParseGitHubFeedbackComment(comment.Body)
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("comment %d: %w", comment.ID, err)
+			return ImportResult{}, fmt.Errorf("comment %d: %w", comment.ID, feedbackImportErrorHint(err))
 		}
 		if !ok {
 			continue
@@ -247,7 +303,7 @@ func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, ru
 			if len(assignment.Options) > 0 {
 				event, err := rankedFeedbackEventFromEntry(runID, itemID, entry, assignment, reviewer, SourceGitHub, sourceURL, createdAt)
 				if err != nil {
-					return ImportResult{}, fmt.Errorf("comment %d item %s: %w", comment.ID, itemID, err)
+					return ImportResult{}, fmt.Errorf("comment %d item %s: %w", comment.ID, itemID, feedbackImportErrorHint(err))
 				}
 				commentRankedEvents = append(commentRankedEvents, event)
 				continue
@@ -405,7 +461,10 @@ func parseFullYAMLFeedback(content string) (feedbackFile, bool, error) {
 
 var shortFeedbackLine = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._/-]*)\s*:\s*([A-Za-z]+)(?:\s*-\s*(.*))?$`)
 var shortRankingLine = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._/-]*)\s+ranking\s*:\s*(.+)$`)
+var shortDirectRankingLine = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._/-]*)\s*:\s*([A-Za-z][A-Za-z0-9._/-]*(?:\s*(?:>|,|\|)\s*[A-Za-z][A-Za-z0-9._/-]*)+)(?:\s*-\s*(.*))?$`)
 var shortMetadataLine = regexp.MustCompile(`^(run_id|reviewer)\s*:\s*(.+)$`)
+var shortItemSignalLine = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._/-]*)\s+(quality|continue_mode|promote)\s*:\s*(.+)$`)
+var shortBareSignalLine = regexp.MustCompile(`^(quality|continue_mode|promote)\s*:\s*(.+)$`)
 var shortTraitHeaderLine = regexp.MustCompile(`^(best traits|useful traits|reject|rejected traits)\s*:\s*$`)
 var shortTraitLine = regexp.MustCompile(`^-\s*([^:]+):\s*(.+)$`)
 
@@ -428,6 +487,16 @@ func parseShortFormFeedback(content string) (feedbackFile, bool, error) {
 			case "reviewer":
 				parsed.Reviewer = strings.TrimSpace(match[2])
 			}
+			continue
+		}
+		if match := shortItemSignalLine.FindStringSubmatch(line); match != nil {
+			if index := findFeedbackItemIndex(parsed.Items, strings.TrimSpace(match[1])); index >= 0 {
+				setFeedbackItemSignal(&parsed.Items[index], match[2], match[3])
+			}
+			continue
+		}
+		if match := shortBareSignalLine.FindStringSubmatch(line); match != nil && traitItemIndex >= 0 {
+			setFeedbackItemSignal(&parsed.Items[traitItemIndex], match[1], match[2])
 			continue
 		}
 		if match := shortTraitHeaderLine.FindStringSubmatch(strings.ToLower(line)); match != nil {
@@ -474,6 +543,16 @@ func parseShortFormFeedback(content string) (feedbackFile, bool, error) {
 			traitTarget = ""
 			continue
 		}
+		if match := shortDirectRankingLine.FindStringSubmatch(line); match != nil {
+			parsed.Items = append(parsed.Items, feedbackFileEntry{
+				ItemID:    strings.TrimSpace(match[1]),
+				Ranking:   splitRankingString(match[2]),
+				Reasoning: strings.TrimSpace(match[3]),
+			})
+			traitItemIndex = len(parsed.Items) - 1
+			traitTarget = ""
+			continue
+		}
 		match := shortFeedbackLine.FindStringSubmatch(line)
 		if match == nil {
 			continue
@@ -490,6 +569,28 @@ func parseShortFormFeedback(content string) (feedbackFile, bool, error) {
 		return feedbackFile{}, false, nil
 	}
 	return parsed, true, nil
+}
+
+func findFeedbackItemIndex(items []feedbackFileEntry, itemID string) int {
+	itemID = strings.TrimSpace(itemID)
+	for index := range items {
+		if strings.TrimSpace(items[index].ItemID) == itemID {
+			return index
+		}
+	}
+	return -1
+}
+
+func setFeedbackItemSignal(entry *feedbackFileEntry, key string, value string) {
+	value = strings.TrimSpace(value)
+	switch strings.TrimSpace(strings.ToLower(key)) {
+	case "quality":
+		entry.Quality = value
+	case "continue_mode":
+		entry.ContinueMode = value
+	case "promote":
+		entry.Promote = value
+	}
 }
 
 func splitRankingString(value string) []string {

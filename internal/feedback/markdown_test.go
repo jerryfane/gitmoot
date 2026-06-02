@@ -174,6 +174,9 @@ items:
     rejected_traits:
       B:
         - too generic
+    quality: poor
+    continue_mode: explore
+    promote: no
     reasoning: C explains the product best.
 `
 	if err := os.WriteFile(filepath.Join(packetDir, "feedback.yml"), []byte(feedbackContent), 0o644); err != nil {
@@ -192,6 +195,9 @@ items:
 	}
 	if len(stored) != 1 || stored[0].Winner != "c" || stored[0].Reasoning != "C explains the product best." || stored[0].Source != SourceMarkdown {
 		t.Fatalf("stored ranked events = %+v", stored)
+	}
+	if stored[0].Quality != "poor" || stored[0].ContinueMode != "explore" || stored[0].Promote != "no" {
+		t.Fatalf("stored ranked event signals = %+v", stored[0])
 	}
 	if !strings.Contains(stored[0].UsefulTraitsJSON, `"a":["visual style"]`) || !strings.Contains(stored[0].RejectedTraitsJSON, `"b":["too generic"]`) {
 		t.Fatalf("stored traits useful=%s rejected=%s", stored[0].UsefulTraitsJSON, stored[0].RejectedTraitsJSON)
@@ -272,6 +278,54 @@ items:
 	}
 	_, err := collector.ImportPacket(ctx, store, packetDir, "")
 	if err == nil || !strings.Contains(err.Error(), "winner") {
+		t.Fatalf("ImportPacket error = %v", err)
+	}
+	stored, err := store.ListRankedFeedbackEvents(ctx, "ranked-1")
+	if err != nil {
+		t.Fatalf("ListRankedFeedbackEvents returned error: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("ImportPacket persisted partial ranked events: %+v", stored)
+	}
+}
+
+func TestMarkdownCollectorRejectsInvalidRankedSignalWithoutPartialImport(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupMarkdownRankedFeedbackRun(t, "ranked-1")
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{
+		RunID:  "ranked-1",
+		ItemID: "item-002",
+		Title:  "Second Ranked Item",
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem item-002 returned error: %v", err)
+	}
+	for _, label := range []string{"a", "b", "c", "d"} {
+		if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{RunID: "ranked-1", ItemID: "item-002", Label: label, ArtifactID: "option-" + label, Role: "option"}); err != nil {
+			t.Fatalf("UpsertEvalReviewOption item-002 %s returned error: %v", label, err)
+		}
+	}
+	packetDir := filepath.Join(t.TempDir(), "packet")
+	collector := MarkdownCollector{BlobStore: blobs}
+	if err := collector.WritePacket(ctx, store, "ranked-1", packetDir); err != nil {
+		t.Fatalf("WritePacket returned error: %v", err)
+	}
+	feedbackContent := `run_id: ranked-1
+reviewer: jerry
+items:
+  - item_id: item-001
+    ranking:
+      - C > A > D > B
+    quality: poor
+  - item_id: item-002
+    ranking:
+      - C > A > D > B
+    quality: ok
+`
+	if err := os.WriteFile(filepath.Join(packetDir, "feedback.yml"), []byte(feedbackContent), 0o644); err != nil {
+		t.Fatalf("write feedback.yml: %v", err)
+	}
+	_, err := collector.ImportPacket(ctx, store, packetDir, "")
+	if err == nil || !strings.Contains(err.Error(), "quality") {
 		t.Fatalf("ImportPacket error = %v", err)
 	}
 	stored, err := store.ListRankedFeedbackEvents(ctx, "ranked-1")

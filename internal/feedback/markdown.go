@@ -61,6 +61,9 @@ type feedbackFileEntry struct {
 	Winner         string              `yaml:"winner,omitempty"`
 	UsefulTraits   map[string][]string `yaml:"useful_traits,omitempty"`
 	RejectedTraits map[string][]string `yaml:"rejected_traits,omitempty"`
+	Quality        string              `yaml:"quality"`
+	ContinueMode   string              `yaml:"continue_mode"`
+	Promote        string              `yaml:"promote"`
 	Reasoning      string              `yaml:"reasoning,omitempty"`
 }
 
@@ -183,7 +186,7 @@ func (c MarkdownCollector) ImportPacket(ctx context.Context, store *db.Store, di
 		if len(assignment.Options) > 0 {
 			event, err := rankedFeedbackEventFromEntry(feedback.RunID, itemID, entry, assignment, reviewer, SourceMarkdown, dir, now)
 			if err != nil {
-				return ImportResult{}, fmt.Errorf("item %s: %w", itemID, err)
+				return ImportResult{}, fmt.Errorf("item %s: %w", itemID, feedbackImportErrorHint(err))
 			}
 			rankedEvents = append(rankedEvents, event)
 			continue
@@ -494,6 +497,10 @@ func rankedFeedbackEventFromEntry(runID string, itemID string, entry feedbackFil
 			return db.RankedFeedbackEvent{}, fmt.Errorf("winner %q does not match first ranked option %q", winner, ranking[0])
 		}
 	}
+	quality, continueMode, promote, err := normalizeRankedFeedbackSignals(entry)
+	if err != nil {
+		return db.RankedFeedbackEvent{}, err
+	}
 	return db.RankedFeedbackEvent{
 		RunID:              strings.TrimSpace(runID),
 		ItemID:             strings.TrimSpace(itemID),
@@ -501,12 +508,42 @@ func rankedFeedbackEventFromEntry(runID string, itemID string, entry feedbackFil
 		Winner:             winner,
 		UsefulTraitsJSON:   usefulTraitsJSON,
 		RejectedTraitsJSON: rejectedTraitsJSON,
+		Quality:            quality,
+		ContinueMode:       continueMode,
+		Promote:            promote,
 		Reasoning:          strings.TrimSpace(entry.Reasoning),
 		Reviewer:           strings.TrimSpace(reviewer),
 		Source:             strings.TrimSpace(source),
 		SourceURL:          strings.TrimSpace(sourceURL),
 		CreatedAt:          strings.TrimSpace(createdAt),
 	}, nil
+}
+
+func normalizeRankedFeedbackSignals(entry feedbackFileEntry) (string, string, string, error) {
+	quality := strings.TrimSpace(strings.ToLower(entry.Quality))
+	switch quality {
+	case "", "poor", "acceptable", "strong":
+	default:
+		return "", "", "", errors.New("quality must be one of poor, acceptable, or strong")
+	}
+	continueMode := strings.TrimSpace(strings.ToLower(entry.ContinueMode))
+	switch continueMode {
+	case "", db.EvalRunModeExplore, db.EvalRunModeRefine, db.EvalRunModeDistill, db.EvalRunModeValidate:
+	default:
+		return "", "", "", errors.New("continue_mode must be one of explore, refine, distill, or validate")
+	}
+	promote := strings.TrimSpace(strings.ToLower(entry.Promote))
+	switch promote {
+	case "", "yes", "y", "true":
+		if promote != "" {
+			promote = "yes"
+		}
+	case "no", "n", "false":
+		promote = "no"
+	default:
+		return "", "", "", errors.New("promote must be yes or no")
+	}
+	return quality, continueMode, promote, nil
 }
 
 func validateRankedTraitLabels(traits map[string][]string, known map[string]struct{}) error {
@@ -739,6 +776,9 @@ func writeFeedbackYAML(path string, runID string, assignments assignmentFile) er
 				Winner:         "",
 				UsefulTraits:   map[string][]string{},
 				RejectedTraits: map[string][]string{},
+				Quality:        "",
+				ContinueMode:   "",
+				Promote:        "",
 				Reasoning:      "",
 			})
 			continue
@@ -782,8 +822,25 @@ func normalizeFeedbackFileEntries(feedback *feedbackFile) {
 		feedback.Items[index].Winner = strings.TrimSpace(feedback.Items[index].Winner)
 		feedback.Items[index].UsefulTraits = trimTraitMap(feedback.Items[index].UsefulTraits)
 		feedback.Items[index].RejectedTraits = trimTraitMap(feedback.Items[index].RejectedTraits)
+		feedback.Items[index].Quality = strings.TrimSpace(feedback.Items[index].Quality)
+		feedback.Items[index].ContinueMode = strings.TrimSpace(feedback.Items[index].ContinueMode)
+		feedback.Items[index].Promote = strings.TrimSpace(feedback.Items[index].Promote)
 		feedback.Items[index].Reasoning = strings.TrimSpace(feedback.Items[index].Reasoning)
 	}
+}
+
+func feedbackImportErrorHint(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if strings.Contains(message, "reasoning: |") || strings.Contains(message, "block-scalar") {
+		return err
+	}
+	if strings.Contains(message, "yaml") || strings.Contains(message, "mapping values are not allowed") || strings.Contains(message, "did not find expected") || strings.Contains(message, "ranking") {
+		return fmt.Errorf("%w; for long reasoning or text containing colons, use block-scalar YAML like `reasoning: |`", err)
+	}
+	return err
 }
 
 func readAssignments(path string) (assignmentFile, error) {

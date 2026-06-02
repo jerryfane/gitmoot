@@ -189,23 +189,30 @@ func TestGitHubCollectorPublishesRankedIssueBody(t *testing.T) {
 	body := fake.createdIssue.Body
 	for _, want := range []string{
 		"Rank every option",
+		"## Review Table",
 		"## Phase Recommendation",
 		"recommend continue explore",
+		"| Item | What to compare | Options |",
+		"Option C: [open](https://example.com/c)",
+		"## Inline Options Without Public Links",
+		"#### Option A",
+		"option a answer",
 		"```yaml",
 		"run_id: ranked-1",
 		"item_id: item-001",
 		"<replace with ranked option labels, e.g. A > B > C > D>",
-		"| Option | Artifact | Reference |",
-		"[open](https://example.com/c)",
-		"#### Option C",
-		"option c answer",
+		"quality: \"\"",
+		"continue_mode: \"\"",
+		"promote: \"\"",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("ranked issue body missing %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(body, "/tmp/gitmoot-option-a.md") {
-		t.Fatalf("ranked issue body leaked local path:\n%s", body)
+	for _, leaked := range []string{"/tmp/gitmoot-option-a.md", "#### Option C", "option c answer"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("ranked issue body leaked %q:\n%s", leaked, body)
+		}
 	}
 }
 
@@ -355,7 +362,7 @@ func TestGitHubCollectorSyncImportsRankedYAMLCommentWithColonItemID(t *testing.T
 	fake := &fakeFeedbackGitHub{
 		comments: map[int64][]github.IssueComment{
 			42: {
-				{ID: 1, Body: "```yaml\nrun_id: ranked-1\nitems:\n  - item_id: scenario:landing\n    ranking:\n      - C > A > D > B\n    reasoning: option c is strongest\n```\n", URL: "https://github.com/owner/repo/issues/42#issuecomment-1", Author: "alice", CreatedAt: "2026-06-02T10:00:00Z"},
+				{ID: 1, Body: "```yaml\nrun_id: ranked-1\nitems:\n  - item_id: scenario:landing\n    ranking:\n      - C > A > D > B\n    quality: poor\n    continue_mode: explore\n    promote: no\n    reasoning: option c is strongest\n```\n", URL: "https://github.com/owner/repo/issues/42#issuecomment-1", Author: "alice", CreatedAt: "2026-06-02T10:00:00Z"},
 			},
 		},
 	}
@@ -370,6 +377,62 @@ func TestGitHubCollectorSyncImportsRankedYAMLCommentWithColonItemID(t *testing.T
 	}
 	if result.RankedFeedbackEvents[0].ItemID != "scenario:landing" || result.RankedFeedbackEvents[0].Winner != "c" {
 		t.Fatalf("ranked event = %+v", result.RankedFeedbackEvents[0])
+	}
+	if result.RankedFeedbackEvents[0].Quality != "poor" || result.RankedFeedbackEvents[0].ContinueMode != "explore" || result.RankedFeedbackEvents[0].Promote != "no" {
+		t.Fatalf("ranked event signals = %+v", result.RankedFeedbackEvents[0])
+	}
+}
+
+func TestGitHubCollectorSyncImportsRankedDirectShortFormWithSignals(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubRankedFeedbackRun(t, "ranked-1", "owner/repo")
+	fake := &fakeFeedbackGitHub{
+		comments: map[int64][]github.IssueComment{
+			42: {
+				{ID: 1, Body: "run_id: ranked-1\nitem-001: C > A > D > B - all options are still weak\nitem-001 quality: poor\nitem-001 continue_mode: explore\nitem-001 promote: no\n", URL: "https://github.com/owner/repo/issues/42#issuecomment-1", Author: "alice", CreatedAt: "2026-06-02T10:00:00Z"},
+			},
+		},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	result, err := collector.Sync(ctx, store, "ranked-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	if err != nil {
+		t.Fatalf("Sync returned error: %v", err)
+	}
+	if result.Count() != 1 || len(result.RankedFeedbackEvents) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	event := result.RankedFeedbackEvents[0]
+	if event.Winner != "c" || event.Quality != "poor" || event.ContinueMode != "explore" || event.Promote != "no" || !strings.Contains(event.Reasoning, "weak") {
+		t.Fatalf("ranked event = %+v", event)
+	}
+}
+
+func TestGitHubCollectorSyncRejectsInvalidRankedSignalWithoutPartialImport(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubRankedFeedbackRun(t, "ranked-1", "owner/repo")
+	if err := addGitHubRankedFeedbackItem(ctx, store, blobs, "ranked-1", "item-002"); err != nil {
+		t.Fatalf("addGitHubRankedFeedbackItem returned error: %v", err)
+	}
+	fake := &fakeFeedbackGitHub{
+		comments: map[int64][]github.IssueComment{
+			42: {
+				{ID: 1, Body: "```yaml\nrun_id: ranked-1\nitems:\n  - item_id: item-001\n    ranking:\n      - C > A > D > B\n    quality: poor\n  - item_id: item-002\n    ranking:\n      - C > A > D > B\n    quality: ok\n```\n", URL: "https://github.com/owner/repo/issues/42#issuecomment-1", Author: "alice", CreatedAt: "2026-06-02T10:00:00Z"},
+			},
+		},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	_, err := collector.Sync(ctx, store, "ranked-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	if err == nil || !strings.Contains(err.Error(), "quality") {
+		t.Fatalf("Sync error = %v", err)
+	}
+	stored, err := store.ListRankedFeedbackEvents(ctx, "ranked-1")
+	if err != nil {
+		t.Fatalf("ListRankedFeedbackEvents returned error: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("Sync persisted partial ranked events: %+v", stored)
 	}
 }
 
@@ -478,6 +541,27 @@ func setupGitHubRankedFeedbackRunWithItem(t *testing.T, runID string, itemID str
 		}
 	}
 	return store, blobStore
+}
+
+func addGitHubRankedFeedbackItem(ctx context.Context, store *db.Store, blobStore artifact.Store, runID string, itemID string) error {
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{RunID: runID, ItemID: itemID, Title: "Ranked Item"}); err != nil {
+		return err
+	}
+	for _, label := range []string{"a", "b", "c", "d"} {
+		content := []byte("option " + label + " answer")
+		blob, err := blobStore.Put(content)
+		if err != nil {
+			return err
+		}
+		artifactID := itemID + "-option-" + label
+		if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{ID: artifactID, Hash: blob.Hash, MediaType: "text/markdown", SizeBytes: blob.Size, Driver: "text"}); err != nil {
+			return err
+		}
+		if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{RunID: runID, ItemID: itemID, Label: label, ArtifactID: artifactID, Role: "option"}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func setupGitHubFeedbackRun(t *testing.T, runID string, targetRepo string) (*db.Store, artifact.Store) {

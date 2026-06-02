@@ -2,6 +2,7 @@ package skillopt
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jerryfane/gitmoot/internal/db"
@@ -24,6 +25,45 @@ func TestRecommendPhaseExploreToRefine(t *testing.T) {
 	}
 	if recommendation.RankingStability != "c 2/2" {
 		t.Fatalf("ranking stability = %q", recommendation.RankingStability)
+	}
+}
+
+func TestRecommendPhaseExploreStableWinnerWithPoorQualityStaysExplore(t *testing.T) {
+	ranked := []db.RankedFeedbackEvent{
+		rankedEvent(t, "c", "c", "a", "d", "b"),
+		rankedEvent(t, "c", "c", "d", "a", "b"),
+	}
+	ranked[0].Quality = "poor"
+	ranked[1].Quality = "poor"
+
+	recommendation := RecommendPhase(
+		db.EvalRun{ID: "run-1", Mode: db.EvalRunModeExplore, ExplorationLevel: db.ExplorationLevelHigh},
+		nil,
+		ranked,
+		pairwisePreferences(12),
+	)
+
+	if recommendation.RecommendedMode != db.EvalRunModeExplore || !strings.Contains(recommendation.Reason, "quality: poor") {
+		t.Fatalf("recommendation = %+v", recommendation)
+	}
+}
+
+func TestRecommendPhaseExploreExplicitContinueModeStaysExplore(t *testing.T) {
+	ranked := []db.RankedFeedbackEvent{
+		rankedEvent(t, "c", "c", "a", "d", "b"),
+		rankedEvent(t, "c", "c", "d", "a", "b"),
+	}
+	ranked[0].ContinueMode = db.EvalRunModeExplore
+
+	recommendation := RecommendPhase(
+		db.EvalRun{ID: "run-1", Mode: db.EvalRunModeExplore, ExplorationLevel: db.ExplorationLevelHigh},
+		nil,
+		ranked,
+		pairwisePreferences(12),
+	)
+
+	if recommendation.RecommendedMode != db.EvalRunModeExplore || !strings.Contains(recommendation.Reason, "continue_mode: explore") {
+		t.Fatalf("recommendation = %+v", recommendation)
 	}
 }
 
