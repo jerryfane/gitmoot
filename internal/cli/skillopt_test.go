@@ -895,8 +895,231 @@ func TestSkillOptReviewItemAddStoresArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read feedback.yml: %v", err)
 	}
-	if !strings.Contains(string(feedbackYAML), "item_id: item-001") {
+	if !strings.Contains(string(feedbackYAML), "item_id: item-001") || !strings.Contains(string(feedbackYAML), "choice:") {
 		t.Fatalf("feedback.yml = %s", string(feedbackYAML))
+	}
+}
+
+func TestSkillOptRankedReviewItemAddAndMarkdownExport(t *testing.T) {
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	template := cliSkillOptTemplate("planner", "Plan the work.")
+	if err := store.UpsertAgentTemplate(context.Background(), template); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"skillopt", "review", "create",
+		"--home", home,
+		"--template", "planner",
+		"--repo", "owner/repo",
+		"--run", "planner-explore-1",
+		"--mode", "explore",
+		"--exploration-level", "high",
+		"--options", "4",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("skillopt review create exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	inputDir := t.TempDir()
+	optionPaths := map[string]string{}
+	for _, label := range []string{"a", "b", "c", "d"} {
+		path := filepath.Join(inputDir, label+".md")
+		if err := os.WriteFile(path, []byte("# Option "+strings.ToUpper(label)+"\n\nReview content.\n"), 0o644); err != nil {
+			t.Fatalf("write option %s: %v", label, err)
+		}
+		optionPaths[label] = path
+	}
+	missingOptionArgs := []string{
+		"skillopt", "review", "item", "add",
+		"--home", home,
+		"--run", "planner-explore-1",
+		"--item", "item-001",
+		"--title", "Landing page",
+		"--option", "a=" + optionPaths["a"],
+		"--option", "b=" + optionPaths["b"],
+		"--option", "c=" + optionPaths["c"],
+		"--option", "d=" + filepath.Join(inputDir, "missing.md"),
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(missingOptionArgs, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "missing.md") {
+		t.Fatalf("ranked item add with missing option: code=%d stderr=%s", code, stderr.String())
+	}
+	store, err = db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open after failed ranked item add returned error: %v", err)
+	}
+	options, err := store.ListEvalReviewOptions(context.Background(), "planner-explore-1", "item-001")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions after failed add returned error: %v", err)
+	}
+	if len(options) != 0 {
+		t.Fatalf("failed ranked item add persisted partial options: %+v", options)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after failed ranked item add returned error: %v", err)
+	}
+	rankedItemArgs := []string{
+		"skillopt", "review", "item", "add",
+		"--home", home,
+		"--run", "planner-explore-1",
+		"--item", "item-001",
+		"--title", "Landing page",
+		"--option", "a=" + optionPaths["a"],
+		"--option", "b=" + optionPaths["b"],
+		"--option", "c=" + optionPaths["c"],
+		"--option", "d=" + optionPaths["d"],
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(rankedItemArgs, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("skillopt review item add exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(rankedItemArgs, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("skillopt review item add retry exit code = %d, stderr=%s", code, stderr.String())
+	}
+	replacementPath := filepath.Join(inputDir, "e.md")
+	if err := os.WriteFile(replacementPath, []byte("# Option E\n\nReplacement content.\n"), 0o644); err != nil {
+		t.Fatalf("write replacement option: %v", err)
+	}
+	rankedReplacementArgs := []string{
+		"skillopt", "review", "item", "add",
+		"--home", home,
+		"--run", "planner-explore-1",
+		"--item", "item-001",
+		"--title", "Landing page",
+		"--option", "a=" + optionPaths["a"],
+		"--option", "b=" + optionPaths["b"],
+		"--option", "c=" + optionPaths["c"],
+		"--option", "e=" + replacementPath,
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(rankedReplacementArgs, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("skillopt review item add replacement exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"skillopt", "review", "item", "add",
+		"--home", home,
+		"--run", "planner-explore-1",
+		"--item", "item-ab",
+		"--baseline", optionPaths["a"],
+		"--candidate", optionPaths["b"],
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "is ranked mode; use repeated --option") {
+		t.Fatalf("ranked run accepted A/B artifacts: code=%d stderr=%s", code, stderr.String())
+	}
+
+	store, err = db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open after ranked item add returned error: %v", err)
+	}
+	run, err := store.GetEvalRun(context.Background(), "planner-explore-1")
+	if err != nil {
+		t.Fatalf("GetEvalRun returned error: %v", err)
+	}
+	if run.Mode != db.EvalRunModeExplore || run.ExplorationLevel != db.ExplorationLevelHigh || run.OptionsCount != 4 {
+		t.Fatalf("run = %+v", run)
+	}
+	options, err = store.ListEvalReviewOptions(context.Background(), "planner-explore-1", "item-001")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions returned error: %v", err)
+	}
+	if len(options) != 4 || options[0].Label != "a" || options[3].Label != "e" || !strings.Contains(options[0].MetadataJSON, optionPaths["a"]) {
+		t.Fatalf("options = %+v", options)
+	}
+	for _, option := range options {
+		if option.Label == "d" {
+			t.Fatalf("replacement left stale option d: %+v", options)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after ranked checks returned error: %v", err)
+	}
+
+	packetDir := filepath.Join(t.TempDir(), "packet")
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "feedback", "markdown", "export", "--home", home, "--run", "planner-explore-1", "--output", packetDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("skillopt feedback markdown export exit code = %d, stderr=%s", code, stderr.String())
+	}
+	index, err := os.ReadFile(filepath.Join(packetDir, "index.md"))
+	if err != nil {
+		t.Fatalf("read index.md: %v", err)
+	}
+	if !strings.Contains(string(index), "ranking every option") || !strings.Contains(string(index), "A > B > C > E") {
+		t.Fatalf("index.md = %s", string(index))
+	}
+	itemFiles, err := os.ReadDir(filepath.Join(packetDir, "items"))
+	if err != nil {
+		t.Fatalf("read items dir: %v", err)
+	}
+	if len(itemFiles) != 1 {
+		t.Fatalf("item files = %d, want 1", len(itemFiles))
+	}
+	itemContent, err := os.ReadFile(filepath.Join(packetDir, "items", itemFiles[0].Name()))
+	if err != nil {
+		t.Fatalf("read item markdown: %v", err)
+	}
+	if !strings.Contains(string(itemContent), "| Option | Artifact | Reference |") || !strings.Contains(string(itemContent), "Option C") {
+		t.Fatalf("item markdown = %s", string(itemContent))
+	}
+	feedbackYAML, err := os.ReadFile(filepath.Join(packetDir, "feedback.yml"))
+	if err != nil {
+		t.Fatalf("read feedback.yml: %v", err)
+	}
+	if !strings.Contains(string(feedbackYAML), "ranking:") ||
+		!strings.Contains(string(feedbackYAML), "<replace with ranked option labels, best to worst>") ||
+		strings.Contains(string(feedbackYAML), "- C") {
+		t.Fatalf("feedback.yml = %s", string(feedbackYAML))
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"skillopt", "review", "create",
+		"--home", home,
+		"--template", "planner",
+		"--repo", "owner/repo",
+		"--run", "planner-validate-1",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("validate review create exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"skillopt", "review", "item", "add",
+		"--home", home,
+		"--run", "planner-validate-1",
+		"--item", "item-ranked",
+		"--option", "a=" + optionPaths["a"],
+		"--option", "b=" + optionPaths["b"],
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "is validate/A/B mode; use --baseline and --candidate") {
+		t.Fatalf("validate run accepted ranked options: code=%d stderr=%s", code, stderr.String())
 	}
 }
 

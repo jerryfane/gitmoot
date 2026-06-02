@@ -35,6 +35,11 @@ func TestParseGitHubFeedbackComment(t *testing.T) {
 			wantOK: true, wantRunID: "run-1", wantItems: 2, wantItem: "item-001", wantChoice: "b", wantReason: "More concrete and easier to execute.",
 		},
 		{
+			name:   "ranked short form",
+			body:   "run_id: ranked-1\nitem-001 ranking: C > A > D > B\nbest traits:\n- C: clearest product explanation\nreject:\n- B: too generic\n",
+			wantOK: true, wantRunID: "ranked-1", wantItems: 1, wantItem: "item-001",
+		},
+		{
 			name:   "unrelated",
 			body:   "Thanks, I will review this later.",
 			wantOK: false,
@@ -85,7 +90,43 @@ func TestParseGitHubFeedbackComment(t *testing.T) {
 			if parsed.Items[0].ItemID != tt.wantItem || parsed.Items[0].Choice != tt.wantChoice || parsed.Items[0].Reasoning != tt.wantReason {
 				t.Fatalf("first item = %+v", parsed.Items[0])
 			}
+			if tt.name == "ranked short form" {
+				if strings.Join(parsed.Items[0].Ranking, ",") != "C,A,D,B" ||
+					!strings.Contains(strings.Join(parsed.Items[0].UsefulTraits["C"], ","), "clearest product explanation") ||
+					!strings.Contains(strings.Join(parsed.Items[0].RejectedTraits["B"], ","), "too generic") {
+					t.Fatalf("ranked first item = %+v", parsed.Items[0])
+				}
+			}
 		})
+	}
+}
+
+func TestParseGitHubFeedbackCommentScopesRankedTraitsToItem(t *testing.T) {
+	body := "run_id: ranked-1\n" +
+		"item-001 ranking: C > A > D > B\n" +
+		"best traits:\n" +
+		"- C: clearest product explanation\n" +
+		"item-002 ranking: A > B > C > D\n" +
+		"reject:\n" +
+		"- D: too generic\n"
+	parsed, ok, err := ParseGitHubFeedbackComment(body)
+	if err != nil {
+		t.Fatalf("ParseGitHubFeedbackComment returned error: %v", err)
+	}
+	if !ok || len(parsed.Items) != 2 {
+		t.Fatalf("parsed ok=%t items=%+v", ok, parsed.Items)
+	}
+	if !strings.Contains(strings.Join(parsed.Items[0].UsefulTraits["C"], ","), "clearest product explanation") {
+		t.Fatalf("first item traits = %+v", parsed.Items[0])
+	}
+	if len(parsed.Items[0].RejectedTraits) != 0 {
+		t.Fatalf("first item received second item rejected traits: %+v", parsed.Items[0])
+	}
+	if !strings.Contains(strings.Join(parsed.Items[1].RejectedTraits["D"], ","), "too generic") {
+		t.Fatalf("second item traits = %+v", parsed.Items[1])
+	}
+	if len(parsed.Items[1].UsefulTraits) != 0 {
+		t.Fatalf("second item received first item useful traits: %+v", parsed.Items[1])
 	}
 }
 
@@ -113,6 +154,7 @@ func TestGitHubCollectorPublishesIssueBody(t *testing.T) {
 	for _, want := range []string{
 		"Allowed choices: `a`, `b`, `tie`, `neither`, `skip`",
 		"run_id: run-1",
+		"choice:",
 		"item-001: <choice> - optional reason",
 		"#### Option A",
 		"#### Option B",
@@ -122,6 +164,44 @@ func TestGitHubCollectorPublishesIssueBody(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("issue body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestGitHubCollectorPublishesRankedIssueBody(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubRankedFeedbackRun(t, "ranked-1", "owner/repo")
+	fake := &fakeFeedbackGitHub{
+		issue: github.Issue{Number: 42, URL: "https://github.com/owner/repo/issues/42"},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	result, err := collector.Publish(ctx, store, "ranked-1", GitHubPublishTarget{
+		Repo: github.Repository{Owner: "owner", Name: "repo"},
+	})
+	if err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if result.Mode != "issue" || result.IssueNumber != 42 {
+		t.Fatalf("result = %+v", result)
+	}
+	body := fake.createdIssue.Body
+	for _, want := range []string{
+		"Rank every option",
+		"```yaml",
+		"run_id: ranked-1",
+		"item_id: item-001",
+		"<replace with ranked option labels, e.g. A > B > C > D>",
+		"| Option | Artifact | Reference |",
+		"[open](https://example.com/c)",
+		"#### Option C",
+		"option c answer",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("ranked issue body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "/tmp/gitmoot-option-a.md") {
+		t.Fatalf("ranked issue body leaked local path:\n%s", body)
 	}
 }
 
@@ -197,10 +277,11 @@ func TestGitHubCollectorSyncImportsValidCommentsAndIgnoresUnrelated(t *testing.T
 		return time.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
 	}}
 
-	events, err := collector.Sync(ctx, store, "run-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	result, err := collector.Sync(ctx, store, "run-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
 	if err != nil {
 		t.Fatalf("Sync returned error: %v", err)
 	}
+	events := result.FeedbackEvents
 	if len(events) != 1 {
 		t.Fatalf("events = %+v, want 1 imported event", events)
 	}
@@ -223,6 +304,93 @@ func TestGitHubCollectorSyncImportsValidCommentsAndIgnoresUnrelated(t *testing.T
 	}
 	if len(stored) != 1 {
 		t.Fatalf("duplicate sync persisted duplicate events: %+v", stored)
+	}
+}
+
+func TestGitHubCollectorSyncImportsRankedShortFormComment(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubRankedFeedbackRun(t, "ranked-1", "owner/repo")
+	fake := &fakeFeedbackGitHub{
+		comments: map[int64][]github.IssueComment{
+			42: {
+				{ID: 1, Body: "run_id: ranked-1\nitem-001 ranking: C > A > D > B\nbest traits:\n- C: clearest product explanation\n- A: best visual style\nreject:\n- B: too generic\n", URL: "https://github.com/owner/repo/issues/42#issuecomment-1", Author: "alice", CreatedAt: "2026-06-02T10:00:00Z"},
+			},
+		},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	result, err := collector.Sync(ctx, store, "ranked-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	if err != nil {
+		t.Fatalf("Sync returned error: %v", err)
+	}
+	if result.Count() != 1 || len(result.RankedFeedbackEvents) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	stored, err := store.ListRankedFeedbackEvents(ctx, "ranked-1")
+	if err != nil {
+		t.Fatalf("ListRankedFeedbackEvents returned error: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Winner != "c" || stored[0].Reviewer != "alice" || stored[0].Source != SourceGitHub {
+		t.Fatalf("stored ranked feedback = %+v", stored)
+	}
+	if !strings.Contains(stored[0].UsefulTraitsJSON, `"c":["clearest product explanation"]`) || !strings.Contains(stored[0].RejectedTraitsJSON, `"b":["too generic"]`) {
+		t.Fatalf("stored traits useful=%s rejected=%s", stored[0].UsefulTraitsJSON, stored[0].RejectedTraitsJSON)
+	}
+	pairs, err := store.ListPairwisePreferences(ctx, "ranked-1")
+	if err != nil {
+		t.Fatalf("ListPairwisePreferences returned error: %v", err)
+	}
+	if len(pairs) != 6 || pairs[0].Preferred != "c" || pairs[0].Rejected != "a" {
+		t.Fatalf("pairwise preferences = %+v", pairs)
+	}
+}
+
+func TestGitHubCollectorSyncImportsRankedYAMLCommentWithColonItemID(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubRankedFeedbackRunWithItem(t, "ranked-1", "scenario:landing", "owner/repo")
+	fake := &fakeFeedbackGitHub{
+		comments: map[int64][]github.IssueComment{
+			42: {
+				{ID: 1, Body: "```yaml\nrun_id: ranked-1\nitems:\n  - item_id: scenario:landing\n    ranking:\n      - C > A > D > B\n    reasoning: option c is strongest\n```\n", URL: "https://github.com/owner/repo/issues/42#issuecomment-1", Author: "alice", CreatedAt: "2026-06-02T10:00:00Z"},
+			},
+		},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	result, err := collector.Sync(ctx, store, "ranked-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	if err != nil {
+		t.Fatalf("Sync returned error: %v", err)
+	}
+	if result.Count() != 1 || len(result.RankedFeedbackEvents) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.RankedFeedbackEvents[0].ItemID != "scenario:landing" || result.RankedFeedbackEvents[0].Winner != "c" {
+		t.Fatalf("ranked event = %+v", result.RankedFeedbackEvents[0])
+	}
+}
+
+func TestGitHubCollectorSyncRejectsUnchangedRankedTemplate(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubRankedFeedbackRun(t, "ranked-1", "owner/repo")
+	fake := &fakeFeedbackGitHub{
+		comments: map[int64][]github.IssueComment{
+			42: {
+				{ID: 1, Body: "```yaml\nrun_id: ranked-1\nitems:\n  - item_id: item-001\n    ranking:\n      - <replace with ranked option labels, e.g. A > B > C > D>\n```\n", URL: "https://github.com/owner/repo/issues/42#issuecomment-1", Author: "alice", CreatedAt: "2026-06-02T10:00:00Z"},
+			},
+		},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	_, err := collector.Sync(ctx, store, "ranked-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	if err == nil || !strings.Contains(err.Error(), "unknown option") {
+		t.Fatalf("Sync error = %v", err)
+	}
+	stored, err := store.ListRankedFeedbackEvents(ctx, "ranked-1")
+	if err != nil {
+		t.Fatalf("ListRankedFeedbackEvents returned error: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("Sync persisted unchanged template feedback: %+v", stored)
 	}
 }
 
@@ -251,6 +419,61 @@ func TestGitHubCollectorSyncRejectsInvalidChoiceForKnownShortFormItem(t *testing
 	if len(stored) != 0 {
 		t.Fatalf("Sync persisted partial events after invalid known item choice: %+v", stored)
 	}
+}
+
+func setupGitHubRankedFeedbackRun(t *testing.T, runID string, targetRepo string) (*db.Store, artifact.Store) {
+	return setupGitHubRankedFeedbackRunWithItem(t, runID, "item-001", targetRepo)
+}
+
+func setupGitHubRankedFeedbackRunWithItem(t *testing.T, runID string, itemID string, targetRepo string) (*db.Store, artifact.Store) {
+	t.Helper()
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+	blobStore := artifact.NewStore(filepath.Join(t.TempDir(), "blobs"))
+	if err := store.UpsertEvalRun(ctx, db.EvalRun{
+		ID:           runID,
+		TemplateID:   "planner",
+		TargetRepo:   targetRepo,
+		State:        "review",
+		Mode:         db.EvalRunModeExplore,
+		OptionsCount: 4,
+	}); err != nil {
+		t.Fatalf("UpsertEvalRun returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{
+		RunID:  runID,
+		ItemID: itemID,
+		Title:  "Ranked Item",
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem returned error: %v", err)
+	}
+	for _, label := range []string{"a", "b", "c", "d"} {
+		content := []byte("option " + label + " answer")
+		blob, err := blobStore.Put(content)
+		if err != nil {
+			t.Fatalf("Put option %s returned error: %v", label, err)
+		}
+		artifactID := "option-" + label
+		if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{ID: artifactID, Hash: blob.Hash, MediaType: "text/markdown", SizeBytes: blob.Size, Driver: "text"}); err != nil {
+			t.Fatalf("UpsertEvalArtifact %s returned error: %v", label, err)
+		}
+		metadata := `{"path":"/tmp/gitmoot-option-` + label + `.md"}`
+		if label == "c" {
+			metadata = `{"preview_url":"https://example.com/c"}`
+		}
+		if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{RunID: runID, ItemID: itemID, Label: label, ArtifactID: artifactID, Role: "option", MetadataJSON: metadata}); err != nil {
+			t.Fatalf("UpsertEvalReviewOption %s returned error: %v", label, err)
+		}
+	}
+	return store, blobStore
 }
 
 func setupGitHubFeedbackRun(t *testing.T, runID string, targetRepo string) (*db.Store, artifact.Store) {

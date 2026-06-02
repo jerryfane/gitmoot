@@ -269,8 +269,34 @@ func TestRankedReviewStorageRejectsInvalidReferences(t *testing.T) {
 			t.Fatalf("UpsertEvalReviewOption %s returned error: %v", label, err)
 		}
 	}
-	if err := store.UpsertEvalReviewOption(ctx, EvalReviewOption{RunID: "run-ranked", ItemID: "item-001", Label: "A", ArtifactID: "artifact-duplicate"}); err == nil || !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("duplicate UpsertEvalReviewOption error = %v, want already exists", err)
+	if err := store.UpsertEvalReviewOption(ctx, EvalReviewOption{RunID: "run-ranked", ItemID: "item-001", Label: "A", ArtifactID: "artifact-updated"}); err != nil {
+		t.Fatalf("duplicate UpsertEvalReviewOption returned error: %v", err)
+	}
+	options, err := store.ListEvalReviewOptions(ctx, "run-ranked", "item-001")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions after update returned error: %v", err)
+	}
+	if len(options) != 3 || options[0].ArtifactID != "artifact-updated" {
+		t.Fatalf("updated options = %+v", options)
+	}
+	if err := store.ReplaceEvalReviewOptions(ctx, "run-ranked", "item-001", []EvalReviewOption{
+		{Label: "B", ArtifactID: "artifact-b"},
+		{Label: "C", ArtifactID: "artifact-c"},
+		{Label: "D", ArtifactID: "artifact-d"},
+	}); err != nil {
+		t.Fatalf("ReplaceEvalReviewOptions returned error: %v", err)
+	}
+	options, err = store.ListEvalReviewOptions(ctx, "run-ranked", "item-001")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions after replace returned error: %v", err)
+	}
+	if len(options) != 3 || options[0].Label != "b" || options[2].Label != "d" {
+		t.Fatalf("replaced options = %+v", options)
+	}
+	for _, option := range options {
+		if option.Label == "a" {
+			t.Fatalf("ReplaceEvalReviewOptions left stale option a: %+v", options)
+		}
 	}
 
 	tests := map[string]RankedFeedbackEvent{

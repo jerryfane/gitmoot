@@ -31,11 +31,19 @@ type assignmentFile struct {
 }
 
 type blindAssignment struct {
-	ItemID    string `json:"item_id"`
-	A         string `json:"a"`
-	B         string `json:"b"`
-	Baseline  string `json:"baseline"`
-	Candidate string `json:"candidate"`
+	ItemID    string                  `json:"item_id"`
+	A         string                  `json:"a"`
+	B         string                  `json:"b"`
+	Baseline  string                  `json:"baseline"`
+	Candidate string                  `json:"candidate"`
+	Options   []blindOptionAssignment `json:"options,omitempty"`
+}
+
+type blindOptionAssignment struct {
+	Label        string `json:"label"`
+	ArtifactID   string `json:"artifact_id"`
+	Role         string `json:"role,omitempty"`
+	MetadataJSON string `json:"metadata_json,omitempty"`
 }
 
 type feedbackFile struct {
@@ -46,9 +54,22 @@ type feedbackFile struct {
 }
 
 type feedbackFileEntry struct {
-	ItemID    string `yaml:"item_id"`
-	Choice    string `yaml:"choice"`
-	Reasoning string `yaml:"reasoning,omitempty"`
+	ItemID         string              `yaml:"item_id"`
+	Choice         string              `yaml:"choice"`
+	Ranking        []string            `yaml:"ranking,omitempty"`
+	Winner         string              `yaml:"winner,omitempty"`
+	UsefulTraits   map[string][]string `yaml:"useful_traits,omitempty"`
+	RejectedTraits map[string][]string `yaml:"rejected_traits,omitempty"`
+	Reasoning      string              `yaml:"reasoning,omitempty"`
+}
+
+type ImportResult struct {
+	FeedbackEvents       []db.FeedbackEvent
+	RankedFeedbackEvents []db.RankedFeedbackEvent
+}
+
+func (r ImportResult) Count() int {
+	return len(r.FeedbackEvents) + len(r.RankedFeedbackEvents)
 }
 
 func (c MarkdownCollector) WritePacket(ctx context.Context, store *db.Store, runID string, dir string) error {
@@ -75,7 +96,7 @@ func (c MarkdownCollector) WritePacket(ctx context.Context, store *db.Store, run
 	}
 	assignments := assignmentFile{RunID: run.ID}
 	for _, item := range items {
-		assignment, err := validatedAssignmentFor(run.ID, item)
+		assignment, err := validatedAssignmentForReview(ctx, store, run, item)
 		if err != nil {
 			return err
 		}
@@ -90,76 +111,85 @@ func (c MarkdownCollector) WritePacket(ctx context.Context, store *db.Store, run
 	if err := writeJSONFile(filepath.Join(dir, assignmentsName), assignments, 0o600); err != nil {
 		return err
 	}
-	if err := writeTextFile(filepath.Join(dir, "index.md"), indexMarkdown(run, items), 0o644); err != nil {
+	if err := writeTextFile(filepath.Join(dir, "index.md"), indexMarkdown(run, items, assignments), 0o644); err != nil {
 		return err
 	}
-	return writeFeedbackYAML(filepath.Join(dir, "feedback.yml"), run.ID, items)
+	return writeFeedbackYAML(filepath.Join(dir, "feedback.yml"), run.ID, assignments)
 }
 
-func (c MarkdownCollector) ImportPacket(ctx context.Context, store *db.Store, dir string, reviewerOverride string) ([]db.FeedbackEvent, error) {
+func (c MarkdownCollector) ImportPacket(ctx context.Context, store *db.Store, dir string, reviewerOverride string) (ImportResult, error) {
 	if store == nil {
-		return nil, errors.New("store is required")
+		return ImportResult{}, errors.New("store is required")
 	}
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
-		return nil, errors.New("packet directory is required")
+		return ImportResult{}, errors.New("packet directory is required")
 	}
 	dir, err := filepath.Abs(filepath.Clean(dir))
 	if err != nil {
-		return nil, fmt.Errorf("resolve packet directory: %w", err)
+		return ImportResult{}, fmt.Errorf("resolve packet directory: %w", err)
 	}
 	assignments, err := readAssignments(filepath.Join(dir, assignmentsName))
 	if err != nil {
-		return nil, err
+		return ImportResult{}, err
 	}
 	feedback, err := readFeedbackYAML(filepath.Join(dir, "feedback.yml"))
 	if err != nil {
-		return nil, err
+		return ImportResult{}, err
 	}
 	if feedback.RunID != assignments.RunID {
-		return nil, fmt.Errorf("feedback run_id %q does not match assignments run_id %q", feedback.RunID, assignments.RunID)
+		return ImportResult{}, fmt.Errorf("feedback run_id %q does not match assignments run_id %q", feedback.RunID, assignments.RunID)
 	}
 	if err := validateAssignmentsAgainstStore(ctx, store, assignments); err != nil {
-		return nil, err
+		return ImportResult{}, err
 	}
 	reviewer := strings.TrimSpace(reviewerOverride)
 	if reviewer == "" {
 		reviewer = strings.TrimSpace(feedback.Reviewer)
 	}
 	if reviewer == "" {
-		return nil, errors.New("feedback reviewer is required")
+		return ImportResult{}, errors.New("feedback reviewer is required")
 	}
 	assignmentsByItem := map[string]blindAssignment{}
 	for _, assignment := range assignments.Items {
 		itemID := strings.TrimSpace(assignment.ItemID)
 		if itemID == "" {
-			return nil, errors.New("assignments contain an item with empty item_id")
+			return ImportResult{}, errors.New("assignments contain an item with empty item_id")
 		}
 		if _, ok := assignmentsByItem[itemID]; ok {
-			return nil, fmt.Errorf("assignments contain duplicate item_id %q", itemID)
+			return ImportResult{}, fmt.Errorf("assignments contain duplicate item_id %q", itemID)
 		}
 		assignmentsByItem[itemID] = assignment
 	}
 	now := c.now().UTC().Format(time.RFC3339)
 	events := make([]db.FeedbackEvent, 0, len(feedback.Items))
+	rankedEvents := make([]db.RankedFeedbackEvent, 0, len(feedback.Items))
 	seenItems := map[string]struct{}{}
 	for _, entry := range feedback.Items {
 		itemID := strings.TrimSpace(entry.ItemID)
 		assignment, ok := assignmentsByItem[itemID]
 		if !ok {
-			return nil, fmt.Errorf("unknown feedback item_id %q", itemID)
+			return ImportResult{}, fmt.Errorf("unknown feedback item_id %q", itemID)
 		}
 		if _, ok := seenItems[itemID]; ok {
-			return nil, fmt.Errorf("duplicate feedback item_id %q", itemID)
+			return ImportResult{}, fmt.Errorf("duplicate feedback item_id %q", itemID)
 		}
 		seenItems[itemID] = struct{}{}
+		if len(assignment.Options) > 0 {
+			event, err := rankedFeedbackEventFromEntry(feedback.RunID, itemID, entry, assignment, reviewer, SourceMarkdown, dir, now)
+			if err != nil {
+				return ImportResult{}, fmt.Errorf("item %s: %w", itemID, err)
+			}
+			rankedEvents = append(rankedEvents, event)
+			continue
+		}
 		choice, err := NormalizeChoice(entry.Choice)
 		if err != nil {
-			return nil, fmt.Errorf("item %s: %w", itemID, err)
+			return ImportResult{}, fmt.Errorf("item %s: %w", itemID, err)
 		}
 		choice, err = deblindChoice(choice, assignment)
 		if err != nil {
-			return nil, fmt.Errorf("item %s: %w", itemID, err)
+			return ImportResult{}, fmt.Errorf("item %s: %w", itemID, err)
 		}
 		event := db.FeedbackEvent{
 			RunID:     feedback.RunID,
@@ -181,17 +211,25 @@ func (c MarkdownCollector) ImportPacket(ctx context.Context, store *db.Store, di
 			}
 		}
 		sort.Strings(missing)
-		return nil, fmt.Errorf("feedback.yml missing feedback for item_id %q", missing[0])
+		return ImportResult{}, fmt.Errorf("feedback.yml missing feedback for item_id %q", missing[0])
 	}
 	for _, event := range events {
 		if err := store.UpsertFeedbackEvent(ctx, event); err != nil {
-			return nil, err
+			return ImportResult{}, err
 		}
 	}
-	return events, nil
+	for _, event := range rankedEvents {
+		if err := store.UpsertRankedFeedbackEvent(ctx, event); err != nil {
+			return ImportResult{}, err
+		}
+	}
+	return ImportResult{FeedbackEvents: events, RankedFeedbackEvents: rankedEvents}, nil
 }
 
 func (c MarkdownCollector) writeItem(ctx context.Context, store *db.Store, dir string, item db.EvalReviewItem, assignment blindAssignment) error {
+	if len(assignment.Options) > 0 {
+		return c.writeRankedItem(ctx, store, dir, item, assignment)
+	}
 	optionA, err := c.optionText(ctx, store, assignment.A)
 	if err != nil {
 		return fmt.Errorf("item %s option a: %w", item.ItemID, err)
@@ -208,6 +246,24 @@ func (c MarkdownCollector) writeItem(ctx context.Context, store *db.Store, dir s
 	writeMarkdownFence(&builder, optionB)
 	builder.WriteString("\n## Feedback\n\n")
 	builder.WriteString("Record this item in `../feedback.yml` with one of: `a`, `b`, `tie`, `neither`, `skip`.\n")
+	return writeTextFile(filepath.Join(dir, "items", itemFilename(item.ItemID)), builder.String(), 0o644)
+}
+
+func (c MarkdownCollector) writeRankedItem(ctx context.Context, store *db.Store, dir string, item db.EvalReviewItem, assignment blindAssignment) error {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "# %s\n\n", itemTitle(item))
+	builder.WriteString("Rank every option in `../feedback.yml` from best to worst. Use the option labels exactly as shown here.\n\n")
+	writeOptionReferenceTable(&builder, assignment.Options)
+	for _, option := range assignment.Options {
+		content, err := c.optionText(ctx, store, option.ArtifactID)
+		if err != nil {
+			return fmt.Errorf("item %s option %s: %w", item.ItemID, option.Label, err)
+		}
+		fmt.Fprintf(&builder, "\n## Option %s\n\n", displayOptionLabel(option.Label))
+		writeMarkdownFence(&builder, content)
+	}
+	builder.WriteString("\n## Feedback\n\n")
+	builder.WriteString("Record `ranking`, optional trait notes, and concise reasoning in `../feedback.yml`.\n")
 	return writeTextFile(filepath.Join(dir, "items", itemFilename(item.ItemID)), builder.String(), 0o644)
 }
 
@@ -250,6 +306,46 @@ func assignmentFor(runID string, item db.EvalReviewItem) blindAssignment {
 	return assignment
 }
 
+func validatedAssignmentForReview(ctx context.Context, store *db.Store, run db.EvalRun, item db.EvalReviewItem) (blindAssignment, error) {
+	if reviewUsesRankedOptions(run) {
+		return validatedRankedAssignmentFor(ctx, store, run, item)
+	}
+	return validatedAssignmentFor(run.ID, item)
+}
+
+func reviewUsesRankedOptions(run db.EvalRun) bool {
+	return run.Mode != "" && run.Mode != db.EvalRunModeValidate || run.OptionsCount > 2
+}
+
+func validatedRankedAssignmentFor(ctx context.Context, store *db.Store, run db.EvalRun, item db.EvalReviewItem) (blindAssignment, error) {
+	options, err := store.ListEvalReviewOptions(ctx, run.ID, item.ItemID)
+	if err != nil {
+		return blindAssignment{}, err
+	}
+	if len(options) == 0 {
+		return blindAssignment{}, fmt.Errorf("eval review item %s requires registered options", item.ItemID)
+	}
+	if run.OptionsCount > 0 && len(options) != run.OptionsCount {
+		return blindAssignment{}, fmt.Errorf("eval review item %s has %d options, want %d", item.ItemID, len(options), run.OptionsCount)
+	}
+	assignment := blindAssignment{ItemID: item.ItemID}
+	for _, option := range options {
+		if strings.TrimSpace(option.ArtifactID) == "" {
+			return blindAssignment{}, fmt.Errorf("eval review item %s option %s missing artifact", item.ItemID, option.Label)
+		}
+		assignment.Options = append(assignment.Options, blindOptionAssignment{
+			Label:        strings.TrimSpace(option.Label),
+			ArtifactID:   strings.TrimSpace(option.ArtifactID),
+			Role:         strings.TrimSpace(option.Role),
+			MetadataJSON: strings.TrimSpace(option.MetadataJSON),
+		})
+	}
+	sort.Slice(assignment.Options, func(i, j int) bool {
+		return assignment.Options[i].Label < assignment.Options[j].Label
+	})
+	return assignment, nil
+}
+
 func validatedAssignmentFor(runID string, item db.EvalReviewItem) (blindAssignment, error) {
 	baselineArtifactID := strings.TrimSpace(item.BaselineArtifactID)
 	candidateArtifactID := strings.TrimSpace(item.CandidateArtifactID)
@@ -284,6 +380,16 @@ func validateAssignmentsAgainstStore(ctx context.Context, store *db.Store, assig
 		if !ok {
 			return fmt.Errorf("packet assignment item_id %q is not in eval run %s", itemID, run.ID)
 		}
+		if len(assignment.Options) > 0 {
+			current, err := validatedRankedAssignmentFor(ctx, store, run, item)
+			if err != nil {
+				return err
+			}
+			if !rankedAssignmentsMatch(assignment, current) {
+				return fmt.Errorf("packet assignment item_id %q does not match stored review options", itemID)
+			}
+			continue
+		}
 		if strings.TrimSpace(assignment.Baseline) != strings.TrimSpace(item.BaselineArtifactID) ||
 			strings.TrimSpace(assignment.Candidate) != strings.TrimSpace(item.CandidateArtifactID) {
 			return fmt.Errorf("packet assignment item_id %q does not match stored baseline/candidate artifacts", itemID)
@@ -304,6 +410,162 @@ func validateAssignmentsAgainstStore(ctx context.Context, store *db.Store, assig
 		}
 	}
 	return nil
+}
+
+func rankedAssignmentsMatch(left blindAssignment, right blindAssignment) bool {
+	if len(left.Options) != len(right.Options) {
+		return false
+	}
+	for index := range left.Options {
+		if strings.TrimSpace(left.Options[index].Label) != strings.TrimSpace(right.Options[index].Label) ||
+			strings.TrimSpace(left.Options[index].ArtifactID) != strings.TrimSpace(right.Options[index].ArtifactID) {
+			return false
+		}
+	}
+	return true
+}
+
+func rankedFeedbackEventFromEntry(runID string, itemID string, entry feedbackFileEntry, assignment blindAssignment, reviewer string, source string, sourceURL string, createdAt string) (db.RankedFeedbackEvent, error) {
+	ranking, err := normalizedRanking(entry.Ranking)
+	if err != nil {
+		return db.RankedFeedbackEvent{}, err
+	}
+	if len(ranking) == 0 {
+		return db.RankedFeedbackEvent{}, errors.New("ranking is required")
+	}
+	known := map[string]struct{}{}
+	for _, option := range assignment.Options {
+		label := normalizeReviewOptionLabel(option.Label)
+		if label != "" {
+			known[label] = struct{}{}
+		}
+	}
+	for _, label := range ranking {
+		if _, ok := known[label]; !ok {
+			return db.RankedFeedbackEvent{}, fmt.Errorf("ranking references unknown option %q", label)
+		}
+	}
+	if len(ranking) != len(known) {
+		return db.RankedFeedbackEvent{}, fmt.Errorf("ranking includes %d options, want %d options", len(ranking), len(known))
+	}
+	for label := range known {
+		found := false
+		for _, ranked := range ranking {
+			if ranked == label {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return db.RankedFeedbackEvent{}, fmt.Errorf("ranking missing option %q", label)
+		}
+	}
+	if err := validateRankedTraitLabels(entry.UsefulTraits, known); err != nil {
+		return db.RankedFeedbackEvent{}, fmt.Errorf("useful_traits: %w", err)
+	}
+	if err := validateRankedTraitLabels(entry.RejectedTraits, known); err != nil {
+		return db.RankedFeedbackEvent{}, fmt.Errorf("rejected_traits: %w", err)
+	}
+	rankingJSON, err := json.Marshal(ranking)
+	if err != nil {
+		return db.RankedFeedbackEvent{}, err
+	}
+	usefulTraitsJSON, err := rankedTraitJSON(entry.UsefulTraits)
+	if err != nil {
+		return db.RankedFeedbackEvent{}, fmt.Errorf("useful_traits: %w", err)
+	}
+	rejectedTraitsJSON, err := rankedTraitJSON(entry.RejectedTraits)
+	if err != nil {
+		return db.RankedFeedbackEvent{}, fmt.Errorf("rejected_traits: %w", err)
+	}
+	winner := normalizeReviewOptionLabel(entry.Winner)
+	if winner == "" {
+		winner = ranking[0]
+	} else {
+		if _, ok := known[winner]; !ok {
+			return db.RankedFeedbackEvent{}, fmt.Errorf("winner references unknown option %q", winner)
+		}
+		if winner != ranking[0] {
+			return db.RankedFeedbackEvent{}, fmt.Errorf("winner %q does not match first ranked option %q", winner, ranking[0])
+		}
+	}
+	return db.RankedFeedbackEvent{
+		RunID:              strings.TrimSpace(runID),
+		ItemID:             strings.TrimSpace(itemID),
+		RankingJSON:        string(rankingJSON),
+		Winner:             winner,
+		UsefulTraitsJSON:   usefulTraitsJSON,
+		RejectedTraitsJSON: rejectedTraitsJSON,
+		Reasoning:          strings.TrimSpace(entry.Reasoning),
+		Reviewer:           strings.TrimSpace(reviewer),
+		Source:             strings.TrimSpace(source),
+		SourceURL:          strings.TrimSpace(sourceURL),
+		CreatedAt:          strings.TrimSpace(createdAt),
+	}, nil
+}
+
+func validateRankedTraitLabels(traits map[string][]string, known map[string]struct{}) error {
+	for label := range traits {
+		optionLabel := normalizeReviewOptionLabel(label)
+		if optionLabel == "" {
+			return errors.New("trait option label is required")
+		}
+		if _, ok := known[optionLabel]; !ok {
+			return fmt.Errorf("references unknown option %q", optionLabel)
+		}
+	}
+	return nil
+}
+
+func normalizedRanking(values []string) ([]string, error) {
+	ranking := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		label := normalizeReviewOptionLabel(value)
+		if label == "" {
+			return nil, errors.New("ranking contains an empty option label")
+		}
+		if _, ok := seen[label]; ok {
+			return nil, fmt.Errorf("ranking contains duplicate option label %q", label)
+		}
+		seen[label] = struct{}{}
+		ranking = append(ranking, label)
+	}
+	if len(ranking) < 2 {
+		return nil, errors.New("ranking must include at least two options")
+	}
+	return ranking, nil
+}
+
+func rankedTraitJSON(traits map[string][]string) (string, error) {
+	if len(traits) == 0 {
+		return "", nil
+	}
+	normalized := map[string][]string{}
+	for label, values := range traits {
+		optionLabel := normalizeReviewOptionLabel(label)
+		if optionLabel == "" {
+			return "", errors.New("trait option label is required")
+		}
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				normalized[optionLabel] = append(normalized[optionLabel], value)
+			}
+		}
+		if _, ok := normalized[optionLabel]; !ok {
+			normalized[optionLabel] = []string{}
+		}
+	}
+	content, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+func normalizeReviewOptionLabel(label string) string {
+	return strings.ToLower(strings.TrimSpace(label))
 }
 
 func deblindChoice(choice string, assignment blindAssignment) (string, error) {
@@ -336,36 +598,118 @@ func canonicalChoiceForArtifact(artifactID string, assignment blindAssignment) (
 	}
 }
 
-func indexMarkdown(run db.EvalRun, items []db.EvalReviewItem) string {
+func indexMarkdown(run db.EvalRun, items []db.EvalReviewItem, assignments assignmentFile) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "# Gitmoot Feedback Packet: %s\n\n", run.ID)
-	builder.WriteString("Review each item without trying to infer which option is baseline or candidate.\n\n")
+	if reviewUsesRankedOptions(run) {
+		builder.WriteString("Review each item by ranking every option from best to worst.\n\n")
+	} else {
+		builder.WriteString("Review each item without trying to infer which option is baseline or candidate.\n\n")
+	}
 	builder.WriteString("## How To Review\n\n")
 	builder.WriteString("1. Open this `index.md` file.\n")
 	builder.WriteString("2. Open each linked item in `items/*.md`.\n")
-	builder.WriteString("3. Compare Option A and Option B blind for each item.\n")
-	builder.WriteString("4. Edit `feedback.yml` in this packet directory and set `reviewer`.\n")
-	builder.WriteString("5. For every item, choose exactly one of: `a`, `b`, `tie`, `neither`, `skip`.\n")
-	builder.WriteString("6. Add concise `reasoning` when it helps explain the choice.\n")
-	builder.WriteString("7. Import the completed packet. If `reviewer` is not set in `feedback.yml`, pass `--reviewer <name>`:\n\n")
+	if reviewUsesRankedOptions(run) {
+		builder.WriteString("3. Rank every option for each item in `feedback.yml`.\n")
+		builder.WriteString("4. Add useful traits and rejected traits when they explain what should be kept or avoided.\n")
+		builder.WriteString("5. Import the completed packet. If `reviewer` is not set in `feedback.yml`, pass `--reviewer <name>`:\n\n")
+	} else {
+		builder.WriteString("3. Compare Option A and Option B blind for each item.\n")
+		builder.WriteString("4. Edit `feedback.yml` in this packet directory and set `reviewer`.\n")
+		builder.WriteString("5. For every item, choose exactly one of: `a`, `b`, `tie`, `neither`, `skip`.\n")
+		builder.WriteString("6. Add concise `reasoning` when it helps explain the choice.\n")
+		builder.WriteString("7. Import the completed packet. If `reviewer` is not set in `feedback.yml`, pass `--reviewer <name>`:\n\n")
+	}
 	builder.WriteString("   ```sh\n")
 	builder.WriteString("   gitmoot skillopt feedback markdown import --packet <packet-dir> --reviewer <name>\n")
 	builder.WriteString("   ```\n\n")
-	builder.WriteString("Keep `.assignments.json` untouched. It is hidden Gitmoot metadata used to preserve and validate the blind A/B mapping on import.\n\n")
+	builder.WriteString("Keep `.assignments.json` untouched. It is hidden Gitmoot metadata used to preserve and validate option mappings on import.\n\n")
 	builder.WriteString("## Items\n\n")
 	for _, item := range items {
 		fmt.Fprintf(&builder, "- [%s](items/%s)\n", itemTitle(item), itemFilename(item.ItemID))
+	}
+	if reviewUsesRankedOptions(run) {
+		builder.WriteString("\n## Ranking Labels\n\n")
+		assignmentsByItem := map[string]blindAssignment{}
+		for _, assignment := range assignments.Items {
+			assignmentsByItem[assignment.ItemID] = assignment
+		}
+		for _, item := range items {
+			assignment := assignmentsByItem[item.ItemID]
+			labels := displayOptionLabels(assignment.Options)
+			fmt.Fprintf(&builder, "- %s: `%s`\n", itemTitle(item), strings.Join(labels, " > "))
+		}
 	}
 	builder.WriteString("\n## Submit Feedback\n\n")
 	builder.WriteString("After all items are filled in `feedback.yml`, run the import command above.\n")
 	return builder.String()
 }
 
-func writeFeedbackYAML(path string, runID string, items []db.EvalReviewItem) error {
+func displayOptionLabels(options []blindOptionAssignment) []string {
+	labels := make([]string, 0, len(options))
+	for _, option := range options {
+		labels = append(labels, displayOptionLabel(option.Label))
+	}
+	return labels
+}
+
+func displayOptionLabel(label string) string {
+	label = strings.TrimSpace(label)
+	if len(label) == 1 {
+		return strings.ToUpper(label)
+	}
+	return label
+}
+
+func writeOptionReferenceTable(builder *strings.Builder, options []blindOptionAssignment) {
+	writeOptionReferenceTableWithLocalPaths(builder, options, true)
+}
+
+func writeGitHubOptionReferenceTable(builder *strings.Builder, options []blindOptionAssignment) {
+	writeOptionReferenceTableWithLocalPaths(builder, options, false)
+}
+
+func writeOptionReferenceTableWithLocalPaths(builder *strings.Builder, options []blindOptionAssignment, includeLocalPaths bool) {
+	builder.WriteString("| Option | Artifact | Reference |\n")
+	builder.WriteString("| --- | --- | --- |\n")
+	for _, option := range options {
+		fmt.Fprintf(builder, "| %s | `%s` | %s |\n", displayOptionLabel(option.Label), option.ArtifactID, optionReference(option, includeLocalPaths))
+	}
+	builder.WriteString("\n")
+}
+
+func optionReference(option blindOptionAssignment, includeLocalPaths bool) string {
+	metadata := map[string]string{}
+	if strings.TrimSpace(option.MetadataJSON) != "" {
+		_ = json.Unmarshal([]byte(option.MetadataJSON), &metadata)
+	}
+	for _, key := range []string{"preview_url", "url"} {
+		if value := strings.TrimSpace(metadata[key]); value != "" {
+			return fmt.Sprintf("[open](%s)", value)
+		}
+	}
+	if path := strings.TrimSpace(metadata["path"]); includeLocalPaths && path != "" {
+		return "`" + strings.ReplaceAll(path, "`", "") + "`"
+	}
+	return ""
+}
+
+func writeFeedbackYAML(path string, runID string, assignments assignmentFile) error {
 	packet := feedbackFile{RunID: runID, Reviewer: ""}
-	for _, item := range items {
+	for _, assignment := range assignments.Items {
+		if len(assignment.Options) > 0 {
+			packet.Items = append(packet.Items, feedbackFileEntry{
+				ItemID:         assignment.ItemID,
+				Ranking:        []string{"<replace with ranked option labels, best to worst>"},
+				Winner:         "",
+				UsefulTraits:   map[string][]string{},
+				RejectedTraits: map[string][]string{},
+				Reasoning:      "",
+			})
+			continue
+		}
 		packet.Items = append(packet.Items, feedbackFileEntry{
-			ItemID:    item.ItemID,
+			ItemID:    assignment.ItemID,
 			Choice:    "",
 			Reasoning: "",
 		})
@@ -390,7 +734,21 @@ func readFeedbackYAML(path string) (feedbackFile, error) {
 	if feedback.RunID == "" {
 		return feedbackFile{}, errors.New("feedback.yml missing run_id")
 	}
+	feedback.Reviewer = strings.TrimSpace(feedback.Reviewer)
+	normalizeFeedbackFileEntries(&feedback)
 	return feedback, nil
+}
+
+func normalizeFeedbackFileEntries(feedback *feedbackFile) {
+	for index := range feedback.Items {
+		feedback.Items[index].ItemID = strings.TrimSpace(feedback.Items[index].ItemID)
+		feedback.Items[index].Choice = strings.TrimSpace(feedback.Items[index].Choice)
+		feedback.Items[index].Ranking = splitRankingLabels(feedback.Items[index].Ranking)
+		feedback.Items[index].Winner = strings.TrimSpace(feedback.Items[index].Winner)
+		feedback.Items[index].UsefulTraits = trimTraitMap(feedback.Items[index].UsefulTraits)
+		feedback.Items[index].RejectedTraits = trimTraitMap(feedback.Items[index].RejectedTraits)
+		feedback.Items[index].Reasoning = strings.TrimSpace(feedback.Items[index].Reasoning)
+	}
 }
 
 func readAssignments(path string) (assignmentFile, error) {

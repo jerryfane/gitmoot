@@ -78,6 +78,9 @@ func (c GitHubCollector) Body(ctx context.Context, store *db.Store, runID string
 	var builder strings.Builder
 	builder.WriteString(githubFeedbackPacketMarker + "\n")
 	fmt.Fprintf(&builder, "# Gitmoot SkillOpt Feedback: %s\n\n", run.ID)
+	if reviewUsesRankedOptions(run) {
+		return c.rankedBody(ctx, store, run, items, assignments)
+	}
 	builder.WriteString("Review each item without trying to infer which option is baseline or candidate.\n\n")
 	builder.WriteString("Reply in a comment with one of these formats. Allowed choices: `a`, `b`, `tie`, `neither`, `skip`.\n\n")
 	builder.WriteString("## Copy-Paste YAML Reply\n\n")
@@ -107,44 +110,97 @@ func (c GitHubCollector) Body(ctx context.Context, store *db.Store, runID string
 	return builder.String(), nil
 }
 
-func (c GitHubCollector) Sync(ctx context.Context, store *db.Store, runID string, repo github.Repository, issueNumber int64) ([]db.FeedbackEvent, error) {
+func (c GitHubCollector) rankedBody(ctx context.Context, store *db.Store, run db.EvalRun, items []db.EvalReviewItem, assignments map[string]githubAssignment) (string, error) {
+	var builder strings.Builder
+	builder.WriteString(githubFeedbackPacketMarker + "\n")
+	fmt.Fprintf(&builder, "# Gitmoot SkillOpt Feedback: %s\n\n", run.ID)
+	builder.WriteString("Rank every option for each item from best to worst. Use the option labels exactly as shown.\n\n")
+	builder.WriteString("Reply in a comment with this format:\n\n")
+	builder.WriteString("```yaml\n")
+	replyYAML, err := rankedReplyYAML(run.ID, items, assignments)
+	if err != nil {
+		return "", err
+	}
+	builder.WriteString(replyYAML)
+	builder.WriteString("```\n\n")
+	builder.WriteString("## Items\n")
+	for _, item := range items {
+		assignment := assignments[item.ItemID]
+		fmt.Fprintf(&builder, "\n### %s\n\n", itemTitle(item))
+		writeGitHubOptionReferenceTable(&builder, assignment.Options)
+		for _, option := range assignment.Options {
+			content, err := c.optionText(ctx, store, option.ArtifactID)
+			if err != nil {
+				return "", fmt.Errorf("item %s option %s: %w", item.ItemID, option.Label, err)
+			}
+			fmt.Fprintf(&builder, "#### Option %s\n\n", displayOptionLabel(option.Label))
+			writeMarkdownFence(&builder, content)
+			builder.WriteString("\n")
+		}
+	}
+	return builder.String(), nil
+}
+
+func rankedReplyYAML(runID string, items []db.EvalReviewItem, assignments map[string]githubAssignment) (string, error) {
+	type rankedReplyFile struct {
+		RunID string              `yaml:"run_id"`
+		Items []feedbackFileEntry `yaml:"items"`
+	}
+	packet := rankedReplyFile{RunID: runID}
+	for _, item := range items {
+		labels := displayOptionLabels(assignments[item.ItemID].Options)
+		packet.Items = append(packet.Items, feedbackFileEntry{
+			ItemID:    item.ItemID,
+			Ranking:   []string{fmt.Sprintf("<replace with ranked option labels, e.g. %s>", strings.Join(labels, " > "))},
+			Reasoning: "",
+		})
+	}
+	content, err := yaml.Marshal(packet)
+	if err != nil {
+		return "", fmt.Errorf("encode ranked feedback reply: %w", err)
+	}
+	return string(content), nil
+}
+
+func (c GitHubCollector) Sync(ctx context.Context, store *db.Store, runID string, repo github.Repository, issueNumber int64) (ImportResult, error) {
 	if c.GitHub == nil {
-		return nil, errors.New("github client is required")
+		return ImportResult{}, errors.New("github client is required")
 	}
 	if repo.FullName() == "" {
-		return nil, errors.New("github feedback repo is required")
+		return ImportResult{}, errors.New("github feedback repo is required")
 	}
 	if issueNumber <= 0 {
-		return nil, errors.New("github feedback issue or pull request number is required")
+		return ImportResult{}, errors.New("github feedback issue or pull request number is required")
 	}
 	comments, err := c.GitHub.ListIssueComments(ctx, repo, issueNumber)
 	if err != nil {
-		return nil, err
+		return ImportResult{}, err
 	}
 	return c.ImportComments(ctx, store, runID, comments)
 }
 
-func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, runID string, comments []github.IssueComment) ([]db.FeedbackEvent, error) {
+func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, runID string, comments []github.IssueComment) (ImportResult, error) {
 	if store == nil {
-		return nil, errors.New("store is required")
+		return ImportResult{}, errors.New("store is required")
 	}
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
-		return nil, errors.New("run id is required")
+		return ImportResult{}, errors.New("run id is required")
 	}
 	items, assignments, err := c.reviewItemsAndAssignments(ctx, store, runID)
 	if err != nil {
-		return nil, err
+		return ImportResult{}, err
 	}
 	knownItems := make(map[string]struct{}, len(items))
 	for _, item := range items {
 		knownItems[item.ItemID] = struct{}{}
 	}
 	var imported []db.FeedbackEvent
+	var importedRanked []db.RankedFeedbackEvent
 	for _, comment := range comments {
 		parsed, ok, err := ParseGitHubFeedbackComment(comment.Body)
 		if err != nil {
-			return nil, fmt.Errorf("comment %d: %w", comment.ID, err)
+			return ImportResult{}, fmt.Errorf("comment %d: %w", comment.ID, err)
 		}
 		if !ok {
 			continue
@@ -171,21 +227,31 @@ func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, ru
 			createdAt = c.now().UTC().Format(time.RFC3339)
 		}
 		commentEvents := make([]db.FeedbackEvent, 0, len(parsed.Items))
+		commentRankedEvents := make([]db.RankedFeedbackEvent, 0, len(parsed.Items))
 		for _, entry := range parsed.Items {
 			itemID := strings.TrimSpace(entry.ItemID)
 			if _, ok := knownItems[itemID]; !ok {
 				if parsed.ShortForm {
 					continue
 				}
-				return nil, fmt.Errorf("comment %d: unknown feedback item_id %q", comment.ID, itemID)
+				return ImportResult{}, fmt.Errorf("comment %d: unknown feedback item_id %q", comment.ID, itemID)
+			}
+			assignment := assignments[itemID].blindAssignment
+			if len(assignment.Options) > 0 {
+				event, err := rankedFeedbackEventFromEntry(runID, itemID, entry, assignment, reviewer, SourceGitHub, sourceURL, createdAt)
+				if err != nil {
+					return ImportResult{}, fmt.Errorf("comment %d item %s: %w", comment.ID, itemID, err)
+				}
+				commentRankedEvents = append(commentRankedEvents, event)
+				continue
 			}
 			choice, err := NormalizeChoice(entry.Choice)
 			if err != nil {
-				return nil, fmt.Errorf("comment %d item %s: %w", comment.ID, itemID, err)
+				return ImportResult{}, fmt.Errorf("comment %d item %s: %w", comment.ID, itemID, err)
 			}
-			choice, err = deblindChoice(choice, assignments[itemID].blindAssignment)
+			choice, err = deblindChoice(choice, assignment)
 			if err != nil {
-				return nil, fmt.Errorf("comment %d item %s: %w", comment.ID, itemID, err)
+				return ImportResult{}, fmt.Errorf("comment %d item %s: %w", comment.ID, itemID, err)
 			}
 			event := db.FeedbackEvent{
 				RunID:     runID,
@@ -200,13 +266,19 @@ func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, ru
 			commentEvents = append(commentEvents, event)
 		}
 		imported = append(imported, commentEvents...)
+		importedRanked = append(importedRanked, commentRankedEvents...)
 	}
 	for _, event := range imported {
 		if err := store.UpsertFeedbackEvent(ctx, event); err != nil {
-			return nil, err
+			return ImportResult{}, err
 		}
 	}
-	return imported, nil
+	for _, event := range importedRanked {
+		if err := store.UpsertRankedFeedbackEvent(ctx, event); err != nil {
+			return ImportResult{}, err
+		}
+	}
+	return ImportResult{FeedbackEvents: imported, RankedFeedbackEvents: importedRanked}, nil
 }
 
 type githubAssignment struct {
@@ -229,9 +301,13 @@ func (c GitHubCollector) reviewItemsAndAssignments(ctx context.Context, store *d
 	}
 	assignments := make(map[string]githubAssignment, len(items))
 	for _, item := range items {
-		assignment, err := validatedAssignmentFor(run.ID, item)
+		assignment, err := validatedAssignmentForReview(ctx, store, run, item)
 		if err != nil {
 			return nil, nil, err
+		}
+		if len(assignment.Options) > 0 {
+			assignments[item.ItemID] = githubAssignment{blindAssignment: assignment}
+			continue
 		}
 		optionA, err := c.optionText(ctx, store, assignment.A)
 		if err != nil {
@@ -306,11 +382,7 @@ func parseFullYAMLFeedback(content string) (feedbackFile, bool, error) {
 	if len(parsed.Items) == 0 {
 		return feedbackFile{}, false, nil
 	}
-	for index := range parsed.Items {
-		parsed.Items[index].ItemID = strings.TrimSpace(parsed.Items[index].ItemID)
-		parsed.Items[index].Choice = strings.TrimSpace(parsed.Items[index].Choice)
-		parsed.Items[index].Reasoning = strings.TrimSpace(parsed.Items[index].Reasoning)
-	}
+	normalizeFeedbackFileEntries(&parsed)
 	hasFeedbackItem := false
 	for _, item := range parsed.Items {
 		if item.ItemID != "" {
@@ -325,10 +397,15 @@ func parseFullYAMLFeedback(content string) (feedbackFile, bool, error) {
 }
 
 var shortFeedbackLine = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._/-]*)\s*:\s*([A-Za-z]+)(?:\s*-\s*(.*))?$`)
+var shortRankingLine = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._/-]*)\s+ranking\s*:\s*(.+)$`)
 var shortMetadataLine = regexp.MustCompile(`^(run_id|reviewer)\s*:\s*(.+)$`)
+var shortTraitHeaderLine = regexp.MustCompile(`^(best traits|useful traits|reject|rejected traits)\s*:\s*$`)
+var shortTraitLine = regexp.MustCompile(`^-\s*([^:]+):\s*(.+)$`)
 
 func parseShortFormFeedback(content string) (feedbackFile, bool, error) {
 	parsed := feedbackFile{ShortForm: true}
+	var traitTarget string
+	traitItemIndex := -1
 	for _, raw := range strings.Split(content, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "```") {
@@ -346,10 +423,56 @@ func parseShortFormFeedback(content string) (feedbackFile, bool, error) {
 			}
 			continue
 		}
+		if match := shortTraitHeaderLine.FindStringSubmatch(strings.ToLower(line)); match != nil {
+			if traitItemIndex < 0 {
+				continue
+			}
+			switch match[1] {
+			case "best traits", "useful traits":
+				traitTarget = "useful"
+			case "reject", "rejected traits":
+				traitTarget = "rejected"
+			}
+			continue
+		}
+		if traitTarget != "" {
+			if match := shortTraitLine.FindStringSubmatch(line); match != nil && traitItemIndex >= 0 {
+				label := strings.TrimSpace(match[1])
+				trait := strings.TrimSpace(match[2])
+				if trait != "" {
+					entry := &parsed.Items[traitItemIndex]
+					if traitTarget == "useful" {
+						if entry.UsefulTraits == nil {
+							entry.UsefulTraits = map[string][]string{}
+						}
+						entry.UsefulTraits[label] = append(entry.UsefulTraits[label], trait)
+					} else {
+						if entry.RejectedTraits == nil {
+							entry.RejectedTraits = map[string][]string{}
+						}
+						entry.RejectedTraits[label] = append(entry.RejectedTraits[label], trait)
+					}
+				}
+				continue
+			}
+			traitTarget = ""
+			traitItemIndex = -1
+		}
+		if match := shortRankingLine.FindStringSubmatch(line); match != nil {
+			parsed.Items = append(parsed.Items, feedbackFileEntry{
+				ItemID:  strings.TrimSpace(match[1]),
+				Ranking: splitRankingString(match[2]),
+			})
+			traitItemIndex = len(parsed.Items) - 1
+			traitTarget = ""
+			continue
+		}
 		match := shortFeedbackLine.FindStringSubmatch(line)
 		if match == nil {
 			continue
 		}
+		traitTarget = ""
+		traitItemIndex = -1
 		parsed.Items = append(parsed.Items, feedbackFileEntry{
 			ItemID:    strings.TrimSpace(match[1]),
 			Choice:    strings.TrimSpace(match[2]),
@@ -360,6 +483,63 @@ func parseShortFormFeedback(content string) (feedbackFile, bool, error) {
 		return feedbackFile{}, false, nil
 	}
 	return parsed, true, nil
+}
+
+func splitRankingString(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '>' || r == ',' || r == '|'
+	})
+	return splitRankingLabels(parts)
+}
+
+func splitRankingLabels(values []string) []string {
+	labels := make([]string, 0, len(values))
+	for _, value := range values {
+		parts := strings.FieldsFunc(value, func(r rune) bool {
+			return r == '>' || r == ',' || r == '|'
+		})
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				labels = append(labels, part)
+			}
+		}
+	}
+	return labels
+}
+
+func trimTraitMap(values map[string][]string) map[string][]string {
+	if len(values) == 0 {
+		return nil
+	}
+	trimmed := map[string][]string{}
+	for key, traits := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		for _, trait := range traits {
+			trait = strings.TrimSpace(trait)
+			if trait != "" {
+				trimmed[key] = append(trimmed[key], trait)
+			}
+		}
+	}
+	if len(trimmed) == 0 {
+		return nil
+	}
+	return trimmed
+}
+
+func cloneTraitMap(values map[string][]string) map[string][]string {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := make(map[string][]string, len(values))
+	for key, traits := range values {
+		clone[key] = append([]string(nil), traits...)
+	}
+	return clone
 }
 
 func fencedBlocks(content string) []string {

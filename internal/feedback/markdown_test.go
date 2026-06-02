@@ -107,10 +107,11 @@ items:
 	if err := os.WriteFile(filepath.Join(packetDir, "feedback.yml"), []byte(feedbackContent), 0o644); err != nil {
 		t.Fatalf("write feedback.yml: %v", err)
 	}
-	events, err := collector.ImportPacket(ctx, store, packetDir+string(os.PathSeparator)+".", "")
+	result, err := collector.ImportPacket(ctx, store, packetDir+string(os.PathSeparator)+".", "")
 	if err != nil {
 		t.Fatalf("ImportPacket returned error: %v", err)
 	}
+	events := result.FeedbackEvents
 	if len(events) != 2 || events[0].Choice != "b" || events[1].Choice != "b" || events[0].CreatedAt != "2026-05-31T10:00:00Z" {
 		t.Fatalf("events = %+v", events)
 	}
@@ -130,6 +131,114 @@ items:
 	}
 	if len(stored) != 2 {
 		t.Fatalf("second import duplicated feedback events: %+v", stored)
+	}
+}
+
+func TestMarkdownCollectorImportsRankedPacket(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupMarkdownRankedFeedbackRun(t, "ranked-1")
+	packetDir := filepath.Join(t.TempDir(), "packet")
+	collector := MarkdownCollector{
+		BlobStore: blobs,
+		Now: func() time.Time {
+			return time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
+		},
+	}
+	if err := collector.WritePacket(ctx, store, "ranked-1", packetDir); err != nil {
+		t.Fatalf("WritePacket returned error: %v", err)
+	}
+	if _, err := collector.ImportPacket(ctx, store, packetDir, "jerry"); err == nil || !strings.Contains(err.Error(), "ranking") {
+		t.Fatalf("unchanged ranked packet import error = %v", err)
+	}
+	feedbackContent := `run_id: ranked-1
+reviewer: jerry
+items:
+  - item_id: item-001
+    ranking:
+      - C > A > D > B
+    useful_traits:
+      A:
+        - visual style
+      D:
+        - motion
+    rejected_traits:
+      B:
+        - too generic
+    reasoning: C explains the product best.
+`
+	if err := os.WriteFile(filepath.Join(packetDir, "feedback.yml"), []byte(feedbackContent), 0o644); err != nil {
+		t.Fatalf("write feedback.yml: %v", err)
+	}
+	result, err := collector.ImportPacket(ctx, store, packetDir, "")
+	if err != nil {
+		t.Fatalf("ImportPacket returned error: %v", err)
+	}
+	if result.Count() != 1 || len(result.RankedFeedbackEvents) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	stored, err := store.ListRankedFeedbackEvents(ctx, "ranked-1")
+	if err != nil {
+		t.Fatalf("ListRankedFeedbackEvents returned error: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Winner != "c" || stored[0].Reasoning != "C explains the product best." || stored[0].Source != SourceMarkdown {
+		t.Fatalf("stored ranked events = %+v", stored)
+	}
+	if !strings.Contains(stored[0].UsefulTraitsJSON, `"a":["visual style"]`) || !strings.Contains(stored[0].RejectedTraitsJSON, `"b":["too generic"]`) {
+		t.Fatalf("stored traits useful=%s rejected=%s", stored[0].UsefulTraitsJSON, stored[0].RejectedTraitsJSON)
+	}
+	pairs, err := store.ListPairwisePreferences(ctx, "ranked-1")
+	if err != nil {
+		t.Fatalf("ListPairwisePreferences returned error: %v", err)
+	}
+	if len(pairs) != 6 || pairs[0].Preferred != "c" || pairs[0].Rejected != "a" || pairs[5].Preferred != "d" || pairs[5].Rejected != "b" {
+		t.Fatalf("pairwise preferences = %+v", pairs)
+	}
+}
+
+func TestMarkdownCollectorRejectsInvalidRankedWinnerWithoutPartialImport(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupMarkdownRankedFeedbackRun(t, "ranked-1")
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{
+		RunID:  "ranked-1",
+		ItemID: "item-002",
+		Title:  "Second Ranked Item",
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem item-002 returned error: %v", err)
+	}
+	for _, label := range []string{"a", "b", "c", "d"} {
+		if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{RunID: "ranked-1", ItemID: "item-002", Label: label, ArtifactID: "option-" + label, Role: "option"}); err != nil {
+			t.Fatalf("UpsertEvalReviewOption item-002 %s returned error: %v", label, err)
+		}
+	}
+	packetDir := filepath.Join(t.TempDir(), "packet")
+	collector := MarkdownCollector{BlobStore: blobs}
+	if err := collector.WritePacket(ctx, store, "ranked-1", packetDir); err != nil {
+		t.Fatalf("WritePacket returned error: %v", err)
+	}
+	feedbackContent := `run_id: ranked-1
+reviewer: jerry
+items:
+  - item_id: item-001
+    ranking:
+      - C > A > D > B
+  - item_id: item-002
+    ranking:
+      - C > A > D > B
+    winner: B
+`
+	if err := os.WriteFile(filepath.Join(packetDir, "feedback.yml"), []byte(feedbackContent), 0o644); err != nil {
+		t.Fatalf("write feedback.yml: %v", err)
+	}
+	_, err := collector.ImportPacket(ctx, store, packetDir, "")
+	if err == nil || !strings.Contains(err.Error(), "winner") {
+		t.Fatalf("ImportPacket error = %v", err)
+	}
+	stored, err := store.ListRankedFeedbackEvents(ctx, "ranked-1")
+	if err != nil {
+		t.Fatalf("ListRankedFeedbackEvents returned error: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("ImportPacket persisted partial ranked events: %+v", stored)
 	}
 }
 
@@ -346,4 +455,49 @@ func TestMarkdownCollectorUsesCollisionSafeItemFilenames(t *testing.T) {
 	if !strings.Contains(string(index), "items/"+first) || !strings.Contains(string(index), "items/"+second) {
 		t.Fatalf("index does not link distinct item files:\n%s", string(index))
 	}
+}
+
+func setupMarkdownRankedFeedbackRun(t *testing.T, runID string) (*db.Store, artifact.Store) {
+	t.Helper()
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+	blobStore := artifact.NewStore(filepath.Join(t.TempDir(), "blobs"))
+	if err := store.UpsertEvalRun(ctx, db.EvalRun{
+		ID:           runID,
+		State:        "review",
+		Mode:         db.EvalRunModeExplore,
+		OptionsCount: 4,
+	}); err != nil {
+		t.Fatalf("UpsertEvalRun returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{
+		RunID:  runID,
+		ItemID: "item-001",
+		Title:  "Ranked Item",
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem returned error: %v", err)
+	}
+	for _, label := range []string{"a", "b", "c", "d"} {
+		content := []byte("option " + label + " answer")
+		blob, err := blobStore.Put(content)
+		if err != nil {
+			t.Fatalf("Put option %s returned error: %v", label, err)
+		}
+		artifactID := "option-" + label
+		if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{ID: artifactID, Hash: blob.Hash, MediaType: "text/markdown", SizeBytes: blob.Size, Driver: "text"}); err != nil {
+			t.Fatalf("UpsertEvalArtifact %s returned error: %v", label, err)
+		}
+		if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{RunID: runID, ItemID: "item-001", Label: label, ArtifactID: artifactID, Role: "option"}); err != nil {
+			t.Fatalf("UpsertEvalReviewOption %s returned error: %v", label, err)
+		}
+	}
+	return store, blobStore
 }

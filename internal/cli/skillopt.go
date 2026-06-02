@@ -53,8 +53,9 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot skillopt export --run <run-id> [--output package.json]")
 	fmt.Fprintln(w, "  gitmoot skillopt import --file candidate.json [--artifact-dir artifacts]")
-	fmt.Fprintln(w, "  gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id>")
+	fmt.Fprintln(w, "  gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id> [--mode validate|explore|refine|distill] [--options N]")
 	fmt.Fprintln(w, "  gitmoot skillopt review item add --run <run-id> --item <item-id> --baseline baseline.md --candidate candidate.md [--title text]")
+	fmt.Fprintln(w, "  gitmoot skillopt review item add --run <run-id> --item <item-id> --option a=option-a.md --option b=option-b.md [...] [--title text]")
 	fmt.Fprintln(w, "  gitmoot skillopt review status --run <run-id>")
 	fmt.Fprintln(w, "  gitmoot skillopt candidate list [--template id]")
 	fmt.Fprintln(w, "  gitmoot skillopt candidate show <version-id>")
@@ -92,6 +93,9 @@ func runSkillOptReviewCreate(args []string, stdout, stderr io.Writer) int {
 	templateID := fs.String("template", "", "agent template id or version to review")
 	repoFlag := fs.String("repo", "", "target repository in owner/repo form")
 	runID := fs.String("run", "", "review run id")
+	mode := fs.String("mode", "", "review mode: validate, explore, refine, or distill")
+	explorationLevel := fs.String("exploration-level", "", "exploration level: high, medium, or low")
+	optionsCount := fs.Int("options", 0, "expected number of review options")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -123,6 +127,9 @@ func runSkillOptReviewCreate(args []string, stdout, stderr io.Writer) int {
 			TemplateVersionID: template.VersionID,
 			TargetRepo:        repo.FullName(),
 			State:             "review",
+			Mode:              strings.TrimSpace(*mode),
+			ExplorationLevel:  strings.TrimSpace(*explorationLevel),
+			OptionsCount:      *optionsCount,
 			MetadataJSON:      `{"driver":"manual-review"}`,
 		}
 		return store.UpsertEvalRun(context.Background(), run)
@@ -149,6 +156,72 @@ func runSkillOptReviewItem(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+type repeatedStringFlag []string
+
+func (f *repeatedStringFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(*f, ",")
+}
+
+func (f *repeatedStringFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+type skillOptOptionSpec struct {
+	Label string
+	Path  string
+}
+
+type preparedSkillOptOption struct {
+	Spec     skillOptOptionSpec
+	Artifact db.EvalArtifact
+	Metadata string
+}
+
+func parseSkillOptOptionFlags(values []string) ([]skillOptOptionSpec, error) {
+	specs := make([]skillOptOptionSpec, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		label, path, ok := strings.Cut(value, "=")
+		if !ok {
+			return nil, fmt.Errorf("--option must use label=path form")
+		}
+		label = strings.ToLower(strings.TrimSpace(label))
+		path = strings.TrimSpace(path)
+		if err := validateSkillOptOptionLabel(label); err != nil {
+			return nil, err
+		}
+		if path == "" {
+			return nil, fmt.Errorf("option %s path is required", label)
+		}
+		if _, ok := seen[label]; ok {
+			return nil, fmt.Errorf("duplicate option label %q", label)
+		}
+		seen[label] = struct{}{}
+		specs = append(specs, skillOptOptionSpec{Label: label, Path: path})
+	}
+	return specs, nil
+}
+
+func validateSkillOptOptionLabel(label string) error {
+	if label == "" {
+		return errors.New("option label is required")
+	}
+	for _, r := range label {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return fmt.Errorf("option label %q must use only letters, digits, dots, dashes, or underscores", label)
+		}
+	}
+	return nil
+}
+
 func runSkillOptReviewItemAdd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("skillopt review item add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -161,6 +234,8 @@ func runSkillOptReviewItemAdd(args []string, stdout, stderr io.Writer) int {
 	metadataJSON := fs.String("metadata-json", "", "JSON metadata to attach to the review item")
 	mediaType := fs.String("media-type", "", "media type override for stored artifacts")
 	driver := fs.String("driver", "text", "artifact driver")
+	var optionFlags repeatedStringFlag
+	fs.Var(&optionFlags, "option", "N-way option in label=path form; repeat once per option")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -171,8 +246,23 @@ func runSkillOptReviewItemAdd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "skillopt review item add does not accept positional arguments")
 		return 2
 	}
-	if strings.TrimSpace(*runID) == "" || strings.TrimSpace(*itemID) == "" || strings.TrimSpace(*baselinePath) == "" || strings.TrimSpace(*candidatePath) == "" {
-		fmt.Fprintln(stderr, "skillopt review item add requires --run, --item, --baseline, and --candidate")
+	if strings.TrimSpace(*runID) == "" || strings.TrimSpace(*itemID) == "" {
+		fmt.Fprintln(stderr, "skillopt review item add requires --run and --item")
+		return 2
+	}
+	hasAB := strings.TrimSpace(*baselinePath) != "" || strings.TrimSpace(*candidatePath) != ""
+	hasOptions := len(optionFlags) > 0
+	if hasAB && hasOptions {
+		fmt.Fprintln(stderr, "skillopt review item add accepts either --baseline/--candidate or repeated --option flags, not both")
+		return 2
+	}
+	if !hasOptions && (strings.TrimSpace(*baselinePath) == "" || strings.TrimSpace(*candidatePath) == "") {
+		fmt.Fprintln(stderr, "skillopt review item add requires --baseline and --candidate, or repeated --option label=path flags")
+		return 2
+	}
+	optionSpecs, err := parseSkillOptOptionFlags(optionFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "skillopt review item add: %v\n", err)
 		return 2
 	}
 	metadata, err := normalizeSkillOptMetadataJSON(*metadataJSON)
@@ -191,6 +281,61 @@ func runSkillOptReviewItemAdd(args []string, stdout, stderr io.Writer) int {
 			return err
 		}
 		blobStore := artifact.NewStore(paths.ArtifactBlobs)
+		rankedRun := skillOptRunUsesRankedOptions(run)
+		if hasOptions && !rankedRun {
+			return fmt.Errorf("review run %s is validate/A/B mode; use --baseline and --candidate", run.ID)
+		}
+		if !hasOptions && rankedRun {
+			return fmt.Errorf("review run %s is ranked mode; use repeated --option label=path flags", run.ID)
+		}
+		if hasOptions {
+			if run.OptionsCount > 0 && len(optionSpecs) != run.OptionsCount {
+				return fmt.Errorf("review run %s expects %d options, got %d", run.ID, run.OptionsCount, len(optionSpecs))
+			}
+			preparedOptions := make([]preparedSkillOptOption, 0, len(optionSpecs))
+			for _, spec := range optionSpecs {
+				optionArtifact, err := prepareReviewItemArtifact(blobStore, run.ID, *itemID, "option-"+spec.Label, spec.Path, *mediaType, *driver)
+				if err != nil {
+					return err
+				}
+				optionMetadata, err := reviewOptionMetadataJSON(spec.Path)
+				if err != nil {
+					return err
+				}
+				preparedOptions = append(preparedOptions, preparedSkillOptOption{
+					Spec:     spec,
+					Artifact: optionArtifact,
+					Metadata: optionMetadata,
+				})
+			}
+			item = db.EvalReviewItem{
+				RunID:        run.ID,
+				ItemID:       strings.TrimSpace(*itemID),
+				Title:        strings.TrimSpace(*title),
+				MetadataJSON: metadata,
+			}
+			if err := store.UpsertEvalReviewItem(ctx, item); err != nil {
+				return err
+			}
+			replacementOptions := make([]db.EvalReviewOption, 0, len(preparedOptions))
+			for _, prepared := range preparedOptions {
+				if err := store.UpsertEvalArtifact(ctx, prepared.Artifact); err != nil {
+					return fmt.Errorf("register option %s artifact: %w", prepared.Spec.Label, err)
+				}
+				replacementOptions = append(replacementOptions, db.EvalReviewOption{
+					RunID:        run.ID,
+					ItemID:       strings.TrimSpace(*itemID),
+					Label:        prepared.Spec.Label,
+					ArtifactID:   prepared.Artifact.ID,
+					Role:         "option",
+					MetadataJSON: prepared.Metadata,
+				})
+			}
+			if err := store.ReplaceEvalReviewOptions(ctx, run.ID, strings.TrimSpace(*itemID), replacementOptions); err != nil {
+				return err
+			}
+			return nil
+		}
 		baseline, err := prepareReviewItemArtifact(blobStore, run.ID, *itemID, "baseline", *baselinePath, *mediaType, *driver)
 		if err != nil {
 			return err
@@ -254,7 +399,7 @@ func runSkillOptReviewStatus(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	itemCount := len(status.Items)
-	feedbackCount := len(status.Feedback)
+	feedbackCount := len(status.Feedback) + len(status.RankedFeedback)
 	fmt.Fprintf(stdout, "run: %s\n", status.Run.ID)
 	fmt.Fprintf(stdout, "template: %s\n", status.Run.TemplateID)
 	fmt.Fprintf(stdout, "template_version: %s\n", status.Run.TemplateVersionID)
@@ -279,6 +424,7 @@ type skillOptReviewStatus struct {
 	Run              db.EvalRun
 	Items            []db.EvalReviewItem
 	Feedback         []db.FeedbackEvent
+	RankedFeedback   []db.RankedFeedbackEvent
 	PacketBlockers   []string
 	TrainingBlockers []string
 	PacketReady      bool
@@ -301,12 +447,17 @@ func loadSkillOptReviewStatus(ctx context.Context, store *db.Store, blobStore ar
 	if err != nil {
 		return skillOptReviewStatus{}, err
 	}
-	packetBlockers := reviewPacketBlockers(ctx, store, blobStore, items)
-	trainingBlockers := reviewTrainingBlockers(ctx, store, run.ID, items, events)
+	rankedEvents, err := store.ListRankedFeedbackEvents(ctx, run.ID)
+	if err != nil {
+		return skillOptReviewStatus{}, err
+	}
+	packetBlockers := reviewPacketBlockers(ctx, store, blobStore, run, items)
+	trainingBlockers := reviewTrainingBlockers(ctx, store, run, items, events, rankedEvents)
 	return skillOptReviewStatus{
 		Run:              run,
 		Items:            items,
 		Feedback:         events,
+		RankedFeedback:   rankedEvents,
 		PacketBlockers:   packetBlockers,
 		TrainingBlockers: trainingBlockers,
 		PacketReady:      len(packetBlockers) == 0,
@@ -314,7 +465,7 @@ func loadSkillOptReviewStatus(ctx context.Context, store *db.Store, blobStore ar
 	}, nil
 }
 
-func reviewPacketBlockers(ctx context.Context, store *db.Store, blobStore artifact.Store, items []db.EvalReviewItem) []string {
+func reviewPacketBlockers(ctx context.Context, store *db.Store, blobStore artifact.Store, run db.EvalRun, items []db.EvalReviewItem) []string {
 	if len(items) == 0 {
 		return []string{"run has no review items"}
 	}
@@ -324,6 +475,25 @@ func reviewPacketBlockers(ctx context.Context, store *db.Store, blobStore artifa
 		itemID := strings.TrimSpace(item.ItemID)
 		if itemID == "" {
 			itemID = item.ID
+		}
+		if skillOptRunUsesRankedOptions(run) {
+			options, err := store.ListEvalReviewOptions(ctx, run.ID, item.ItemID)
+			if err != nil {
+				blockers = append(blockers, fmt.Sprintf("item %s options are not readable: %v", itemID, err))
+				continue
+			}
+			if len(options) == 0 {
+				blockers = append(blockers, fmt.Sprintf("item %s has no registered options", itemID))
+				continue
+			}
+			if run.OptionsCount > 0 && len(options) != run.OptionsCount {
+				blockers = append(blockers, fmt.Sprintf("item %s has %d options, want %d", itemID, len(options), run.OptionsCount))
+				continue
+			}
+			for _, option := range options {
+				blockers = append(blockers, validateReviewArtifactBlob(ctx, store, blobStore, itemID, "option "+option.Label, option.ArtifactID, validated)...)
+			}
+			continue
 		}
 		baseline := strings.TrimSpace(item.BaselineArtifactID)
 		candidate := strings.TrimSpace(item.CandidateArtifactID)
@@ -341,13 +511,20 @@ func reviewPacketBlockers(ctx context.Context, store *db.Store, blobStore artifa
 	return blockers
 }
 
-func reviewTrainingBlockers(ctx context.Context, store *db.Store, runID string, items []db.EvalReviewItem, events []db.FeedbackEvent) []string {
+func skillOptRunUsesRankedOptions(run db.EvalRun) bool {
+	return run.Mode != db.EvalRunModeValidate || run.OptionsCount > 2
+}
+
+func reviewTrainingBlockers(ctx context.Context, store *db.Store, run db.EvalRun, items []db.EvalReviewItem, events []db.FeedbackEvent, rankedEvents []db.RankedFeedbackEvent) []string {
 	if len(items) == 0 {
 		return []string{"run has no review items"}
 	}
 	var blockers []string
 	feedbackByItem := map[string]int{}
 	for _, event := range events {
+		feedbackByItem[strings.TrimSpace(event.ItemID)]++
+	}
+	for _, event := range rankedEvents {
 		feedbackByItem[strings.TrimSpace(event.ItemID)]++
 	}
 	for _, item := range items {
@@ -359,7 +536,10 @@ func reviewTrainingBlockers(ctx context.Context, store *db.Store, runID string, 
 			blockers = append(blockers, fmt.Sprintf("item %s has no imported feedback", itemID))
 		}
 	}
-	if _, err := skillopt.ExportTrainingPackage(ctx, store, runID); err != nil {
+	if skillOptRunUsesRankedOptions(run) && len(rankedEvents) > 0 {
+		blockers = append(blockers, "ranked feedback export is not implemented yet")
+	}
+	if _, err := skillopt.ExportTrainingPackage(ctx, store, run.ID); err != nil {
 		blockers = append(blockers, fmt.Sprintf("training export failed: %v", err))
 	}
 	return blockers
@@ -446,6 +626,18 @@ func normalizeSkillOptMetadataJSON(value string) (string, error) {
 	encoded, err := json.Marshal(decoded)
 	if err != nil {
 		return "", fmt.Errorf("metadata-json: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func reviewOptionMetadataJSON(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	encoded, err := json.Marshal(map[string]string{"path": path})
+	if err != nil {
+		return "", fmt.Errorf("option metadata: %w", err)
 	}
 	return string(encoded), nil
 }
@@ -899,11 +1091,11 @@ func runSkillOptFeedbackMarkdownImport(args []string, stdout, stderr io.Writer) 
 	var count int
 	if err := withSkillOptStore(*home, func(paths config.Paths, store *db.Store) error {
 		collector := feedback.MarkdownCollector{BlobStore: artifact.NewStore(paths.ArtifactBlobs)}
-		events, err := collector.ImportPacket(context.Background(), store, *packet, *reviewer)
+		result, err := collector.ImportPacket(context.Background(), store, *packet, *reviewer)
 		if err != nil {
 			return err
 		}
-		count = len(events)
+		count = result.Count()
 		return nil
 	}); err != nil {
 		fmt.Fprintf(stderr, "skillopt feedback markdown import: %v\n", err)
@@ -1009,11 +1201,11 @@ func runSkillOptFeedbackGitHubSync(args []string, stdout, stderr io.Writer) int 
 			BlobStore: artifact.NewStore(paths.ArtifactBlobs),
 			GitHub:    newSkillOptGitHubClient(),
 		}
-		events, err := collector.Sync(context.Background(), store, run.ID, repo, targetNumber)
+		result, err := collector.Sync(context.Background(), store, run.ID, repo, targetNumber)
 		if err != nil {
 			return err
 		}
-		count = len(events)
+		count = result.Count()
 		return nil
 	}); err != nil {
 		fmt.Fprintf(stderr, "skillopt feedback github sync: %v\n", err)

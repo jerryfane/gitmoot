@@ -1874,19 +1874,63 @@ func (s *Store) UpsertEvalReviewOption(ctx context.Context, option EvalReviewOpt
 	if err != nil {
 		return err
 	}
-	var existingID string
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM eval_review_options WHERE run_id = ? AND item_id = ? AND label = ?`,
-		option.RunID, option.ItemID, option.Label).Scan(&existingID); err == nil {
-		return fmt.Errorf("eval review option label %q already exists for item %q", option.Label, option.ItemID)
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO eval_review_options(
 			id, run_id, item_id, label, artifact_id, role, metadata_json, created_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(run_id, item_id, label) DO UPDATE SET
+			id = excluded.id,
+			artifact_id = excluded.artifact_id,
+			role = excluded.role,
+			metadata_json = excluded.metadata_json,
+			updated_at = CURRENT_TIMESTAMP`,
 		option.ID, option.RunID, option.ItemID, option.Label, option.ArtifactID, option.Role, option.MetadataJSON)
 	return err
+}
+
+func (s *Store) ReplaceEvalReviewOptions(ctx context.Context, runID string, itemID string, options []EvalReviewOption) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return errors.New("eval review option run id is required")
+	}
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return errors.New("eval review option item id is required")
+	}
+	normalized := make([]EvalReviewOption, 0, len(options))
+	seen := map[string]struct{}{}
+	for _, option := range options {
+		option.RunID = runID
+		option.ItemID = itemID
+		option, err := normalizeEvalReviewOption(option)
+		if err != nil {
+			return err
+		}
+		if _, ok := seen[option.Label]; ok {
+			return fmt.Errorf("eval review option label %q is duplicated for item %q", option.Label, itemID)
+		}
+		seen[option.Label] = struct{}{}
+		normalized = append(normalized, option)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM eval_review_options WHERE run_id = ? AND item_id = ?`, runID, itemID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	for _, option := range normalized {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO eval_review_options(
+				id, run_id, item_id, label, artifact_id, role, metadata_json, created_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+			option.ID, option.RunID, option.ItemID, option.Label, option.ArtifactID, option.Role, option.MetadataJSON); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func normalizeEvalReviewOption(option EvalReviewOption) (EvalReviewOption, error) {
