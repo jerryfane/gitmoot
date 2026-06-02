@@ -153,6 +153,8 @@ func TestGitHubCollectorPublishesIssueBody(t *testing.T) {
 	body := fake.createdIssue.Body
 	for _, want := range []string{
 		"Allowed choices: `a`, `b`, `tie`, `neither`, `skip`",
+		"## Phase Recommendation",
+		"recommend continue validate",
 		"run_id: run-1",
 		"choice:",
 		"item-001: <choice> - optional reason",
@@ -187,6 +189,8 @@ func TestGitHubCollectorPublishesRankedIssueBody(t *testing.T) {
 	body := fake.createdIssue.Body
 	for _, want := range []string{
 		"Rank every option",
+		"## Phase Recommendation",
+		"recommend continue explore",
 		"```yaml",
 		"run_id: ranked-1",
 		"item_id: item-001",

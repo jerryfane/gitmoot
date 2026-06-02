@@ -2,6 +2,7 @@ package feedback
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,6 +72,8 @@ func TestMarkdownCollectorWriteAndImportPacket(t *testing.T) {
 	}
 	if !strings.Contains(string(index), "Open each linked item") ||
 		!strings.Contains(string(index), "set `reviewer`") ||
+		!strings.Contains(string(index), "## Phase Recommendation") ||
+		!strings.Contains(string(index), "recommend continue validate") ||
 		!strings.Contains(string(index), "gitmoot skillopt feedback markdown import --packet <packet-dir> --reviewer <name>") ||
 		!strings.Contains(string(index), ".assignments.json") {
 		t.Fatalf("index content misses instructions:\n%s", string(index))
@@ -147,6 +150,13 @@ func TestMarkdownCollectorImportsRankedPacket(t *testing.T) {
 	if err := collector.WritePacket(ctx, store, "ranked-1", packetDir); err != nil {
 		t.Fatalf("WritePacket returned error: %v", err)
 	}
+	index, err := os.ReadFile(filepath.Join(packetDir, "index.md"))
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	if !strings.Contains(string(index), "## Phase Recommendation") || !strings.Contains(string(index), "recommend continue explore") {
+		t.Fatalf("ranked index missing phase recommendation:\n%s", string(index))
+	}
 	if _, err := collector.ImportPacket(ctx, store, packetDir, "jerry"); err == nil || !strings.Contains(err.Error(), "ranking") {
 		t.Fatalf("unchanged ranked packet import error = %v", err)
 	}
@@ -192,6 +202,37 @@ items:
 	}
 	if len(pairs) != 6 || pairs[0].Preferred != "c" || pairs[0].Rejected != "a" || pairs[5].Preferred != "d" || pairs[5].Rejected != "b" {
 		t.Fatalf("pairwise preferences = %+v", pairs)
+	}
+	ranking, err := json.Marshal([]string{"c", "a", "d", "b"})
+	if err != nil {
+		t.Fatalf("marshal ranking: %v", err)
+	}
+	if err := store.UpsertRankedFeedbackEvent(ctx, db.RankedFeedbackEvent{
+		RunID:       "ranked-1",
+		ItemID:      "item-001",
+		RankingJSON: string(ranking),
+		Winner:      "c",
+		Reviewer:    "second-reviewer",
+		Source:      SourceMarkdown,
+		SourceURL:   packetDir + "#second",
+		CreatedAt:   "2026-06-02T11:00:00Z",
+	}); err != nil {
+		t.Fatalf("UpsertRankedFeedbackEvent second returned error: %v", err)
+	}
+	secondPacketDir := filepath.Join(t.TempDir(), "packet-with-feedback")
+	if err := collector.WritePacket(ctx, store, "ranked-1", secondPacketDir); err != nil {
+		t.Fatalf("WritePacket with feedback returned error: %v", err)
+	}
+	secondIndex, err := os.ReadFile(filepath.Join(secondPacketDir, "index.md"))
+	if err != nil {
+		t.Fatalf("read second index: %v", err)
+	}
+	if !strings.Contains(string(secondIndex), "Outcome recommendation is hidden") ||
+		strings.Contains(string(secondIndex), "recommend refine") ||
+		strings.Contains(string(secondIndex), "top option") ||
+		strings.Contains(string(secondIndex), "Ranking stability") ||
+		strings.Contains(string(secondIndex), "Recommended next mode") {
+		t.Fatalf("ranked index leaks outcome recommendation:\n%s", string(secondIndex))
 	}
 }
 

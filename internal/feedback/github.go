@@ -11,6 +11,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/artifact"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/github"
+	"github.com/jerryfane/gitmoot/internal/skillopt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -75,13 +76,18 @@ func (c GitHubCollector) Body(ctx context.Context, store *db.Store, runID string
 	if err != nil {
 		return "", err
 	}
+	recommendation, err := phaseRecommendationForRun(ctx, store, run, items)
+	if err != nil {
+		return "", err
+	}
 	var builder strings.Builder
 	builder.WriteString(githubFeedbackPacketMarker + "\n")
 	fmt.Fprintf(&builder, "# Gitmoot SkillOpt Feedback: %s\n\n", run.ID)
 	if reviewUsesRankedOptions(run) {
-		return c.rankedBody(ctx, store, run, items, assignments)
+		return c.rankedBody(ctx, store, run, items, assignments, recommendation)
 	}
 	builder.WriteString("Review each item without trying to infer which option is baseline or candidate.\n\n")
+	writePhaseRecommendation(&builder, recommendation)
 	builder.WriteString("Reply in a comment with one of these formats. Allowed choices: `a`, `b`, `tie`, `neither`, `skip`.\n\n")
 	builder.WriteString("## Copy-Paste YAML Reply\n\n")
 	builder.WriteString("```yaml\n")
@@ -110,11 +116,12 @@ func (c GitHubCollector) Body(ctx context.Context, store *db.Store, runID string
 	return builder.String(), nil
 }
 
-func (c GitHubCollector) rankedBody(ctx context.Context, store *db.Store, run db.EvalRun, items []db.EvalReviewItem, assignments map[string]githubAssignment) (string, error) {
+func (c GitHubCollector) rankedBody(ctx context.Context, store *db.Store, run db.EvalRun, items []db.EvalReviewItem, assignments map[string]githubAssignment, recommendation skillopt.PhaseRecommendation) (string, error) {
 	var builder strings.Builder
 	builder.WriteString(githubFeedbackPacketMarker + "\n")
 	fmt.Fprintf(&builder, "# Gitmoot SkillOpt Feedback: %s\n\n", run.ID)
 	builder.WriteString("Rank every option for each item from best to worst. Use the option labels exactly as shown.\n\n")
+	writePhaseRecommendation(&builder, recommendation)
 	builder.WriteString("Reply in a comment with this format:\n\n")
 	builder.WriteString("```yaml\n")
 	replyYAML, err := rankedReplyYAML(run.ID, items, assignments)

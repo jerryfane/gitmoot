@@ -405,9 +405,14 @@ func runSkillOptReviewStatus(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "template_version: %s\n", status.Run.TemplateVersionID)
 	fmt.Fprintf(stdout, "repo: %s\n", status.Run.TargetRepo)
 	fmt.Fprintf(stdout, "state: %s\n", status.Run.State)
+	fmt.Fprintf(stdout, "mode: %s\n", status.Recommendation.CurrentMode)
+	fmt.Fprintf(stdout, "exploration_level: %s\n", status.Recommendation.ExplorationLevel)
 	fmt.Fprintf(stdout, "items: %d\n", itemCount)
 	fmt.Fprintf(stdout, "feedback: %d\n", feedbackCount)
 	fmt.Fprintf(stdout, "pairwise_preferences: %d\n", len(status.PairwisePreferences))
+	fmt.Fprintf(stdout, "ranking_stability: %s\n", status.Recommendation.RankingStability)
+	fmt.Fprintf(stdout, "recommended_next_mode: %s\n", status.Recommendation.RecommendedMode)
+	fmt.Fprintf(stdout, "recommendation: %s\n", status.Recommendation.Summary())
 	fmt.Fprintf(stdout, "packet_blockers: %d\n", len(status.PacketBlockers))
 	fmt.Fprintf(stdout, "training_blockers: %d\n", len(status.TrainingBlockers))
 	fmt.Fprintf(stdout, "ready_for_packet: %t\n", status.PacketReady)
@@ -427,6 +432,7 @@ type skillOptReviewStatus struct {
 	Feedback            []db.FeedbackEvent
 	RankedFeedback      []db.RankedFeedbackEvent
 	PairwisePreferences []db.PairwisePreference
+	Recommendation      skillopt.PhaseRecommendation
 	PacketBlockers      []string
 	TrainingBlockers    []string
 	PacketReady         bool
@@ -459,12 +465,14 @@ func loadSkillOptReviewStatus(ctx context.Context, store *db.Store, blobStore ar
 	}
 	packetBlockers := reviewPacketBlockers(ctx, store, blobStore, run, items)
 	trainingBlockers := reviewTrainingBlockers(ctx, store, run, items, events, rankedEvents)
+	recommendation := skillopt.RecommendPhaseForItems(run, items, events, rankedEvents, pairwisePreferences)
 	return skillOptReviewStatus{
 		Run:                 run,
 		Items:               items,
 		Feedback:            events,
 		RankedFeedback:      rankedEvents,
 		PairwisePreferences: pairwisePreferences,
+		Recommendation:      recommendation,
 		PacketBlockers:      packetBlockers,
 		TrainingBlockers:    trainingBlockers,
 		PacketReady:         len(packetBlockers) == 0,

@@ -1689,9 +1689,23 @@ func TestSkillOptReviewStatusShowsRankedPairwisePreferences(t *testing.T) {
 		Reasoning:   "C explains the product most clearly.",
 		Reviewer:    "jerry",
 		Source:      "github",
+		SourceURL:   "https://github.com/owner/repo/issues/1#issuecomment-1",
 		CreatedAt:   "2026-06-02T10:00:00Z",
 	}); err != nil {
 		t.Fatalf("UpsertRankedFeedbackEvent returned error: %v", err)
+	}
+	if err := store.UpsertRankedFeedbackEvent(context.Background(), db.RankedFeedbackEvent{
+		RunID:       "planner-ranked-1",
+		ItemID:      "item-001",
+		RankingJSON: string(ranking),
+		Winner:      "c",
+		Reasoning:   "C is still strongest.",
+		Reviewer:    "jerry",
+		Source:      "github",
+		SourceURL:   "https://github.com/owner/repo/issues/1#issuecomment-2",
+		CreatedAt:   "2026-06-02T11:00:00Z",
+	}); err != nil {
+		t.Fatalf("UpsertRankedFeedbackEvent second returned error: %v", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
@@ -1704,8 +1718,13 @@ func TestSkillOptReviewStatusShowsRankedPairwisePreferences(t *testing.T) {
 	}
 	for _, want := range []string{
 		"items: 1",
-		"feedback: 1",
-		"pairwise_preferences: 6",
+		"feedback: 2",
+		"pairwise_preferences: 12",
+		"mode: explore",
+		"exploration_level: high",
+		"ranking_stability: c 2/2",
+		"recommended_next_mode: refine",
+		"recommendation: recommend refine",
 		"packet_blockers: 0",
 		"training_blockers: 0",
 		"ready_for_packet: true",

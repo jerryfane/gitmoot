@@ -15,6 +15,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/artifact"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/skillopt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -111,7 +112,11 @@ func (c MarkdownCollector) WritePacket(ctx context.Context, store *db.Store, run
 	if err := writeJSONFile(filepath.Join(dir, assignmentsName), assignments, 0o600); err != nil {
 		return err
 	}
-	if err := writeTextFile(filepath.Join(dir, "index.md"), indexMarkdown(run, items, assignments), 0o644); err != nil {
+	recommendation, err := phaseRecommendationForRun(ctx, store, run, items)
+	if err != nil {
+		return err
+	}
+	if err := writeTextFile(filepath.Join(dir, "index.md"), indexMarkdown(run, items, assignments, recommendation), 0o644); err != nil {
 		return err
 	}
 	return writeFeedbackYAML(filepath.Join(dir, "feedback.yml"), run.ID, assignments)
@@ -598,7 +603,7 @@ func canonicalChoiceForArtifact(artifactID string, assignment blindAssignment) (
 	}
 }
 
-func indexMarkdown(run db.EvalRun, items []db.EvalReviewItem, assignments assignmentFile) string {
+func indexMarkdown(run db.EvalRun, items []db.EvalReviewItem, assignments assignmentFile, recommendation skillopt.PhaseRecommendation) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "# Gitmoot Feedback Packet: %s\n\n", run.ID)
 	if reviewUsesRankedOptions(run) {
@@ -624,6 +629,7 @@ func indexMarkdown(run db.EvalRun, items []db.EvalReviewItem, assignments assign
 	builder.WriteString("   gitmoot skillopt feedback markdown import --packet <packet-dir> --reviewer <name>\n")
 	builder.WriteString("   ```\n\n")
 	builder.WriteString("Keep `.assignments.json` untouched. It is hidden Gitmoot metadata used to preserve and validate option mappings on import.\n\n")
+	writePhaseRecommendation(&builder, recommendation)
 	builder.WriteString("## Items\n\n")
 	for _, item := range items {
 		fmt.Fprintf(&builder, "- [%s](items/%s)\n", itemTitle(item), itemFilename(item.ItemID))
@@ -643,6 +649,35 @@ func indexMarkdown(run db.EvalRun, items []db.EvalReviewItem, assignments assign
 	builder.WriteString("\n## Submit Feedback\n\n")
 	builder.WriteString("After all items are filled in `feedback.yml`, run the import command above.\n")
 	return builder.String()
+}
+
+func phaseRecommendationForRun(ctx context.Context, store *db.Store, run db.EvalRun, items []db.EvalReviewItem) (skillopt.PhaseRecommendation, error) {
+	feedbackEvents, err := store.ListFeedbackEvents(ctx, run.ID)
+	if err != nil {
+		return skillopt.PhaseRecommendation{}, err
+	}
+	rankedEvents, err := store.ListRankedFeedbackEvents(ctx, run.ID)
+	if err != nil {
+		return skillopt.PhaseRecommendation{}, err
+	}
+	pairwisePreferences, err := store.ListPairwisePreferences(ctx, run.ID)
+	if err != nil {
+		return skillopt.PhaseRecommendation{}, err
+	}
+	return skillopt.RecommendPhaseForItems(run, items, feedbackEvents, rankedEvents, pairwisePreferences), nil
+}
+
+func writePhaseRecommendation(builder *strings.Builder, recommendation skillopt.PhaseRecommendation) {
+	builder.WriteString("## Phase Recommendation\n\n")
+	fmt.Fprintf(builder, "- Current mode: `%s`\n", recommendation.CurrentMode)
+	if recommendation.FeedbackCount > 0 {
+		builder.WriteString("- Outcome recommendation is hidden in blind review packets after feedback exists to avoid biasing reviewers.\n")
+		builder.WriteString("- Run `gitmoot skillopt review status --run <run-id>` after importing feedback to inspect the full recommendation.\n\n")
+		return
+	}
+	fmt.Fprintf(builder, "- Ranking stability: `%s`\n", recommendation.RankingStability)
+	fmt.Fprintf(builder, "- Recommended next mode: `%s`\n", recommendation.RecommendedMode)
+	fmt.Fprintf(builder, "- %s\n\n", recommendation.Summary())
 }
 
 func displayOptionLabels(options []blindOptionAssignment) []string {
