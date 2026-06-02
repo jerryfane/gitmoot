@@ -415,6 +415,23 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 	if err := os.WriteFile(requestPath, []byte("Train landing page plans with diverse review items."), 0o644); err != nil {
 		t.Fatalf("write request file: %v", err)
 	}
+	itemsPath := filepath.Join(t.TempDir(), "items.yml")
+	if err := os.WriteFile(itemsPath, []byte(`items:
+  - item_id: hero-saas
+    title: SaaS hero
+    brief: Design a landing page hero for a workflow SaaS product.
+    target_audience: founders
+    output_type: vue landing page
+    artifact_hints:
+      - clickable preview
+  - item_id: ecommerce-proof
+    title: Ecommerce proof section
+    brief: Design a social proof section for an ecommerce analytics product.
+    target_audience: growth teams
+    output_type: vue landing page
+`), 0o644); err != nil {
+		t.Fatalf("write items file: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{
 		"skillopt", "train", "start",
@@ -428,6 +445,7 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 		"--task-kind", "design",
 		"--mode", "explore",
 		"--options", "4",
+		"--items-file", itemsPath,
 		"--dry-run",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -475,6 +493,7 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 		"--repo", "owner/product",
 		"--session", "landing-train",
 		"--request", "Train landing page plans.",
+		"--items-file", itemsPath,
 	}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("train start without yes exit code = %d, want 2; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
@@ -497,12 +516,13 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 		"--task-kind", "design",
 		"--mode", "explore",
 		"--options", "4",
+		"--items-file", itemsPath,
 		"--yes",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("train start exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "created train session landing-train") {
+	if !strings.Contains(stdout.String(), "created train session landing-train") || !strings.Contains(stdout.String(), "preferred_gate: soft") || !strings.Contains(stdout.String(), "items: 2") || !strings.Contains(stdout.String(), "warning: preview repo must be public or GitHub Pages-enabled") {
 		t.Fatalf("train start stdout = %q", stdout.String())
 	}
 	store, err = db.Open(paths.Database)
@@ -520,8 +540,25 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
 	}
-	if iteration.BaseTemplateVersionID != installed.VersionID || iteration.Mode != db.EvalRunModeExplore || iteration.ExplorationLevel != db.ExplorationLevelHigh || iteration.EvalRunID != "landing-train-review-001" {
+	if iteration.BaseTemplateVersionID != installed.VersionID || iteration.Mode != db.EvalRunModeExplore || iteration.ExplorationLevel != db.ExplorationLevelHigh || iteration.EvalRunID != "landing-train-review-001" || iteration.State != skillopt.TrainStateItemsReady {
 		t.Fatalf("iteration = %+v", iteration)
+	}
+	run, err := store.GetEvalRun(context.Background(), "landing-train-review-001")
+	if err != nil {
+		t.Fatalf("GetEvalRun returned error: %v", err)
+	}
+	if run.TemplateVersionID != installed.VersionID || run.TargetRepo != "owner/product" || run.OptionsCount != 4 || skillOptMetadataString(run.MetadataJSON, "evaluation", "preferred_gate") != "soft" {
+		t.Fatalf("eval run = %+v metadata=%s", run, run.MetadataJSON)
+	}
+	if !strings.Contains(run.MetadataJSON, "preview repo must be public or GitHub Pages-enabled") {
+		t.Fatalf("eval run metadata did not include preview warning: %s", run.MetadataJSON)
+	}
+	items, err := store.ListEvalReviewItems(context.Background(), "landing-train-review-001")
+	if err != nil {
+		t.Fatalf("ListEvalReviewItems returned error: %v", err)
+	}
+	if len(items) != 2 || items[0].ItemID != "ecommerce-proof" || !strings.Contains(items[0].MetadataJSON, "growth teams") {
+		t.Fatalf("items = %+v", items)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close after start returned error: %v", err)
@@ -536,6 +573,7 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 		"--repo", "owner/product",
 		"--session", "landing-train",
 		"--request", "Overwrite existing train session.",
+		"--items-file", itemsPath,
 		"--yes",
 	}, &stdout, &stderr)
 	if code != 1 {
@@ -559,13 +597,51 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 		t.Fatalf("Close after duplicate start returned error: %v", err)
 	}
 
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize before eval-run collision returned error: %v", err)
+	}
+	store, err = db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open before eval-run collision returned error: %v", err)
+	}
+	if err := store.UpsertEvalRun(context.Background(), db.EvalRun{
+		ID:                "eval-collision-review-001",
+		TemplateID:        "planner",
+		TemplateVersionID: installed.VersionID,
+		TargetRepo:        "owner/other",
+		State:             "review",
+	}); err != nil {
+		t.Fatalf("UpsertEvalRun collision returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close before eval-run collision returned error: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"skillopt", "train", "start",
+		"--home", home,
+		"--template", "planner",
+		"--repo", "owner/product",
+		"--session", "eval-collision",
+		"--request", "Train landing page plans.",
+		"--items-file", itemsPath,
+		"--yes",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("eval-run collision train start exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "eval run eval-collision-review-001 already exists") {
+		t.Fatalf("eval-run collision stderr = %q", stderr.String())
+	}
+
 	stdout.Reset()
 	stderr.Reset()
 	code = Run([]string{"skillopt", "train", "status", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("train status exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "current_phase: request_confirmed") || !strings.Contains(stdout.String(), "blocked_step: workspace_ready") {
+	if !strings.Contains(stdout.String(), "current_phase: items_ready") || !strings.Contains(stdout.String(), "blocked_step: options_generated") || !strings.Contains(stdout.String(), "review_items: 2") {
 		t.Fatalf("status stdout = %q", stdout.String())
 	}
 
@@ -649,6 +725,17 @@ func TestGeneratedSkillOptTrainSessionIDIncludesSubsecondEntropy(t *testing.T) {
 
 func TestSkillOptTrainStartDryRunDoesNotInitializeFreshHome(t *testing.T) {
 	home := t.TempDir()
+	itemsPath := filepath.Join(t.TempDir(), "items.yml")
+	if err := os.WriteFile(itemsPath, []byte(`items:
+  - title: One
+    brief: First item.
+    output_type: markdown
+  - title: Two
+    brief: Second item.
+    output_type: markdown
+`), 0o644); err != nil {
+		t.Fatalf("write items file: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{
 		"skillopt", "train", "start",
@@ -656,6 +743,7 @@ func TestSkillOptTrainStartDryRunDoesNotInitializeFreshHome(t *testing.T) {
 		"--template", "planner",
 		"--repo", "owner/product",
 		"--request", "Train landing page plans.",
+		"--items-file", itemsPath,
 		"--dry-run",
 	}, &stdout, &stderr)
 	if code != 1 {
@@ -666,6 +754,121 @@ func TestSkillOptTrainStartDryRunDoesNotInitializeFreshHome(t *testing.T) {
 	}
 	if _, err := os.Stat(config.PathsForHome(home).Home); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dry-run initialized home, stat err=%v", err)
+	}
+}
+
+func TestSkillOptTrainStartRejectsTooFewItemsAndWarnsOnHomogeneousItems(t *testing.T) {
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if err := store.UpsertAgentTemplate(context.Background(), cliSkillOptTemplate("designer", "Design well.")); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	dir := t.TempDir()
+	tooFewPath := filepath.Join(dir, "too-few.yml")
+	if err := os.WriteFile(tooFewPath, []byte(`items:
+  - title: Landing page
+    brief: Create a product landing page.
+    output_type: vue
+`), 0o644); err != nil {
+		t.Fatalf("write too-few items: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"skillopt", "train", "start",
+		"--home", home,
+		"--template", "designer",
+		"--repo", "owner/product",
+		"--request", "Train generic landing pages.",
+		"--items-file", tooFewPath,
+		"--yes",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("too-few train start exit code = %d, want 2; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "at least 2 items, got 1") {
+		t.Fatalf("too-few stderr = %q", stderr.String())
+	}
+
+	homogeneousPath := filepath.Join(dir, "homogeneous.yml")
+	if err := os.WriteFile(homogeneousPath, []byte(`items:
+  - title: Landing page
+    brief: Create a product landing page.
+    output_type: vue
+  - title: Landing page
+    brief: Create a product landing page.
+    output_type: vue
+  - title: Landing page
+    brief: Create a product landing page.
+    output_type: vue
+`), 0o644); err != nil {
+		t.Fatalf("write homogeneous items: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"skillopt", "train", "start",
+		"--home", home,
+		"--template", "designer",
+		"--repo", "owner/product",
+		"--session", "homogeneous-train",
+		"--request", "Train generic landing pages.",
+		"--items-file", homogeneousPath,
+		"--task-kind", "custom",
+		"--yes",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("homogeneous train start exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "preferred_gate: hard_then_soft") || !strings.Contains(stdout.String(), "warning: duplicate item title") || !strings.Contains(stdout.String(), "warning: training items look homogeneous") {
+		t.Fatalf("homogeneous stdout = %q", stdout.String())
+	}
+}
+
+func TestReadSkillOptTrainItemsAcceptsTopLevelArray(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "items.yml")
+	if err := os.WriteFile(path, []byte(`- item_id: alpha
+  title: Alpha item
+  brief: Create an alpha output.
+  output_type: markdown
+- item_id: beta
+  title: Beta item
+  brief: Create a beta output.
+  output_type: markdown
+`), 0o644); err != nil {
+		t.Fatalf("write items file: %v", err)
+	}
+	items, warnings, err := readSkillOptTrainItems(path)
+	if err != nil {
+		t.Fatalf("readSkillOptTrainItems returned error: %v", err)
+	}
+	if len(items) != 2 || items[0].ItemID != "alpha" || len(warnings) != 0 {
+		t.Fatalf("items=%+v warnings=%+v", items, warnings)
+	}
+}
+
+func TestReadSkillOptTrainItemsRejectsMalformedWrappedItems(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "items.yml")
+	if err := os.WriteFile(path, []byte(`items:
+  - item_id: alpha
+    title: Alpha item
+    brief: Create an alpha output.
+    output_type: markdown
+    artifact_hints: scalar-not-list
+`), 0o644); err != nil {
+		t.Fatalf("write items file: %v", err)
+	}
+	if _, _, err := readSkillOptTrainItems(path); err == nil || !strings.Contains(err.Error(), "decode items-file") {
+		t.Fatalf("readSkillOptTrainItems error = %v", err)
 	}
 }
 
@@ -1221,7 +1424,6 @@ func TestSkillOptReviewItemAddStoresArtifacts(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("skillopt review create exit code = %d, stderr=%s", code, stderr.String())
 	}
-
 	inputDir := t.TempDir()
 	baselinePath := filepath.Join(inputDir, "baseline.md")
 	candidatePath := filepath.Join(inputDir, "candidate.md")
@@ -1348,6 +1550,21 @@ func TestSkillOptRankedReviewItemAddAndMarkdownExport(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("skillopt review create exit code = %d, stderr=%s", code, stderr.String())
 	}
+	store, err = db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open before preseeded review item returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewItem(context.Background(), db.EvalReviewItem{
+		RunID:        "planner-explore-1",
+		ItemID:       "item-001",
+		Title:        "Preplanned landing page",
+		MetadataJSON: `{"brief":"Preserve this brief","output_type":"vue"}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem preseed returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after preseeded review item returned error: %v", err)
+	}
 
 	inputDir := t.TempDir()
 	optionPaths := map[string]string{}
@@ -1464,6 +1681,13 @@ func TestSkillOptRankedReviewItemAddAndMarkdownExport(t *testing.T) {
 	}
 	if len(options) != 4 || options[0].Label != "a" || options[3].Label != "e" || !strings.Contains(options[0].MetadataJSON, optionPaths["a"]) {
 		t.Fatalf("options = %+v", options)
+	}
+	items, err := store.ListEvalReviewItems(context.Background(), "planner-explore-1")
+	if err != nil {
+		t.Fatalf("ListEvalReviewItems returned error: %v", err)
+	}
+	if len(items) != 1 || items[0].Title != "Landing page" || !strings.Contains(items[0].MetadataJSON, "Preserve this brief") {
+		t.Fatalf("item metadata was not preserved after option add: %+v", items)
 	}
 	for _, option := range options {
 		if option.Label == "d" {
