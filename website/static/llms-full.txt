@@ -285,6 +285,8 @@ gitmoot lock release owner/repo <branch> --owner <agent>
 ```sh
 gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id>
 gitmoot skillopt review item add --run <run-id> --item <item-id> --baseline baseline.md --candidate candidate.md [--title text]
+gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id> --mode explore --options 4
+gitmoot skillopt review item add --run <run-id> --item <item-id> --option a=option-a.md --option b=option-b.md [...]
 gitmoot skillopt review status --run <run-id>
 gitmoot skillopt export --run <run-id> --output training.json
 gitmoot skillopt import --file candidate.json [--artifact-dir artifacts]
@@ -301,6 +303,11 @@ gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issu
 Create a review run, add saved baseline/candidate outputs as review items,
 export a Markdown or GitHub feedback packet, import the completed feedback, then
 export `training.json` for a future external `gitmoot-skillopt` optimizer.
+Use ranked exploration when the template needs broad search: start with
+`--mode explore --options 4` to `6`, rank every option, record useful/rejected
+traits, then narrow into `refine`, `distill`, and finally A/B `validate`.
+`skillopt review status` reports ranking stability and the recommended next
+mode, but the recommendation is advisory only.
 Dry-run optimization validates the contract without model calls:
 
 ```sh
@@ -337,6 +344,10 @@ run-scoped short lines such as `run_id: run-1` followed by
 canonical feedback events and ignores unrelated comments. Repo selection uses
 `--repo`, then the eval run target repo, then the template source repo, then
 optional `[feedback].repo = "owner/reviews"` in Gitmoot config.
+
+Detailed ranked exploration examples, including a landing-page visual task and
+a non-visual writing task, live in
+[docs/skillopt-exchange-contract.md](docs/skillopt-exchange-contract.md).
 
 Detailed command coverage lives in
 [skills/gitmoot/references/CLI.md](skills/gitmoot/references/CLI.md).
@@ -2085,6 +2096,168 @@ Expected signals:
    /tmp/gitmoot-current daemon status --home "$GITMOOT_SMOKE_HOME"
    ```
 
+## Ranked SkillOpt Exploration Smoke Test
+
+Goal: clean temp home -> N-way exploration run -> option artifact registration
+-> Markdown packet export/import -> ranked pairwise expansion -> training
+package inspection. The optional GitHub step proves the same packet can be
+published to a review issue or PR and synced back.
+
+1. Build a local test binary and use isolated directories.
+
+   ```sh
+   GOTOOLCHAIN=go1.26.0 go build -o /tmp/gitmoot-current ./cmd/gitmoot
+   export GITMOOT_SMOKE_HOME=/tmp/gitmoot-ranked-smoke
+   export GITMOOT_SMOKE_WORK=/tmp/gitmoot-ranked-smoke-work
+   rm -rf "$GITMOOT_SMOKE_HOME" "$GITMOOT_SMOKE_WORK"
+   mkdir -p "$GITMOOT_SMOKE_WORK"
+   /tmp/gitmoot-current init --home "$GITMOOT_SMOKE_HOME"
+   /tmp/gitmoot-current agent template draft ranked-smoke-template \
+     --output "$GITMOOT_SMOKE_WORK/ranked-smoke-template.md" \
+     --force
+   /tmp/gitmoot-current agent template add ranked-smoke-template \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --file "$GITMOOT_SMOKE_WORK/ranked-smoke-template.md"
+   ```
+
+2. Create four tiny option artifacts.
+
+   ```sh
+   printf 'Hero A: compact title, mascot first.\n' > "$GITMOOT_SMOKE_WORK/hero-a.md"
+   printf 'Hero B: long product explanation, no motion.\n' > "$GITMOOT_SMOKE_WORK/hero-b.md"
+   printf 'Hero C: clear product explanation, balanced visual.\n' > "$GITMOOT_SMOKE_WORK/hero-c.md"
+   printf 'Hero D: animation-heavy layout, weaker copy.\n' > "$GITMOOT_SMOKE_WORK/hero-d.md"
+   ```
+
+3. Create an exploration run and register the option artifacts.
+
+   ```sh
+   /tmp/gitmoot-current skillopt review create \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --template ranked-smoke-template \
+     --repo owner/gitmoot-web \
+     --run ranked-smoke-001 \
+     --mode explore \
+     --exploration-level high \
+     --options 4
+
+   /tmp/gitmoot-current skillopt review item add \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --run ranked-smoke-001 \
+     --item hero-001 \
+     --title "Ranked smoke hero" \
+     --option a="$GITMOOT_SMOKE_WORK/hero-a.md" \
+     --option b="$GITMOOT_SMOKE_WORK/hero-b.md" \
+     --option c="$GITMOOT_SMOKE_WORK/hero-c.md" \
+     --option d="$GITMOOT_SMOKE_WORK/hero-d.md" \
+     --metadata-json '{"task":"landing-page","preview_url":"https://example.invalid/preview"}'
+   ```
+
+4. Export the local Markdown packet, fill ranked feedback, and import it.
+
+   ```sh
+   /tmp/gitmoot-current skillopt feedback markdown export \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --run ranked-smoke-001 \
+     --output "$GITMOOT_SMOKE_WORK/packet"
+
+   cat > "$GITMOOT_SMOKE_WORK/packet/feedback.yml" <<'EOF'
+   run_id: ranked-smoke-001
+   reviewer: smoke
+   items:
+     - item_id: hero-001
+       ranking:
+         - C > A > D > B
+       useful_traits:
+         C:
+           - clearest product explanation
+         A:
+           - strongest visual identity
+       rejected_traits:
+         B:
+           - too generic
+       reasoning: C is clearest overall, with A worth preserving visually.
+   EOF
+
+   /tmp/gitmoot-current skillopt feedback markdown import \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --packet "$GITMOOT_SMOKE_WORK/packet"
+   ```
+
+5. Inspect status and export the training package.
+
+   ```sh
+   /tmp/gitmoot-current skillopt review status \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --run ranked-smoke-001
+
+   /tmp/gitmoot-current skillopt export \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --run ranked-smoke-001 \
+     --output "$GITMOOT_SMOKE_WORK/training.json"
+
+   node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); console.log(JSON.stringify({mode:p.eval_run.mode, options:p.items[0].options.length, ranked:p.ranked_feedback_events.length, pairwise:p.pairwise_preferences.length}, null, 2));' "$GITMOOT_SMOKE_WORK/training.json"
+   ```
+
+Expected signals:
+
+- `review create` prints `created review ranked-smoke-001`.
+- `review item add` prints `added review item hero-001`.
+- `feedback markdown export` writes `index.md`, `feedback.yml`, hidden
+  assignment metadata, and a collision-safe linked item file such as
+  `items/hero-001-<hash>.md` under the temp work directory.
+- `feedback markdown import` prints `imported 1 feedback events`.
+- `review status` prints `mode: explore`, `feedback: 1`,
+  `pairwise_preferences: 6`, `packet_blockers: 0`, and
+  `training_blockers: 0`.
+- The exported package inspection prints:
+
+  ```json
+  {
+    "mode": "explore",
+    "options": 4,
+    "ranked": 1,
+    "pairwise": 6
+  }
+  ```
+
+6. Optional GitHub collector smoke with a disposable issue or PR.
+
+   Use a repository intended for review packets, not the real project repo
+   unless that is intentional.
+
+   ```sh
+   /tmp/gitmoot-current skillopt feedback github publish \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --run ranked-smoke-001 \
+     --repo owner/reviews
+
+   gh issue comment <issue-number> --repo owner/reviews --body 'run_id: ranked-smoke-001
+   hero-001 ranking: C > A > D > B
+   best traits:
+   - C: clearest product explanation
+   - A: strongest visual identity
+   reject:
+   - B: too generic'
+
+   /tmp/gitmoot-current skillopt feedback github sync \
+     --home "$GITMOOT_SMOKE_HOME" \
+     --run ranked-smoke-001 \
+     --repo owner/reviews \
+     --issue <issue-number>
+   ```
+
+   For PR comment mode, use `--pr <number>` instead of `--issue <number>` in
+   `publish` and `sync`.
+
+Expected GitHub signals:
+
+- The published issue or PR comment contains a ranked feedback packet with the
+  same item id, `hero-001`.
+- `github sync` imports matching comments and ignores unrelated comments.
+- A repeated sync does not duplicate already imported feedback from the same
+  comment URL.
+
 ## Agent Start Smoke Test
 
 Goal: prove `gitmoot agent start` can create a Codex session, store the session
@@ -2511,6 +2684,14 @@ The plugin is only the runtime discovery surface for this skill. Local agent
 invocation still goes through the `gitmoot` CLI and the same registered agent,
 repo access, runtime adapter, and job history model used by PR-comment jobs.
 
+For SkillOpt template learning, use ranked exploration when the user needs broad
+search across multiple directions, then narrow through refine and distill before
+final validation. Keep final promotion decisions on fresh A/B validation items
+unless the user explicitly asks for another evaluation design. Treat
+`gitmoot skillopt review status` recommendations as advisory. Do not run heavy
+SkillOpt optimization after every tiny feedback round unless the user explicitly
+wants that; collect enough rankings and trait notes first.
+
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).
 For current-chat template capture, read
@@ -2897,6 +3078,8 @@ gitmoot lock show owner/repo <branch>
 ```sh
 gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id>
 gitmoot skillopt review item add --run <run-id> --item <item-id> --baseline baseline.md --candidate candidate.md [--title text]
+gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id> --mode explore --exploration-level high --options 4
+gitmoot skillopt review item add --run <run-id> --item <item-id> --option a=option-a.md --option b=option-b.md [...]
 gitmoot skillopt review status --run <run-id>
 gitmoot skillopt export --run <run-id> [--output training.json]
 gitmoot skillopt import --file candidate.json [--artifact-dir artifacts]
@@ -2911,10 +3094,14 @@ gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issu
 ```
 
 `skillopt review create` starts a review run for a template and target repo.
-`skillopt review item add` stores saved baseline/candidate outputs as artifact
-backed A/B review items. `skillopt review status` reports whether the run has
-items, complete artifacts, imported feedback for every item, and enough metadata
-to export.
+Use the default A/B shape for validation, or pass `--mode explore|refine|distill`
+with `--options N` for ranked exploration. `skillopt review item add` stores
+saved baseline/candidate outputs as artifact-backed A/B review items, or
+repeated `--option label=path` artifacts for ranked N-way items. `skillopt
+review status` reports whether the run has items, complete artifacts, imported
+feedback for every item, ranking stability, pairwise preference count, and a
+recommended next mode. Recommendations are advisory; Gitmoot never changes mode,
+imports a candidate, or promotes a template automatically.
 
 `skillopt export` writes a JSON training package with the template snapshot,
 eval run, review items, artifact manifests, feedback events when present, and
@@ -2940,6 +3127,10 @@ that Gitmoot uses to validate the full response and import de-blinded canonical
 feedback events. Open `index.md`, review every file in `items/*.md`, set
 `reviewer`, edit `feedback.yml` with exactly one of `a`, `b`, `tie`, `neither`,
 or `skip` for every item, and leave `.assignments.json` untouched.
+Ranked packets use the same files, but `feedback.yml` contains ordered rankings
+plus optional `useful_traits`, `rejected_traits`, and reasoning. After feedback
+exists, packet summaries hide outcome-bearing phase details so later blind
+reviewers do not see the current winner before responding.
 
 The GitHub feedback collector publishes the same blind A/B review packet to a
 new issue by default, or to an existing PR when `--pr <number>` is provided.
@@ -2949,6 +3140,9 @@ Gitmoot config. Reviewers can reply with full YAML or run-scoped short-form
 lines such as `run_id: run-1` followed by `item-001: b - More concrete.`.
 `github sync` imports valid comments into canonical feedback events and ignores
 unrelated comments safely.
+Ranked GitHub comments can use `item-001 ranking: C > A > D > B` plus trait
+notes. Use the ranked workflow for exploration/refinement and return to A/B
+validation for final promotion decisions on fresh items.
 
 ---
 
@@ -3145,6 +3339,73 @@ it explicitly:
 ```sh
 gitmoot goal import --file GOAL-feature.md --repo owner/repo
 ```
+
+## SkillOpt Ranked Exploration
+
+Use ranked exploration when a template needs broad search before final
+validation. Keep final promotion decisions on fresh A/B validation items unless
+the user explicitly asks for a different evaluation design.
+
+1. Explore with four to six diverse options per item.
+2. Rank every option and capture useful/rejected traits.
+3. Refine with two to three combined candidates once a direction stabilizes.
+4. Distill the accumulated feedback into a candidate template.
+5. Validate current template vs candidate on fresh A/B items.
+
+Landing-page example:
+
+```sh
+gitmoot skillopt review create \
+  --template landing-page-designer \
+  --repo owner/gitmoot-web \
+  --run landing-page-explore-001 \
+  --mode explore \
+  --exploration-level high \
+  --options 4
+
+gitmoot skillopt review item add \
+  --run landing-page-explore-001 \
+  --item hero-001 \
+  --title "Gitmoot landing page hero" \
+  --option a=previews/hero-a.md \
+  --option b=previews/hero-b.md \
+  --option c=previews/hero-c.md \
+  --option d=previews/hero-d.md
+
+gitmoot skillopt feedback markdown export \
+  --run landing-page-explore-001 \
+  --output .gitmoot/evals/landing-page-explore-001
+```
+
+Non-visual writing tasks use the same shape with text artifacts:
+
+```sh
+gitmoot skillopt review create \
+  --template x-post-writer \
+  --repo owner/content-workflows \
+  --run x-post-style-explore-001 \
+  --mode explore \
+  --options 5
+
+gitmoot skillopt review item add \
+  --run x-post-style-explore-001 \
+  --item thread-hook-001 \
+  --option a=posts/hook-a.txt \
+  --option b=posts/hook-b.txt \
+  --option c=posts/hook-c.txt \
+  --option d=posts/hook-d.txt \
+  --option e=posts/hook-e.txt
+```
+
+After importing feedback, inspect:
+
+```sh
+gitmoot skillopt review status --run landing-page-explore-001
+```
+
+Only run the external optimizer when the user wants a candidate update and the
+status recommendation is stable enough for the current phase. Do not run heavy
+SkillOpt optimization after every tiny feedback round by default.
 
 ## Execution Model
 
