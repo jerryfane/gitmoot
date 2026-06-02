@@ -187,6 +187,42 @@ type EvalRun struct {
 	UpdatedAt         string
 }
 
+type SkillOptTrainSession struct {
+	ID                string
+	TemplateID        string
+	TemplateVersionID string
+	TargetRepo        string
+	WorkspaceRepo     string
+	PreviewRepo       string
+	RequestSummary    string
+	TaskKind          string
+	State             string
+	MetadataJSON      string
+	CreatedAt         string
+	UpdatedAt         string
+}
+
+type SkillOptTrainIteration struct {
+	ID                    string
+	SessionID             string
+	EvalRunID             string
+	BaseTemplateVersionID string
+	CandidateVersionID    string
+	Mode                  string
+	ExplorationLevel      string
+	State                 string
+	IssueRepo             string
+	IssueNumber           int64
+	IssueURL              string
+	PullRequestRepo       string
+	PullRequestNumber     int64
+	PullRequestURL        string
+	DecisionReason        string
+	MetadataJSON          string
+	CreatedAt             string
+	UpdatedAt             string
+}
+
 const (
 	EvalRunModeExplore  = "explore"
 	EvalRunModeRefine   = "refine"
@@ -1819,6 +1855,193 @@ func (s *Store) GetEvalRun(ctx context.Context, id string) (EvalRun, error) {
 	return scanEvalRun(row)
 }
 
+func (s *Store) UpsertSkillOptTrainSession(ctx context.Context, session SkillOptTrainSession) error {
+	session, err := normalizeSkillOptTrainSession(session)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO skillopt_train_sessions(
+			id, template_id, template_version_id, target_repo, workspace_repo, preview_repo,
+			request_summary, task_kind, state, metadata_json, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+			template_id = excluded.template_id,
+			template_version_id = excluded.template_version_id,
+			target_repo = excluded.target_repo,
+			workspace_repo = excluded.workspace_repo,
+			preview_repo = excluded.preview_repo,
+			request_summary = excluded.request_summary,
+			task_kind = excluded.task_kind,
+			state = excluded.state,
+			metadata_json = excluded.metadata_json,
+			updated_at = CURRENT_TIMESTAMP`,
+		session.ID, session.TemplateID, session.TemplateVersionID, session.TargetRepo, session.WorkspaceRepo,
+		session.PreviewRepo, session.RequestSummary, session.TaskKind, session.State, session.MetadataJSON)
+	return err
+}
+
+func normalizeSkillOptTrainSession(session SkillOptTrainSession) (SkillOptTrainSession, error) {
+	session.ID = strings.TrimSpace(session.ID)
+	if session.ID == "" {
+		return SkillOptTrainSession{}, errors.New("skillopt train session id is required")
+	}
+	session.TemplateID = strings.TrimSpace(session.TemplateID)
+	if session.TemplateID == "" {
+		return SkillOptTrainSession{}, errors.New("skillopt train session template id is required")
+	}
+	session.TemplateVersionID = strings.TrimSpace(session.TemplateVersionID)
+	session.TargetRepo = strings.TrimSpace(session.TargetRepo)
+	session.WorkspaceRepo = strings.TrimSpace(session.WorkspaceRepo)
+	session.PreviewRepo = strings.TrimSpace(session.PreviewRepo)
+	session.RequestSummary = strings.TrimSpace(session.RequestSummary)
+	session.TaskKind = strings.TrimSpace(strings.ToLower(session.TaskKind))
+	if session.TaskKind == "" {
+		session.TaskKind = "custom"
+	}
+	session.State = strings.TrimSpace(session.State)
+	if session.State == "" {
+		session.State = "request_confirmed"
+	}
+	session.MetadataJSON = strings.TrimSpace(session.MetadataJSON)
+	return session, nil
+}
+
+func (s *Store) GetSkillOptTrainSession(ctx context.Context, id string) (SkillOptTrainSession, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, template_id, template_version_id, target_repo, workspace_repo, preview_repo,
+			request_summary, task_kind, state, metadata_json, created_at, updated_at
+		FROM skillopt_train_sessions WHERE id = ?`, strings.TrimSpace(id))
+	return scanSkillOptTrainSession(row)
+}
+
+func (s *Store) UpsertSkillOptTrainIteration(ctx context.Context, iteration SkillOptTrainIteration) error {
+	iteration, err := normalizeSkillOptTrainIteration(iteration)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO skillopt_train_iterations(
+			id, session_id, eval_run_id, base_template_version_id, candidate_version_id,
+			mode, exploration_level, state, issue_repo, issue_number, issue_url,
+			pull_request_repo, pull_request_number, pull_request_url, decision_reason, metadata_json, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+			session_id = excluded.session_id,
+			eval_run_id = excluded.eval_run_id,
+			base_template_version_id = excluded.base_template_version_id,
+			candidate_version_id = excluded.candidate_version_id,
+			mode = excluded.mode,
+			exploration_level = excluded.exploration_level,
+			state = excluded.state,
+			issue_repo = excluded.issue_repo,
+			issue_number = excluded.issue_number,
+			issue_url = excluded.issue_url,
+			pull_request_repo = excluded.pull_request_repo,
+			pull_request_number = excluded.pull_request_number,
+			pull_request_url = excluded.pull_request_url,
+			decision_reason = excluded.decision_reason,
+			metadata_json = excluded.metadata_json,
+			updated_at = CURRENT_TIMESTAMP`,
+		iteration.ID, iteration.SessionID, iteration.EvalRunID, iteration.BaseTemplateVersionID, iteration.CandidateVersionID,
+		iteration.Mode, iteration.ExplorationLevel, iteration.State, iteration.IssueRepo, iteration.IssueNumber, iteration.IssueURL,
+		iteration.PullRequestRepo, iteration.PullRequestNumber, iteration.PullRequestURL, iteration.DecisionReason, iteration.MetadataJSON)
+	return err
+}
+
+func normalizeSkillOptTrainIteration(iteration SkillOptTrainIteration) (SkillOptTrainIteration, error) {
+	iteration.ID = strings.TrimSpace(iteration.ID)
+	if iteration.ID == "" {
+		return SkillOptTrainIteration{}, errors.New("skillopt train iteration id is required")
+	}
+	iteration.SessionID = strings.TrimSpace(iteration.SessionID)
+	if iteration.SessionID == "" {
+		return SkillOptTrainIteration{}, errors.New("skillopt train iteration session id is required")
+	}
+	iteration.EvalRunID = strings.TrimSpace(iteration.EvalRunID)
+	iteration.BaseTemplateVersionID = strings.TrimSpace(iteration.BaseTemplateVersionID)
+	iteration.CandidateVersionID = strings.TrimSpace(iteration.CandidateVersionID)
+	iteration.Mode = strings.TrimSpace(strings.ToLower(iteration.Mode))
+	if iteration.Mode == "" {
+		iteration.Mode = EvalRunModeExplore
+	}
+	switch iteration.Mode {
+	case EvalRunModeExplore, EvalRunModeRefine, EvalRunModeDistill, EvalRunModeValidate:
+	default:
+		return SkillOptTrainIteration{}, fmt.Errorf("skillopt train iteration mode %q is not supported", iteration.Mode)
+	}
+	iteration.ExplorationLevel = strings.TrimSpace(strings.ToLower(iteration.ExplorationLevel))
+	if iteration.ExplorationLevel == "" {
+		switch iteration.Mode {
+		case EvalRunModeExplore:
+			iteration.ExplorationLevel = ExplorationLevelHigh
+		case EvalRunModeRefine:
+			iteration.ExplorationLevel = ExplorationLevelMedium
+		default:
+			iteration.ExplorationLevel = ExplorationLevelLow
+		}
+	}
+	switch iteration.ExplorationLevel {
+	case ExplorationLevelHigh, ExplorationLevelMedium, ExplorationLevelLow:
+	default:
+		return SkillOptTrainIteration{}, fmt.Errorf("skillopt train iteration exploration level %q is not supported", iteration.ExplorationLevel)
+	}
+	iteration.State = strings.TrimSpace(iteration.State)
+	if iteration.State == "" {
+		iteration.State = "request_confirmed"
+	}
+	iteration.IssueRepo = strings.TrimSpace(iteration.IssueRepo)
+	iteration.IssueURL = strings.TrimSpace(iteration.IssueURL)
+	iteration.PullRequestRepo = strings.TrimSpace(iteration.PullRequestRepo)
+	iteration.PullRequestURL = strings.TrimSpace(iteration.PullRequestURL)
+	iteration.DecisionReason = strings.TrimSpace(iteration.DecisionReason)
+	iteration.MetadataJSON = strings.TrimSpace(iteration.MetadataJSON)
+	return iteration, nil
+}
+
+func (s *Store) GetSkillOptTrainIteration(ctx context.Context, id string) (SkillOptTrainIteration, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, session_id, eval_run_id, base_template_version_id,
+			candidate_version_id, mode, exploration_level, state, issue_repo, issue_number,
+			issue_url, pull_request_repo, pull_request_number, pull_request_url, decision_reason, metadata_json,
+			created_at, updated_at
+		FROM skillopt_train_iterations WHERE id = ?`, strings.TrimSpace(id))
+	return scanSkillOptTrainIteration(row)
+}
+
+func (s *Store) ListSkillOptTrainIterations(ctx context.Context, sessionID string) ([]SkillOptTrainIteration, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, session_id, eval_run_id, base_template_version_id,
+			candidate_version_id, mode, exploration_level, state, issue_repo, issue_number,
+			issue_url, pull_request_repo, pull_request_number, pull_request_url, decision_reason, metadata_json,
+			created_at, updated_at
+		FROM skillopt_train_iterations
+		WHERE session_id = ?
+		ORDER BY rowid`, strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var iterations []SkillOptTrainIteration
+	for rows.Next() {
+		iteration, err := scanSkillOptTrainIteration(rows)
+		if err != nil {
+			return nil, err
+		}
+		iterations = append(iterations, iteration)
+	}
+	return iterations, rows.Err()
+}
+
+func (s *Store) GetLatestSkillOptTrainIteration(ctx context.Context, sessionID string) (SkillOptTrainIteration, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, session_id, eval_run_id, base_template_version_id,
+			candidate_version_id, mode, exploration_level, state, issue_repo, issue_number,
+			issue_url, pull_request_repo, pull_request_number, pull_request_url, decision_reason, metadata_json,
+			created_at, updated_at
+		FROM skillopt_train_iterations
+		WHERE session_id = ?
+		ORDER BY rowid DESC
+		LIMIT 1`, strings.TrimSpace(sessionID))
+	return scanSkillOptTrainIteration(row)
+}
+
 func (s *Store) UpsertEvalReviewItem(ctx context.Context, item EvalReviewItem) error {
 	if strings.TrimSpace(item.ID) == "" {
 		item.ID = item.RunID + "/" + item.ItemID
@@ -2001,6 +2224,26 @@ func scanEvalRun(row interface{ Scan(dest ...any) error }) (EvalRun, error) {
 		return EvalRun{}, err
 	}
 	return run, nil
+}
+
+func scanSkillOptTrainSession(row interface{ Scan(dest ...any) error }) (SkillOptTrainSession, error) {
+	var session SkillOptTrainSession
+	if err := row.Scan(&session.ID, &session.TemplateID, &session.TemplateVersionID, &session.TargetRepo, &session.WorkspaceRepo, &session.PreviewRepo,
+		&session.RequestSummary, &session.TaskKind, &session.State, &session.MetadataJSON, &session.CreatedAt, &session.UpdatedAt); err != nil {
+		return SkillOptTrainSession{}, err
+	}
+	return session, nil
+}
+
+func scanSkillOptTrainIteration(row interface{ Scan(dest ...any) error }) (SkillOptTrainIteration, error) {
+	var iteration SkillOptTrainIteration
+	if err := row.Scan(&iteration.ID, &iteration.SessionID, &iteration.EvalRunID, &iteration.BaseTemplateVersionID,
+		&iteration.CandidateVersionID, &iteration.Mode, &iteration.ExplorationLevel, &iteration.State, &iteration.IssueRepo,
+		&iteration.IssueNumber, &iteration.IssueURL, &iteration.PullRequestRepo, &iteration.PullRequestNumber,
+		&iteration.PullRequestURL, &iteration.DecisionReason, &iteration.MetadataJSON, &iteration.CreatedAt, &iteration.UpdatedAt); err != nil {
+		return SkillOptTrainIteration{}, err
+	}
+	return iteration, nil
 }
 
 func scanEvalReviewItem(row interface{ Scan(dest ...any) error }) (EvalReviewItem, error) {
@@ -3195,6 +3438,44 @@ CREATE TABLE ranked_feedback_events (
 	source_url TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	UNIQUE(run_id, item_id, reviewer, source, source_url)
+);
+	`,
+	`
+CREATE TABLE skillopt_train_sessions (
+	id TEXT PRIMARY KEY,
+	template_id TEXT NOT NULL,
+	template_version_id TEXT NOT NULL DEFAULT '',
+	target_repo TEXT NOT NULL DEFAULT '',
+	workspace_repo TEXT NOT NULL DEFAULT '',
+	preview_repo TEXT NOT NULL DEFAULT '',
+	request_summary TEXT NOT NULL DEFAULT '',
+	task_kind TEXT NOT NULL DEFAULT 'custom',
+	state TEXT NOT NULL DEFAULT 'request_confirmed',
+	metadata_json TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE skillopt_train_iterations (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL,
+	eval_run_id TEXT NOT NULL DEFAULT '',
+	base_template_version_id TEXT NOT NULL DEFAULT '',
+	candidate_version_id TEXT NOT NULL DEFAULT '',
+	mode TEXT NOT NULL DEFAULT 'explore',
+	exploration_level TEXT NOT NULL DEFAULT 'high',
+	state TEXT NOT NULL DEFAULT 'request_confirmed',
+	issue_repo TEXT NOT NULL DEFAULT '',
+	issue_number INTEGER NOT NULL DEFAULT 0,
+	issue_url TEXT NOT NULL DEFAULT '',
+	pull_request_repo TEXT NOT NULL DEFAULT '',
+	pull_request_number INTEGER NOT NULL DEFAULT 0,
+	pull_request_url TEXT NOT NULL DEFAULT '',
+	decision_reason TEXT NOT NULL DEFAULT '',
+	metadata_json TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(session_id, id)
 );
 	`,
 }

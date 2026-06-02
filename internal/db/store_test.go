@@ -41,6 +41,8 @@ func TestOpenMigratesSchema(t *testing.T) {
 		"eval_review_options",
 		"feedback_events",
 		"ranked_feedback_events",
+		"skillopt_train_sessions",
+		"skillopt_train_iterations",
 	} {
 		ok, err := store.HasTable(ctx, table)
 		if err != nil {
@@ -53,6 +55,145 @@ func TestOpenMigratesSchema(t *testing.T) {
 
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("second Migrate returned error: %v", err)
+	}
+}
+
+func TestSkillOptTrainSessionAndIterationStorage(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	session := SkillOptTrainSession{
+		ID:                "landing-page-session",
+		TemplateID:        "landing-page-designer",
+		TemplateVersionID: "landing-page-designer@v3",
+		TargetRepo:        "owner/product",
+		WorkspaceRepo:     "owner/product-training",
+		PreviewRepo:       "owner/product-previews",
+		RequestSummary:    "Train a landing page designer with GitHub review previews.",
+		TaskKind:          "design",
+		State:             "workspace_ready",
+		MetadataJSON:      `{"source":"test"}`,
+	}
+	if err := store.UpsertSkillOptTrainSession(ctx, session); err != nil {
+		t.Fatalf("UpsertSkillOptTrainSession returned error: %v", err)
+	}
+	storedSession, err := store.GetSkillOptTrainSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainSession returned error: %v", err)
+	}
+	if storedSession.TemplateVersionID != session.TemplateVersionID || storedSession.WorkspaceRepo != session.WorkspaceRepo || storedSession.TaskKind != "design" || storedSession.MetadataJSON != session.MetadataJSON {
+		t.Fatalf("stored session = %+v", storedSession)
+	}
+
+	iteration := SkillOptTrainIteration{
+		ID:                    "landing-page-session-001",
+		SessionID:             session.ID,
+		EvalRunID:             "landing-page-trial-001",
+		BaseTemplateVersionID: "landing-page-designer@v3",
+		CandidateVersionID:    "landing-page-designer@v4",
+		Mode:                  EvalRunModeExplore,
+		ExplorationLevel:      ExplorationLevelHigh,
+		State:                 "candidate_created",
+		IssueRepo:             "owner/product-training",
+		IssueNumber:           67,
+		IssueURL:              "https://github.com/owner/product-training/issues/67",
+		PullRequestRepo:       "owner/product-training",
+		PullRequestNumber:     68,
+		PullRequestURL:        "https://github.com/owner/product-training/pull/68",
+		DecisionReason:        "candidate accepted for validation",
+		MetadataJSON:          `{"step":"candidate"}`,
+	}
+	if err := store.UpsertSkillOptTrainIteration(ctx, iteration); err != nil {
+		t.Fatalf("UpsertSkillOptTrainIteration returned error: %v", err)
+	}
+	storedIteration, err := store.GetSkillOptTrainIteration(ctx, iteration.ID)
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainIteration returned error: %v", err)
+	}
+	if storedIteration.CandidateVersionID != iteration.CandidateVersionID || storedIteration.IssueNumber != 67 || storedIteration.PullRequestNumber != 68 || storedIteration.DecisionReason != iteration.DecisionReason || storedIteration.MetadataJSON != iteration.MetadataJSON {
+		t.Fatalf("stored iteration = %+v", storedIteration)
+	}
+	iterations, err := store.ListSkillOptTrainIterations(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("ListSkillOptTrainIterations returned error: %v", err)
+	}
+	if len(iterations) != 1 || iterations[0].ID != iteration.ID {
+		t.Fatalf("iterations = %+v", iterations)
+	}
+	latest, err := store.GetLatestSkillOptTrainIteration(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if latest.ID != iteration.ID {
+		t.Fatalf("latest = %+v", latest)
+	}
+
+	newer := SkillOptTrainIteration{
+		ID:        "aaa-lexically-earlier",
+		SessionID: session.ID,
+		State:     "workspace_ready",
+	}
+	if err := store.UpsertSkillOptTrainIteration(ctx, newer); err != nil {
+		t.Fatalf("UpsertSkillOptTrainIteration newer returned error: %v", err)
+	}
+	iterations, err = store.ListSkillOptTrainIterations(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("ListSkillOptTrainIterations after newer returned error: %v", err)
+	}
+	if len(iterations) != 2 || iterations[0].ID != iteration.ID || iterations[1].ID != newer.ID {
+		t.Fatalf("iterations after same-second insert = %+v", iterations)
+	}
+	latest, err = store.GetLatestSkillOptTrainIteration(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration newer returned error: %v", err)
+	}
+	if latest.ID != newer.ID {
+		t.Fatalf("latest after same-second insert = %+v, want %+v", latest, newer)
+	}
+}
+
+func TestSkillOptTrainStorageDefaultsAndValidation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpsertSkillOptTrainSession(ctx, SkillOptTrainSession{ID: "session-1", TemplateID: "planner"}); err != nil {
+		t.Fatalf("UpsertSkillOptTrainSession defaults returned error: %v", err)
+	}
+	session, err := store.GetSkillOptTrainSession(ctx, "session-1")
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainSession returned error: %v", err)
+	}
+	if session.State != "request_confirmed" || session.TaskKind != "custom" {
+		t.Fatalf("session defaults = %+v", session)
+	}
+
+	if err := store.UpsertSkillOptTrainSession(ctx, SkillOptTrainSession{ID: "missing-template"}); err == nil || !strings.Contains(err.Error(), "template id") {
+		t.Fatalf("missing template error = %v", err)
+	}
+	if err := store.UpsertSkillOptTrainIteration(ctx, SkillOptTrainIteration{ID: "iteration-1"}); err == nil || !strings.Contains(err.Error(), "session id") {
+		t.Fatalf("missing session error = %v", err)
+	}
+	if err := store.UpsertSkillOptTrainIteration(ctx, SkillOptTrainIteration{ID: "iteration-1", SessionID: "session-1", Mode: "wide"}); err == nil || !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+
+	if err := store.UpsertSkillOptTrainIteration(ctx, SkillOptTrainIteration{ID: "iteration-1", SessionID: "session-1"}); err != nil {
+		t.Fatalf("UpsertSkillOptTrainIteration defaults returned error: %v", err)
+	}
+	iteration, err := store.GetSkillOptTrainIteration(ctx, "iteration-1")
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.Mode != EvalRunModeExplore || iteration.ExplorationLevel != ExplorationLevelHigh || iteration.State != "request_confirmed" {
+		t.Fatalf("iteration defaults = %+v", iteration)
 	}
 }
 
