@@ -288,6 +288,9 @@ type RankedFeedbackEvent struct {
 	Winner             string
 	UsefulTraitsJSON   string
 	RejectedTraitsJSON string
+	Quality            string
+	ContinueMode       string
+	Promote            string
 	Reasoning          string
 	Reviewer           string
 	Source             string
@@ -2073,6 +2076,18 @@ func (s *Store) GetLatestSkillOptTrainIteration(ctx context.Context, sessionID s
 	return scanSkillOptTrainIteration(row)
 }
 
+func (s *Store) GetSkillOptTrainIterationByEvalRun(ctx context.Context, evalRunID string) (SkillOptTrainIteration, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, session_id, eval_run_id, base_template_version_id,
+			candidate_version_id, mode, exploration_level, state, issue_repo, issue_number,
+			issue_url, pull_request_repo, pull_request_number, pull_request_url, decision_reason, metadata_json,
+			created_at, updated_at
+		FROM skillopt_train_iterations
+		WHERE eval_run_id = ?
+		ORDER BY rowid DESC
+		LIMIT 1`, strings.TrimSpace(evalRunID))
+	return scanSkillOptTrainIteration(row)
+}
+
 func (s *Store) UpsertEvalReviewItem(ctx context.Context, item EvalReviewItem) error {
 	if strings.TrimSpace(item.ID) == "" {
 		item.ID = item.RunID + "/" + item.ItemID
@@ -2472,22 +2487,25 @@ func (s *Store) UpsertRankedFeedbackEvent(ctx context.Context, event RankedFeedb
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO ranked_feedback_events(
 			id, run_id, item_id, ranking_json, winner, useful_traits_json, rejected_traits_json,
-			reasoning, reviewer, source, source_url, created_at
+			quality, continue_mode, promote, reasoning, reviewer, source, source_url, created_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(run_id, item_id, reviewer, source, source_url) DO UPDATE SET
 			id = excluded.id,
 			ranking_json = excluded.ranking_json,
 			winner = excluded.winner,
 			useful_traits_json = excluded.useful_traits_json,
 			rejected_traits_json = excluded.rejected_traits_json,
+			quality = excluded.quality,
+			continue_mode = excluded.continue_mode,
+			promote = excluded.promote,
 			reasoning = excluded.reasoning,
 			reviewer = excluded.reviewer,
 			source = excluded.source,
 			source_url = excluded.source_url,
 			created_at = excluded.created_at`,
 		event.ID, event.RunID, event.ItemID, event.RankingJSON, event.Winner, event.UsefulTraitsJSON, event.RejectedTraitsJSON,
-		event.Reasoning, event.Reviewer, event.Source, event.SourceURL, event.CreatedAt)
+		event.Quality, event.ContinueMode, event.Promote, event.Reasoning, event.Reviewer, event.Source, event.SourceURL, event.CreatedAt)
 	return err
 }
 
@@ -2587,6 +2605,18 @@ func normalizeRankedFeedbackEvent(event RankedFeedbackEvent) (RankedFeedbackEven
 	}
 	event.UsefulTraitsJSON = strings.TrimSpace(event.UsefulTraitsJSON)
 	event.RejectedTraitsJSON = strings.TrimSpace(event.RejectedTraitsJSON)
+	event.Quality = normalizeRankedFeedbackQuality(event.Quality)
+	if event.Quality == "__invalid__" {
+		return RankedFeedbackEvent{}, errors.New("ranked feedback quality must be one of poor, acceptable, or strong")
+	}
+	event.ContinueMode = normalizeRankedFeedbackContinueMode(event.ContinueMode)
+	if event.ContinueMode == "__invalid__" {
+		return RankedFeedbackEvent{}, errors.New("ranked feedback continue_mode must be one of explore, refine, distill, or validate")
+	}
+	event.Promote = normalizeRankedFeedbackPromote(event.Promote)
+	if event.Promote == "__invalid__" {
+		return RankedFeedbackEvent{}, errors.New("ranked feedback promote must be yes or no")
+	}
 	event.Reasoning = strings.TrimSpace(event.Reasoning)
 	event.Reviewer = strings.TrimSpace(event.Reviewer)
 	if event.Reviewer == "" {
@@ -2604,6 +2634,38 @@ func normalizeRankedFeedbackEvent(event RankedFeedbackEvent) (RankedFeedbackEven
 		event.ID = rankedFeedbackEventID(event)
 	}
 	return event, nil
+}
+
+func normalizeRankedFeedbackQuality(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "":
+		return ""
+	case "poor", "acceptable", "strong":
+		return strings.TrimSpace(strings.ToLower(value))
+	}
+	return "__invalid__"
+}
+
+func normalizeRankedFeedbackContinueMode(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "":
+		return ""
+	case EvalRunModeExplore, EvalRunModeRefine, EvalRunModeDistill, EvalRunModeValidate:
+		return strings.TrimSpace(strings.ToLower(value))
+	}
+	return "__invalid__"
+}
+
+func normalizeRankedFeedbackPromote(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "":
+		return ""
+	case "yes", "y", "true":
+		return "yes"
+	case "no", "n", "false":
+		return "no"
+	}
+	return "__invalid__"
 }
 
 func rankedFeedbackRanking(event RankedFeedbackEvent) ([]string, error) {
@@ -2631,7 +2693,7 @@ func rankedFeedbackRanking(event RankedFeedbackEvent) ([]string, error) {
 
 func (s *Store) ListRankedFeedbackEvents(ctx context.Context, runID string) ([]RankedFeedbackEvent, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, run_id, item_id, ranking_json, winner, useful_traits_json, rejected_traits_json,
-			reasoning, reviewer, source, source_url, created_at
+			quality, continue_mode, promote, reasoning, reviewer, source, source_url, created_at
 		FROM ranked_feedback_events WHERE run_id = ? ORDER BY item_id, reviewer, source, source_url`, strings.TrimSpace(runID))
 	if err != nil {
 		return nil, err
@@ -2651,7 +2713,7 @@ func (s *Store) ListRankedFeedbackEvents(ctx context.Context, runID string) ([]R
 func scanRankedFeedbackEvent(row interface{ Scan(dest ...any) error }) (RankedFeedbackEvent, error) {
 	var event RankedFeedbackEvent
 	if err := row.Scan(&event.ID, &event.RunID, &event.ItemID, &event.RankingJSON, &event.Winner, &event.UsefulTraitsJSON, &event.RejectedTraitsJSON,
-		&event.Reasoning, &event.Reviewer, &event.Source, &event.SourceURL, &event.CreatedAt); err != nil {
+		&event.Quality, &event.ContinueMode, &event.Promote, &event.Reasoning, &event.Reviewer, &event.Source, &event.SourceURL, &event.CreatedAt); err != nil {
 		return RankedFeedbackEvent{}, err
 	}
 	return event, nil
@@ -3614,5 +3676,10 @@ CREATE TABLE skillopt_train_iterations (
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	UNIQUE(session_id, id)
 );
+	`,
+	`
+ALTER TABLE ranked_feedback_events ADD COLUMN quality TEXT NOT NULL DEFAULT '';
+ALTER TABLE ranked_feedback_events ADD COLUMN continue_mode TEXT NOT NULL DEFAULT '';
+ALTER TABLE ranked_feedback_events ADD COLUMN promote TEXT NOT NULL DEFAULT '';
 	`,
 }

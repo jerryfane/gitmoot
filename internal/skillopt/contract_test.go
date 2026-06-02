@@ -227,6 +227,9 @@ func TestExportTrainingPackageIncludesRankedExplorationFeedback(t *testing.T) {
 		Winner:             "c",
 		UsefulTraitsJSON:   string(useful),
 		RejectedTraitsJSON: string(rejected),
+		Quality:            "acceptable",
+		ContinueMode:       db.EvalRunModeRefine,
+		Promote:            "no",
 		Reasoning:          "C is the clearest direction.",
 		Reviewer:           "jerry",
 		Source:             "github",
@@ -255,6 +258,9 @@ func TestExportTrainingPackageIncludesRankedExplorationFeedback(t *testing.T) {
 	}
 	if !strings.Contains(string(pkg.RankedFeedbackEvents[0].UsefulTraits), "clearest explanation") || !strings.Contains(string(pkg.RankedFeedbackEvents[0].RejectedTraits), "too generic") {
 		t.Fatalf("ranked traits useful=%s rejected=%s", pkg.RankedFeedbackEvents[0].UsefulTraits, pkg.RankedFeedbackEvents[0].RejectedTraits)
+	}
+	if pkg.RankedFeedbackEvents[0].Quality != "acceptable" || pkg.RankedFeedbackEvents[0].ContinueMode != db.EvalRunModeRefine || pkg.RankedFeedbackEvents[0].Promote != "no" {
+		t.Fatalf("ranked feedback signals = %+v", pkg.RankedFeedbackEvents[0])
 	}
 	if len(pkg.PairwisePreferences) != 6 || pkg.PairwisePreferences[0].Preferred != "c" || pkg.PairwisePreferences[5].Rejected != "b" || pkg.PairwisePreferences[0].RankedEventID != pkg.RankedFeedbackEvents[0].ID {
 		t.Fatalf("pairwise preferences = %+v", pkg.PairwisePreferences)

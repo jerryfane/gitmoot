@@ -363,6 +363,9 @@ func TestRankedReviewStorageAndPairwisePreferences(t *testing.T) {
 		Winner:             "c",
 		UsefulTraitsJSON:   string(useful),
 		RejectedTraitsJSON: string(rejected),
+		Quality:            "Poor",
+		ContinueMode:       "Explore",
+		Promote:            "false",
 		Reasoning:          "C is clearest.",
 		Reviewer:           "jerry",
 		Source:             "github",
@@ -378,6 +381,9 @@ func TestRankedReviewStorageAndPairwisePreferences(t *testing.T) {
 	}
 	if len(stored) != 1 || stored[0].Winner != "c" || stored[0].ID == "" {
 		t.Fatalf("stored ranked feedback = %+v", stored)
+	}
+	if stored[0].Quality != "poor" || stored[0].ContinueMode != "explore" || stored[0].Promote != "no" {
+		t.Fatalf("stored ranked feedback signals = %+v", stored[0])
 	}
 	pairs, err := store.ListPairwisePreferences(ctx, "run-ranked")
 	if err != nil {
@@ -461,6 +467,18 @@ func TestRankedReviewStorageRejectsInvalidReferences(t *testing.T) {
 		"unknown useful trait option": {
 			RankingJSON:      `["a","b","c"]`,
 			UsefulTraitsJSON: `{"d":["motion"]}`,
+		},
+		"invalid quality": {
+			RankingJSON: `["a","b","c"]`,
+			Quality:     "ok",
+		},
+		"invalid continue mode": {
+			RankingJSON:  `["a","b","c"]`,
+			ContinueMode: "widen",
+		},
+		"invalid promote": {
+			RankingJSON: `["a","b","c"]`,
+			Promote:     "maybe",
 		},
 	}
 	for name, event := range tests {

@@ -61,6 +61,11 @@ func RecommendPhaseForItems(run db.EvalRun, items []db.EvalReviewItem, feedback 
 		recommendation.Reason = fmt.Sprintf("%d of %d review items have imported feedback; collect feedback for every item before changing phases.", feedbackItemCount, itemCount)
 		return recommendation
 	}
+	if shouldContinueExploration(ranked) {
+		recommendation.RecommendedMode = db.EvalRunModeExplore
+		recommendation.Reason = explorationSignalReason(ranked)
+		return recommendation
+	}
 
 	switch currentMode {
 	case db.EvalRunModeExplore:
@@ -76,6 +81,46 @@ func RecommendPhaseForItems(run db.EvalRun, items []db.EvalReviewItem, feedback 
 		recommendation.Reason = "current mode is not recognized, so keep collecting feedback before changing phases."
 	}
 	return recommendation
+}
+
+func shouldContinueExploration(ranked []db.RankedFeedbackEvent) bool {
+	if len(ranked) == 0 {
+		return false
+	}
+	if hasContinueMode(ranked, db.EvalRunModeExplore) {
+		return true
+	}
+	return allRankedQuality(ranked, "poor")
+}
+
+func explorationSignalReason(ranked []db.RankedFeedbackEvent) string {
+	if hasContinueMode(ranked, db.EvalRunModeExplore) {
+		return "ranked feedback explicitly requested continue_mode: explore, so keep exploring broader alternatives."
+	}
+	return "all ranked feedback is marked quality: poor, so ranking stability is only relative and broad exploration should continue."
+}
+
+func hasContinueMode(ranked []db.RankedFeedbackEvent, mode string) bool {
+	mode = strings.TrimSpace(mode)
+	for _, event := range ranked {
+		if strings.TrimSpace(event.ContinueMode) == mode {
+			return true
+		}
+	}
+	return false
+}
+
+func allRankedQuality(ranked []db.RankedFeedbackEvent, quality string) bool {
+	if len(ranked) == 0 {
+		return false
+	}
+	quality = strings.TrimSpace(quality)
+	for _, event := range ranked {
+		if strings.TrimSpace(event.Quality) != quality {
+			return false
+		}
+	}
+	return true
 }
 
 func feedbackCoverage(items []db.EvalReviewItem, feedback []db.FeedbackEvent, ranked []db.RankedFeedbackEvent) (int, int, int) {

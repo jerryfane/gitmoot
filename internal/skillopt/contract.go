@@ -99,6 +99,9 @@ type RankedFeedbackEvent struct {
 	Winner         string          `json:"winner,omitempty"`
 	UsefulTraits   json.RawMessage `json:"useful_traits,omitempty"`
 	RejectedTraits json.RawMessage `json:"rejected_traits,omitempty"`
+	Quality        string          `json:"quality,omitempty"`
+	ContinueMode   string          `json:"continue_mode,omitempty"`
+	Promote        string          `json:"promote,omitempty"`
 	Reasoning      string          `json:"reasoning,omitempty"`
 	Reviewer       string          `json:"reviewer"`
 	Source         string          `json:"source"`
@@ -670,6 +673,9 @@ func loadRankedFeedbackEvents(ctx context.Context, store *db.Store, runID string
 			Winner:         event.Winner,
 			UsefulTraits:   usefulTraits,
 			RejectedTraits: rejectedTraits,
+			Quality:        event.Quality,
+			ContinueMode:   event.ContinueMode,
+			Promote:        event.Promote,
 			Reasoning:      event.Reasoning,
 			Reviewer:       event.Reviewer,
 			Source:         event.Source,
