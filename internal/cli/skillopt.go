@@ -21,6 +21,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/feedback"
 	"github.com/jerryfane/gitmoot/internal/github"
 	"github.com/jerryfane/gitmoot/internal/skillopt"
+	"gopkg.in/yaml.v3"
 )
 
 var newSkillOptGitHubClient = func() github.Client {
@@ -68,7 +69,7 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt feedback markdown import --packet .gitmoot/evals/<run-id> [--reviewer name]")
 	fmt.Fprintln(w, "  gitmoot skillopt feedback github publish --run <run-id> [--repo owner/repo] [--pr <number>]")
 	fmt.Fprintln(w, "  gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issue <number>|--pr <number>)")
-	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> [--yes]")
+	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
 	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id>")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
@@ -97,7 +98,7 @@ func runSkillOptTrain(args []string, stdout, stderr io.Writer) int {
 
 func printSkillOptTrainUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> [--session <id>] [--workspace-repo owner/repo] [--preview-repo owner/repo] [--request-file path] [--task-kind kind] [--mode explore|refine|distill|validate] [--exploration-level high|medium|low] [--options N] [--dry-run] [--yes]")
+	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--session <id>] [--workspace-repo owner/repo] [--preview-repo owner/repo] [--request-file path] [--task-kind kind] [--mode explore|refine|distill|validate] [--exploration-level high|medium|low] [--options N] [--min-items N] [--preferred-gate hard|soft|hard_then_soft] [--dry-run] [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
 	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id>")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
@@ -118,6 +119,9 @@ func runSkillOptTrainStart(args []string, stdout, stderr io.Writer) int {
 	mode := fs.String("mode", db.EvalRunModeExplore, "train mode: explore, refine, distill, or validate")
 	explorationLevel := fs.String("exploration-level", "", "exploration level: high, medium, or low")
 	optionsCount := fs.Int("options", 0, "expected number of review options")
+	itemsFile := fs.String("items-file", "", "YAML or JSON file describing training review items")
+	minItems := fs.Int("min-items", 2, "minimum number of training review items")
+	preferredGate := fs.String("preferred-gate", "", "evaluation gate: hard, soft, or hard_then_soft")
 	dryRun := fs.Bool("dry-run", false, "print inferred session state without writing")
 	yes := fs.Bool("yes", false, "confirm creation without an interactive prompt")
 	if err := fs.Parse(args); err != nil {
@@ -168,6 +172,27 @@ func runSkillOptTrainStart(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "skillopt train start: --options must be zero or at least 2")
 		return 2
 	}
+	effectiveOptionsCount := effectiveSkillOptOptionsCount(normalizedMode, *optionsCount)
+	items, itemWarnings, err := readSkillOptTrainItems(*itemsFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "skillopt train start: %v\n", err)
+		return 2
+	}
+	if *minItems < 2 {
+		fmt.Fprintln(stderr, "skillopt train start: --min-items must be at least 2")
+		return 2
+	}
+	if len(items) < *minItems {
+		fmt.Fprintf(stderr, "skillopt train start: --items-file must contain at least %d items, got %d\n", *minItems, len(items))
+		return 2
+	}
+	normalizedGate, err := normalizeSkillOptPreferredGate(*preferredGate, normalizedTaskKind)
+	if err != nil {
+		fmt.Fprintf(stderr, "skillopt train start: %v\n", err)
+		return 2
+	}
+	itemWarnings = append(itemWarnings, detectSkillOptTrainItemWarnings(items)...)
+	itemWarnings = append(itemWarnings, detectSkillOptTrainPreviewWarnings(previewRepo)...)
 	var plan skillOptTrainStartPlan
 	openStore := withStore
 	if *dryRun || !*yes {
@@ -178,7 +203,7 @@ func runSkillOptTrainStart(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return err
 		}
-		plan = buildSkillOptTrainStartPlan(template, repo.FullName(), workspaceRepo, previewRepo, strings.TrimSpace(*sessionID), request, normalizedTaskKind, normalizedMode, normalizedExploration, *optionsCount)
+		plan = buildSkillOptTrainStartPlan(template, repo.FullName(), workspaceRepo, previewRepo, strings.TrimSpace(*sessionID), request, normalizedTaskKind, normalizedMode, normalizedExploration, effectiveOptionsCount, normalizedGate, items, itemWarnings)
 		if *dryRun {
 			return nil
 		}
@@ -190,10 +215,26 @@ func runSkillOptTrainStart(args []string, stdout, stderr io.Writer) int {
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		if _, err := store.GetEvalRun(context.Background(), plan.EvalRun.ID); err == nil {
+			return fmt.Errorf("eval run %s already exists; use a different --session or inspect it with gitmoot skillopt review status --run %s", plan.EvalRun.ID, plan.EvalRun.ID)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		if err := store.UpsertSkillOptTrainSession(context.Background(), plan.Session); err != nil {
 			return err
 		}
-		return store.UpsertSkillOptTrainIteration(context.Background(), plan.Iteration)
+		if err := store.UpsertSkillOptTrainIteration(context.Background(), plan.Iteration); err != nil {
+			return err
+		}
+		if err := store.UpsertEvalRun(context.Background(), plan.EvalRun); err != nil {
+			return err
+		}
+		for _, item := range plan.Items {
+			if err := store.UpsertEvalReviewItem(context.Background(), item); err != nil {
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
 		fmt.Fprintf(stderr, "skillopt train start: %v\n", err)
 		return 1
@@ -215,15 +256,22 @@ func runSkillOptTrainStart(args []string, stdout, stderr io.Writer) int {
 type skillOptTrainStartPlan struct {
 	Session   db.SkillOptTrainSession
 	Iteration db.SkillOptTrainIteration
+	EvalRun   db.EvalRun
+	Items     []db.EvalReviewItem
+	Warnings  []string
 	Summary   skillopt.TrainStatusSummary
 }
 
-func buildSkillOptTrainStartPlan(template db.AgentTemplate, repo string, workspaceRepo string, previewRepo string, sessionID string, request string, taskKind string, mode string, explorationLevel string, optionsCount int) skillOptTrainStartPlan {
+func buildSkillOptTrainStartPlan(template db.AgentTemplate, repo string, workspaceRepo string, previewRepo string, sessionID string, request string, taskKind string, mode string, explorationLevel string, optionsCount int, preferredGate string, itemPlans []skillOptTrainItemPlan, warnings []string) skillOptTrainStartPlan {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		sessionID = generatedSkillOptTrainSessionID(template.ID)
 	}
-	metadata := skillOptTrainStartMetadata(request, mode, explorationLevel, optionsCount)
+	state := skillopt.TrainStateRequestConfirmed
+	if workspaceRepo != "" {
+		state = skillopt.TrainStateItemsReady
+	}
+	metadata := skillOptTrainStartMetadata(request, mode, explorationLevel, optionsCount, preferredGate, itemPlans, warnings)
 	session := db.SkillOptTrainSession{
 		ID:                sessionID,
 		TemplateID:        template.ID,
@@ -233,7 +281,7 @@ func buildSkillOptTrainStartPlan(template db.AgentTemplate, repo string, workspa
 		PreviewRepo:       previewRepo,
 		RequestSummary:    firstLine(request),
 		TaskKind:          taskKind,
-		State:             skillopt.TrainStateRequestConfirmed,
+		State:             state,
 		MetadataJSON:      metadata,
 	}
 	iteration := db.SkillOptTrainIteration{
@@ -243,11 +291,31 @@ func buildSkillOptTrainStartPlan(template db.AgentTemplate, repo string, workspa
 		BaseTemplateVersionID: template.VersionID,
 		Mode:                  mode,
 		ExplorationLevel:      explorationLevel,
-		State:                 skillopt.TrainStateRequestConfirmed,
+		State:                 state,
 		MetadataJSON:          metadata,
 	}
+	run := db.EvalRun{
+		ID:                iteration.EvalRunID,
+		TemplateID:        template.ID,
+		TemplateVersionID: template.VersionID,
+		TargetRepo:        repo,
+		State:             "review",
+		Mode:              mode,
+		ExplorationLevel:  explorationLevel,
+		OptionsCount:      optionsCount,
+		MetadataJSON:      metadata,
+	}
+	items := make([]db.EvalReviewItem, 0, len(itemPlans))
+	for _, item := range itemPlans {
+		items = append(items, db.EvalReviewItem{
+			RunID:        run.ID,
+			ItemID:       item.ItemID,
+			Title:        item.Title,
+			MetadataJSON: skillOptTrainItemMetadata(item),
+		})
+	}
 	summary := skillopt.BuildTrainStatusSummary(session, &iteration, skillopt.TrainStatusCounts{})
-	return skillOptTrainStartPlan{Session: session, Iteration: iteration, Summary: summary}
+	return skillOptTrainStartPlan{Session: session, Iteration: iteration, EvalRun: run, Items: items, Warnings: warnings, Summary: summary}
 }
 
 func printSkillOptTrainStartPlan(stdout io.Writer, plan skillOptTrainStartPlan) {
@@ -263,6 +331,11 @@ func printSkillOptTrainStartPlan(stdout io.Writer, plan skillOptTrainStartPlan) 
 	writeLine(stdout, "eval_run: %s", plan.Iteration.EvalRunID)
 	writeLine(stdout, "mode: %s", plan.Iteration.Mode)
 	writeLine(stdout, "exploration_level: %s", plan.Iteration.ExplorationLevel)
+	writeLine(stdout, "preferred_gate: %s", skillOptMetadataString(plan.EvalRun.MetadataJSON, "evaluation", "preferred_gate"))
+	writeLine(stdout, "items: %d", len(plan.Items))
+	for _, warning := range plan.Warnings {
+		writeLine(stdout, "warning: %s", warning)
+	}
 	writeLine(stdout, "current_phase: %s", plan.Summary.CurrentPhase)
 	writeLine(stdout, "blocked_step: %s", plan.Summary.BlockedStep)
 	writeLine(stdout, "next_action: %s", plan.Summary.NextAction)
@@ -488,6 +561,156 @@ func readSkillOptTrainRequest(requestText string, requestFile string) (string, e
 	return strings.TrimSpace(string(content)), nil
 }
 
+type skillOptTrainItemsFile struct {
+	Items []skillOptTrainItemPlan `json:"items" yaml:"items"`
+}
+
+type skillOptTrainItemPlan struct {
+	ItemID         string   `json:"item_id" yaml:"item_id"`
+	Title          string   `json:"title" yaml:"title"`
+	Brief          string   `json:"brief" yaml:"brief"`
+	TargetAudience string   `json:"target_audience" yaml:"target_audience"`
+	OutputType     string   `json:"output_type" yaml:"output_type"`
+	ArtifactHints  []string `json:"artifact_hints" yaml:"artifact_hints"`
+}
+
+func readSkillOptTrainItems(path string) ([]skillOptTrainItemPlan, []string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil, errors.New("skillopt train start requires --items-file")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read items-file: %w", err)
+	}
+	var wrapped skillOptTrainItemsFile
+	wrappedErr := yaml.Unmarshal(content, &wrapped)
+	items := wrapped.Items
+	if wrappedErr != nil && len(items) > 0 {
+		return nil, nil, fmt.Errorf("decode items-file: %w", wrappedErr)
+	}
+	if len(items) == 0 {
+		var direct []skillOptTrainItemPlan
+		if err := yaml.Unmarshal(content, &direct); err != nil {
+			if wrappedErr != nil {
+				return nil, nil, fmt.Errorf("decode items-file: %w", wrappedErr)
+			}
+			return nil, nil, fmt.Errorf("decode items-file: %w", err)
+		}
+		items = direct
+	}
+	normalized := make([]skillOptTrainItemPlan, 0, len(items))
+	seen := map[string]struct{}{}
+	for index, item := range items {
+		item.ItemID = strings.TrimSpace(item.ItemID)
+		if item.ItemID == "" {
+			item.ItemID = fmt.Sprintf("item-%03d", index+1)
+		}
+		item.Title = strings.TrimSpace(item.Title)
+		item.Brief = strings.TrimSpace(item.Brief)
+		item.TargetAudience = strings.TrimSpace(item.TargetAudience)
+		item.OutputType = strings.TrimSpace(item.OutputType)
+		item.ArtifactHints = trimStringSlice(item.ArtifactHints)
+		if item.Title == "" {
+			return nil, nil, fmt.Errorf("items-file item %s title is required", item.ItemID)
+		}
+		if item.Brief == "" {
+			return nil, nil, fmt.Errorf("items-file item %s brief is required", item.ItemID)
+		}
+		if item.OutputType == "" {
+			return nil, nil, fmt.Errorf("items-file item %s output_type is required", item.ItemID)
+		}
+		if _, exists := seen[item.ItemID]; exists {
+			return nil, nil, fmt.Errorf("items-file item id %q is duplicated", item.ItemID)
+		}
+		seen[item.ItemID] = struct{}{}
+		normalized = append(normalized, item)
+	}
+	return normalized, nil, nil
+}
+
+func detectSkillOptTrainItemWarnings(items []skillOptTrainItemPlan) []string {
+	warnings := []string{}
+	titleCounts := map[string]int{}
+	briefCounts := map[string]int{}
+	distinctTerms := map[string]struct{}{}
+	for _, item := range items {
+		titleCounts[strings.ToLower(item.Title)]++
+		briefCounts[strings.ToLower(item.Brief)]++
+		for _, term := range skillOptTrainItemTerms(item.Title + " " + item.Brief + " " + item.OutputType) {
+			distinctTerms[term] = struct{}{}
+		}
+	}
+	for title, count := range titleCounts {
+		if title != "" && count > 1 {
+			warnings = append(warnings, fmt.Sprintf("duplicate item title %q appears %d times", title, count))
+		}
+	}
+	for brief, count := range briefCounts {
+		if brief != "" && count > 1 {
+			warnings = append(warnings, fmt.Sprintf("duplicate item brief %q appears %d times", brief, count))
+		}
+	}
+	if len(items) >= 3 && len(distinctTerms) < len(items)*2 {
+		warnings = append(warnings, "training items look homogeneous; add more distinct products, audiences, formats, or constraints for stronger feedback")
+	}
+	return warnings
+}
+
+func detectSkillOptTrainPreviewWarnings(previewRepo string) []string {
+	if strings.TrimSpace(previewRepo) == "" {
+		return nil
+	}
+	return []string{"preview repo must be public or GitHub Pages-enabled before clickable demos can be published"}
+}
+
+func skillOptTrainItemTerms(value string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	terms := make([]string, 0, len(parts))
+	stop := map[string]struct{}{
+		"and": {}, "for": {}, "the": {}, "with": {}, "that": {}, "this": {}, "from": {}, "into": {},
+		"page": {}, "build": {}, "create": {}, "make": {}, "write": {}, "design": {}, "output": {},
+	}
+	for _, part := range parts {
+		if len(part) < 4 {
+			continue
+		}
+		if _, skip := stop[part]; skip {
+			continue
+		}
+		terms = append(terms, part)
+	}
+	return terms
+}
+
+func skillOptTrainItemMetadata(item skillOptTrainItemPlan) string {
+	metadata := map[string]any{
+		"brief":           item.Brief,
+		"target_audience": item.TargetAudience,
+		"output_type":     item.OutputType,
+		"artifact_hints":  item.ArtifactHints,
+		"source":          "gitmoot skillopt train start",
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func trimStringSlice(values []string) []string {
+	output := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			output = append(output, value)
+		}
+	}
+	return output
+}
+
 func parseOptionalSkillOptTrainRepo(name string, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -542,6 +765,36 @@ func normalizeSkillOptTrainMode(mode string, explorationLevel string) (string, s
 	}
 }
 
+func normalizeSkillOptPreferredGate(value string, taskKind string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		switch taskKind {
+		case "correctness", "data":
+			value = "hard"
+		case "ux", "design", "writing":
+			value = "soft"
+		default:
+			value = "hard_then_soft"
+		}
+	}
+	switch value {
+	case "hard", "soft", "hard_then_soft":
+		return value, nil
+	default:
+		return "", fmt.Errorf("preferred gate %q is not supported", value)
+	}
+}
+
+func effectiveSkillOptOptionsCount(mode string, optionsCount int) int {
+	if optionsCount != 0 {
+		return optionsCount
+	}
+	if mode == db.EvalRunModeExplore {
+		return 5
+	}
+	return 2
+}
+
 func generatedSkillOptTrainSessionID(templateID string) string {
 	base := strings.ToLower(strings.TrimSpace(templateID))
 	if base == "" {
@@ -564,7 +817,7 @@ func generatedSkillOptTrainSessionID(templateID string) string {
 	return "train-" + strings.Trim(b.String(), "-_") + "-" + now.Format("20060102-150405") + fmt.Sprintf("-%09d", now.Nanosecond())
 }
 
-func skillOptTrainStartMetadata(request string, mode string, explorationLevel string, optionsCount int) string {
+func skillOptTrainStartMetadata(request string, mode string, explorationLevel string, optionsCount int, preferredGate string, items []skillOptTrainItemPlan, warnings []string) string {
 	lines := strings.Count(request, "\n") + 1
 	words := len(strings.Fields(request))
 	metadata := map[string]any{
@@ -575,13 +828,36 @@ func skillOptTrainStartMetadata(request string, mode string, explorationLevel st
 		"mode":              mode,
 		"exploration_level": explorationLevel,
 		"options_count":     optionsCount,
-		"source":            "gitmoot skillopt train start",
+		"items_count":       len(items),
+		"item_warnings":     warnings,
+		"evaluation": map[string]any{
+			"preferred_gate": preferredGate,
+		},
+		"source": "gitmoot skillopt train start",
 	}
 	encoded, err := json.Marshal(metadata)
 	if err != nil {
 		return ""
 	}
 	return string(encoded)
+}
+
+func skillOptMetadataString(metadataJSON string, path ...string) string {
+	var current any
+	if err := json.Unmarshal([]byte(metadataJSON), &current); err != nil {
+		return ""
+	}
+	for _, key := range path {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current = object[key]
+	}
+	if value, ok := current.(string); ok {
+		return value
+	}
+	return ""
 }
 
 func skillOptTrainDecisionMetadata(existing string, reason string) string {
@@ -868,6 +1144,9 @@ func runSkillOptReviewItemAdd(args []string, stdout, stderr io.Writer) int {
 				Title:        strings.TrimSpace(*title),
 				MetadataJSON: metadata,
 			}
+			if err := preserveExistingSkillOptReviewItemDetails(ctx, store, &item); err != nil {
+				return err
+			}
 			if err := store.UpsertEvalReviewItem(ctx, item); err != nil {
 				return err
 			}
@@ -914,6 +1193,9 @@ func runSkillOptReviewItemAdd(args []string, stdout, stderr io.Writer) int {
 			BaselineArtifactID:  baseline.ID,
 			CandidateArtifactID: candidate.ID,
 			MetadataJSON:        metadata,
+		}
+		if err := preserveExistingSkillOptReviewItemDetails(ctx, store, &item); err != nil {
+			return err
 		}
 		return store.UpsertEvalReviewItem(ctx, item)
 	}); err != nil {
@@ -978,6 +1260,32 @@ func runSkillOptReviewStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "training_blocker: %s\n", blocker)
 	}
 	return 0
+}
+
+func preserveExistingSkillOptReviewItemDetails(ctx context.Context, store *db.Store, item *db.EvalReviewItem) error {
+	if store == nil || item == nil {
+		return nil
+	}
+	if strings.TrimSpace(item.Title) != "" && strings.TrimSpace(item.MetadataJSON) != "" {
+		return nil
+	}
+	items, err := store.ListEvalReviewItems(ctx, item.RunID)
+	if err != nil {
+		return err
+	}
+	for _, existing := range items {
+		if strings.TrimSpace(existing.ItemID) != strings.TrimSpace(item.ItemID) {
+			continue
+		}
+		if strings.TrimSpace(item.Title) == "" {
+			item.Title = existing.Title
+		}
+		if strings.TrimSpace(item.MetadataJSON) == "" {
+			item.MetadataJSON = existing.MetadataJSON
+		}
+		return nil
+	}
+	return nil
 }
 
 type skillOptReviewStatus struct {

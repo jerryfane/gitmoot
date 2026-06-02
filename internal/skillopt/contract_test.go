@@ -97,6 +97,57 @@ func TestExportTrainingPackage(t *testing.T) {
 	}
 }
 
+func TestExportTrainingPackageIncludesPreferredGateMetadata(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	template := testTemplate("designer", "Design carefully.")
+	if err := store.UpsertAgentTemplate(ctx, template); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	installed, err := store.GetAgentTemplate(ctx, "designer")
+	if err != nil {
+		t.Fatalf("GetAgentTemplate returned error: %v", err)
+	}
+	if err := store.UpsertEvalRun(ctx, db.EvalRun{
+		ID:                "train-run-1",
+		TemplateID:        "designer",
+		TemplateVersionID: installed.VersionID,
+		TargetRepo:        "owner/repo",
+		State:             "review",
+		Mode:              db.EvalRunModeExplore,
+		ExplorationLevel:  db.ExplorationLevelHigh,
+		OptionsCount:      4,
+		MetadataJSON:      `{"evaluation":{"preferred_gate":"soft"},"source":"gitmoot skillopt train start"}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalRun returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{
+		RunID:        "train-run-1",
+		ItemID:       "item-001",
+		Title:        "Landing page",
+		MetadataJSON: `{"brief":"Create a landing page.","output_type":"vue"}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem returned error: %v", err)
+	}
+
+	pkg, err := ExportTrainingPackage(ctx, store, "train-run-1")
+	if err != nil {
+		t.Fatalf("ExportTrainingPackage returned error: %v", err)
+	}
+	var evaluator map[string]any
+	if err := json.Unmarshal(pkg.EvaluatorConfig, &evaluator); err != nil {
+		t.Fatalf("decode evaluator config: %v", err)
+	}
+	evaluation, ok := evaluator["evaluation"].(map[string]any)
+	if !ok || evaluation["preferred_gate"] != "soft" {
+		t.Fatalf("evaluator config = %s", string(pkg.EvaluatorConfig))
+	}
+}
+
 func TestExportTrainingPackageIncludesRankedExplorationFeedback(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
