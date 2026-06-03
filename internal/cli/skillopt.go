@@ -81,7 +81,7 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issue <number>|--pr <number>)")
 	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
-	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
+	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--optimizer-backend name] [--target-backend name] [--evaluator-id id] [--evaluator-model name] [--evaluator-backend name] [--skill-update-mode mode] [--num-epochs N] [--batch-size N] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
 }
 
@@ -110,7 +110,7 @@ func printSkillOptTrainUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--session <id>] [--workspace-repo owner/repo] [--preview-repo owner/repo] [--preview-mode none|optional|required] [--preview-renderer none|vue-vite] [--preview-publisher none|github-pages] [--preview-route-template template] [--request-file path] [--task-kind kind] [--mode explore|refine|distill|validate] [--exploration-level high|medium|low] [--options N] [--min-items N] [--preferred-gate hard|soft|hard_then_soft] [--dry-run] [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
-	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
+	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--optimizer-backend name] [--target-backend name] [--evaluator-id id] [--evaluator-model name] [--evaluator-backend name] [--skill-update-mode mode] [--num-epochs N] [--batch-size N] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
 }
 
@@ -410,6 +410,14 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 	model := fs.String("model", "", "model name to pass to both optimizer and target when specific model flags are omitted")
 	optimizerModel := fs.String("optimizer-model", "", "optimizer model name")
 	targetModel := fs.String("target-model", "", "target model name")
+	optimizerBackend := fs.String("optimizer-backend", "", "optimizer backend")
+	targetBackend := fs.String("target-backend", "", "target backend")
+	evaluatorID := fs.String("evaluator-id", "", "evaluator id, such as landing_page_v1")
+	evaluatorModel := fs.String("evaluator-model", "", "evaluator model name")
+	evaluatorBackend := fs.String("evaluator-backend", "", "evaluator backend")
+	skillUpdateMode := fs.String("skill-update-mode", "", "SkillOpt update mode")
+	numEpochs := fs.Int("num-epochs", 0, "optimizer epoch count")
+	batchSize := fs.Int("batch-size", 0, "optimizer batch size")
 	gate := fs.String("gate", "", "optimizer gate metric: hard, soft, or mixed")
 	outRoot := fs.String("out-root", "", "optimizer output directory")
 	timeout := fs.String("timeout", "", "optimizer timeout duration")
@@ -433,6 +441,14 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "skillopt train continue requires --session")
 		return 2
 	}
+	if *numEpochs < 0 {
+		fmt.Fprintln(stderr, "skillopt train continue: --num-epochs must be zero or greater")
+		return 2
+	}
+	if *batchSize < 0 {
+		fmt.Fprintln(stderr, "skillopt train continue: --batch-size must be zero or greater")
+		return 2
+	}
 	var output skillOptTrainContinueOutput
 	if err := withStoreAndPaths(*home, func(paths config.Paths, store *db.Store) error {
 		var err error
@@ -442,15 +458,23 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 			GeneratorAgent: *generatorAgent,
 			GeneratorType:  *generatorType,
 			Optimizer: skillOptTrainOptimizerRequest{
-				SkillOptBin:    *skillOptBin,
-				Model:          *model,
-				OptimizerModel: *optimizerModel,
-				TargetModel:    *targetModel,
-				Gate:           *gate,
-				OutRoot:        *outRoot,
-				Timeout:        *timeout,
-				DryRun:         *dryRun,
-				RerunOptimizer: *rerunOptimizer,
+				SkillOptBin:      *skillOptBin,
+				Model:            *model,
+				OptimizerModel:   *optimizerModel,
+				TargetModel:      *targetModel,
+				OptimizerBackend: *optimizerBackend,
+				TargetBackend:    *targetBackend,
+				EvaluatorID:      *evaluatorID,
+				EvaluatorModel:   *evaluatorModel,
+				EvaluatorBackend: *evaluatorBackend,
+				SkillUpdateMode:  *skillUpdateMode,
+				NumEpochs:        *numEpochs,
+				BatchSize:        *batchSize,
+				Gate:             *gate,
+				OutRoot:          *outRoot,
+				Timeout:          *timeout,
+				DryRun:           *dryRun,
+				RerunOptimizer:   *rerunOptimizer,
 			},
 			PromoteCandidate: *promote,
 			RejectCandidate:  *reject,
@@ -488,15 +512,23 @@ type skillOptTrainContinueRequest struct {
 }
 
 type skillOptTrainOptimizerRequest struct {
-	SkillOptBin    string
-	Model          string
-	OptimizerModel string
-	TargetModel    string
-	Gate           string
-	OutRoot        string
-	Timeout        string
-	DryRun         bool
-	RerunOptimizer bool
+	SkillOptBin      string
+	Model            string
+	OptimizerModel   string
+	TargetModel      string
+	OptimizerBackend string
+	TargetBackend    string
+	EvaluatorID      string
+	EvaluatorModel   string
+	EvaluatorBackend string
+	SkillUpdateMode  string
+	NumEpochs        int
+	BatchSize        int
+	Gate             string
+	OutRoot          string
+	Timeout          string
+	DryRun           bool
+	RerunOptimizer   bool
 }
 
 type skillOptTrainContinueOutput struct {
@@ -3877,6 +3909,30 @@ func buildSkillOptTrainOptimizerCommand(iteration db.SkillOptTrainIteration, req
 	}
 	if targetModel != "" {
 		args = append(args, "--target-model", targetModel)
+	}
+	if optimizerBackend := strings.TrimSpace(request.OptimizerBackend); optimizerBackend != "" {
+		args = append(args, "--optimizer-backend", optimizerBackend)
+	}
+	if targetBackend := strings.TrimSpace(request.TargetBackend); targetBackend != "" {
+		args = append(args, "--target-backend", targetBackend)
+	}
+	if evaluatorID := strings.TrimSpace(request.EvaluatorID); evaluatorID != "" {
+		args = append(args, "--evaluator-id", evaluatorID)
+	}
+	if evaluatorModel := strings.TrimSpace(request.EvaluatorModel); evaluatorModel != "" {
+		args = append(args, "--evaluator-model", evaluatorModel)
+	}
+	if evaluatorBackend := strings.TrimSpace(request.EvaluatorBackend); evaluatorBackend != "" {
+		args = append(args, "--evaluator-backend", evaluatorBackend)
+	}
+	if skillUpdateMode := strings.TrimSpace(request.SkillUpdateMode); skillUpdateMode != "" {
+		args = append(args, "--skill-update-mode", skillUpdateMode)
+	}
+	if request.NumEpochs > 0 {
+		args = append(args, "--num-epochs", strconv.Itoa(request.NumEpochs))
+	}
+	if request.BatchSize > 0 {
+		args = append(args, "--batch-size", strconv.Itoa(request.BatchSize))
 	}
 	if request.DryRun {
 		args = append(args, "--dry-run")
