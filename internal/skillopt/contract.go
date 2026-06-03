@@ -49,6 +49,69 @@ type ArtifactRef struct {
 	Driver    string `json:"driver"`
 }
 
+type EvaluatorProfile struct {
+	ProfileID        string                 `json:"profile_id,omitempty"`
+	TaskKind         string                 `json:"task_kind,omitempty"`
+	ArtifactContract string                 `json:"artifact_contract,omitempty"`
+	PreviewAdapter   string                 `json:"preview_adapter,omitempty"`
+	Checks           []EvaluatorCheckConfig `json:"checks,omitempty"`
+	Judge            *EvaluatorJudgeConfig  `json:"judge,omitempty"`
+	Metadata         json.RawMessage        `json:"metadata,omitempty"`
+}
+
+type EvaluatorCheckConfig struct {
+	ID       string          `json:"id,omitempty"`
+	Type     string          `json:"type,omitempty"`
+	When     string          `json:"when,omitempty"`
+	Required bool            `json:"required,omitempty"`
+	Config   json.RawMessage `json:"config,omitempty"`
+}
+
+type EvaluatorJudgeConfig struct {
+	Type   string          `json:"type,omitempty"`
+	When   string          `json:"when,omitempty"`
+	Model  string          `json:"model,omitempty"`
+	Config json.RawMessage `json:"config,omitempty"`
+}
+
+type EvaluatorStageStatus struct {
+	Stage      string          `json:"stage,omitempty"`
+	Status     string          `json:"status,omitempty"`
+	StartedAt  string          `json:"started_at,omitempty"`
+	FinishedAt string          `json:"finished_at,omitempty"`
+	DurationMS int64           `json:"duration_ms,omitempty"`
+	Details    json.RawMessage `json:"details,omitempty"`
+}
+
+type EvaluatorCheckResult struct {
+	Check    string          `json:"check,omitempty"`
+	Severity string          `json:"severity,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
+	Evidence []string        `json:"evidence,omitempty"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+}
+
+type EvaluatorFailurePacket struct {
+	PrimaryReason string                 `json:"primary_reason,omitempty"`
+	HumanReason   string                 `json:"human_reason,omitempty"`
+	OptimizerHint string                 `json:"optimizer_hint,omitempty"`
+	FailedChecks  []EvaluatorCheckResult `json:"failed_checks,omitempty"`
+	Evidence      []string               `json:"evidence,omitempty"`
+	StageStatus   []EvaluatorStageStatus `json:"stage_status,omitempty"`
+}
+
+type EvaluatorScore struct {
+	ProfileID       string                  `json:"profile_id,omitempty"`
+	TaskKind        string                  `json:"task_kind,omitempty"`
+	Hard            *float64                `json:"hard,omitempty"`
+	Soft            *float64                `json:"soft,omitempty"`
+	DimensionScores map[string]float64      `json:"dimension_scores,omitempty"`
+	FailReason      string                  `json:"fail_reason,omitempty"`
+	Failure         *EvaluatorFailurePacket `json:"failure,omitempty"`
+	StageStatus     []EvaluatorStageStatus  `json:"stage_status,omitempty"`
+	Metadata        json.RawMessage         `json:"metadata,omitempty"`
+}
+
 type EvalRun struct {
 	ID                string          `json:"id"`
 	TemplateID        string          `json:"template_id"`
@@ -132,6 +195,7 @@ type TrainingPackage struct {
 	RankedFeedbackEvents []RankedFeedbackEvent `json:"ranked_feedback_events,omitempty"`
 	PairwisePreferences  []PairwisePreference  `json:"pairwise_preferences,omitempty"`
 	EvaluatorConfig      json.RawMessage       `json:"evaluator_config,omitempty"`
+	EvaluatorProfile     *EvaluatorProfile     `json:"evaluator_profile,omitempty"`
 }
 
 type CandidateTemplate struct {
@@ -140,10 +204,12 @@ type CandidateTemplate struct {
 }
 
 type CandidateSummary struct {
-	DiffArtifactID    string          `json:"diff_artifact_id,omitempty"`
-	Score             *float64        `json:"score,omitempty"`
-	PreferenceSummary string          `json:"preference_summary,omitempty"`
-	Metadata          json.RawMessage `json:"metadata,omitempty"`
+	DiffArtifactID    string                  `json:"diff_artifact_id,omitempty"`
+	Score             *float64                `json:"score,omitempty"`
+	PreferenceSummary string                  `json:"preference_summary,omitempty"`
+	Metadata          json.RawMessage         `json:"metadata,omitempty"`
+	EvaluatorScore    *EvaluatorScore         `json:"evaluator_score,omitempty"`
+	Failure           *EvaluatorFailurePacket `json:"failure,omitempty"`
 }
 
 type CandidateArtifactRef struct {

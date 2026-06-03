@@ -148,6 +148,129 @@ func TestExportTrainingPackageIncludesPreferredGateMetadata(t *testing.T) {
 	}
 }
 
+func TestEvaluatorProfileAndFailurePacketContractsRoundTrip(t *testing.T) {
+	hard := 0.0
+	soft := 0.12
+	training := TrainingPackage{
+		Kind:            TrainingPackageKind,
+		ContractVersion: ContractVersion,
+		Template: TemplateSnapshot{
+			ID:            "planner",
+			VersionID:     "planner@v1",
+			VersionNumber: 1,
+			VersionState:  "active",
+			ContentHash:   "sha256:abc",
+			Metadata: agenttemplate.Metadata{
+				ID:          "planner",
+				Name:        "Planner",
+				Description: "Plans work.",
+				Kind:        "agent-template",
+				Version:     1,
+				Capabilities: []string{
+					"ask",
+				},
+				RuntimeCompatibility: []string{
+					"codex",
+				},
+				Tags: []string{
+					"planning",
+				},
+				Inputs: []string{
+					"request",
+				},
+				Outputs: []string{
+					"plan",
+				},
+			},
+			Content: "Plan carefully.",
+		},
+		EvalRun: EvalRun{
+			ID:         "run-1",
+			TemplateID: "planner",
+			State:      "review",
+		},
+		EvaluatorProfile: &EvaluatorProfile{
+			ProfileID:        "vue_landing_page_v1",
+			TaskKind:         "vue_landing_page",
+			ArtifactContract: "vue_vite_bundle",
+			PreviewAdapter:   "vue_vite",
+			Checks: []EvaluatorCheckConfig{
+				{ID: "required_files", Type: "artifact_contract", Required: true},
+				{ID: "render_smoke", Type: "playwright", When: "checks_pass"},
+			},
+			Judge:    &EvaluatorJudgeConfig{Type: "screenshot_llm", When: "checks_pass", Model: "gpt-evaluator"},
+			Metadata: json.RawMessage(`{"source":"test"}`),
+		},
+	}
+	candidate := CandidatePackage{
+		Kind:            CandidatePackageKind,
+		ContractVersion: ContractVersion,
+		TemplateID:      "planner",
+		Summary: CandidateSummary{
+			EvaluatorScore: &EvaluatorScore{
+				ProfileID: "vue_landing_page_v1",
+				TaskKind:  "vue_landing_page",
+				Hard:      &hard,
+				Soft:      &soft,
+				DimensionScores: map[string]float64{
+					"artifact_contract": 0,
+				},
+				FailReason: "missing required artifact",
+				Failure: &EvaluatorFailurePacket{
+					PrimaryReason: "missing_required_artifact",
+					HumanReason:   "The response did not include the required Vue/Vite preview bundle.",
+					OptimizerHint: "Return serialized bundle JSON with required files.",
+					FailedChecks: []EvaluatorCheckResult{
+						{
+							Check:    "artifact_contract.required_files",
+							Severity: "hard_blocker",
+							Reason:   "src/App.vue was not present.",
+							Evidence: []string{"src/App.vue missing"},
+						},
+					},
+					Evidence: []string{"bundle JSON shape missing"},
+					StageStatus: []EvaluatorStageStatus{
+						{Stage: "artifact_contract", Status: "failed", DurationMS: 7},
+					},
+				},
+				StageStatus: []EvaluatorStageStatus{
+					{Stage: "artifact_contract", Status: "failed"},
+				},
+			},
+		},
+	}
+
+	trainingBytes, err := json.Marshal(training)
+	if err != nil {
+		t.Fatalf("marshal training package: %v", err)
+	}
+	var decodedTraining TrainingPackage
+	if err := json.Unmarshal(trainingBytes, &decodedTraining); err != nil {
+		t.Fatalf("unmarshal training package: %v", err)
+	}
+	if decodedTraining.EvaluatorProfile == nil ||
+		decodedTraining.EvaluatorProfile.ProfileID != "vue_landing_page_v1" ||
+		decodedTraining.EvaluatorProfile.Checks[1].ID != "render_smoke" {
+		t.Fatalf("decoded evaluator profile = %+v", decodedTraining.EvaluatorProfile)
+	}
+
+	candidateBytes, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatalf("marshal candidate package: %v", err)
+	}
+	var decodedCandidate CandidatePackage
+	if err := json.Unmarshal(candidateBytes, &decodedCandidate); err != nil {
+		t.Fatalf("unmarshal candidate package: %v", err)
+	}
+	failure := decodedCandidate.Summary.EvaluatorScore.Failure
+	if failure == nil ||
+		failure.PrimaryReason != "missing_required_artifact" ||
+		failure.FailedChecks[0].Check != "artifact_contract.required_files" ||
+		*decodedCandidate.Summary.EvaluatorScore.Soft != soft {
+		t.Fatalf("decoded evaluator failure = %+v", decodedCandidate.Summary.EvaluatorScore)
+	}
+}
+
 func TestExportTrainingPackageIncludesRankedExplorationFeedback(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
