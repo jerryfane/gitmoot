@@ -216,6 +216,42 @@ func TestGitHubCollectorPublishesRankedIssueBody(t *testing.T) {
 	}
 }
 
+func TestGitHubCollectorRejectsPreviewBundleWithoutURL(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubRankedFeedbackRun(t, "ranked-1", "owner/repo")
+	bundle, err := blobs.Put([]byte(`{"renderer":"vue-vite"}`))
+	if err != nil {
+		t.Fatalf("Put preview bundle returned error: %v", err)
+	}
+	if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{ID: "option-a", Hash: bundle.Hash, MediaType: "application/json", SizeBytes: bundle.Size, Driver: "vue-vite"}); err != nil {
+		t.Fatalf("UpsertEvalArtifact option-a returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{
+		RunID:        "ranked-1",
+		ItemID:       "item-001",
+		Label:        "a",
+		ArtifactID:   "option-a",
+		Role:         "option",
+		MetadataJSON: `{"preview_bundle":{"renderer":"vue-vite","files":["package.json"]}}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewOption option-a returned error: %v", err)
+	}
+	fake := &fakeFeedbackGitHub{
+		issue: github.Issue{Number: 42, URL: "https://github.com/owner/repo/issues/42"},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	_, err = collector.Publish(ctx, store, "ranked-1", GitHubPublishTarget{
+		Repo: github.Repository{Owner: "owner", Name: "repo"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "preview_url") {
+		t.Fatalf("Publish error = %v, want preview_url", err)
+	}
+	if fake.createdIssue.Body != "" {
+		t.Fatalf("Publish created issue body despite missing preview URL:\n%s", fake.createdIssue.Body)
+	}
+}
+
 func TestGitHubCollectorYAMLTemplateHandlesSpecialIDs(t *testing.T) {
 	ctx := context.Background()
 	store, blobs := setupGitHubFeedbackRunWithItem(t, "run: 1 # x", "- item: 001", "owner/repo")
@@ -534,7 +570,7 @@ func setupGitHubRankedFeedbackRunWithItem(t *testing.T, runID string, itemID str
 		}
 		metadata := `{"path":"/tmp/gitmoot-option-` + label + `.md"}`
 		if label == "c" {
-			metadata = `{"preview_url":"https://example.com/c"}`
+			metadata = `{"preview_url":"https://example.com/c","preview_bundle":{"renderer":"vue-vite","files":["package.json"]}}`
 		}
 		if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{RunID: runID, ItemID: itemID, Label: label, ArtifactID: artifactID, Role: "option", MetadataJSON: metadata}); err != nil {
 			t.Fatalf("UpsertEvalReviewOption %s returned error: %v", label, err)

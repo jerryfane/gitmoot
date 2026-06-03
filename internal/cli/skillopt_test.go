@@ -798,6 +798,86 @@ func TestGeneratedSkillOptTrainSessionIDIncludesSubsecondEntropy(t *testing.T) {
 	}
 }
 
+func TestSkillOptGitHubPagesURLHandlesProjectAndUserPages(t *testing.T) {
+	project := githubPagesURL(db.Repo{Owner: "owner", Name: "previews"}, "runs/run-1/item/a/")
+	if project != "https://owner.github.io/previews/runs/run-1/item/a/" {
+		t.Fatalf("project pages URL = %q", project)
+	}
+	user := githubPagesURL(db.Repo{Owner: "owner", Name: "owner.github.io"}, "runs/run-1/item/a/")
+	if user != "https://owner.github.io/runs/run-1/item/a/" {
+		t.Fatalf("user pages URL = %q", user)
+	}
+}
+
+func TestSkillOptPreviewRouteSlugsUnsafeSegments(t *testing.T) {
+	route, err := skillOptPreviewRoute("", "run 1", "hero#main", "A/B?")
+	if err != nil {
+		t.Fatalf("skillOptPreviewRoute returned error: %v", err)
+	}
+	want := "runs/run-1-" + shortHash("run 1") + "/hero-main-" + shortHash("hero#main") + "/a-b-" + shortHash("A/B?") + "/"
+	if route != want {
+		t.Fatalf("route = %q, want %q", route, want)
+	}
+}
+
+func TestTrustedVueViteScaffoldUsesRelativeBase(t *testing.T) {
+	workDir := t.TempDir()
+	if err := writeTrustedVueViteScaffold(workDir); err != nil {
+		t.Fatalf("writeTrustedVueViteScaffold returned error: %v", err)
+	}
+	config, err := os.ReadFile(filepath.Join(workDir, "vite.config.js"))
+	if err != nil {
+		t.Fatalf("read vite config: %v", err)
+	}
+	if !strings.Contains(string(config), "base: './'") {
+		t.Fatalf("vite config missing relative base:\n%s", string(config))
+	}
+}
+
+func TestPublishGitHubPagesPreviewRestoresCheckoutOnCommitFailure(t *testing.T) {
+	previewDir := t.TempDir()
+	runGit(t, previewDir, "init")
+	runGit(t, previewDir, "config", "user.email", "gitmoot@example.com")
+	runGit(t, previewDir, "config", "user.name", "Gitmoot")
+	runGit(t, previewDir, "branch", "-m", "main")
+	if err := os.WriteFile(filepath.Join(previewDir, "README.md"), []byte("previews\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	runGit(t, previewDir, "add", "README.md")
+	runGit(t, previewDir, "commit", "-m", "init")
+	distDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(distDir, "index.html"), []byte("<main>preview</main>\n"), 0o644); err != nil {
+		t.Fatalf("write dist index: %v", err)
+	}
+	previewRunner := &skillOptTrainFakePreviewRunner{failGitCommit: true}
+	oldPreviewRunner := skillOptTrainPreviewRunner
+	skillOptTrainPreviewRunner = previewRunner
+	defer func() {
+		skillOptTrainPreviewRunner = oldPreviewRunner
+	}()
+
+	_, err := publishGitHubPagesPreview(context.Background(), db.Repo{Owner: "owner", Name: "previews", CheckoutPath: previewDir}, "runs/run-1/item/a/", distDir)
+	if err == nil || !strings.Contains(err.Error(), "git commit") {
+		t.Fatalf("publishGitHubPagesPreview error = %v, want git commit", err)
+	}
+	status := runGitOutput(t, previewDir, "status", "--porcelain")
+	if strings.TrimSpace(status) != "" {
+		t.Fatalf("preview repo left dirty after commit failure:\n%s", status)
+	}
+	if _, err := os.Stat(filepath.Join(previewDir, "runs")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preview route was not cleaned, stat err=%v", err)
+	}
+}
+
+func runGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	result, err := subprocess.ExecRunner{}.Run(context.Background(), dir, "git", args...)
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, result.Stderr)
+	}
+	return result.Stdout
+}
+
 func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
 	home := t.TempDir()
 	repoDir := t.TempDir()
@@ -939,14 +1019,444 @@ func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
 		}
 	}
 
+	fakeGitHub := &skillOptFakeGitHub{}
+	oldClient := newSkillOptGitHubClient
+	newSkillOptGitHubClient = func() github.Client { return fakeGitHub }
+	defer func() {
+		newSkillOptGitHubClient = oldClient
+	}()
+
 	stdout.Reset()
 	stderr.Reset()
 	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("second train continue exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "continue_ready: false") || !strings.Contains(stdout.String(), "options already generated") {
+	if !strings.Contains(stdout.String(), "current_phase: review_published") ||
+		!strings.Contains(stdout.String(), "continue_ready: true") ||
+		!strings.Contains(stdout.String(), "review_repo: owner/product") ||
+		!strings.Contains(stdout.String(), "preview_urls: 0") {
 		t.Fatalf("second continue stdout = %q", stdout.String())
+	}
+	if fakeGitHub.createdIssue.Repo.FullName() != "owner/product" || !strings.Contains(fakeGitHub.createdIssue.Body, "## Inline Options Without Public Links") {
+		t.Fatalf("created review issue = %+v", fakeGitHub.createdIssue)
+	}
+}
+
+func TestSkillOptTrainContinueGeneratesRequiredVuePreviewBundles(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/workspace.git")
+	t.Chdir(repoDir)
+	itemsPath := writeSkillOptTrainItemsFile(t)
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if err := store.UpsertAgentTemplate(context.Background(), cliSkillOptTemplate("planner", "Plan the work.")); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after template seed returned error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{
+		"agent", "type", "set", "skillopt-generator",
+		"--home", home,
+		"--runtime", "codex",
+		"--role", "generator",
+		"--max-background", "1",
+		"--capability", "ask",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("agent type set exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{
+		"skillopt", "train", "start",
+		"--home", home,
+		"--template", "planner",
+		"--repo", "owner/product",
+		"--session", "preview-train",
+		"--workspace-repo", "owner/workspace",
+		"--preview-repo", "owner/previews",
+		"--request", "Train landing page previews.",
+		"--task-kind", "design",
+		"--mode", "explore",
+		"--options", "2",
+		"--items-file", itemsPath,
+		"--yes",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("train start exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	runner := &agentStartRunner{results: []subprocess.Result{
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440501"}` + "\n"},
+		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option A hero")),
+		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option B hero")),
+		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option A proof")),
+		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option B proof")),
+	}}
+	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
+	defer restoreFactory()
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "preview-train"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("train continue exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "current_phase: options_generated") || !strings.Contains(stdout.String(), "generated_options: 4") {
+		t.Fatalf("train continue stdout = %s", stdout.String())
+	}
+	prompt := runner.calls[1].args[len(runner.calls[1].args)-1]
+	for _, want := range []string{
+		"Vue/Vite preview bundle",
+		"summary as a string value",
+		"Do not set gitmoot_result.summary to a nested object",
+		"package.json, index.html, src/main.js, src/App.vue",
+		"Do not include local absolute paths",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("preview prompt missing %q:\n%s", want, prompt)
+		}
+	}
+
+	store = openCLIJobStore(t, home)
+	defer store.Close()
+	options, err := store.ListEvalReviewOptions(context.Background(), "preview-train-review-001", "hero-saas")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions returned error: %v", err)
+	}
+	if len(options) != 2 {
+		t.Fatalf("options = %+v", options)
+	}
+	artifactRecord, err := store.GetEvalArtifact(context.Background(), options[0].ArtifactID)
+	if err != nil {
+		t.Fatalf("GetEvalArtifact returned error: %v", err)
+	}
+	if artifactRecord.MediaType != "application/json" || artifactRecord.Driver != skillopt.TrainPreviewRendererVueVite {
+		t.Fatalf("artifact = %+v", artifactRecord)
+	}
+	artifactContent, err := artifact.NewStore(paths.ArtifactBlobs).Read(artifactRecord.Hash)
+	if err != nil {
+		t.Fatalf("Read preview bundle artifact returned error: %v", err)
+	}
+	if _, err := skillopt.ParsePreviewBundle(artifactContent); err != nil {
+		t.Fatalf("stored preview bundle did not parse: %v\n%s", err, string(artifactContent))
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(options[0].MetadataJSON), &metadata); err != nil {
+		t.Fatalf("option metadata unmarshal returned error: %v", err)
+	}
+	bundleMetadata, ok := metadata["preview_bundle"].(map[string]any)
+	if !ok {
+		t.Fatalf("option metadata missing preview_bundle: %s", options[0].MetadataJSON)
+	}
+	if bundleMetadata["renderer"] != skillopt.TrainPreviewRendererVueVite || int(bundleMetadata["file_count"].(float64)) != 4 || bundleMetadata["build_command"] != "npm run build" || bundleMetadata["dist_dir"] != "dist" {
+		t.Fatalf("preview bundle metadata = %+v", bundleMetadata)
+	}
+	if _, ok := bundleMetadata["content"]; ok {
+		t.Fatalf("preview bundle metadata included file content: %+v", bundleMetadata)
+	}
+
+	previewDir := t.TempDir()
+	runGit(t, previewDir, "init")
+	runGit(t, previewDir, "config", "user.email", "gitmoot@example.com")
+	runGit(t, previewDir, "config", "user.name", "Gitmoot")
+	runGit(t, previewDir, "branch", "-m", "main")
+	runGit(t, previewDir, "remote", "add", "origin", "https://github.com/owner/previews.git")
+	if err := os.WriteFile(filepath.Join(previewDir, "README.md"), []byte("previews\n"), 0o644); err != nil {
+		t.Fatalf("write preview README: %v", err)
+	}
+	runGit(t, previewDir, "add", "README.md")
+	runGit(t, previewDir, "commit", "-m", "init")
+	if err := store.UpsertRepo(context.Background(), db.Repo{Owner: "owner", Name: "previews", CheckoutPath: previewDir, PollInterval: "30s"}); err != nil {
+		t.Fatalf("UpsertRepo preview returned error: %v", err)
+	}
+	previewRunner := &skillOptTrainFakePreviewRunner{}
+	oldPreviewRunner := skillOptTrainPreviewRunner
+	skillOptTrainPreviewRunner = previewRunner
+	defer func() {
+		skillOptTrainPreviewRunner = oldPreviewRunner
+	}()
+	fakeGitHub := &skillOptFakeGitHub{}
+	oldClient := newSkillOptGitHubClient
+	newSkillOptGitHubClient = func() github.Client { return fakeGitHub }
+	defer func() {
+		newSkillOptGitHubClient = oldClient
+	}()
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "preview-train"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("second train continue exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "current_phase: review_published") ||
+		!strings.Contains(stdout.String(), "review_repo: owner/previews") ||
+		!strings.Contains(stdout.String(), "preview_urls: 4") {
+		t.Fatalf("second train continue stdout = %s", stdout.String())
+	}
+	wantPreviewURL := "https://owner.github.io/previews/runs/preview-train-review-001/hero-saas/a/"
+	if fakeGitHub.createdIssue.Repo.FullName() != "owner/previews" ||
+		!strings.Contains(fakeGitHub.createdIssue.Body, "Option A: [open]("+wantPreviewURL+")") ||
+		strings.Contains(fakeGitHub.createdIssue.Body, "## Inline Options Without Public Links") ||
+		strings.Contains(fakeGitHub.createdIssue.Body, `"renderer":"vue-vite"`) {
+		t.Fatalf("created preview review issue = %+v\n%s", fakeGitHub.createdIssue, fakeGitHub.createdIssue.Body)
+	}
+	if _, err := os.Stat(filepath.Join(previewDir, "runs", "preview-train-review-001", "hero-saas", "a", "index.html")); err != nil {
+		t.Fatalf("preview index was not published: %v", err)
+	}
+	options, err = store.ListEvalReviewOptions(context.Background(), "preview-train-review-001", "hero-saas")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions after publish returned error: %v", err)
+	}
+	if !strings.Contains(options[0].MetadataJSON, `"preview_url":"`+wantPreviewURL+`"`) {
+		t.Fatalf("option metadata missing preview_url: %s", options[0].MetadataJSON)
+	}
+}
+
+func TestSkillOptTrainContinueAllowsOptionalVuePreviewFallback(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/workspace.git")
+	t.Chdir(repoDir)
+	itemsPath := writeSkillOptTrainItemsFile(t)
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if err := store.UpsertAgentTemplate(context.Background(), cliSkillOptTemplate("planner", "Plan the work.")); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after template seed returned error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{
+		"agent", "type", "set", "skillopt-generator",
+		"--home", home,
+		"--runtime", "codex",
+		"--role", "generator",
+		"--max-background", "1",
+		"--capability", "ask",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("agent type set exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{
+		"skillopt", "train", "start",
+		"--home", home,
+		"--template", "planner",
+		"--repo", "owner/product",
+		"--session", "optional-preview-train",
+		"--workspace-repo", "owner/workspace",
+		"--preview-repo", "owner/previews",
+		"--preview-mode", "optional",
+		"--request", "Train landing page previews.",
+		"--task-kind", "design",
+		"--mode", "explore",
+		"--options", "2",
+		"--items-file", itemsPath,
+		"--yes",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("train start exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	runner := &agentStartRunner{results: []subprocess.Result{
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440503"}` + "\n"},
+		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option A optional preview")),
+		cliImplementedSummaryResult(t, "# Option B\n\nMarkdown fallback."),
+		cliImplementedSummaryResult(t, "# Option A\n\nMarkdown fallback."),
+		cliImplementedSummaryResult(t, "# Option B\n\nMarkdown fallback."),
+	}}
+	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
+	defer restoreFactory()
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optional-preview-train"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("train continue exit code = %d, stderr=%s", code, stderr.String())
+	}
+	prompt := runner.calls[1].args[len(runner.calls[1].args)-1]
+	for _, want := range []string{
+		"optional Vue/Vite previews",
+		"Prefer a Vue/Vite preview bundle",
+		"plain text or markdown is accepted only as inline fallback",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("optional preview prompt missing %q:\n%s", want, prompt)
+		}
+	}
+
+	store = openCLIJobStore(t, home)
+	defer store.Close()
+	options, err := store.ListEvalReviewOptions(context.Background(), "optional-preview-train-review-001", "")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions returned error: %v", err)
+	}
+	if len(options) != 4 {
+		t.Fatalf("options = %+v", options)
+	}
+	var bundleOptions int
+	var fallbackOptions int
+	for _, option := range options {
+		artifactRecord, err := store.GetEvalArtifact(context.Background(), option.ArtifactID)
+		if err != nil {
+			t.Fatalf("GetEvalArtifact returned error: %v", err)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal([]byte(option.MetadataJSON), &metadata); err != nil {
+			t.Fatalf("option metadata unmarshal returned error: %v", err)
+		}
+		_, hasBundleMetadata := metadata["preview_bundle"]
+		switch {
+		case artifactRecord.MediaType == "application/json" && artifactRecord.Driver == skillopt.TrainPreviewRendererVueVite:
+			bundleOptions++
+			if !hasBundleMetadata {
+				t.Fatalf("bundle option metadata missing preview_bundle: %s", option.MetadataJSON)
+			}
+		case artifactRecord.MediaType == "text/markdown" && artifactRecord.Driver == "text":
+			fallbackOptions++
+			if hasBundleMetadata {
+				t.Fatalf("fallback option metadata unexpectedly included preview_bundle: %s", option.MetadataJSON)
+			}
+		default:
+			t.Fatalf("unexpected optional preview artifact = %+v", artifactRecord)
+		}
+	}
+	if bundleOptions == 0 || fallbackOptions == 0 {
+		t.Fatalf("optional preview generated bundleOptions=%d fallbackOptions=%d", bundleOptions, fallbackOptions)
+	}
+
+	fakeGitHub := &skillOptFakeGitHub{}
+	oldClient := newSkillOptGitHubClient
+	newSkillOptGitHubClient = func() github.Client { return fakeGitHub }
+	defer func() {
+		newSkillOptGitHubClient = oldClient
+	}()
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optional-preview-train"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("second train continue exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "current_phase: review_published") ||
+		!strings.Contains(stdout.String(), "review_repo: owner/previews") ||
+		!strings.Contains(stdout.String(), "preview_urls: 0") {
+		t.Fatalf("second train continue stdout = %s", stdout.String())
+	}
+	if fakeGitHub.createdIssue.Repo.FullName() != "owner/previews" ||
+		!strings.Contains(fakeGitHub.createdIssue.Body, "Vue/Vite preview source") ||
+		strings.Contains(fakeGitHub.createdIssue.Body, `"renderer":"vue-vite"`) {
+		t.Fatalf("optional preview fallback issue = %+v\n%s", fakeGitHub.createdIssue, fakeGitHub.createdIssue.Body)
+	}
+}
+
+func TestSkillOptTrainContinueFailsRequiredVuePreviewForProseOutput(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/workspace.git")
+	t.Chdir(repoDir)
+	itemsPath := writeSkillOptTrainItemsFile(t)
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if err := store.UpsertAgentTemplate(context.Background(), cliSkillOptTemplate("planner", "Plan the work.")); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after template seed returned error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{
+		"agent", "type", "set", "skillopt-generator",
+		"--home", home,
+		"--runtime", "codex",
+		"--role", "generator",
+		"--max-background", "1",
+		"--capability", "ask",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("agent type set exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{
+		"skillopt", "train", "start",
+		"--home", home,
+		"--template", "planner",
+		"--repo", "owner/product",
+		"--session", "preview-train",
+		"--workspace-repo", "owner/workspace",
+		"--preview-repo", "owner/previews",
+		"--request", "Train landing page previews.",
+		"--task-kind", "design",
+		"--mode", "explore",
+		"--options", "2",
+		"--items-file", itemsPath,
+		"--yes",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("train start exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	runner := &agentStartRunner{results: []subprocess.Result{
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440502"}` + "\n"},
+		cliImplementedSummaryResult(t, "# Option A\n\nMarkdown is not a preview bundle."),
+		cliImplementedSummaryResult(t, "# Option A\n\nMarkdown is not a preview bundle."),
+	}}
+	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
+	defer restoreFactory()
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "preview-train"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train continue exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "preview bundle") || !strings.Contains(stderr.String(), "decode preview bundle JSON") {
+		t.Fatalf("preview bundle failure stderr = %q", stderr.String())
+	}
+	store = openCLIJobStore(t, home)
+	defer store.Close()
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "preview-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateItemsReady || !strings.Contains(iteration.MetadataJSON, `"status":"failed"`) || !strings.Contains(iteration.MetadataJSON, "preview bundle") {
+		t.Fatalf("iteration after preview failure = %+v metadata=%s", iteration, iteration.MetadataJSON)
+	}
+	options, err := store.ListEvalReviewOptions(context.Background(), "preview-train-review-001", "hero-saas")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions returned error: %v", err)
+	}
+	if len(options) != 0 {
+		t.Fatalf("failure persisted preview options: %+v", options)
 	}
 }
 
@@ -3597,6 +4107,45 @@ func writeSkillOptTrainItemsFile(t *testing.T) string {
 	return itemsPath
 }
 
+func cliImplementedSummaryResult(t *testing.T, summary string) subprocess.Result {
+	t.Helper()
+	encoded, err := json.Marshal(map[string]any{
+		"gitmoot_result": map[string]any{
+			"decision":     "implemented",
+			"summary":      summary,
+			"findings":     []any{},
+			"changes_made": []any{},
+			"tests_run":    []any{},
+			"needs":        []any{},
+			"next_agents":  []any{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal implemented summary result returned error: %v", err)
+	}
+	return subprocess.Result{Stdout: string(encoded) + "\n"}
+}
+
+func cliVuePreviewBundleSummary(t *testing.T, marker string) string {
+	t.Helper()
+	bundle := skillopt.PreviewBundle{
+		Renderer:     skillopt.TrainPreviewRendererVueVite,
+		BuildCommand: "npm run build",
+		DistDir:      "dist",
+		Files: []skillopt.PreviewBundleFile{
+			{Path: "package.json", Content: `{"scripts":{"build":"vite build"}}`},
+			{Path: "index.html", Content: `<div id="app"></div><script type="module" src="/src/main.js"></script>`},
+			{Path: "src/main.js", Content: `import { createApp } from 'vue'; import App from './App.vue'; createApp(App).mount('#app');`},
+			{Path: "src/App.vue", Content: `<template><main>` + marker + `</main></template>`},
+		},
+	}
+	encoded, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("Marshal Vue preview bundle returned error: %v", err)
+	}
+	return string(encoded)
+}
+
 func TestSkillOptTrainStartDryRunDoesNotInitializeFreshHome(t *testing.T) {
 	home := t.TempDir()
 	itemsPath := filepath.Join(t.TempDir(), "items.yml")
@@ -5778,6 +6327,56 @@ func (r *skillOptTrainFakeOptimizerRunner) LookPath(file string) (string, error)
 	}
 	if strings.TrimSpace(r.lookPathValue) != "" {
 		return r.lookPathValue, nil
+	}
+	return "/fake/bin/" + file, nil
+}
+
+type skillOptTrainFakePreviewRunner struct {
+	failGitCommit bool
+	calls         []skillOptTrainFakePreviewCall
+}
+
+type skillOptTrainFakePreviewCall struct {
+	dir     string
+	command string
+	args    []string
+}
+
+func (r *skillOptTrainFakePreviewRunner) Run(ctx context.Context, dir string, command string, args ...string) (subprocess.Result, error) {
+	r.calls = append(r.calls, skillOptTrainFakePreviewCall{dir: dir, command: command, args: append([]string{}, args...)})
+	result := subprocess.Result{Command: command, Args: args}
+	if command == "npm" {
+		if len(args) == 2 && args[0] == "install" && args[1] == "--ignore-scripts" {
+			result.Stdout = "installed\n"
+			return result, nil
+		}
+		if len(args) == 2 && args[0] == "run" && args[1] == "build" {
+			distDir := filepath.Join(dir, "dist")
+			if err := os.MkdirAll(distDir, 0o755); err != nil {
+				return result, err
+			}
+			if err := os.WriteFile(filepath.Join(distDir, "index.html"), []byte("<div id=\"app\">preview</div>\n"), 0o644); err != nil {
+				return result, err
+			}
+			result.Stdout = "built\n"
+			return result, nil
+		}
+		return result, fmt.Errorf("unexpected npm args: %v", args)
+	}
+	if command == "git" && len(args) == 1 && args[0] == "push" {
+		result.Stdout = "pushed\n"
+		return result, nil
+	}
+	if command == "git" && len(args) > 0 && args[0] == "commit" && r.failGitCommit {
+		result.Stderr = "commit failed\n"
+		return result, errors.New("exit status 1")
+	}
+	return subprocess.ExecRunner{}.Run(ctx, dir, command, args...)
+}
+
+func (r *skillOptTrainFakePreviewRunner) LookPath(file string) (string, error) {
+	if strings.TrimSpace(file) == "" {
+		return "", errors.New("empty file")
 	}
 	return "/fake/bin/" + file, nil
 }

@@ -471,6 +471,72 @@ func TestMarkdownCollectorRejectsIdenticalABItems(t *testing.T) {
 	}
 }
 
+func TestMarkdownCollectorRejectsPreviewBundleWithoutURL(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupMarkdownRankedFeedbackRun(t, "ranked-1")
+	bundle, err := blobs.Put([]byte(`{"renderer":"vue-vite"}`))
+	if err != nil {
+		t.Fatalf("Put preview bundle returned error: %v", err)
+	}
+	if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{ID: "option-a", Hash: bundle.Hash, MediaType: "application/json", SizeBytes: bundle.Size, Driver: "vue-vite"}); err != nil {
+		t.Fatalf("UpsertEvalArtifact option-a returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{
+		RunID:        "ranked-1",
+		ItemID:       "item-001",
+		Label:        "a",
+		ArtifactID:   "option-a",
+		Role:         "option",
+		MetadataJSON: `{"preview_bundle":{"renderer":"vue-vite","files":["package.json"]}}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewOption option-a returned error: %v", err)
+	}
+	collector := MarkdownCollector{BlobStore: blobs}
+
+	err = collector.WritePacket(ctx, store, "ranked-1", filepath.Join(t.TempDir(), "packet"))
+	if err == nil || !strings.Contains(err.Error(), "preview_url") {
+		t.Fatalf("WritePacket error = %v, want preview_url", err)
+	}
+}
+
+func TestMarkdownCollectorLinksPreviewBundleWithURL(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupMarkdownRankedFeedbackRun(t, "ranked-1")
+	bundle, err := blobs.Put([]byte(`{"renderer":"vue-vite"}`))
+	if err != nil {
+		t.Fatalf("Put preview bundle returned error: %v", err)
+	}
+	if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{ID: "option-a", Hash: bundle.Hash, MediaType: "application/json", SizeBytes: bundle.Size, Driver: "vue-vite"}); err != nil {
+		t.Fatalf("UpsertEvalArtifact option-a returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{
+		RunID:        "ranked-1",
+		ItemID:       "item-001",
+		Label:        "a",
+		ArtifactID:   "option-a",
+		Role:         "option",
+		MetadataJSON: `{"preview_url":"https://example.com/a","preview_bundle":{"renderer":"vue-vite","files":["package.json"]}}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewOption option-a returned error: %v", err)
+	}
+	packetDir := filepath.Join(t.TempDir(), "packet")
+	collector := MarkdownCollector{BlobStore: blobs}
+
+	if err := collector.WritePacket(ctx, store, "ranked-1", packetDir); err != nil {
+		t.Fatalf("WritePacket returned error: %v", err)
+	}
+	itemContent, err := os.ReadFile(filepath.Join(packetDir, "items", itemFilename("item-001")))
+	if err != nil {
+		t.Fatalf("read ranked item: %v", err)
+	}
+	if !strings.Contains(string(itemContent), "Reference: [open](https://example.com/a)") {
+		t.Fatalf("ranked item missing preview reference:\n%s", string(itemContent))
+	}
+	if strings.Contains(string(itemContent), `"renderer":"vue-vite"`) {
+		t.Fatalf("ranked item inlined preview bundle:\n%s", string(itemContent))
+	}
+}
+
 func TestMarkdownCollectorRejectsPacketWithoutStoredRun(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))

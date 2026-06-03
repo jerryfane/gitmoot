@@ -263,6 +263,13 @@ func (c MarkdownCollector) writeRankedItem(ctx context.Context, store *db.Store,
 	builder.WriteString("Rank every option in `../feedback.yml` from best to worst. Use the option labels exactly as shown here.\n\n")
 	writeOptionReferenceTable(&builder, assignment.Options)
 	for _, option := range assignment.Options {
+		if optionHasPreviewBundleWithoutReference(option) {
+			return missingPreviewURLForBundleError(item.ItemID, option.Label)
+		}
+		if optionHasPreviewBundle(option) {
+			fmt.Fprintf(&builder, "\n## Option %s\n\nReference: %s\n", displayOptionLabel(option.Label), optionReference(option, true))
+			continue
+		}
 		content, err := c.optionText(ctx, store, option.ArtifactID)
 		if err != nil {
 			return fmt.Errorf("item %s option %s: %w", item.ItemID, option.Label, err)
@@ -751,19 +758,58 @@ func writeOptionReferenceTableWithLocalPaths(builder *strings.Builder, options [
 }
 
 func optionReference(option blindOptionAssignment, includeLocalPaths bool) string {
-	metadata := map[string]string{}
-	if strings.TrimSpace(option.MetadataJSON) != "" {
-		_ = json.Unmarshal([]byte(option.MetadataJSON), &metadata)
-	}
+	metadata := optionMetadata(option)
 	for _, key := range []string{"preview_url", "url"} {
-		if value := strings.TrimSpace(metadata[key]); value != "" {
+		if value := metadataString(metadata, key); value != "" {
 			return fmt.Sprintf("[open](%s)", value)
 		}
 	}
-	if path := strings.TrimSpace(metadata["path"]); includeLocalPaths && path != "" {
+	if path := metadataString(metadata, "path"); includeLocalPaths && path != "" {
 		return "`" + strings.ReplaceAll(path, "`", "") + "`"
 	}
 	return ""
+}
+
+func optionHasPreviewBundleWithoutReference(option blindOptionAssignment) bool {
+	if !optionHasPreviewBundle(option) {
+		return false
+	}
+	metadata := optionMetadata(option)
+	for _, key := range []string{"preview_url", "url"} {
+		if metadataString(metadata, key) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func optionHasPreviewBundle(option blindOptionAssignment) bool {
+	metadata := optionMetadata(option)
+	if metadata["preview_bundle"] == nil {
+		return false
+	}
+	return true
+}
+
+func missingPreviewURLForBundleError(itemID string, label string) error {
+	return fmt.Errorf("item %s option %s has a preview bundle but no preview_url; publish previews before publishing a feedback packet", itemID, displayOptionLabel(label))
+}
+
+func optionMetadata(option blindOptionAssignment) map[string]any {
+	metadata := map[string]any{}
+	if strings.TrimSpace(option.MetadataJSON) != "" {
+		_ = json.Unmarshal([]byte(option.MetadataJSON), &metadata)
+	}
+	return metadata
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	switch value := metadata[key].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
 }
 
 func writeFeedbackYAML(path string, runID string, assignments assignmentFile) error {

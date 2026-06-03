@@ -150,6 +150,9 @@ func (c GitHubCollector) writeUnlinkedRankedOptionContent(ctx context.Context, s
 		assignment := assignments[item.ItemID]
 		wroteItem := false
 		for _, option := range assignment.Options {
+			if optionHasPreviewBundleWithoutReference(option) {
+				return missingPreviewURLForBundleError(item.ItemID, option.Label)
+			}
 			if optionReference(option, false) != "" {
 				continue
 			}

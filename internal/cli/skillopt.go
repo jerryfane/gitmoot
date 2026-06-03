@@ -36,6 +36,8 @@ var newSkillOptGitHubClient = func() github.Client {
 
 var skillOptTrainOptimizerRunner subprocess.Runner = subprocess.ExecRunner{}
 
+var skillOptTrainPreviewRunner subprocess.Runner = subprocess.ExecRunner{}
+
 func runSkillOpt(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printSkillOptUsage(stdout)
@@ -598,8 +600,43 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 			},
 		}, nil
 	case skillopt.TrainStateOptionsGenerated:
-		output.Lines = []string{"next: options already generated; publish the human review packet"}
-		return output, nil
+		releaseReviewLock, _, err := acquireSkillOptTrainReviewLock(ctx, store, session.ID, iteration.ID)
+		if err != nil {
+			return output, err
+		}
+		defer func() {
+			_ = releaseReviewLock(context.Background())
+		}()
+		session, iteration, counts, err = loadSkillOptTrainStatus(ctx, store, request.SessionID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		summary = skillopt.BuildTrainStatusSummary(session, iteration, counts)
+		output = skillOptTrainContinueOutput{Summary: summary, Counts: counts}
+		if iteration == nil {
+			output.Lines = []string{"next: train session has no iteration to continue"}
+			return output, nil
+		}
+		if summary.CurrentPhase != skillopt.TrainStateOptionsGenerated {
+			output.Lines = []string{fmt.Sprintf("next: %s", summary.NextAction)}
+			return output, nil
+		}
+		result, err := publishSkillOptTrainReview(ctx, paths, store, session, *iteration)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSession, updatedIteration, updatedCounts, err := loadSkillOptTrainStatus(ctx, store, session.ID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSummary := skillopt.BuildTrainStatusSummary(updatedSession, updatedIteration, updatedCounts)
+		lines := []string{
+			fmt.Sprintf("review: %s", result.URL),
+			fmt.Sprintf("review_repo: %s", result.Repo.FullName()),
+			fmt.Sprintf("preview_urls: %d", result.PreviewURLs),
+			"next: wait for feedback, then run train continue after sync",
+		}
+		return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
 	case skillopt.TrainStateFeedbackSynced, skillopt.TrainStateTrainingPackageCreated, skillopt.TrainStateOptimizerCompleted:
 		if iteration == nil {
 			output.Lines = []string{"next: train session has no iteration to continue"}
@@ -1917,6 +1954,8 @@ var errSkillOptTrainOptimizerBusy = errors.New("skillopt train optimizer is alre
 
 var errSkillOptTrainCandidateReviewBusy = errors.New("skillopt train candidate review is already publishing")
 
+var errSkillOptTrainReviewBusy = errors.New("skillopt train review is already publishing")
+
 var errSkillOptTrainStartNextBusy = errors.New("skillopt train next iteration is already starting")
 
 const skillOptTrainGenerationLockTTL = 2 * time.Hour
@@ -1928,6 +1967,8 @@ const skillOptTrainOptimizerLockTTL = 4 * time.Hour
 const skillOptTrainOptimizerLockBuffer = 10 * time.Minute
 
 const skillOptTrainCandidateReviewLockTTL = 30 * time.Minute
+
+const skillOptTrainReviewLockTTL = 30 * time.Minute
 
 const skillOptTrainStartNextLockTTL = 30 * time.Minute
 
@@ -1964,6 +2005,41 @@ func skillOptTrainCandidateReviewLockKey(sessionID string, iterationID string) s
 		return "skillopt-train-candidate-review:" + sessionID
 	}
 	return "skillopt-train-candidate-review:" + sessionID + ":" + iterationID
+}
+
+func acquireSkillOptTrainReviewLock(ctx context.Context, store *db.Store, sessionID string, iterationID string) (func(context.Context) error, bool, error) {
+	key := skillOptTrainReviewLockKey(sessionID, iterationID)
+	token, err := newRuntimeLockOwnerToken()
+	if err != nil {
+		return noopAgentReservationRelease, false, err
+	}
+	now := time.Now().UTC()
+	ownerJobID := localAgentJobID("skillopt-train-review", strings.TrimSpace(sessionID))
+	acquired, err := store.AcquireResourceLock(ctx, db.ResourceLock{
+		ResourceKey: key,
+		OwnerJobID:  ownerJobID,
+		OwnerToken:  token,
+		ExpiresAt:   now.Add(skillOptTrainReviewLockTTL).Format(time.RFC3339Nano),
+	}, now)
+	if err != nil {
+		return noopAgentReservationRelease, false, err
+	}
+	if !acquired {
+		return noopAgentReservationRelease, false, fmt.Errorf("%w: %s", errSkillOptTrainReviewBusy, key)
+	}
+	return func(releaseCtx context.Context) error {
+		_, err := store.ReleaseResourceLock(releaseCtx, key, ownerJobID, token)
+		return err
+	}, true, nil
+}
+
+func skillOptTrainReviewLockKey(sessionID string, iterationID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	iterationID = strings.TrimSpace(iterationID)
+	if iterationID == "" {
+		return "skillopt-train-review:" + sessionID
+	}
+	return "skillopt-train-review:" + sessionID + ":" + iterationID
 }
 
 func acquireSkillOptTrainStartNextLock(ctx context.Context, store *db.Store, sessionID string) (func(context.Context) error, bool, error) {
@@ -2351,6 +2427,8 @@ func generateSkillOptTrainSingleItemOptions(ctx context.Context, store *db.Store
 	generatedItem := skillOptTrainGeneratedItemOptions{ItemID: item.ItemID}
 	replacementOptions := make([]db.EvalReviewOption, 0, len(roles))
 	artifactRecords := make([]db.EvalArtifact, 0, len(roles))
+	wantsVuePreviewBundle := skillOptTrainWantsVuePreviewBundle(session)
+	requiresVuePreviewBundle := skillOptTrainRequiresVuePreviewBundle(session)
 	for _, role := range roles {
 		prompt := buildSkillOptTrainGenerationPrompt(session, iteration, run, item, role, rankedRun)
 		output, err := dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
@@ -2375,12 +2453,33 @@ func generateSkillOptTrainSingleItemOptions(ctx context.Context, store *db.Store
 		if rankedRun {
 			artifactRole = "option-" + role
 		}
-		artifactRecord, err := prepareReviewItemContentArtifact(blobStore, run.ID, item.ItemID, artifactRole, []byte(output.Result.Summary), "text/markdown", "text")
+		artifactContent := []byte(output.Result.Summary)
+		artifactMediaType := "text/markdown"
+		artifactDriver := "text"
+		var previewBundleMetadata *skillopt.PreviewBundleMetadata
+		if wantsVuePreviewBundle {
+			bundle, err := skillopt.ParsePreviewBundle([]byte(output.Result.Summary))
+			if err != nil {
+				if requiresVuePreviewBundle {
+					return skillOptTrainGeneratedItemOptions{}, fmt.Errorf("generate %s for %s: preview bundle: %w", role, item.ItemID, err)
+				}
+			} else {
+				artifactContent, err = json.Marshal(bundle)
+				if err != nil {
+					return skillOptTrainGeneratedItemOptions{}, fmt.Errorf("generate %s for %s: encode preview bundle: %w", role, item.ItemID, err)
+				}
+				metadata := bundle.Metadata()
+				previewBundleMetadata = &metadata
+				artifactMediaType = "application/json"
+				artifactDriver = skillopt.TrainPreviewRendererVueVite
+			}
+		}
+		artifactRecord, err := prepareReviewItemContentArtifact(blobStore, run.ID, item.ItemID, artifactRole, artifactContent, artifactMediaType, artifactDriver)
 		if err != nil {
 			return skillOptTrainGeneratedItemOptions{}, err
 		}
 		artifactRecords = append(artifactRecords, artifactRecord)
-		optionMetadata := skillOptTrainGeneratedOptionMetadata(output, prompt)
+		optionMetadata := skillOptTrainGeneratedOptionMetadata(output, prompt, previewBundleMetadata)
 		if rankedRun {
 			replacementOptions = append(replacementOptions, db.EvalReviewOption{
 				RunID:        run.ID,
@@ -2417,6 +2516,682 @@ func generateSkillOptTrainSingleItemOptions(ctx context.Context, store *db.Store
 		generatedItem.ReviewItem = &item
 	}
 	return generatedItem, nil
+}
+
+func skillOptTrainWantsVuePreviewBundle(session db.SkillOptTrainSession) bool {
+	policy := skillopt.ResolveTrainPreviewPolicy(session)
+	return policy.Mode != skillopt.TrainPreviewModeNone && policy.Renderer == skillopt.TrainPreviewRendererVueVite
+}
+
+func skillOptTrainRequiresVuePreviewBundle(session db.SkillOptTrainSession) bool {
+	policy := skillopt.ResolveTrainPreviewPolicy(session)
+	return policy.Mode == skillopt.TrainPreviewModeRequired && policy.Renderer == skillopt.TrainPreviewRendererVueVite
+}
+
+type skillOptTrainReviewPublishResult struct {
+	Repo        github.Repository
+	IssueNumber int64
+	URL         string
+	PreviewURLs int
+}
+
+func publishSkillOptTrainReview(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) (skillOptTrainReviewPublishResult, error) {
+	if err := skillopt.CanTransitionTrainIteration(iteration.State, skillopt.TrainStateReviewPublished); err != nil {
+		return skillOptTrainReviewPublishResult{}, err
+	}
+	if strings.TrimSpace(iteration.EvalRunID) == "" {
+		return skillOptTrainReviewPublishResult{}, fmt.Errorf("train iteration %s has no eval run id", iteration.ID)
+	}
+	if recovered, ok, err := recoverSkillOptTrainReviewPublication(ctx, paths, store, session, iteration); err != nil {
+		return skillOptTrainReviewPublishResult{}, err
+	} else if ok {
+		return recovered, nil
+	}
+	previewURLs, err := publishSkillOptTrainPreviewURLs(ctx, paths, store, session, iteration)
+	if err != nil {
+		return skillOptTrainReviewPublishResult{}, err
+	}
+	run, err := store.GetEvalRun(ctx, iteration.EvalRunID)
+	if err != nil {
+		return skillOptTrainReviewPublishResult{}, err
+	}
+	repo, err := resolveSkillOptFeedbackRepo(ctx, paths, store, run, "")
+	if err != nil {
+		return skillOptTrainReviewPublishResult{}, err
+	}
+	publishingMetadata := map[string]any{
+		"status":       "publishing",
+		"repo":         repo.FullName(),
+		"preview_urls": previewURLs,
+		"started_at":   time.Now().UTC().Format(time.RFC3339Nano),
+		"source":       "gitmoot skillopt train continue",
+	}
+	if err := writeSkillOptTrainReviewRecovery(paths, session, iteration, publishingMetadata); err != nil {
+		return skillOptTrainReviewPublishResult{}, fmt.Errorf("write review pre-publish recovery marker: %w", err)
+	}
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "review", publishingMetadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "review", publishingMetadata)
+	if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+		return skillOptTrainReviewPublishResult{}, err
+	}
+	collector := feedback.GitHubCollector{BlobStore: artifact.NewStore(paths.ArtifactBlobs)}
+	body, err := collector.Body(ctx, store, run.ID)
+	if err != nil {
+		return skillOptTrainReviewPublishResult{}, err
+	}
+	client := newSkillOptGitHubClient()
+	postingMetadata := make(map[string]any, len(publishingMetadata)+2)
+	for key, value := range publishingMetadata {
+		postingMetadata[key] = value
+	}
+	postingMetadata["status"] = "posting_external"
+	postingMetadata["external_post_started_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeSkillOptTrainReviewRecovery(paths, session, iteration, postingMetadata); err != nil {
+		return skillOptTrainReviewPublishResult{}, fmt.Errorf("write review external-post recovery marker: %w", err)
+	}
+	issue, err := client.CreateIssue(ctx, github.CreateIssueInput{
+		Repo:  repo,
+		Title: fmt.Sprintf("Gitmoot SkillOpt feedback: %s", strings.TrimSpace(run.ID)),
+		Body:  body,
+	})
+	if err != nil {
+		return skillOptTrainReviewPublishResult{}, err
+	}
+	published := feedback.GitHubPublishResult{Repo: repo, IssueNumber: issue.Number, URL: issue.URL, Mode: "issue"}
+	externalMetadata := map[string]any{
+		"status":       "published_external",
+		"repo":         published.Repo.FullName(),
+		"issue_number": published.IssueNumber,
+		"url":          published.URL,
+		"preview_urls": previewURLs,
+		"published_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"source":       "gitmoot skillopt train continue",
+	}
+	externalMarkerErr := writeSkillOptTrainReviewRecovery(paths, session, iteration, externalMetadata)
+	session.State = skillopt.TrainStateReviewPublished
+	iteration.State = skillopt.TrainStateReviewPublished
+	iteration.IssueRepo = published.Repo.FullName()
+	iteration.IssueNumber = published.IssueNumber
+	iteration.IssueURL = published.URL
+	dbMetadata := make(map[string]any, len(externalMetadata))
+	for key, value := range externalMetadata {
+		dbMetadata[key] = value
+	}
+	dbMetadata["status"] = "published"
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "review", dbMetadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "review", dbMetadata)
+	if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+		if externalMarkerErr != nil {
+			return skillOptTrainReviewPublishResult{}, fmt.Errorf("%w; review was published at %s but recovery marker write failed: %v", err, published.URL, externalMarkerErr)
+		}
+		return skillOptTrainReviewPublishResult{}, err
+	}
+	if externalMarkerErr != nil {
+		return skillOptTrainReviewPublishResult{}, fmt.Errorf("review was published at %s and recorded in local state but recovery marker write failed: %w", published.URL, externalMarkerErr)
+	}
+	_ = removeSkillOptTrainReviewRecovery(paths, session, iteration)
+	return skillOptTrainReviewPublishResult{Repo: published.Repo, IssueNumber: published.IssueNumber, URL: published.URL, PreviewURLs: previewURLs}, nil
+}
+
+func recoverSkillOptTrainReviewPublication(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) (skillOptTrainReviewPublishResult, bool, error) {
+	review, ok, err := readSkillOptTrainReviewRecovery(paths, session, iteration)
+	if err != nil || !ok {
+		return skillOptTrainReviewPublishResult{}, ok, err
+	}
+	status := metadataString(review, "status")
+	if status == "posting_external" {
+		return skillOptTrainReviewPublishResult{}, true, errors.New("train review publication was interrupted after the external GitHub post started; inspect the review repo before retrying to avoid duplicate issues")
+	}
+	if status != "published_external" {
+		return skillOptTrainReviewPublishResult{}, false, nil
+	}
+	repo, err := daemon.ParseRepository(metadataString(review, "repo"))
+	if err != nil {
+		return skillOptTrainReviewPublishResult{}, true, err
+	}
+	issueNumber := int64(metadataNumber(review, "issue_number"))
+	url := metadataString(review, "url")
+	previewURLs := metadataNumber(review, "preview_urls")
+	session.State = skillopt.TrainStateReviewPublished
+	iteration.State = skillopt.TrainStateReviewPublished
+	iteration.IssueRepo = repo.FullName()
+	iteration.IssueNumber = issueNumber
+	iteration.IssueURL = url
+	metadata := map[string]any{
+		"status":       "published",
+		"repo":         repo.FullName(),
+		"issue_number": issueNumber,
+		"url":          url,
+		"preview_urls": previewURLs,
+		"published_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"source":       "gitmoot skillopt train continue",
+	}
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "review", metadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "review", metadata)
+	if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+		return skillOptTrainReviewPublishResult{}, true, err
+	}
+	_ = removeSkillOptTrainReviewRecovery(paths, session, iteration)
+	return skillOptTrainReviewPublishResult{Repo: repo, IssueNumber: issueNumber, URL: url, PreviewURLs: previewURLs}, true, nil
+}
+
+func writeSkillOptTrainReviewRecovery(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, metadata map[string]any) error {
+	path := skillOptTrainReviewRecoveryPath(paths, session, iteration)
+	if path == "" {
+		return errors.New("review recovery path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	tmpPath := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	if err := os.WriteFile(tmpPath, encoded, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func readSkillOptTrainReviewRecovery(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) (map[string]any, bool, error) {
+	path := skillOptTrainReviewRecoveryPath(paths, session, iteration)
+	if path == "" {
+		return nil, false, nil
+	}
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, true, err
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(content, &metadata); err != nil {
+		return nil, true, fmt.Errorf("read review recovery marker %s: %w", path, err)
+	}
+	return metadata, true, nil
+}
+
+func removeSkillOptTrainReviewRecovery(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) error {
+	path := skillOptTrainReviewRecoveryPath(paths, session, iteration)
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func skillOptTrainReviewRecoveryPath(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) string {
+	if strings.TrimSpace(paths.Home) == "" {
+		return ""
+	}
+	name := skillOptCandidateReviewRecoveryName(session.ID, iteration.ID)
+	if name == "" {
+		return ""
+	}
+	return filepath.Join(paths.Home, "skillopt", "reviews", name+".json")
+}
+
+func publishSkillOptTrainPreviewURLs(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) (int, error) {
+	policy := skillopt.ResolveTrainPreviewPolicy(session)
+	if policy.Mode == skillopt.TrainPreviewModeNone || policy.Renderer == skillopt.TrainPreviewRendererNone || policy.Publisher == skillopt.TrainPreviewPublisherNone {
+		return 0, nil
+	}
+	if policy.Renderer != skillopt.TrainPreviewRendererVueVite || policy.Publisher != skillopt.TrainPreviewPublisherGitHubPages {
+		if policy.Mode == skillopt.TrainPreviewModeRequired {
+			return 0, fmt.Errorf("preview renderer %s with publisher %s is not implemented", policy.Renderer, policy.Publisher)
+		}
+		return 0, nil
+	}
+	run, err := store.GetEvalRun(ctx, iteration.EvalRunID)
+	if err != nil {
+		return 0, err
+	}
+	options, err := store.ListEvalReviewOptions(ctx, run.ID, "")
+	if err != nil {
+		return 0, err
+	}
+	if len(options) == 0 {
+		if policy.Mode == skillopt.TrainPreviewModeRequired {
+			return 0, fmt.Errorf("train run %s has no generated options to publish previews", run.ID)
+		}
+		return 0, nil
+	}
+	blobStore := artifact.NewStore(paths.ArtifactBlobs)
+	previewRepo, err := previewRepoRecord(ctx, store, policy)
+	if err != nil {
+		if policy.Mode == skillopt.TrainPreviewModeRequired {
+			return 0, err
+		}
+		return convertOptionalPreviewBundlesToFallback(ctx, store, blobStore, options)
+	}
+	if err := requireCleanPreviewRepo(ctx, previewRepo.CheckoutPath); err != nil {
+		if policy.Mode == skillopt.TrainPreviewModeRequired {
+			return 0, err
+		}
+		return convertOptionalPreviewBundlesToFallback(ctx, store, blobStore, options)
+	}
+	publishedCount := 0
+	for _, option := range options {
+		metadata := optionMetadataMap(option.MetadataJSON)
+		if metadataStringValue(metadata, "preview_url") != "" || metadataStringValue(metadata, "url") != "" {
+			publishedCount++
+			continue
+		}
+		if metadata["preview_bundle"] == nil {
+			if policy.Mode == skillopt.TrainPreviewModeRequired {
+				return publishedCount, fmt.Errorf("item %s option %s is missing preview bundle metadata", option.ItemID, option.Label)
+			}
+			continue
+		}
+		record, err := store.GetEvalArtifact(ctx, option.ArtifactID)
+		if err != nil {
+			return publishedCount, fmt.Errorf("item %s option %s artifact: %w", option.ItemID, option.Label, err)
+		}
+		content, err := blobStore.Read(record.Hash)
+		if err != nil {
+			return publishedCount, fmt.Errorf("item %s option %s preview bundle blob: %w", option.ItemID, option.Label, err)
+		}
+		bundle, err := skillopt.ParsePreviewBundle(content)
+		if err != nil {
+			if policy.Mode == skillopt.TrainPreviewModeRequired {
+				return publishedCount, fmt.Errorf("item %s option %s preview bundle: %w", option.ItemID, option.Label, err)
+			}
+			continue
+		}
+		distDir, cleanup, err := renderVueVitePreviewBundle(ctx, bundle)
+		if err != nil {
+			if policy.Mode == skillopt.TrainPreviewModeRequired {
+				return publishedCount, fmt.Errorf("item %s option %s render preview: %w", option.ItemID, option.Label, err)
+			}
+			continue
+		}
+		route, err := skillOptPreviewRoute(policy.RouteTemplate, run.ID, option.ItemID, option.Label)
+		if err != nil {
+			_ = cleanup()
+			return publishedCount, err
+		}
+		url, err := publishGitHubPagesPreview(ctx, previewRepo, route, distDir)
+		_ = cleanup()
+		if err != nil {
+			if policy.Mode == skillopt.TrainPreviewModeRequired {
+				return publishedCount, fmt.Errorf("item %s option %s publish preview: %w", option.ItemID, option.Label, err)
+			}
+			continue
+		}
+		metadata["preview_url"] = url
+		metadata["preview_route"] = route
+		metadata["preview_repo"] = previewRepo.FullName()
+		option.MetadataJSON = encodeOptionMetadata(metadata)
+		if err := store.UpsertEvalReviewOption(ctx, option); err != nil {
+			return publishedCount, err
+		}
+		publishedCount++
+	}
+	if policy.Mode == skillopt.TrainPreviewModeRequired && publishedCount != len(options) {
+		return publishedCount, fmt.Errorf("required preview run has %d/%d preview URLs", publishedCount, len(options))
+	}
+	if policy.Mode == skillopt.TrainPreviewModeOptional {
+		freshOptions, err := store.ListEvalReviewOptions(ctx, run.ID, "")
+		if err != nil {
+			return publishedCount, err
+		}
+		if _, err := convertOptionalPreviewBundlesToFallback(ctx, store, blobStore, freshOptions); err != nil {
+			return publishedCount, err
+		}
+	}
+	return publishedCount, nil
+}
+
+func convertOptionalPreviewBundlesToFallback(ctx context.Context, store *db.Store, blobStore artifact.Store, options []db.EvalReviewOption) (int, error) {
+	for _, option := range options {
+		metadata := optionMetadataMap(option.MetadataJSON)
+		if metadata["preview_bundle"] == nil || metadataStringValue(metadata, "preview_url") != "" || metadataStringValue(metadata, "url") != "" {
+			continue
+		}
+		record, err := store.GetEvalArtifact(ctx, option.ArtifactID)
+		if err != nil {
+			return 0, err
+		}
+		content, err := blobStore.Read(record.Hash)
+		if err != nil {
+			return 0, err
+		}
+		bundle, err := skillopt.ParsePreviewBundle(content)
+		if err != nil {
+			return 0, err
+		}
+		fallbackContent := []byte(previewBundleInlineFallback(bundle))
+		blob, err := blobStore.Put(fallbackContent)
+		if err != nil {
+			return 0, err
+		}
+		record.Hash = blob.Hash
+		record.MediaType = "text/markdown"
+		record.SizeBytes = blob.Size
+		record.Driver = "text"
+		if err := store.UpsertEvalArtifact(ctx, record); err != nil {
+			return 0, err
+		}
+		delete(metadata, "preview_bundle")
+		metadata["preview_fallback"] = "inline"
+		metadata["preview_fallback_renderer"] = skillopt.TrainPreviewRendererVueVite
+		option.MetadataJSON = encodeOptionMetadata(metadata)
+		if err := store.UpsertEvalReviewOption(ctx, option); err != nil {
+			return 0, err
+		}
+	}
+	return 0, nil
+}
+
+func previewBundleInlineFallback(bundle skillopt.PreviewBundle) string {
+	var builder strings.Builder
+	builder.WriteString("# Vue/Vite preview source\n\n")
+	builder.WriteString("A clickable preview was not available, so this option is included as inline Vue/Vite source for review.\n\n")
+	for _, file := range bundle.Files {
+		fmt.Fprintf(&builder, "## `%s`\n\n", file.Path)
+		writeSkillOptMarkdownFence(&builder, file.Content)
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
+func writeSkillOptMarkdownFence(builder *strings.Builder, content string) {
+	fence := "```"
+	for strings.Contains(content, fence) {
+		fence += "`"
+	}
+	builder.WriteString(fence)
+	builder.WriteString("text\n")
+	builder.WriteString(strings.TrimRight(content, "\n"))
+	builder.WriteString("\n")
+	builder.WriteString(fence)
+	builder.WriteString("\n")
+}
+
+func previewRepoRecord(ctx context.Context, store *db.Store, policy skillopt.TrainPreviewPolicy) (db.Repo, error) {
+	repoName := strings.TrimSpace(policy.Repo)
+	if repoName == "" {
+		return db.Repo{}, errors.New("preview repo is required")
+	}
+	repo, err := store.GetRepo(ctx, repoName)
+	if err != nil {
+		return db.Repo{}, fmt.Errorf("preview repo %s is not registered with a checkout path; run `gitmoot repo add %s --path /path/to/checkout`: %w", repoName, repoName, err)
+	}
+	if strings.TrimSpace(repo.CheckoutPath) == "" {
+		return db.Repo{}, fmt.Errorf("preview repo %s has no checkout path; run `gitmoot repo add %s --path /path/to/checkout`", repoName, repoName)
+	}
+	if _, err := os.Stat(repo.CheckoutPath); err != nil {
+		return db.Repo{}, fmt.Errorf("preview repo %s checkout is not ready: %w", repo.FullName(), err)
+	}
+	return repo, nil
+}
+
+func requireCleanPreviewRepo(ctx context.Context, checkout string) error {
+	result, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("check preview repo status: %w", err)
+	}
+	if strings.TrimSpace(result.Stdout) != "" {
+		return fmt.Errorf("preview repo checkout %s is dirty; commit or clean it before publishing previews", checkout)
+	}
+	return nil
+}
+
+func renderVueVitePreviewBundle(ctx context.Context, bundle skillopt.PreviewBundle) (string, func() error, error) {
+	workDir, err := os.MkdirTemp("", "gitmoot-vue-preview-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() error { return os.RemoveAll(workDir) }
+	for _, file := range bundle.Files {
+		target, err := safeJoinPreviewPath(workDir, file.Path)
+		if err != nil {
+			_ = cleanup()
+			return "", nil, err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			_ = cleanup()
+			return "", nil, err
+		}
+		if err := os.WriteFile(target, []byte(file.Content), 0o644); err != nil {
+			_ = cleanup()
+			return "", nil, err
+		}
+	}
+	if err := writeTrustedVueViteScaffold(workDir); err != nil {
+		_ = cleanup()
+		return "", nil, err
+	}
+	if _, err := skillOptTrainPreviewRunner.Run(ctx, workDir, "npm", "install", "--ignore-scripts"); err != nil {
+		_ = cleanup()
+		return "", nil, fmt.Errorf("npm install: %w", err)
+	}
+	if _, err := skillOptTrainPreviewRunner.Run(ctx, workDir, "npm", "run", "build"); err != nil {
+		_ = cleanup()
+		return "", nil, fmt.Errorf("%s: %w", bundle.BuildCommand, err)
+	}
+	distDir, err := safeJoinPreviewPath(workDir, bundle.DistDir)
+	if err != nil {
+		_ = cleanup()
+		return "", nil, err
+	}
+	if _, err := os.Stat(filepath.Join(distDir, "index.html")); err != nil {
+		_ = cleanup()
+		return "", nil, fmt.Errorf("preview build output missing index.html in %s: %w", bundle.DistDir, err)
+	}
+	return distDir, cleanup, nil
+}
+
+func publishGitHubPagesPreview(ctx context.Context, repo db.Repo, route string, distDir string) (string, error) {
+	checkout := strings.TrimSpace(repo.CheckoutPath)
+	if err := requireCleanPreviewRepo(ctx, checkout); err != nil {
+		return "", err
+	}
+	head, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("read preview repo head: %w", err)
+	}
+	headSHA := strings.TrimSpace(head.Stdout)
+	target, err := safeJoinPreviewPath(checkout, route)
+	if err != nil {
+		return "", err
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return "", err
+	}
+	if err := copyDir(distDir, target); err != nil {
+		restorePreviewRoute(ctx, checkout, route, headSHA)
+		return "", err
+	}
+	if _, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "add", "--", route); err != nil {
+		restorePreviewRoute(ctx, checkout, route, headSHA)
+		return "", fmt.Errorf("git add preview route: %w", err)
+	}
+	status, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "status", "--porcelain", "--", route)
+	if err != nil {
+		restorePreviewRoute(ctx, checkout, route, headSHA)
+		return "", fmt.Errorf("check preview route status: %w", err)
+	}
+	if strings.TrimSpace(status.Stdout) != "" {
+		if _, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "commit", "-m", "Publish SkillOpt preview "+strings.TrimSuffix(route, "/")); err != nil {
+			restorePreviewRoute(ctx, checkout, route, headSHA)
+			return "", fmt.Errorf("git commit preview route: %w", err)
+		}
+		if _, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "push"); err != nil {
+			restorePreviewRoute(ctx, checkout, route, headSHA)
+			return "", fmt.Errorf("git push preview route: %w", err)
+		}
+	}
+	return githubPagesURL(repo, route), nil
+}
+
+func restorePreviewRoute(ctx context.Context, checkout string, route string, headSHA string) {
+	if strings.TrimSpace(headSHA) != "" {
+		_, _ = skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "reset", "--hard", headSHA)
+	}
+	_, _ = skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "clean", "-fd", "--", route)
+}
+
+func skillOptPreviewRoute(template string, runID string, itemID string, label string) (string, error) {
+	if strings.TrimSpace(template) == "" {
+		template = skillopt.DefaultTrainPreviewRouteTemplate
+	}
+	route := strings.ReplaceAll(template, "{run_id}", previewRouteSlug(runID))
+	route = strings.ReplaceAll(route, "{item_id}", previewRouteSlug(itemID))
+	route = strings.ReplaceAll(route, "{option_label}", previewRouteSlug(label))
+	route = strings.TrimSpace(route)
+	if route == "" {
+		return "", errors.New("preview route is required")
+	}
+	route = strings.TrimPrefix(route, "/")
+	clean := filepath.ToSlash(filepath.Clean(route))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, ":") {
+		return "", fmt.Errorf("preview route %q is unsafe", route)
+	}
+	if !strings.HasSuffix(clean, "/") {
+		clean += "/"
+	}
+	return clean, nil
+}
+
+func safeJoinPreviewPath(root string, relative string) (string, error) {
+	root = filepath.Clean(root)
+	relative = filepath.FromSlash(strings.TrimSpace(relative))
+	if filepath.IsAbs(relative) {
+		return "", fmt.Errorf("preview path %q must be relative", relative)
+	}
+	target := filepath.Clean(filepath.Join(root, relative))
+	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
+		return "", fmt.Errorf("preview path %q must stay inside %s", relative, root)
+	}
+	return target, nil
+}
+
+func copyDir(source string, target string) error {
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		sourcePath := filepath.Join(source, entry.Name())
+		targetPath := filepath.Join(target, entry.Name())
+		if entry.IsDir() {
+			if err := copyDir(sourcePath, targetPath); err != nil {
+				return err
+			}
+			continue
+		}
+		content, err := os.ReadFile(sourcePath)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(targetPath, content, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func githubPagesURL(repo db.Repo, route string) string {
+	if strings.EqualFold(repo.Name, repo.Owner+".github.io") {
+		return fmt.Sprintf("https://%s.github.io/%s", repo.Owner, strings.TrimLeft(route, "/"))
+	}
+	return fmt.Sprintf("https://%s.github.io/%s/%s", repo.Owner, repo.Name, strings.TrimLeft(route, "/"))
+}
+
+func writeTrustedVueViteScaffold(workDir string) error {
+	packageJSON := `{"type":"module","scripts":{"build":"vite build"},"dependencies":{"@vitejs/plugin-vue":"latest","vite":"latest","vue":"latest"}}`
+	if err := os.WriteFile(filepath.Join(workDir, "package.json"), []byte(packageJSON), 0o644); err != nil {
+		return err
+	}
+	indexHTML := `<div id="app"></div><script type="module" src="/src/main.js"></script>`
+	if err := os.WriteFile(filepath.Join(workDir, "index.html"), []byte(indexHTML), 0o644); err != nil {
+		return err
+	}
+	mainPath := filepath.Join(workDir, "src", "main.js")
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0o755); err != nil {
+		return err
+	}
+	mainJS := `import { createApp } from 'vue'; import App from './App.vue'; createApp(App).mount('#app');`
+	if err := os.WriteFile(mainPath, []byte(mainJS), 0o644); err != nil {
+		return err
+	}
+	viteConfig := "import { defineConfig } from 'vite';\nimport vue from '@vitejs/plugin-vue';\n\nexport default defineConfig({ base: './', plugins: [vue()] });\n"
+	return os.WriteFile(filepath.Join(workDir, "vite.config.js"), []byte(viteConfig), 0o644)
+}
+
+func previewRouteSlug(value string) string {
+	trimmed := strings.TrimSpace(value)
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(trimmed) {
+		allowed := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-'
+		if allowed {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(builder.String(), ".-_")
+	if slug == "" {
+		slug = "value"
+	}
+	if slug != trimmed {
+		slug = slug + "-" + shortHash(trimmed)
+	}
+	return slug
+}
+
+func optionMetadataMap(metadataJSON string) map[string]any {
+	metadata := map[string]any{}
+	if strings.TrimSpace(metadataJSON) != "" {
+		_ = json.Unmarshal([]byte(metadataJSON), &metadata)
+	}
+	return metadata
+}
+
+func metadataStringValue(metadata map[string]any, key string) string {
+	if value, ok := metadata[key].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func metadataNumber(metadata map[string]any, key string) int {
+	switch value := metadata[key].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case int64:
+		return int(value)
+	default:
+		return 0
+	}
+}
+
+func encodeOptionMetadata(metadata map[string]any) string {
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 func runSkillOptTrainStop(args []string, stdout, stderr io.Writer) int {
@@ -3377,6 +4152,28 @@ func buildSkillOptTrainGenerationPrompt(session db.SkillOptTrainSession, iterati
 	}
 	builder.WriteString("- Keep the artifact self-contained and directly reviewable.\n")
 	builder.WriteString("- Preserve the requested output type.\n")
+	if skillOptTrainWantsVuePreviewBundle(session) {
+		requiresVuePreviewBundle := skillOptTrainRequiresVuePreviewBundle(session)
+		builder.WriteString("\nPreview bundle contract:\n")
+		if requiresVuePreviewBundle {
+			builder.WriteString("- This train session requires a Vue/Vite preview bundle for every generated option.\n")
+			builder.WriteString("- Keep gitmoot_result.summary as a string value. The string content must be exactly one serialized JSON object, with no markdown, code fences, or prose.\n")
+			builder.WriteString("- Do not set gitmoot_result.summary to a nested object; encode the bundle JSON as the summary string.\n")
+		} else {
+			builder.WriteString("- This train session is configured for optional Vue/Vite previews. Prefer a Vue/Vite preview bundle so Gitmoot can publish preview URLs; plain text or markdown is accepted only as inline fallback.\n")
+			builder.WriteString("- If you return a preview bundle, keep gitmoot_result.summary as a string containing exactly one serialized JSON object, with no markdown, code fences, or prose.\n")
+			builder.WriteString("- If you return plain text or markdown fallback, use the normal summary string and do not include the bundle JSON shape.\n")
+		}
+		builder.WriteString("- Use renderer \"vue-vite\".\n")
+		builder.WriteString("- Include build_command exactly \"npm run build\" and dist_dir \"dist\".\n")
+		builder.WriteString("- Include files with these required relative paths: package.json, index.html, src/main.js, src/App.vue.\n")
+		builder.WriteString("- package.json scripts must include only \"build\": \"vite build\". Do not include dependencies or devDependencies; Gitmoot supplies trusted build dependencies.\n")
+		builder.WriteString("- index.html and src/main.js must use the standard Vue mount scaffold exactly; Gitmoot overwrites them with trusted scaffold files before build.\n")
+		builder.WriteString("- src/App.vue must be scriptless template/style Vue only. Do not include script blocks, imports, require, import.meta, @import, or CSS url().\n")
+		builder.WriteString("- Each file entry must have path and non-empty content. Use slash-separated relative paths only.\n")
+		builder.WriteString("- Do not include local absolute paths, path traversal, secrets, .env files, node_modules, dependency caches, dist, built outputs, vite.config.js, or files outside the required paths.\n")
+		builder.WriteString("- The JSON object shape is: renderer string, files array of {path, content}, build_command string, dist_dir string.\n")
+	}
 	return builder.String()
 }
 
@@ -3403,13 +4200,16 @@ func prepareReviewItemContentArtifact(blobStore artifact.Store, runID string, it
 	}, nil
 }
 
-func skillOptTrainGeneratedOptionMetadata(output localAgentJobOutput, prompt string) string {
+func skillOptTrainGeneratedOptionMetadata(output localAgentJobOutput, prompt string, previewBundleMetadata *skillopt.PreviewBundleMetadata) string {
 	metadata := map[string]any{
 		"source":           "gitmoot skillopt train continue",
 		"job_id":           output.JobID,
 		"agent":            output.Agent,
 		"prompt":           prompt,
 		"raw_output_count": output.RawOutputCount,
+	}
+	if previewBundleMetadata != nil {
+		metadata["preview_bundle"] = *previewBundleMetadata
 	}
 	encoded, err := json.Marshal(metadata)
 	if err != nil {
