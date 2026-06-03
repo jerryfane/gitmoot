@@ -3,13 +3,16 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	neturl "net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,7 +79,7 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issue <number>|--pr <number>)")
 	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
-	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer]")
+	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
 }
 
@@ -105,7 +108,7 @@ func printSkillOptTrainUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--session <id>] [--workspace-repo owner/repo] [--preview-repo owner/repo] [--request-file path] [--task-kind kind] [--mode explore|refine|distill|validate] [--exploration-level high|medium|low] [--options N] [--min-items N] [--preferred-gate hard|soft|hard_then_soft] [--dry-run] [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
-	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer]")
+	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
 }
 
@@ -396,6 +399,10 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 	timeout := fs.String("timeout", "", "optimizer timeout duration")
 	dryRun := fs.Bool("dry-run", false, "ask gitmoot-skillopt to avoid model calls while still producing a candidate package")
 	rerunOptimizer := fs.Bool("rerun-optimizer", false, "rerun gitmoot-skillopt after optimizer completion instead of retrying the existing candidate import")
+	promote := fs.String("promote", "", "candidate version to promote after candidate review")
+	reject := fs.String("reject", "", "candidate version to reject after candidate review")
+	reason := fs.String("reason", "", "decision reason required with --reject")
+	startNext := fs.Bool("start-next", false, "start the next train iteration after a promote or reject decision")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -429,6 +436,10 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 				DryRun:         *dryRun,
 				RerunOptimizer: *rerunOptimizer,
 			},
+			PromoteCandidate: *promote,
+			RejectCandidate:  *reject,
+			DecisionReason:   *reason,
+			StartNext:        *startNext,
 		})
 		return err
 	}); err != nil {
@@ -454,6 +465,10 @@ type skillOptTrainContinueRequest struct {
 	GeneratorType     string
 	GenerationLockTTL time.Duration
 	Optimizer         skillOptTrainOptimizerRequest
+	PromoteCandidate  string
+	RejectCandidate   string
+	DecisionReason    string
+	StartNext         bool
 }
 
 type skillOptTrainOptimizerRequest struct {
@@ -488,6 +503,23 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 	if iteration == nil {
 		output.Lines = []string{"next: train session has no iteration to continue"}
 		return output, nil
+	}
+	if strings.TrimSpace(request.PromoteCandidate) != "" && strings.TrimSpace(request.RejectCandidate) != "" {
+		return skillOptTrainContinueOutput{}, errors.New("train continue accepts only one of --promote or --reject")
+	}
+	if skillOptTrainDecisionRequested(request) &&
+		summary.CurrentPhase != skillopt.TrainStateCandidateReviewPublished &&
+		summary.CurrentPhase != skillopt.TrainStateCandidateCreated &&
+		summary.CurrentPhase != skillopt.TrainStateCandidatePromoted &&
+		summary.CurrentPhase != skillopt.TrainStateCandidateRejected {
+		return skillOptTrainContinueOutput{}, fmt.Errorf("candidate decisions require train iteration at %s; current phase is %s", skillopt.TrainStateCandidateReviewPublished, summary.CurrentPhase)
+	}
+	if request.StartNext &&
+		summary.CurrentPhase != skillopt.TrainStateCandidateReviewPublished &&
+		summary.CurrentPhase != skillopt.TrainStateCandidateCreated &&
+		summary.CurrentPhase != skillopt.TrainStateCandidatePromoted &&
+		summary.CurrentPhase != skillopt.TrainStateCandidateRejected {
+		return skillOptTrainContinueOutput{}, fmt.Errorf("--start-next requires a promoted or rejected candidate; current phase is %s", summary.CurrentPhase)
 	}
 	switch summary.CurrentPhase {
 	case skillopt.TrainStateItemsReady:
@@ -611,10 +643,184 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 			ContinueReady: true,
 			Lines:         lines,
 		}, nil
+	case skillopt.TrainStateCandidateCreated:
+		releaseCandidateReviewLock, _, err := acquireSkillOptTrainCandidateReviewLock(ctx, store, session.ID, iteration.ID)
+		if err != nil {
+			return output, err
+		}
+		defer func() {
+			_ = releaseCandidateReviewLock(context.Background())
+		}()
+		session, iteration, counts, err = loadSkillOptTrainStatus(ctx, store, request.SessionID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		summary = skillopt.BuildTrainStatusSummary(session, iteration, counts)
+		output = skillOptTrainContinueOutput{Summary: summary, Counts: counts}
+		if iteration == nil {
+			output.Lines = []string{"next: train session has no iteration to continue"}
+			return output, nil
+		}
+		if skillOptTrainDecisionRequested(request) && summary.CurrentPhase == skillopt.TrainStateCandidateReviewPublished {
+			return continueSkillOptTrainCandidateDecision(ctx, store, session, *iteration, counts, request)
+		}
+		if summary.CurrentPhase != skillopt.TrainStateCandidateCreated {
+			output.Lines = []string{fmt.Sprintf("next: %s", summary.NextAction)}
+			return output, nil
+		}
+		candidateID := strings.TrimSpace(iteration.CandidateVersionID)
+		if requestedCandidateID := requestedSkillOptTrainCandidateID(request); requestedCandidateID != "" && requestedCandidateID != candidateID {
+			return skillOptTrainContinueOutput{}, fmt.Errorf("candidate %s does not match train iteration candidate %s", requestedCandidateID, candidateID)
+		}
+		if result, err := syncSkillOptTrainCandidateDecision(ctx, store, session, *iteration, candidateID, requestedSkillOptTrainCandidateDecision(request), strings.TrimSpace(request.DecisionReason)); err != nil || result.Decided {
+			if err != nil {
+				return skillOptTrainContinueOutput{}, err
+			}
+			return continueSkillOptTrainAfterCandidateDecision(ctx, store, session.ID, request, result)
+		}
+		if request.StartNext {
+			return skillOptTrainContinueOutput{}, fmt.Errorf("--start-next requires a promoted or rejected candidate; current phase is %s", summary.CurrentPhase)
+		}
+		if skillOptTrainDecisionRequested(request) {
+			if candidateID == "" {
+				return skillOptTrainContinueOutput{}, errors.New("train iteration has no candidate version to review")
+			}
+			if _, recovered, err := recoverSkillOptCandidateReviewPublication(ctx, paths, store, session, *iteration, candidateID); err != nil {
+				return skillOptTrainContinueOutput{}, err
+			} else if !recovered {
+				return skillOptTrainContinueOutput{}, fmt.Errorf("candidate decisions require train iteration at %s; current phase is %s", skillopt.TrainStateCandidateReviewPublished, summary.CurrentPhase)
+			}
+			updatedSession, updatedIteration, updatedCounts, err := loadSkillOptTrainStatus(ctx, store, session.ID)
+			if err != nil {
+				return skillOptTrainContinueOutput{}, err
+			}
+			if updatedIteration == nil {
+				return skillOptTrainContinueOutput{}, errors.New("train session has no recovered iteration to decide")
+			}
+			return continueSkillOptTrainCandidateDecision(ctx, store, updatedSession, *updatedIteration, updatedCounts, request)
+		}
+		result, err := publishSkillOptTrainCandidateReview(ctx, paths, store, session, *iteration, request.Home)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSession, updatedIteration, updatedCounts, err := loadSkillOptTrainStatus(ctx, store, session.ID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSummary := skillopt.BuildTrainStatusSummary(updatedSession, updatedIteration, updatedCounts)
+		lines := []string{
+			fmt.Sprintf("candidate_review: %s", result.URL),
+			fmt.Sprintf("candidate: %s", result.CandidateVersionID),
+			"next: promote with --promote, reject with --reject --reason, or wait for a human decision",
+		}
+		return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
+	case skillopt.TrainStateCandidateReviewPublished:
+		return continueSkillOptTrainCandidateDecision(ctx, store, session, *iteration, counts, request)
+	case skillopt.TrainStateCandidatePromoted, skillopt.TrainStateCandidateRejected:
+		if err := validateTerminalSkillOptTrainDecisionRequest(*iteration, request); err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		if !request.StartNext {
+			output.Lines = []string{"next: stop or run --start-next"}
+			return output, nil
+		}
+		next, err := startNextSkillOptTrainIteration(ctx, store, session, *iteration)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSession, updatedIteration, updatedCounts, err := loadSkillOptTrainStatus(ctx, store, session.ID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSummary := skillopt.BuildTrainStatusSummary(updatedSession, updatedIteration, updatedCounts)
+		lines := []string{}
+		if decision := requestedSkillOptTrainCandidateDecision(request); decision != "" {
+			lines = append(lines, fmt.Sprintf("%s_candidate: %s", decision, requestedSkillOptTrainCandidateID(request)))
+		}
+		lines = append(lines,
+			fmt.Sprintf("started_iteration: %s", next.ID),
+			fmt.Sprintf("base_version: %s", next.BaseTemplateVersionID),
+			"next: generate review options with train continue",
+		)
+		return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
 	default:
 		output.Lines = []string{fmt.Sprintf("next: %s", summary.NextAction)}
 		return output, nil
 	}
+}
+
+func continueSkillOptTrainCandidateDecision(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, counts skillopt.TrainStatusCounts, request skillOptTrainContinueRequest) (skillOptTrainContinueOutput, error) {
+	summary := skillopt.BuildTrainStatusSummary(session, &iteration, counts)
+	output := skillOptTrainContinueOutput{Summary: summary, Counts: counts}
+	result, err := decideSkillOptTrainCandidate(ctx, store, session, iteration, request)
+	if err != nil {
+		return skillOptTrainContinueOutput{}, err
+	}
+	if !result.Decided {
+		if request.StartNext {
+			return skillOptTrainContinueOutput{}, fmt.Errorf("--start-next requires a promoted or rejected candidate; current phase is %s", summary.CurrentPhase)
+		}
+		output.Lines = []string{"next: promote with --promote <candidate-version> or reject with --reject <candidate-version> --reason <text>"}
+		return output, nil
+	}
+	return continueSkillOptTrainAfterCandidateDecision(ctx, store, session.ID, request, result)
+}
+
+func continueSkillOptTrainAfterCandidateDecision(ctx context.Context, store *db.Store, sessionID string, request skillOptTrainContinueRequest, result skillOptTrainCandidateDecisionResult) (skillOptTrainContinueOutput, error) {
+	updatedSession, updatedIteration, updatedCounts, err := loadSkillOptTrainStatus(ctx, store, sessionID)
+	if err != nil {
+		return skillOptTrainContinueOutput{}, err
+	}
+	updatedSummary := skillopt.BuildTrainStatusSummary(updatedSession, updatedIteration, updatedCounts)
+	if request.StartNext {
+		if updatedIteration == nil {
+			return skillOptTrainContinueOutput{}, errors.New("train session has no decided iteration to continue")
+		}
+		next, err := startNextSkillOptTrainIteration(ctx, store, updatedSession, *updatedIteration)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSession, updatedIteration, updatedCounts, err = loadSkillOptTrainStatus(ctx, store, sessionID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSummary = skillopt.BuildTrainStatusSummary(updatedSession, updatedIteration, updatedCounts)
+		lines := []string{
+			fmt.Sprintf("%s_candidate: %s", result.Decision, result.CandidateVersionID),
+			fmt.Sprintf("started_iteration: %s", next.ID),
+			fmt.Sprintf("base_version: %s", next.BaseTemplateVersionID),
+			"next: generate review options with train continue",
+		}
+		return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
+	}
+	lines := []string{
+		fmt.Sprintf("%s_candidate: %s", result.Decision, result.CandidateVersionID),
+		"next: stop or run --start-next",
+	}
+	return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
+}
+
+func validateTerminalSkillOptTrainDecisionRequest(iteration db.SkillOptTrainIteration, request skillOptTrainContinueRequest) error {
+	decision := requestedSkillOptTrainCandidateDecision(request)
+	if decision == "" {
+		return nil
+	}
+	candidateID := requestedSkillOptTrainCandidateID(request)
+	expected := strings.TrimSpace(iteration.CandidateVersionID)
+	if candidateID != expected {
+		return fmt.Errorf("candidate %s does not match train iteration candidate %s", candidateID, expected)
+	}
+	currentDecision := ""
+	switch skillopt.NormalizeTrainState(iteration.State) {
+	case skillopt.TrainStateCandidatePromoted:
+		currentDecision = "promoted"
+	case skillopt.TrainStateCandidateRejected:
+		currentDecision = "rejected"
+	}
+	if currentDecision != "" && decision != currentDecision {
+		return fmt.Errorf("candidate %s is already %s, not %s", candidateID, currentDecision, decision)
+	}
+	return nil
 }
 
 type skillOptTrainOptimizerResult struct {
@@ -634,6 +840,945 @@ type skillOptTrainOptimizerPaths struct {
 	TrainingPackagePath  string
 	CandidatePackagePath string
 	ArtifactDir          string
+}
+
+type skillOptTrainCandidateReviewResult struct {
+	URL                string
+	CandidateVersionID string
+}
+
+type skillOptTrainCandidateDecisionResult struct {
+	Decided            bool
+	Decision           string
+	CandidateVersionID string
+}
+
+const (
+	skillOptCandidateReviewEvalReportLimit = 12000
+	skillOptCandidateReviewDiffLimit       = 32000
+)
+
+func publishSkillOptTrainCandidateReview(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, commandHome string) (skillOptTrainCandidateReviewResult, error) {
+	if err := skillopt.CanTransitionTrainIteration(iteration.State, skillopt.TrainStateCandidateReviewPublished); err != nil {
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	candidateID := strings.TrimSpace(iteration.CandidateVersionID)
+	if candidateID == "" {
+		return skillOptTrainCandidateReviewResult{}, errors.New("train iteration has no candidate version to review")
+	}
+	if result, recovered, err := recoverSkillOptCandidateReviewPublication(ctx, paths, store, session, iteration, candidateID); recovered || err != nil {
+		return result, err
+	}
+	refreshedSession, err := store.GetSkillOptTrainSession(ctx, session.ID)
+	if err != nil {
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	refreshedIteration, err := store.GetSkillOptTrainIteration(ctx, iteration.ID)
+	if err != nil {
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	session = refreshedSession
+	iteration = refreshedIteration
+	if err := preventDuplicateSkillOptCandidateReviewPublish(session, iteration, candidateID, time.Now().UTC()); err != nil {
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	repo, err := resolveSkillOptTrainCandidateReviewRepo(session, iteration)
+	if err != nil {
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	body, err := skillOptTrainCandidateReviewBody(ctx, store, session, iteration, commandHome)
+	if err != nil {
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	client := newSkillOptGitHubClient()
+	if iteration.PullRequestNumber > 0 && iteration.IssueNumber == 0 {
+		iteration.PullRequestRepo = repo.FullName()
+	} else {
+		iteration.IssueRepo = repo.FullName()
+	}
+	title := fmt.Sprintf("SkillOpt candidate review: %s", session.ID)
+	publishingMetadata := map[string]any{
+		"status":              "publishing",
+		"candidate_version":   candidateID,
+		"issue_repo":          iteration.IssueRepo,
+		"issue_number":        iteration.IssueNumber,
+		"issue_url":           iteration.IssueURL,
+		"pull_request_repo":   iteration.PullRequestRepo,
+		"pull_request_number": iteration.PullRequestNumber,
+		"pull_request_url":    iteration.PullRequestURL,
+		"issue_title":         title,
+		"started_at":          time.Now().UTC().Format(time.RFC3339Nano),
+		"source":              "gitmoot skillopt train continue",
+	}
+	if err := writeSkillOptCandidateReviewRecovery(paths, session, iteration, publishingMetadata); err != nil {
+		return skillOptTrainCandidateReviewResult{}, fmt.Errorf("write candidate review pre-publish recovery marker: %w", err)
+	}
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_review", publishingMetadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_review", publishingMetadata)
+	if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	postingMetadata := make(map[string]any, len(publishingMetadata)+2)
+	for key, value := range publishingMetadata {
+		postingMetadata[key] = value
+	}
+	postingMetadata["status"] = "posting_external"
+	postingMetadata["external_post_started_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeSkillOptCandidateReviewRecovery(paths, session, iteration, postingMetadata); err != nil {
+		if metaErr := recordFailedSkillOptCandidateReviewPublish(ctx, store, session, iteration, publishingMetadata, err); metaErr != nil {
+			return skillOptTrainCandidateReviewResult{}, fmt.Errorf("%w; failed to record candidate review publish failure: %v", err, metaErr)
+		}
+		return skillOptTrainCandidateReviewResult{}, fmt.Errorf("write candidate review external-post recovery marker: %w", err)
+	}
+	var url string
+	if iteration.IssueNumber > 0 {
+		comment, err := client.PostIssueComment(ctx, repo, iteration.IssueNumber, body)
+		if err != nil {
+			if metaErr := recordFailedSkillOptCandidateReviewPublish(ctx, store, session, iteration, publishingMetadata, err); metaErr != nil {
+				return skillOptTrainCandidateReviewResult{}, fmt.Errorf("%w; failed to record candidate review publish failure: %v", err, metaErr)
+			}
+			return skillOptTrainCandidateReviewResult{}, err
+		}
+		url = comment.URL
+		if strings.TrimSpace(iteration.IssueURL) == "" {
+			iteration.IssueURL = skillOptReviewTargetURLFromCommentOrHost(comment.URL, repo, "issues", iteration.IssueNumber)
+		}
+	} else if iteration.PullRequestNumber > 0 {
+		comment, err := client.PostIssueComment(ctx, repo, iteration.PullRequestNumber, body)
+		if err != nil {
+			if metaErr := recordFailedSkillOptCandidateReviewPublish(ctx, store, session, iteration, publishingMetadata, err); metaErr != nil {
+				return skillOptTrainCandidateReviewResult{}, fmt.Errorf("%w; failed to record candidate review publish failure: %v", err, metaErr)
+			}
+			return skillOptTrainCandidateReviewResult{}, err
+		}
+		url = comment.URL
+		if strings.TrimSpace(iteration.PullRequestURL) == "" {
+			iteration.PullRequestURL = skillOptReviewTargetURLFromCommentOrHost(comment.URL, repo, "pull", iteration.PullRequestNumber)
+		}
+	} else {
+		issue, err := client.CreateIssue(ctx, github.CreateIssueInput{
+			Repo:  repo,
+			Title: title,
+			Body:  body,
+		})
+		if err != nil {
+			if metaErr := recordFailedSkillOptCandidateReviewPublish(ctx, store, session, iteration, publishingMetadata, err); metaErr != nil {
+				return skillOptTrainCandidateReviewResult{}, fmt.Errorf("%w; failed to record candidate review publish failure: %v", err, metaErr)
+			}
+			return skillOptTrainCandidateReviewResult{}, err
+		}
+		iteration.IssueNumber = issue.Number
+		iteration.IssueURL = issue.URL
+		url = issue.URL
+	}
+	externalMetadata := skillOptCandidateReviewPublicationMetadata(publishingMetadata, iteration, url, "published_external")
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_review", externalMetadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_review", externalMetadata)
+	recoveryErr := writeSkillOptCandidateReviewRecovery(paths, session, iteration, externalMetadata)
+	if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+		if recoveryErr != nil {
+			return skillOptTrainCandidateReviewResult{}, fmt.Errorf("%w; candidate review was published at %s but recovery marker write failed: %v", err, url, recoveryErr)
+		}
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	iteration.State = skillopt.TrainStateCandidateReviewPublished
+	session.State = skillopt.TrainStateCandidateReviewPublished
+	metadata := skillOptCandidateReviewPublicationMetadata(publishingMetadata, iteration, url, "published")
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_review", metadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_review", metadata)
+	if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+		return skillOptTrainCandidateReviewResult{}, err
+	}
+	_ = removeSkillOptCandidateReviewRecovery(paths, session, iteration)
+	return skillOptTrainCandidateReviewResult{URL: url, CandidateVersionID: candidateID}, nil
+}
+
+func recoverSkillOptCandidateReviewPublication(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, candidateID string) (skillOptTrainCandidateReviewResult, bool, error) {
+	sources := []map[string]any{
+		decodedSkillOptMetadataValue(decodedSkillOptMetadata(iteration.MetadataJSON)["candidate_review"]),
+		decodedSkillOptMetadataValue(decodedSkillOptMetadata(session.MetadataJSON)["candidate_review"]),
+	}
+	if review, ok, err := readSkillOptCandidateReviewRecovery(paths, session, iteration); err != nil {
+		return skillOptTrainCandidateReviewResult{}, true, err
+	} else if ok {
+		if metadataString(review, "status") == "publishing" && metadataString(review, "external_post_started_at") == "" {
+			metadata := make(map[string]any, len(review)+3)
+			for key, value := range review {
+				metadata[key] = value
+			}
+			metadata["status"] = "failed"
+			metadata["error"] = "candidate review publication interrupted before external post started"
+			metadata["failed_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+			session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_review", metadata)
+			iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_review", metadata)
+			if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+				return skillOptTrainCandidateReviewResult{}, true, err
+			}
+			_ = removeSkillOptCandidateReviewRecovery(paths, session, iteration)
+			return skillOptTrainCandidateReviewResult{}, false, nil
+		}
+		sources = append(sources, review)
+	}
+	for _, review := range sources {
+		status := metadataString(review, "status")
+		if status == "posting_external" {
+			target := skillOptCandidateReviewRecoveryTarget(review)
+			if target == "" {
+				target = "inspect the configured GitHub review surface before retrying"
+			}
+			return skillOptTrainCandidateReviewResult{}, true, fmt.Errorf("candidate review publication for %s was interrupted after external post started; %s", candidateID, target)
+		}
+		if status != "published_external" && status != "published" {
+			continue
+		}
+		reviewCandidate := metadataString(review, "candidate_version")
+		if reviewCandidate != "" && reviewCandidate != candidateID {
+			continue
+		}
+		url := skillOptCandidateReviewURLFromMetadata(review)
+		if url == "" {
+			return skillOptTrainCandidateReviewResult{}, true, fmt.Errorf("candidate review publication for %s is marked %s but has no recoverable review URL", candidateID, status)
+		}
+		applySkillOptCandidateReviewMetadataToIteration(review, &iteration)
+		iteration.State = skillopt.TrainStateCandidateReviewPublished
+		session.State = skillopt.TrainStateCandidateReviewPublished
+		metadata := make(map[string]any, len(review)+3)
+		for key, value := range review {
+			metadata[key] = value
+		}
+		metadata["status"] = "published"
+		metadata["review_url"] = url
+		metadata["recovered_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_review", metadata)
+		iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_review", metadata)
+		if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+			return skillOptTrainCandidateReviewResult{}, true, err
+		}
+		_ = removeSkillOptCandidateReviewRecovery(paths, session, iteration)
+		return skillOptTrainCandidateReviewResult{URL: url, CandidateVersionID: candidateID}, true, nil
+	}
+	return skillOptTrainCandidateReviewResult{}, false, nil
+}
+
+func preventDuplicateSkillOptCandidateReviewPublish(session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, candidateID string, now time.Time) error {
+	for _, source := range []struct {
+		name     string
+		metadata string
+	}{
+		{name: "iteration", metadata: iteration.MetadataJSON},
+		{name: "session", metadata: session.MetadataJSON},
+	} {
+		review := decodedSkillOptMetadataValue(decodedSkillOptMetadata(source.metadata)["candidate_review"])
+		status := metadataString(review, "status")
+		if status == "publishing" && !skillOptCandidateReviewPublishingFresh(review, now) {
+			continue
+		}
+		if status != "publishing" && status != "published" {
+			continue
+		}
+		reviewCandidate := metadataString(review, "candidate_version")
+		if reviewCandidate != "" && reviewCandidate != candidateID {
+			continue
+		}
+		target := skillOptCandidateReviewRecoveryTarget(review)
+		if target == "" {
+			target = "inspect candidate_review metadata before retrying"
+		}
+		return fmt.Errorf("candidate review publication for %s is marked %s in %s metadata; %s", candidateID, status, source.name, target)
+	}
+	return nil
+}
+
+func skillOptCandidateReviewPublishingFresh(review map[string]any, now time.Time) bool {
+	startedAt := metadataString(review, "started_at")
+	if startedAt == "" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return now.Before(started.Add(skillOptTrainCandidateReviewLockTTL))
+}
+
+func writeSkillOptCandidateReviewRecovery(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, metadata map[string]any) error {
+	path := skillOptCandidateReviewRecoveryPath(paths, session, iteration)
+	if path == "" {
+		return errors.New("candidate review recovery path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	tmpPath := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	if err := os.WriteFile(tmpPath, encoded, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func readSkillOptCandidateReviewRecovery(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) (map[string]any, bool, error) {
+	path := skillOptCandidateReviewRecoveryPath(paths, session, iteration)
+	if path == "" {
+		return nil, false, nil
+	}
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, true, err
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(content, &metadata); err != nil {
+		return nil, true, fmt.Errorf("read candidate review recovery marker %s: %w", path, err)
+	}
+	return metadata, true, nil
+}
+
+func removeSkillOptCandidateReviewRecovery(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) error {
+	path := skillOptCandidateReviewRecoveryPath(paths, session, iteration)
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func skillOptCandidateReviewRecoveryPath(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) string {
+	if strings.TrimSpace(paths.Home) == "" {
+		return ""
+	}
+	name := skillOptCandidateReviewRecoveryName(session.ID, iteration.ID)
+	if name == "" {
+		return ""
+	}
+	return filepath.Join(paths.Home, "skillopt", "candidate-reviews", name+".json")
+}
+
+func skillOptCandidateReviewRecoveryName(sessionID string, iterationID string) string {
+	sessionID = encodeSkillOptCandidateReviewRecoveryToken(sessionID)
+	iterationID = encodeSkillOptCandidateReviewRecoveryToken(iterationID)
+	if sessionID == "" || iterationID == "" {
+		return ""
+	}
+	return sessionID + "-" + iterationID
+}
+
+func encodeSkillOptCandidateReviewRecoveryToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
+}
+
+func skillOptCandidateReviewPublicationMetadata(base map[string]any, iteration db.SkillOptTrainIteration, reviewURL string, status string) map[string]any {
+	metadata := make(map[string]any, len(base)+9)
+	for key, value := range base {
+		metadata[key] = value
+	}
+	metadata["status"] = status
+	metadata["issue_repo"] = iteration.IssueRepo
+	metadata["issue_number"] = iteration.IssueNumber
+	metadata["issue_url"] = iteration.IssueURL
+	metadata["pull_request_repo"] = iteration.PullRequestRepo
+	metadata["pull_request_number"] = iteration.PullRequestNumber
+	metadata["pull_request_url"] = iteration.PullRequestURL
+	metadata["review_url"] = reviewURL
+	metadata["published_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	return metadata
+}
+
+func recordFailedSkillOptCandidateReviewPublish(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, publishingMetadata map[string]any, publishErr error) error {
+	metadata := make(map[string]any, len(publishingMetadata)+3)
+	for key, value := range publishingMetadata {
+		metadata[key] = value
+	}
+	metadata["status"] = "failed"
+	metadata["error"] = truncateForMetadata(publishErr.Error())
+	metadata["failed_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_review", metadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_review", metadata)
+	return store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration)
+}
+
+func applySkillOptCandidateReviewMetadataToIteration(review map[string]any, iteration *db.SkillOptTrainIteration) {
+	if value := metadataString(review, "issue_repo"); value != "" {
+		iteration.IssueRepo = value
+	}
+	if value := metadataString(review, "issue_number"); value != "" {
+		if number, err := strconv.ParseInt(value, 10, 64); err == nil {
+			iteration.IssueNumber = number
+		}
+	}
+	if value := metadataString(review, "issue_url"); value != "" {
+		iteration.IssueURL = value
+	}
+	if value := metadataString(review, "pull_request_repo"); value != "" {
+		iteration.PullRequestRepo = value
+	}
+	if value := metadataString(review, "pull_request_number"); value != "" {
+		if number, err := strconv.ParseInt(value, 10, 64); err == nil {
+			iteration.PullRequestNumber = number
+		}
+	}
+	if value := metadataString(review, "pull_request_url"); value != "" {
+		iteration.PullRequestURL = value
+	}
+}
+
+func skillOptCandidateReviewURLFromMetadata(review map[string]any) string {
+	for _, key := range []string{"review_url", "issue_url", "pull_request_url"} {
+		if value := metadataString(review, key); value != "" {
+			return value
+		}
+	}
+	repo := metadataString(review, "issue_repo")
+	number := metadataString(review, "issue_number")
+	if repo != "" && number != "" && number != "0" {
+		return "https://github.com/" + repo + "/issues/" + number
+	}
+	repo = metadataString(review, "pull_request_repo")
+	number = metadataString(review, "pull_request_number")
+	if repo != "" && number != "" && number != "0" {
+		return "https://github.com/" + repo + "/pull/" + number
+	}
+	return ""
+}
+
+func skillOptCandidateReviewRecoveryTarget(review map[string]any) string {
+	for _, key := range []string{"review_url", "issue_url", "pull_request_url"} {
+		if value := metadataString(review, key); value != "" {
+			return "review target: " + value
+		}
+	}
+	repo := metadataString(review, "issue_repo")
+	number := metadataString(review, "issue_number")
+	if repo != "" && number != "" && number != "0" {
+		return "review issue: " + repo + "#" + number
+	}
+	repo = metadataString(review, "pull_request_repo")
+	number = metadataString(review, "pull_request_number")
+	if repo != "" && number != "" && number != "0" {
+		return "review pull request: " + repo + "#" + number
+	}
+	if title := metadataString(review, "issue_title"); title != "" {
+		return "search for review issue title: " + title
+	}
+	return ""
+}
+
+func resolveSkillOptTrainCandidateReviewRepo(session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) (github.Repository, error) {
+	repoName := strings.TrimSpace(iteration.IssueRepo)
+	if iteration.IssueNumber > 0 {
+		if repoName == "" {
+			repoName = skillOptGitHubIssueURLRepo(iteration.IssueURL)
+		}
+		if repoName == "" {
+			return github.Repository{}, errors.New("candidate review issue repo is required when reusing an existing review issue")
+		}
+	} else if iteration.PullRequestNumber > 0 {
+		repoName = strings.TrimSpace(iteration.PullRequestRepo)
+		if repoName == "" {
+			repoName = skillOptGitHubPullRequestURLRepo(iteration.PullRequestURL)
+		}
+		if repoName == "" {
+			return github.Repository{}, errors.New("candidate review pull request repo is required when reusing an existing review pull request")
+		}
+	} else if repoName == "" {
+		repoName = strings.TrimSpace(session.WorkspaceRepo)
+		if repoName == "" {
+			repoName = strings.TrimSpace(session.TargetRepo)
+		}
+	}
+	repo, err := daemon.ParseRepository(repoName)
+	if err != nil {
+		return github.Repository{}, fmt.Errorf("candidate review repo: %w", err)
+	}
+	return repo, nil
+}
+
+func skillOptGitHubIssueURLRepo(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := neturl.Parse(value)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	if len(parts) < 4 || parts[2] != "issues" {
+		return ""
+	}
+	repo, err := daemon.ParseRepository(parts[0] + "/" + parts[1])
+	if err != nil {
+		return ""
+	}
+	return repo.FullName()
+}
+
+func skillOptGitHubPullRequestURLRepo(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := neturl.Parse(value)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	if len(parts) < 4 || parts[2] != "pull" {
+		return ""
+	}
+	repo, err := daemon.ParseRepository(parts[0] + "/" + parts[1])
+	if err != nil {
+		return ""
+	}
+	return repo.FullName()
+}
+
+func skillOptReviewTargetURLFromCommentURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := neturl.Parse(value)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	if len(parts) < 4 || (parts[2] != "issues" && parts[2] != "pull") {
+		return ""
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func skillOptReviewTargetURLFromCommentOrHost(commentURL string, repo github.Repository, kind string, number int64) string {
+	if target := skillOptReviewTargetURLFromCommentURL(commentURL); target != "" {
+		return target
+	}
+	parsed, err := neturl.Parse(strings.TrimSpace(commentURL))
+	if err != nil || strings.TrimSpace(parsed.Host) == "" {
+		return ""
+	}
+	scheme := strings.TrimSpace(parsed.Scheme)
+	if scheme == "" {
+		scheme = "https"
+	}
+	target := neturl.URL{
+		Scheme: scheme,
+		Host:   parsed.Host,
+		Path:   "/" + repo.FullName() + "/" + strings.Trim(kind, "/") + "/" + fmt.Sprint(number),
+	}
+	return target.String()
+}
+
+func skillOptTrainDecisionRequested(request skillOptTrainContinueRequest) bool {
+	return strings.TrimSpace(request.PromoteCandidate) != "" || strings.TrimSpace(request.RejectCandidate) != ""
+}
+
+func requestedSkillOptTrainCandidateDecision(request skillOptTrainContinueRequest) string {
+	if strings.TrimSpace(request.PromoteCandidate) != "" {
+		return "promoted"
+	}
+	if strings.TrimSpace(request.RejectCandidate) != "" {
+		return "rejected"
+	}
+	return ""
+}
+
+func requestedSkillOptTrainCandidateID(request skillOptTrainContinueRequest) string {
+	if value := strings.TrimSpace(request.PromoteCandidate); value != "" {
+		return value
+	}
+	return strings.TrimSpace(request.RejectCandidate)
+}
+
+func skillOptTrainCandidateReviewBody(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, commandHome string) (string, error) {
+	candidateID := strings.TrimSpace(iteration.CandidateVersionID)
+	version, err := store.GetAgentTemplateVersionByID(ctx, candidateID)
+	if err != nil {
+		return "", fmt.Errorf("load candidate version %s: %w", candidateID, err)
+	}
+	review, err := store.GetAgentTemplateCandidateReview(ctx, candidateID)
+	if err != nil {
+		return "", fmt.Errorf("load candidate review %s: %w", candidateID, err)
+	}
+	baseRef := strings.TrimSpace(review.BaseVersionID)
+	if baseRef == "" {
+		baseRef = strings.TrimSpace(iteration.BaseTemplateVersionID)
+	}
+	var base db.AgentTemplate
+	if baseRef != "" {
+		base, err = store.GetAgentTemplateReference(ctx, baseRef)
+		if err != nil {
+			return "", fmt.Errorf("load base version %s: %w", baseRef, err)
+		}
+	}
+	var builder strings.Builder
+	builder.WriteString("## SkillOpt Candidate Review\n\n")
+	fmt.Fprintf(&builder, "Session: `%s`\n", session.ID)
+	fmt.Fprintf(&builder, "Iteration: `%s`\n", iteration.ID)
+	fmt.Fprintf(&builder, "Template: `%s`\n", session.TemplateID)
+	fmt.Fprintf(&builder, "Base: `%s`\n", emptyText(baseRef))
+	fmt.Fprintf(&builder, "Candidate: `%s`\n", candidateID)
+	if summary := strings.TrimSpace(review.PreferenceSummary); summary != "" {
+		fmt.Fprintf(&builder, "\n### Candidate Summary\n%s\n", summary)
+	}
+	if review.Score != nil {
+		fmt.Fprintf(&builder, "\nScore: `%s`\n", scoreText(review.Score))
+	}
+	if strings.TrimSpace(session.PreviewRepo) != "" {
+		fmt.Fprintf(&builder, "\nPreview repo: `%s`\n", session.PreviewRepo)
+	}
+	if strings.TrimSpace(iteration.PullRequestURL) != "" {
+		fmt.Fprintf(&builder, "\nCandidate PR: %s\n", iteration.PullRequestURL)
+	}
+	if strings.TrimSpace(review.EvalReportJSON) != "" {
+		fmt.Fprintf(&builder, "\n### Eval Report\n```json\n%s\n```\n", limitSkillOptCandidateReviewText(indentJSON(review.EvalReportJSON), skillOptCandidateReviewEvalReportLimit, "eval report"))
+	}
+	if strings.TrimSpace(base.Content) != "" {
+		diff := artifact.TextDriver{}.Diff(base.VersionID+".md", version.ID+".md", []byte(base.Content), []byte(version.Content))
+		fmt.Fprintf(&builder, "\n### Candidate Template Diff\n```diff\n%s\n```\n", limitSkillOptCandidateReviewText(strings.TrimRight(diff, "\n"), skillOptCandidateReviewDiffLimit, "candidate template diff"))
+	}
+	builder.WriteString("\n### Decision\n")
+	usesCustomHome := strings.TrimSpace(commandHome) != ""
+	fmt.Fprintf(&builder, "- Promote: `%s`\n", skillOptTrainCandidateDecisionCommand(usesCustomHome, session.ID, "--promote", candidateID, false))
+	fmt.Fprintf(&builder, "- Reject: `%s`\n", skillOptTrainCandidateDecisionCommand(usesCustomHome, session.ID, "--reject", candidateID, true))
+	fmt.Fprintf(&builder, "- Continue: `%s` after promote/reject completes.\n", skillOptTrainStartNextCommand(usesCustomHome, session.ID))
+	return builder.String(), nil
+}
+
+func skillOptTrainCandidateDecisionCommand(usesCustomHome bool, sessionID, decisionFlag, candidateID string, includeReason bool) string {
+	args := []string{"gitmoot", "skillopt", "train", "continue"}
+	if usesCustomHome {
+		args = append(args, "--home", "<train-home>")
+	}
+	args = append(args, "--session", strings.TrimSpace(sessionID), decisionFlag, strings.TrimSpace(candidateID))
+	if includeReason {
+		args = append(args, "--reason", "...")
+	}
+	return shellArgs(args)
+}
+
+func skillOptTrainStartNextCommand(usesCustomHome bool, sessionID string) string {
+	args := []string{"gitmoot", "skillopt", "train", "continue"}
+	if usesCustomHome {
+		args = append(args, "--home", "<train-home>")
+	}
+	args = append(args, "--session", strings.TrimSpace(sessionID), "--start-next")
+	return shellArgs(args)
+}
+
+func limitSkillOptCandidateReviewText(value string, maxRunes int, label string) string {
+	value = strings.TrimRight(value, "\n")
+	if maxRunes <= 0 || utf8.RuneCountInString(value) <= maxRunes {
+		return value
+	}
+	runes := []rune(value)
+	omitted := len(runes) - maxRunes
+	suffix := fmt.Sprintf("\n\n... truncated %s after %d characters; %d characters omitted. Inspect the stored candidate artifacts for the full content.", strings.TrimSpace(label), maxRunes, omitted)
+	return string(runes[:maxRunes]) + suffix
+}
+
+func decideSkillOptTrainCandidate(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, request skillOptTrainContinueRequest) (skillOptTrainCandidateDecisionResult, error) {
+	promote := strings.TrimSpace(request.PromoteCandidate)
+	reject := strings.TrimSpace(request.RejectCandidate)
+	if promote != "" && reject != "" {
+		return skillOptTrainCandidateDecisionResult{}, errors.New("train continue accepts only one of --promote or --reject")
+	}
+	expected := strings.TrimSpace(iteration.CandidateVersionID)
+	if expected == "" {
+		return skillOptTrainCandidateDecisionResult{}, errors.New("train iteration has no candidate version")
+	}
+	candidateID := promote
+	decision := ""
+	if promote != "" {
+		decision = "promoted"
+	} else if reject != "" {
+		candidateID = reject
+		decision = "rejected"
+		if strings.TrimSpace(request.DecisionReason) == "" {
+			return skillOptTrainCandidateDecisionResult{}, errors.New("train candidate rejection requires --reason")
+		}
+	}
+	if candidateID != "" && candidateID != expected {
+		return skillOptTrainCandidateDecisionResult{}, fmt.Errorf("candidate %s does not match train iteration candidate %s", candidateID, expected)
+	}
+	if decision == "" {
+		return syncSkillOptTrainCandidateDecision(ctx, store, session, iteration, expected, "", "")
+	}
+	if result, err := syncSkillOptTrainCandidateDecision(ctx, store, session, iteration, expected, decision, strings.TrimSpace(request.DecisionReason)); err != nil || result.Decided {
+		return result, err
+	}
+	if err := skillopt.CanTransitionTrainIteration(iteration.State, map[string]string{
+		"promoted": skillopt.TrainStateCandidatePromoted,
+		"rejected": skillopt.TrainStateCandidateRejected,
+	}[decision]); err != nil {
+		return skillOptTrainCandidateDecisionResult{}, err
+	}
+	if decision == "promoted" {
+		session.TemplateVersionID = candidateID
+		session.State = skillopt.TrainStateCandidatePromoted
+		iteration.State = skillopt.TrainStateCandidatePromoted
+	} else {
+		session.State = skillopt.TrainStateCandidateRejected
+		iteration.State = skillopt.TrainStateCandidateRejected
+		iteration.DecisionReason = strings.TrimSpace(request.DecisionReason)
+	}
+	metadata := map[string]any{
+		"decision":          decision,
+		"candidate_version": candidateID,
+		"reason":            strings.TrimSpace(request.DecisionReason),
+		"decided_at":        time.Now().UTC().Format(time.RFC3339Nano),
+		"source":            "gitmoot skillopt train continue",
+	}
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_decision", metadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_decision", metadata)
+	if _, err := store.DecideSkillOptTrainCandidate(ctx, session, iteration, candidateID, decision); err != nil {
+		return skillOptTrainCandidateDecisionResult{}, err
+	}
+	return skillOptTrainCandidateDecisionResult{Decided: true, Decision: decision, CandidateVersionID: candidateID}, nil
+}
+
+func syncSkillOptTrainCandidateDecision(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, candidateID string, expectedDecision string, fallbackReason string) (skillOptTrainCandidateDecisionResult, error) {
+	candidateID = strings.TrimSpace(candidateID)
+	if candidateID == "" {
+		return skillOptTrainCandidateDecisionResult{}, nil
+	}
+	candidate, err := store.GetAgentTemplateVersionByID(ctx, candidateID)
+	if err != nil {
+		return skillOptTrainCandidateDecisionResult{}, fmt.Errorf("load candidate version %s: %w", candidateID, err)
+	}
+	review, reviewErr := store.GetAgentTemplateCandidateReview(ctx, candidateID)
+	if reviewErr != nil && !errors.Is(reviewErr, sql.ErrNoRows) {
+		return skillOptTrainCandidateDecisionResult{}, fmt.Errorf("load candidate review %s: %w", candidateID, reviewErr)
+	}
+	var decision string
+	switch candidate.State {
+	case "current":
+		decision = "promoted"
+	case "rejected":
+		decision = "rejected"
+	default:
+		if reviewErr == nil {
+			switch strings.TrimSpace(review.State) {
+			case "promoted":
+				decision = "promoted"
+			case "rejected":
+				decision = "rejected"
+			}
+		}
+		if decision == "" {
+			return skillOptTrainCandidateDecisionResult{}, nil
+		}
+	}
+	if expectedDecision != "" && expectedDecision != decision {
+		return skillOptTrainCandidateDecisionResult{}, fmt.Errorf("candidate %s is already %s, not %s", candidateID, decision, expectedDecision)
+	}
+	targetState := map[string]string{
+		"promoted": skillopt.TrainStateCandidatePromoted,
+		"rejected": skillopt.TrainStateCandidateRejected,
+	}[decision]
+	switch skillopt.NormalizeTrainState(iteration.State) {
+	case skillopt.TrainStateCandidateCreated, skillopt.TrainStateCandidateReviewPublished:
+	default:
+		if err := skillopt.CanTransitionTrainIteration(iteration.State, targetState); err != nil {
+			return skillOptTrainCandidateDecisionResult{}, err
+		}
+	}
+	reason := strings.TrimSpace(fallbackReason)
+	if decision == "rejected" {
+		if reviewErr == nil && strings.TrimSpace(review.DecisionReason) != "" {
+			reason = strings.TrimSpace(review.DecisionReason)
+		}
+		if reason == "" {
+			return skillOptTrainCandidateDecisionResult{}, errors.New("train candidate rejection requires --reason")
+		}
+	}
+	if decision == "promoted" {
+		session.TemplateVersionID = candidateID
+		session.State = skillopt.TrainStateCandidatePromoted
+		iteration.State = skillopt.TrainStateCandidatePromoted
+	} else {
+		session.State = skillopt.TrainStateCandidateRejected
+		iteration.State = skillopt.TrainStateCandidateRejected
+		iteration.DecisionReason = reason
+	}
+	metadata := map[string]any{
+		"decision":          decision,
+		"candidate_version": candidateID,
+		"reason":            reason,
+		"decided_at":        time.Now().UTC().Format(time.RFC3339Nano),
+		"source":            "gitmoot skillopt train continue synced candidate state",
+	}
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_decision", metadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_decision", metadata)
+	if err := store.UpsertSkillOptTrainSessionAndIteration(ctx, session, iteration); err != nil {
+		return skillOptTrainCandidateDecisionResult{}, err
+	}
+	return skillOptTrainCandidateDecisionResult{Decided: true, Decision: decision, CandidateVersionID: candidateID}, nil
+}
+
+func startNextSkillOptTrainIteration(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, previous db.SkillOptTrainIteration) (db.SkillOptTrainIteration, error) {
+	if err := skillopt.CanStartNextTrainIteration(previous); err != nil {
+		return db.SkillOptTrainIteration{}, err
+	}
+	releaseStartNextLock, _, err := acquireSkillOptTrainStartNextLock(ctx, store, session.ID)
+	if err != nil {
+		return db.SkillOptTrainIteration{}, err
+	}
+	defer func() {
+		_ = releaseStartNextLock(context.Background())
+	}()
+	baseVersion := strings.TrimSpace(previous.BaseTemplateVersionID)
+	if skillopt.NormalizeTrainState(previous.State) == skillopt.TrainStateCandidatePromoted {
+		baseVersion = strings.TrimSpace(previous.CandidateVersionID)
+	}
+	if baseVersion == "" {
+		return db.SkillOptTrainIteration{}, errors.New("next train iteration base version is required")
+	}
+	previousRun, err := store.GetEvalRun(ctx, previous.EvalRunID)
+	if err != nil {
+		return db.SkillOptTrainIteration{}, fmt.Errorf("load previous eval run %s: %w", previous.EvalRunID, err)
+	}
+	iterations, err := store.ListSkillOptTrainIterations(ctx, session.ID)
+	if err != nil {
+		return db.SkillOptTrainIteration{}, err
+	}
+	nextNumber := len(iterations) + 1
+	nextID := fmt.Sprintf("%s-%03d", session.ID, nextNumber)
+	nextRunID := fmt.Sprintf("%s-review-%03d", session.ID, nextNumber)
+	if _, err := store.GetSkillOptTrainIteration(ctx, nextID); err == nil {
+		return db.SkillOptTrainIteration{}, fmt.Errorf("train iteration %s already exists; inspect it with gitmoot skillopt train status --session %s", nextID, session.ID)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return db.SkillOptTrainIteration{}, err
+	}
+	if _, err := store.GetEvalRun(ctx, nextRunID); err == nil {
+		return db.SkillOptTrainIteration{}, fmt.Errorf("eval run %s already exists; inspect it with gitmoot skillopt review status --run %s", nextRunID, nextRunID)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return db.SkillOptTrainIteration{}, err
+	}
+	metadata := skillOptTrainNextIterationMetadata(session.MetadataJSON, previous.MetadataJSON, map[string]any{
+		"id":         previous.ID,
+		"state":      previous.State,
+		"candidate":  previous.CandidateVersionID,
+		"started_at": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	items, err := store.ListEvalReviewItems(ctx, previous.EvalRunID)
+	if err != nil {
+		return db.SkillOptTrainIteration{}, err
+	}
+	feedbackEvents, err := store.ListFeedbackEvents(ctx, previous.EvalRunID)
+	if err != nil {
+		return db.SkillOptTrainIteration{}, err
+	}
+	rankedFeedbackEvents, err := store.ListRankedFeedbackEvents(ctx, previous.EvalRunID)
+	if err != nil {
+		return db.SkillOptTrainIteration{}, err
+	}
+	pairwisePreferences, err := store.ListPairwisePreferences(ctx, previous.EvalRunID)
+	if err != nil {
+		return db.SkillOptTrainIteration{}, err
+	}
+	recommendation := skillopt.RecommendPhaseForItems(previousRun, items, feedbackEvents, rankedFeedbackEvents, pairwisePreferences)
+	nextMode := skillOptTrainNextIterationMode(previous.Mode, recommendation.RecommendedMode)
+	nextExplorationLevel := strings.TrimSpace(recommendation.ExplorationLevel)
+	if nextExplorationLevel == "" {
+		nextExplorationLevel = previous.ExplorationLevel
+	}
+	metadata = mergeSkillOptTrainMetadata(metadata, "phase_recommendation", map[string]any{
+		"current_mode":     recommendation.CurrentMode,
+		"recommended_mode": recommendation.RecommendedMode,
+		"selected_mode":    nextMode,
+		"reason":           recommendation.Reason,
+	})
+	next := db.SkillOptTrainIteration{
+		ID:                    nextID,
+		SessionID:             session.ID,
+		EvalRunID:             nextRunID,
+		BaseTemplateVersionID: baseVersion,
+		Mode:                  nextMode,
+		ExplorationLevel:      nextExplorationLevel,
+		State:                 skillopt.TrainStateItemsReady,
+		MetadataJSON:          metadata,
+	}
+	run := db.EvalRun{
+		ID:                nextRunID,
+		TemplateID:        session.TemplateID,
+		TemplateVersionID: baseVersion,
+		TargetRepo:        session.TargetRepo,
+		State:             "review",
+		Mode:              nextMode,
+		ExplorationLevel:  nextExplorationLevel,
+		OptionsCount:      previousRun.OptionsCount,
+		MetadataJSON:      metadata,
+	}
+	session.TemplateVersionID = baseVersion
+	session.State = skillopt.TrainStateItemsReady
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "next_iteration", map[string]any{
+		"id":           next.ID,
+		"base_version": baseVersion,
+		"source":       "gitmoot skillopt train continue",
+	})
+	nextItems := make([]db.EvalReviewItem, 0, len(items))
+	for _, item := range items {
+		item.RunID = nextRunID
+		item.ID = ""
+		item.BaselineArtifactID = ""
+		item.CandidateArtifactID = ""
+		item.PreviewArtifactID = ""
+		item.DiffArtifactID = ""
+		nextItems = append(nextItems, item)
+	}
+	if err := store.UpsertSkillOptTrainNextIteration(ctx, session, next, run, nextItems); err != nil {
+		return db.SkillOptTrainIteration{}, err
+	}
+	return next, nil
+}
+
+func skillOptTrainNextIterationMetadata(sessionMetadata string, previousMetadata string, previousIteration map[string]any) string {
+	metadata := map[string]any{
+		"previous_iteration": previousIteration,
+	}
+	for _, source := range []string{previousMetadata, sessionMetadata} {
+		evaluation := decodedSkillOptMetadataValue(decodedSkillOptMetadata(source)["evaluation"])
+		if len(evaluation) > 0 {
+			metadata["evaluation"] = evaluation
+			break
+		}
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func skillOptTrainNextIterationMode(previousMode string, recommendedMode string) string {
+	switch strings.TrimSpace(recommendedMode) {
+	case db.EvalRunModeExplore, db.EvalRunModeRefine, db.EvalRunModeDistill, db.EvalRunModeValidate:
+		return strings.TrimSpace(recommendedMode)
+	default:
+		return strings.TrimSpace(previousMode)
+	}
 }
 
 func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, request skillOptTrainOptimizerRequest) (skillOptTrainOptimizerResult, error) {
@@ -756,6 +1901,10 @@ var errSkillOptTrainGenerationBusy = errors.New("skillopt train generation is al
 
 var errSkillOptTrainOptimizerBusy = errors.New("skillopt train optimizer is already running")
 
+var errSkillOptTrainCandidateReviewBusy = errors.New("skillopt train candidate review is already publishing")
+
+var errSkillOptTrainStartNextBusy = errors.New("skillopt train next iteration is already starting")
+
 const skillOptTrainGenerationLockTTL = 2 * time.Hour
 
 const skillOptTrainGenerationLockBuffer = 10 * time.Minute
@@ -763,6 +1912,75 @@ const skillOptTrainGenerationLockBuffer = 10 * time.Minute
 const skillOptTrainOptimizerLockTTL = 4 * time.Hour
 
 const skillOptTrainOptimizerLockBuffer = 10 * time.Minute
+
+const skillOptTrainCandidateReviewLockTTL = 30 * time.Minute
+
+const skillOptTrainStartNextLockTTL = 30 * time.Minute
+
+func acquireSkillOptTrainCandidateReviewLock(ctx context.Context, store *db.Store, sessionID string, iterationID string) (func(context.Context) error, bool, error) {
+	key := skillOptTrainCandidateReviewLockKey(sessionID, iterationID)
+	token, err := newRuntimeLockOwnerToken()
+	if err != nil {
+		return noopAgentReservationRelease, false, err
+	}
+	now := time.Now().UTC()
+	ownerJobID := localAgentJobID("skillopt-train-candidate-review", strings.TrimSpace(sessionID))
+	acquired, err := store.AcquireResourceLock(ctx, db.ResourceLock{
+		ResourceKey: key,
+		OwnerJobID:  ownerJobID,
+		OwnerToken:  token,
+		ExpiresAt:   now.Add(skillOptTrainCandidateReviewLockTTL).Format(time.RFC3339Nano),
+	}, now)
+	if err != nil {
+		return noopAgentReservationRelease, false, err
+	}
+	if !acquired {
+		return noopAgentReservationRelease, false, fmt.Errorf("%w: %s", errSkillOptTrainCandidateReviewBusy, key)
+	}
+	return func(releaseCtx context.Context) error {
+		_, err := store.ReleaseResourceLock(releaseCtx, key, ownerJobID, token)
+		return err
+	}, true, nil
+}
+
+func skillOptTrainCandidateReviewLockKey(sessionID string, iterationID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	iterationID = strings.TrimSpace(iterationID)
+	if iterationID == "" {
+		return "skillopt-train-candidate-review:" + sessionID
+	}
+	return "skillopt-train-candidate-review:" + sessionID + ":" + iterationID
+}
+
+func acquireSkillOptTrainStartNextLock(ctx context.Context, store *db.Store, sessionID string) (func(context.Context) error, bool, error) {
+	key := skillOptTrainStartNextLockKey(sessionID)
+	token, err := newRuntimeLockOwnerToken()
+	if err != nil {
+		return noopAgentReservationRelease, false, err
+	}
+	now := time.Now().UTC()
+	ownerJobID := localAgentJobID("skillopt-train-start-next", strings.TrimSpace(sessionID))
+	acquired, err := store.AcquireResourceLock(ctx, db.ResourceLock{
+		ResourceKey: key,
+		OwnerJobID:  ownerJobID,
+		OwnerToken:  token,
+		ExpiresAt:   now.Add(skillOptTrainStartNextLockTTL).Format(time.RFC3339Nano),
+	}, now)
+	if err != nil {
+		return noopAgentReservationRelease, false, err
+	}
+	if !acquired {
+		return noopAgentReservationRelease, false, fmt.Errorf("%w: %s", errSkillOptTrainStartNextBusy, key)
+	}
+	return func(releaseCtx context.Context) error {
+		_, err := store.ReleaseResourceLock(releaseCtx, key, ownerJobID, token)
+		return err
+	}, true, nil
+}
+
+func skillOptTrainStartNextLockKey(sessionID string) string {
+	return "skillopt-train-start-next:" + strings.TrimSpace(sessionID)
+}
 
 func acquireSkillOptTrainOptimizerLock(ctx context.Context, store *db.Store, sessionID string, iterationID string, ttl time.Duration) (func(context.Context) error, bool, error) {
 	key := skillOptTrainOptimizerLockKey(sessionID, iterationID)

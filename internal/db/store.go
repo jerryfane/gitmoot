@@ -1099,6 +1099,101 @@ func (s *Store) RejectAgentTemplateVersion(ctx context.Context, versionID string
 	return s.GetAgentTemplateVersionByID(ctx, target.ID)
 }
 
+func (s *Store) DecideSkillOptTrainCandidate(ctx context.Context, session SkillOptTrainSession, iteration SkillOptTrainIteration, candidateID string, decision string) (AgentTemplateVersion, error) {
+	session, err := normalizeSkillOptTrainSession(session)
+	if err != nil {
+		return AgentTemplateVersion{}, err
+	}
+	iteration, err = normalizeSkillOptTrainIteration(iteration)
+	if err != nil {
+		return AgentTemplateVersion{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AgentTemplateVersion{}, err
+	}
+	defer tx.Rollback()
+	target, err := getAgentTemplateVersionByIDTx(ctx, tx, candidateID)
+	if err != nil {
+		return AgentTemplateVersion{}, err
+	}
+	if target.State != "pending" {
+		return AgentTemplateVersion{}, fmt.Errorf("agent template version %s is %s, not pending", target.ID, target.State)
+	}
+	switch strings.TrimSpace(decision) {
+	case "promoted":
+		current, hasCurrent, err := getCurrentAgentTemplateVersion(ctx, tx, target.TemplateID)
+		if err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		if hasCurrent {
+			if _, err := tx.ExecContext(ctx, `UPDATE agent_template_versions SET state = 'superseded', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, current.ID); err != nil {
+				return AgentTemplateVersion{}, err
+			}
+		}
+		stateResult, err := tx.ExecContext(ctx, `UPDATE agent_template_versions SET state = 'current', promoted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'pending'`, target.ID)
+		if err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		if err := requireAffected(stateResult, "pending agent template version", target.ID); err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		latestID, err := latestSelectableVersionID(ctx, tx, target.TemplateID)
+		if err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE agent_templates SET
+				name = ?, description = ?, source_repo = ?, source_ref = ?, source_path = ?, resolved_commit = ?,
+				content = ?, metadata_json = ?, current_version_id = ?, latest_version_id = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?`,
+			target.Name, target.Description, target.SourceRepo, target.SourceRef, target.SourcePath, target.ResolvedCommit,
+			target.Content, target.MetadataJSON, target.ID, latestID, target.TemplateID)
+		if err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		if err := requireAffected(result, "agent template", target.TemplateID); err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		if err := upsertAgentTemplateCandidateReviewDecisionTx(ctx, tx, target, "promoted", ""); err != nil {
+			return AgentTemplateVersion{}, err
+		}
+	case "rejected":
+		stateResult, err := tx.ExecContext(ctx, `UPDATE agent_template_versions SET state = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'pending'`, target.ID)
+		if err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		if err := requireAffected(stateResult, "pending agent template version", target.ID); err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		latestID, err := latestSelectableVersionID(ctx, tx, target.TemplateID)
+		if err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE agent_templates SET latest_version_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, latestID, target.TemplateID)
+		if err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		if err := requireAffected(result, "agent template", target.TemplateID); err != nil {
+			return AgentTemplateVersion{}, err
+		}
+		if err := upsertAgentTemplateCandidateReviewDecisionTx(ctx, tx, target, "rejected", iteration.DecisionReason); err != nil {
+			return AgentTemplateVersion{}, err
+		}
+	default:
+		return AgentTemplateVersion{}, fmt.Errorf("candidate decision %q is not supported", decision)
+	}
+	if err := upsertSkillOptTrainSessionTx(ctx, tx, session); err != nil {
+		return AgentTemplateVersion{}, err
+	}
+	if err := upsertSkillOptTrainIterationTx(ctx, tx, iteration); err != nil {
+		return AgentTemplateVersion{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AgentTemplateVersion{}, err
+	}
+	return s.GetAgentTemplateVersionByID(ctx, target.ID)
+}
+
 func (s *Store) AgentCanAccessRepo(ctx context.Context, agentName string, repoFullName string) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_repos WHERE agent_name = ? AND repo_full_name = ?`, agentName, repoFullName).Scan(&count)
@@ -1816,7 +1911,11 @@ func (s *Store) UpsertEvalRun(ctx context.Context, run EvalRun) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO eval_runs(id, template_id, template_version_id, target_repo, state, mode, exploration_level, options_count, metadata_json, created_at, updated_at)
+	return upsertEvalRunExec(ctx, s.db, run)
+}
+
+func upsertEvalRunExec(ctx context.Context, exec sqlExecer, run EvalRun) error {
+	_, err := exec.ExecContext(ctx, `INSERT INTO eval_runs(id, template_id, template_version_id, target_repo, state, mode, exploration_level, options_count, metadata_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 			template_id = excluded.template_id,
@@ -1894,7 +1993,19 @@ func (s *Store) UpsertSkillOptTrainSession(ctx context.Context, session SkillOpt
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO skillopt_train_sessions(
+	return upsertSkillOptTrainSessionExec(ctx, s.db, session)
+}
+
+func upsertSkillOptTrainSessionTx(ctx context.Context, tx *sql.Tx, session SkillOptTrainSession) error {
+	session, err := normalizeSkillOptTrainSession(session)
+	if err != nil {
+		return err
+	}
+	return upsertSkillOptTrainSessionExec(ctx, tx, session)
+}
+
+func upsertSkillOptTrainSessionExec(ctx context.Context, exec sqlExecer, session SkillOptTrainSession) error {
+	_, err := exec.ExecContext(ctx, `INSERT INTO skillopt_train_sessions(
 			id, template_id, template_version_id, target_repo, workspace_repo, preview_repo,
 			request_summary, task_kind, state, metadata_json, created_at, updated_at
 		)
@@ -1953,7 +2064,19 @@ func (s *Store) UpsertSkillOptTrainIteration(ctx context.Context, iteration Skil
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO skillopt_train_iterations(
+	return upsertSkillOptTrainIterationExec(ctx, s.db, iteration)
+}
+
+func upsertSkillOptTrainIterationTx(ctx context.Context, tx *sql.Tx, iteration SkillOptTrainIteration) error {
+	iteration, err := normalizeSkillOptTrainIteration(iteration)
+	if err != nil {
+		return err
+	}
+	return upsertSkillOptTrainIterationExec(ctx, tx, iteration)
+}
+
+func upsertSkillOptTrainIterationExec(ctx context.Context, exec sqlExecer, iteration SkillOptTrainIteration) error {
+	_, err := exec.ExecContext(ctx, `INSERT INTO skillopt_train_iterations(
 			id, session_id, eval_run_id, base_template_version_id, candidate_version_id,
 			mode, exploration_level, state, issue_repo, issue_number, issue_url,
 			pull_request_repo, pull_request_number, pull_request_url, decision_reason, metadata_json, created_at, updated_at
@@ -1980,6 +2103,56 @@ func (s *Store) UpsertSkillOptTrainIteration(ctx context.Context, iteration Skil
 		iteration.Mode, iteration.ExplorationLevel, iteration.State, iteration.IssueRepo, iteration.IssueNumber, iteration.IssueURL,
 		iteration.PullRequestRepo, iteration.PullRequestNumber, iteration.PullRequestURL, iteration.DecisionReason, iteration.MetadataJSON)
 	return err
+}
+
+func (s *Store) UpsertSkillOptTrainSessionAndIteration(ctx context.Context, session SkillOptTrainSession, iteration SkillOptTrainIteration) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := upsertSkillOptTrainSessionTx(ctx, tx, session); err != nil {
+		return err
+	}
+	if err := upsertSkillOptTrainIterationTx(ctx, tx, iteration); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) UpsertSkillOptTrainNextIteration(ctx context.Context, session SkillOptTrainSession, iteration SkillOptTrainIteration, run EvalRun, items []EvalReviewItem) error {
+	session, err := normalizeSkillOptTrainSession(session)
+	if err != nil {
+		return err
+	}
+	iteration, err = normalizeSkillOptTrainIteration(iteration)
+	if err != nil {
+		return err
+	}
+	run, err = normalizeEvalRun(run)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := upsertSkillOptTrainSessionExec(ctx, tx, session); err != nil {
+		return err
+	}
+	if err := upsertSkillOptTrainIterationExec(ctx, tx, iteration); err != nil {
+		return err
+	}
+	if err := upsertEvalRunExec(ctx, tx, run); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := upsertEvalReviewItemExec(ctx, tx, item); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func normalizeSkillOptTrainIteration(iteration SkillOptTrainIteration) (SkillOptTrainIteration, error) {
@@ -2089,6 +2262,10 @@ func (s *Store) GetSkillOptTrainIterationByEvalRun(ctx context.Context, evalRunI
 }
 
 func (s *Store) UpsertEvalReviewItem(ctx context.Context, item EvalReviewItem) error {
+	return upsertEvalReviewItemExec(ctx, s.db, item)
+}
+
+func upsertEvalReviewItemExec(ctx context.Context, exec sqlExecer, item EvalReviewItem) error {
 	if strings.TrimSpace(item.ID) == "" {
 		item.ID = item.RunID + "/" + item.ItemID
 	}
@@ -2098,7 +2275,7 @@ func (s *Store) UpsertEvalReviewItem(ctx context.Context, item EvalReviewItem) e
 	if strings.TrimSpace(item.ItemID) == "" {
 		return errors.New("eval review item id is required")
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO eval_review_items(
+	_, err := exec.ExecContext(ctx, `INSERT INTO eval_review_items(
 			id, run_id, item_id, title, source_artifact_id, baseline_artifact_id, candidate_artifact_id,
 			preview_artifact_id, diff_artifact_id, metadata_json, created_at, updated_at
 		)
