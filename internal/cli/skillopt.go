@@ -637,6 +637,69 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 			"next: wait for feedback, then run train continue after sync",
 		}
 		return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
+	case skillopt.TrainStateReviewPublished:
+		status, err := loadSkillOptReviewStatus(ctx, store, artifact.NewStore(paths.ArtifactBlobs), iteration.EvalRunID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		feedbackCount := len(status.Feedback) + len(status.RankedFeedback)
+		if !status.TrainingReady {
+			lines := []string{
+				fmt.Sprintf("feedback_events: %d", feedbackCount),
+				fmt.Sprintf("pairwise_preferences: %d", len(status.PairwisePreferences)),
+				fmt.Sprintf("packet_blockers: %d", len(status.PacketBlockers)),
+				fmt.Sprintf("training_blockers: %d", len(status.TrainingBlockers)),
+			}
+			for _, blocker := range status.PacketBlockers {
+				lines = append(lines, fmt.Sprintf("packet_blocker: %s", blocker))
+			}
+			for _, blocker := range status.TrainingBlockers {
+				lines = append(lines, fmt.Sprintf("training_blocker: %s", blocker))
+			}
+			lines = append(lines, "next: sync human feedback from the review surface")
+			output.Lines = lines
+			return output, nil
+		}
+		if err := skillopt.CanTransitionTrainIteration(iteration.State, skillopt.TrainStateFeedbackSynced); err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		metadata := map[string]any{
+			"status":                 "succeeded",
+			"source":                 "gitmoot skillopt train continue",
+			"completed_at":           time.Now().UTC().Format(time.RFC3339Nano),
+			"feedback_events":        feedbackCount,
+			"ranked_feedback_events": len(status.RankedFeedback),
+			"pairwise_preferences":   len(status.PairwisePreferences),
+			"recommended_next_mode":  status.Recommendation.RecommendedMode,
+			"ranking_stability":      status.Recommendation.RankingStability,
+			"recommendation_summary": status.Recommendation.Summary(),
+			"training_blocker_count": len(status.TrainingBlockers),
+			"review_packet_ready":    status.PacketReady,
+			"review_training_ready":  status.TrainingReady,
+		}
+		session.State = skillopt.TrainStateFeedbackSynced
+		iteration.State = skillopt.TrainStateFeedbackSynced
+		session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "feedback_sync", metadata)
+		iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "feedback_sync", metadata)
+		if err := store.UpsertSkillOptTrainSession(ctx, session); err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		if err := store.UpsertSkillOptTrainIteration(ctx, *iteration); err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSession, updatedIteration, updatedCounts, err := loadSkillOptTrainStatus(ctx, store, session.ID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		updatedSummary := skillopt.BuildTrainStatusSummary(updatedSession, updatedIteration, updatedCounts)
+		lines := []string{
+			fmt.Sprintf("feedback_events: %d", feedbackCount),
+			fmt.Sprintf("pairwise_preferences: %d", len(status.PairwisePreferences)),
+			fmt.Sprintf("recommended_next_mode: %s", status.Recommendation.RecommendedMode),
+			fmt.Sprintf("ranking_stability: %s", status.Recommendation.RankingStability),
+			"next: export the training package before running the optimizer",
+		}
+		return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
 	case skillopt.TrainStateFeedbackSynced, skillopt.TrainStateTrainingPackageCreated, skillopt.TrainStateOptimizerCompleted:
 		if iteration == nil {
 			output.Lines = []string{"next: train session has no iteration to continue"}
@@ -903,11 +966,6 @@ type skillOptTrainCandidateDecisionResult struct {
 	Decision           string
 	CandidateVersionID string
 }
-
-const (
-	skillOptCandidateReviewEvalReportLimit = 12000
-	skillOptCandidateReviewDiffLimit       = 32000
-)
 
 func publishSkillOptTrainCandidateReview(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, commandHome string) (skillOptTrainCandidateReviewResult, error) {
 	if err := skillopt.CanTransitionTrainIteration(iteration.State, skillopt.TrainStateCandidateReviewPublished); err != nil {
@@ -1468,6 +1526,7 @@ func skillOptTrainCandidateReviewBody(ctx context.Context, store *db.Store, sess
 	if err != nil {
 		return "", fmt.Errorf("load candidate version %s: %w", candidateID, err)
 	}
+	candidateID = strings.TrimSpace(version.ID)
 	review, err := store.GetAgentTemplateCandidateReview(ctx, candidateID)
 	if err != nil {
 		return "", fmt.Errorf("load candidate review %s: %w", candidateID, err)
@@ -1475,13 +1534,6 @@ func skillOptTrainCandidateReviewBody(ctx context.Context, store *db.Store, sess
 	baseRef := strings.TrimSpace(review.BaseVersionID)
 	if baseRef == "" {
 		baseRef = strings.TrimSpace(iteration.BaseTemplateVersionID)
-	}
-	var base db.AgentTemplate
-	if baseRef != "" {
-		base, err = store.GetAgentTemplateReference(ctx, baseRef)
-		if err != nil {
-			return "", fmt.Errorf("load base version %s: %w", baseRef, err)
-		}
 	}
 	var builder strings.Builder
 	builder.WriteString("## SkillOpt Candidate Review\n\n")
@@ -1502,12 +1554,14 @@ func skillOptTrainCandidateReviewBody(ctx context.Context, store *db.Store, sess
 	if strings.TrimSpace(iteration.PullRequestURL) != "" {
 		fmt.Fprintf(&builder, "\nCandidate PR: %s\n", iteration.PullRequestURL)
 	}
-	if strings.TrimSpace(review.EvalReportJSON) != "" {
-		fmt.Fprintf(&builder, "\n### Eval Report\n```json\n%s\n```\n", limitSkillOptCandidateReviewText(indentJSON(review.EvalReportJSON), skillOptCandidateReviewEvalReportLimit, "eval report"))
+	if artifactIDs := skillOptCandidateReviewArtifactIDs(review); len(artifactIDs) > 0 {
+		builder.WriteString("\n### Artifacts\n")
+		for _, artifactID := range artifactIDs {
+			fmt.Fprintf(&builder, "- `%s`\n", artifactID)
+		}
 	}
-	if strings.TrimSpace(base.Content) != "" {
-		diff := artifact.TextDriver{}.Diff(base.VersionID+".md", version.ID+".md", []byte(base.Content), []byte(version.Content))
-		fmt.Fprintf(&builder, "\n### Candidate Template Diff\n```diff\n%s\n```\n", limitSkillOptCandidateReviewText(strings.TrimRight(diff, "\n"), skillOptCandidateReviewDiffLimit, "candidate template diff"))
+	if strings.TrimSpace(review.EvalReportJSON) != "" {
+		builder.WriteString("\nEval report: stored with the pending candidate review record.\n")
 	}
 	builder.WriteString("\n### Decision\n")
 	usesCustomHome := strings.TrimSpace(commandHome) != ""
@@ -1515,6 +1569,32 @@ func skillOptTrainCandidateReviewBody(ctx context.Context, store *db.Store, sess
 	fmt.Fprintf(&builder, "- Reject: `%s`\n", skillOptTrainCandidateDecisionCommand(usesCustomHome, session.ID, "--reject", candidateID, true))
 	fmt.Fprintf(&builder, "- Continue: `%s` after promote/reject completes.\n", skillOptTrainStartNextCommand(usesCustomHome, session.ID))
 	return builder.String(), nil
+}
+
+func skillOptCandidateReviewArtifactIDs(review db.AgentTemplateCandidateReview) []string {
+	seen := map[string]struct{}{}
+	var ids []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	add(review.DiffArtifactID)
+	metadata := decodedSkillOptMetadata(review.SummaryMetadataJSON)
+	rawIDs, ok := metadata["artifact_ids"].([]any)
+	if !ok {
+		return ids
+	}
+	for _, rawID := range rawIDs {
+		add(fmt.Sprint(rawID))
+	}
+	return ids
 }
 
 func skillOptTrainCandidateDecisionCommand(usesCustomHome bool, sessionID, decisionFlag, candidateID string, includeReason bool) string {
@@ -1536,17 +1616,6 @@ func skillOptTrainStartNextCommand(usesCustomHome bool, sessionID string) string
 	}
 	args = append(args, "--session", strings.TrimSpace(sessionID), "--start-next")
 	return shellArgs(args)
-}
-
-func limitSkillOptCandidateReviewText(value string, maxRunes int, label string) string {
-	value = strings.TrimRight(value, "\n")
-	if maxRunes <= 0 || utf8.RuneCountInString(value) <= maxRunes {
-		return value
-	}
-	runes := []rune(value)
-	omitted := len(runes) - maxRunes
-	suffix := fmt.Sprintf("\n\n... truncated %s after %d characters; %d characters omitted. Inspect the stored candidate artifacts for the full content.", strings.TrimSpace(label), maxRunes, omitted)
-	return string(runes[:maxRunes]) + suffix
 }
 
 func decideSkillOptTrainCandidate(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, request skillOptTrainContinueRequest) (skillOptTrainCandidateDecisionResult, error) {

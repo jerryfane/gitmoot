@@ -2278,6 +2278,70 @@ func TestSkillOptTrainContinueRunsOptimizerAndImportsCandidate(t *testing.T) {
 	}
 }
 
+func TestSkillOptTrainContinueMarksReviewPublishedFeedbackSynced(t *testing.T) {
+	home, _ := seedSkillOptTrainFeedbackSynced(t)
+	store := openCLIJobStore(t, home)
+	session, err := store.GetSkillOptTrainSession(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainSession returned error: %v", err)
+	}
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	session.State = skillopt.TrainStateReviewPublished
+	iteration.State = skillopt.TrainStateReviewPublished
+	if err := store.UpsertSkillOptTrainSession(context.Background(), session); err != nil {
+		t.Fatalf("UpsertSkillOptTrainSession returned error: %v", err)
+	}
+	if err := store.UpsertSkillOptTrainIteration(context.Background(), iteration); err != nil {
+		t.Fatalf("UpsertSkillOptTrainIteration returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"skillopt", "train", "continue",
+		"--home", home,
+		"--session", "optimizer-train",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("train continue exit code = %d, stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"current_phase: feedback_synced",
+		"blocked_step: training_package_created",
+		"feedback: 1",
+		"continue_ready: true",
+		"feedback_events: 1",
+		"pairwise_preferences: 0",
+		"next: export the training package before running the optimizer",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("train continue stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	store = openCLIJobStore(t, home)
+	defer store.Close()
+	session, err = store.GetSkillOptTrainSession(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainSession after continue returned error: %v", err)
+	}
+	iteration, err = store.GetLatestSkillOptTrainIteration(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration after continue returned error: %v", err)
+	}
+	if session.State != skillopt.TrainStateFeedbackSynced || iteration.State != skillopt.TrainStateFeedbackSynced {
+		t.Fatalf("states = session %s iteration %s, want feedback_synced", session.State, iteration.State)
+	}
+	if !strings.Contains(iteration.MetadataJSON, `"feedback_sync"`) {
+		t.Fatalf("iteration metadata missing feedback_sync: %s", iteration.MetadataJSON)
+	}
+}
+
 func TestSkillOptTrainContinueResolvesRelativeOptimizerBinary(t *testing.T) {
 	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
 	repoDir := t.TempDir()
@@ -2586,7 +2650,8 @@ func TestSkillOptTrainContinuePublishesCandidateReviewPromotesAndStartsNext(t *t
 	}
 	for _, want := range []string{
 		"SkillOpt Candidate Review",
-		"Candidate Template Diff",
+		"### Artifacts",
+		"`candidate-diff`",
 		"planner@v2",
 		skillOptTrainCandidateDecisionCommand(true, "optimizer-train", "--promote", "planner@v2", false),
 		skillOptTrainCandidateDecisionCommand(true, "optimizer-train", "--reject", "planner@v2", true),
@@ -3039,6 +3104,25 @@ func TestSkillOptTrainContinuePublishesCandidateReviewAndRejects(t *testing.T) {
 	}
 	if len(fakeGitHub.postedComments) != 1 || fakeGitHub.postedComments[0].Repo.FullName() != "owner/review" || fakeGitHub.postedComments[0].IssueNumber != 67 {
 		t.Fatalf("candidate review comments = %+v", fakeGitHub.postedComments)
+	}
+	commentBody := fakeGitHub.postedComments[0].Body
+	for _, want := range []string{
+		"## SkillOpt Candidate Review",
+		"### Artifacts",
+		"`candidate-diff`",
+		"Eval report: stored with the pending candidate review record.",
+	} {
+		if !strings.Contains(commentBody, want) {
+			t.Fatalf("candidate review comment missing %q:\n%s", want, commentBody)
+		}
+	}
+	for _, unwanted := range []string{
+		"### Eval Report\n```json",
+		"### Candidate Template Diff\n```diff",
+	} {
+		if strings.Contains(commentBody, unwanted) {
+			t.Fatalf("candidate review comment contains %q:\n%s", unwanted, commentBody)
+		}
 	}
 	commentStore := openCLIJobStore(t, home)
 	publishedIteration, err := commentStore.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
@@ -3718,17 +3802,6 @@ func TestSkillOptTrainContinueStartNextRejectsBusyLock(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "next iteration is already starting") {
 		t.Fatalf("start-next busy stderr = %q", stderr.String())
-	}
-}
-
-func TestLimitSkillOptCandidateReviewText(t *testing.T) {
-	value := strings.Repeat("x", 20)
-	limited := limitSkillOptCandidateReviewText(value, 7, "eval report")
-	if !strings.HasPrefix(limited, strings.Repeat("x", 7)) || !strings.Contains(limited, "truncated eval report") || !strings.Contains(limited, "13 characters omitted") {
-		t.Fatalf("limited review text = %q", limited)
-	}
-	if got := limitSkillOptCandidateReviewText("short\n", 20, "diff"); got != "short" {
-		t.Fatalf("unlimited review text = %q", got)
 	}
 }
 
