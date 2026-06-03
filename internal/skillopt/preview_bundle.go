@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"strings"
 )
 
@@ -16,6 +17,8 @@ const previewBundlePackageBuildScript = "vite build"
 const previewBundleDistDir = "dist"
 const previewBundleTrustedIndexHTML = `<div id="app"></div><script type="module" src="/src/main.js"></script>`
 const previewBundleTrustedMainJS = `import { createApp } from 'vue'; import App from './App.vue'; createApp(App).mount('#app');`
+
+var previewBundleHrefAttributePattern = regexp.MustCompile(`(?i)(?:^|[\s<])(?:xlink:)?href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
 
 type PreviewBundle struct {
 	Renderer     string              `json:"renderer"`
@@ -125,11 +128,11 @@ func validatePreviewBundle(bundle PreviewBundle) (PreviewBundle, error) {
 				return PreviewBundle{}, err
 			}
 		}
-		if normalizedPath == "index.html" && strings.TrimSpace(file.Content) != previewBundleTrustedIndexHTML {
-			return PreviewBundle{}, errors.New("preview bundle index.html must use the trusted Gitmoot Vue mount scaffold")
+		if normalizedPath == "index.html" {
+			bundle.Files[index].Content = previewBundleTrustedIndexHTML
 		}
-		if normalizedPath == "src/main.js" && strings.TrimSpace(file.Content) != previewBundleTrustedMainJS {
-			return PreviewBundle{}, errors.New("preview bundle src/main.js must use the trusted Gitmoot Vue bootstrap")
+		if normalizedPath == "src/main.js" {
+			bundle.Files[index].Content = previewBundleTrustedMainJS
 		}
 		if normalizedPath == "src/App.vue" {
 			if err := validatePreviewBundleAppVue(file.Content); err != nil {
@@ -204,11 +207,23 @@ func validatePreviewBundleAppVue(content string) error {
 	lower := strings.ToLower(content)
 	for _, blocked := range []string{
 		"<script", "</script", "import ", "require(", "import.meta", "@import", "url(",
-		"<iframe", "<object", "<embed", "<link", " src=", " srcset=", " href=", " xlink:href=",
+		"<iframe", "<object", "<embed", "<link", " src=", " srcset=",
 		"http://", "https://", "javascript:", "data:",
 	} {
 		if strings.Contains(lower, blocked) {
 			return fmt.Errorf("preview bundle src/App.vue must not include executable or external-loading construct %q", blocked)
+		}
+	}
+	for _, match := range previewBundleHrefAttributePattern.FindAllStringSubmatch(content, -1) {
+		value := ""
+		for _, group := range match[1:] {
+			if group != "" {
+				value = strings.TrimSpace(group)
+				break
+			}
+		}
+		if !strings.HasPrefix(value, "#") {
+			return errors.New("preview bundle src/App.vue href attributes must point to local anchors")
 		}
 	}
 	if !strings.Contains(lower, "<template") || !strings.Contains(lower, "</template>") {
