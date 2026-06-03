@@ -20,6 +20,47 @@ func TestParsePreviewBundleAcceptsValidVueViteBundle(t *testing.T) {
 	}
 }
 
+func TestParsePreviewBundleCanonicalizesTrustedScaffoldFiles(t *testing.T) {
+	source := validPreviewBundle(t)
+	source.Files[1].Content = `<!doctype html><html><body><div id="app"></div><script type="module" src="/src/main.js"></script></body></html>`
+	source.Files[2].Content = `
+import { createApp } from 'vue'
+import App from './App.vue'
+
+createApp(App).mount('#app')
+`
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		t.Fatalf("Marshal mutated bundle returned error: %v", err)
+	}
+	bundle, err := ParsePreviewBundle(encoded)
+	if err != nil {
+		t.Fatalf("ParsePreviewBundle returned error: %v", err)
+	}
+	files := map[string]string{}
+	for _, file := range bundle.Files {
+		files[file.Path] = file.Content
+	}
+	if files["index.html"] != previewBundleTrustedIndexHTML {
+		t.Fatalf("index.html was not canonicalized: %q", files["index.html"])
+	}
+	if files["src/main.js"] != previewBundleTrustedMainJS {
+		t.Fatalf("src/main.js was not canonicalized: %q", files["src/main.js"])
+	}
+}
+
+func TestParsePreviewBundleAllowsLocalAppVueAnchors(t *testing.T) {
+	source := validPreviewBundle(t)
+	source.Files[3].Content = `<template><main><a href="#details">Details</a></main></template>`
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		t.Fatalf("Marshal mutated bundle returned error: %v", err)
+	}
+	if _, err := ParsePreviewBundle(encoded); err != nil {
+		t.Fatalf("ParsePreviewBundle returned error: %v", err)
+	}
+}
+
 func TestParsePreviewBundleRejectsInvalidBundles(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -94,6 +135,20 @@ func TestParsePreviewBundleRejectsInvalidBundles(t *testing.T) {
 				bundle.Files[3].Content = `<template><main><a href="javascript:alert(1)">Open</a></main></template>`
 			},
 			want: "must not include",
+		},
+		{
+			name: "app vue protocol relative svg href",
+			mutate: func(bundle *PreviewBundle) {
+				bundle.Files[3].Content = `<template><main><svg><image href="//attacker.example/pixel.svg" /></svg></main></template>`
+			},
+			want: "href attributes must point to local anchors",
+		},
+		{
+			name: "app vue non-anchor href",
+			mutate: func(bundle *PreviewBundle) {
+				bundle.Files[3].Content = `<template><main><a href="/external">Open</a></main></template>`
+			},
+			want: "href attributes must point to local anchors",
 		},
 		{
 			name: "empty content",

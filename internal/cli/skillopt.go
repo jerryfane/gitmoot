@@ -4168,7 +4168,7 @@ func buildSkillOptTrainGenerationPrompt(session db.SkillOptTrainSession, iterati
 		builder.WriteString("- Include build_command exactly \"npm run build\" and dist_dir \"dist\".\n")
 		builder.WriteString("- Include files with these required relative paths: package.json, index.html, src/main.js, src/App.vue.\n")
 		builder.WriteString("- package.json scripts must include only \"build\": \"vite build\". Do not include dependencies or devDependencies; Gitmoot supplies trusted build dependencies.\n")
-		builder.WriteString("- index.html and src/main.js must use the standard Vue mount scaffold exactly; Gitmoot overwrites them with trusted scaffold files before build.\n")
+		builder.WriteString("- index.html and src/main.js may use a simple Vue mount placeholder; Gitmoot canonicalizes and overwrites them with trusted scaffold files before build.\n")
 		builder.WriteString("- src/App.vue must be scriptless template/style Vue only. Do not include script blocks, imports, require, import.meta, @import, or CSS url().\n")
 		builder.WriteString("- Each file entry must have path and non-empty content. Use slash-separated relative paths only.\n")
 		builder.WriteString("- Do not include local absolute paths, path traversal, secrets, .env files, node_modules, dependency caches, dist, built outputs, vite.config.js, or files outside the required paths.\n")
