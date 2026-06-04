@@ -905,6 +905,27 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 		}
 		return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
 	case skillopt.TrainStateReviewPublished:
+		releaseReviewSyncLock, _, err := acquireSkillOptTrainReviewLock(ctx, store, session.ID, iteration.ID)
+		if err != nil {
+			return output, err
+		}
+		defer func() {
+			_ = releaseReviewSyncLock(context.Background())
+		}()
+		session, iteration, counts, err = loadSkillOptTrainStatus(ctx, store, request.SessionID)
+		if err != nil {
+			return skillOptTrainContinueOutput{}, err
+		}
+		summary = skillopt.BuildTrainStatusSummary(session, iteration, counts)
+		output = skillOptTrainContinueOutput{Summary: summary, Counts: counts}
+		if iteration == nil {
+			output.Lines = []string{"next: train session has no iteration to continue"}
+			return output, nil
+		}
+		if summary.CurrentPhase != skillopt.TrainStateReviewPublished {
+			output.Lines = []string{fmt.Sprintf("next: %s", summary.NextAction)}
+			return output, nil
+		}
 		status, err := loadSkillOptReviewStatus(ctx, store, artifact.NewStore(paths.ArtifactBlobs), iteration.EvalRunID)
 		if err != nil {
 			return skillOptTrainContinueOutput{}, err

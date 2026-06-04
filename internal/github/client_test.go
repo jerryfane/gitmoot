@@ -81,6 +81,25 @@ func TestCreateIssueUsesIssuesEndpoint(t *testing.T) {
 	runner.wantArgs(t, 0, "api", "repos/jerryfane/gitmoot/issues", "-f", "title=Review run-1", "-f", "body=body")
 }
 
+func TestCloseIssueUsesIssueEndpoint(t *testing.T) {
+	runner := &fakeRunner{
+		results: []subprocess.Result{{
+			Stdout: `{"number": 8, "title": "Review run-1", "state": "closed", "html_url": "https://github.com/jerryfane/gitmoot/issues/8"}`,
+		}},
+	}
+	client := GhClient{Runner: runner}
+
+	issue, err := client.CloseIssue(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 8)
+
+	if err != nil {
+		t.Fatalf("CloseIssue returned error: %v", err)
+	}
+	if issue.Number != 8 || issue.State != "closed" {
+		t.Fatalf("issue = %+v", issue)
+	}
+	runner.wantArgs(t, 0, "api", "-X", "PATCH", "repos/jerryfane/gitmoot/issues/8", "-f", "state=closed")
+}
+
 func TestGetUserPermissionUsesCollaboratorPermissionEndpoint(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{

@@ -21,6 +21,7 @@ type Client interface {
 	GetPullRequest(ctx context.Context, repo Repository, number int64) (PullRequest, error)
 	CreatePullRequest(ctx context.Context, input CreatePullRequestInput) (PullRequest, error)
 	CreateIssue(ctx context.Context, input CreateIssueInput) (Issue, error)
+	CloseIssue(ctx context.Context, repo Repository, issueNumber int64) (Issue, error)
 	ListIssueComments(ctx context.Context, repo Repository, issueNumber int64) ([]IssueComment, error)
 	PostIssueComment(ctx context.Context, repo Repository, issueNumber int64, body string) (IssueComment, error)
 	GetUserPermission(ctx context.Context, repo Repository, username string) (UserPermission, error)
@@ -286,6 +287,12 @@ func (c *GhClient) CreateIssue(ctx context.Context, input CreateIssueInput) (Iss
 		endpoint(input.Repo, "issues"),
 		"-f", "title="+input.Title,
 		"-f", "body="+input.Body)
+	return issue, err
+}
+
+func (c *GhClient) CloseIssue(ctx context.Context, repo Repository, issueNumber int64) (Issue, error) {
+	var issue Issue
+	err := c.apiJSON(ctx, true, &issue, "-X", "PATCH", endpoint(repo, "issues", issueNumber), "-f", "state=closed")
 	return issue, err
 }
 
@@ -662,6 +669,10 @@ func (NoopClient) CreatePullRequest(context.Context, CreatePullRequestInput) (Pu
 }
 
 func (NoopClient) CreateIssue(context.Context, CreateIssueInput) (Issue, error) {
+	return Issue{}, errors.ErrUnsupported
+}
+
+func (NoopClient) CloseIssue(context.Context, Repository, int64) (Issue, error) {
 	return Issue{}, errors.ErrUnsupported
 }
 

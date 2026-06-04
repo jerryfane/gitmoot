@@ -841,7 +841,7 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 				return err
 			}
 			if watchSkillOptReviews {
-				if _, err := pollSkillOptReviewWatches(ctx, store, blobStore, reviewGitHub, stdout, dryRun); err != nil {
+				if _, err := pollSkillOptReviewWatches(ctx, paths, store, blobStore, reviewGitHub, stdout, dryRun, home); err != nil {
 					writeLine(stdout, "skillopt review watch poll error: %s", err)
 				}
 			}

@@ -6271,7 +6271,8 @@ func TestSkillOptReviewWatcherImportsValidYAML(t *testing.T) {
 		},
 	}
 	var stdout bytes.Buffer
-	if _, err := pollSkillOptReviewWatches(context.Background(), store, blobStore, fake, &stdout, false); err != nil {
+	paths := config.PathsForHome(home)
+	if _, err := pollSkillOptReviewWatches(context.Background(), paths, store, blobStore, fake, &stdout, false, home); err != nil {
 		t.Fatalf("pollSkillOptReviewWatches returned error: %v", err)
 	}
 	events, err := store.ListRankedFeedbackEvents(context.Background(), "watcher-review-001")
@@ -6285,16 +6286,26 @@ func TestSkillOptReviewWatcherImportsValidYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSkillOptReviewWatch returned error: %v", err)
 	}
-	if watch.Status != db.SkillOptReviewWatchStatusImported || watch.LastSeenCommentID != 100 {
+	if watch.Status != db.SkillOptReviewWatchStatusClosed || watch.LastSeenCommentID != 100 {
 		t.Fatalf("watch = %+v", watch)
 	}
-	if len(fake.postedComments) != 0 {
+	if len(fake.postedComments) != 1 || !strings.Contains(fake.postedComments[0].Body, skillOptReviewWatchSuccessMarker) {
 		t.Fatalf("posted comments = %+v", fake.postedComments)
+	}
+	if len(fake.closedIssues) != 1 || fake.closedIssues[0].IssueNumber != 67 {
+		t.Fatalf("closed issues = %+v", fake.closedIssues)
+	}
+	iteration, err := store.GetSkillOptTrainIteration(context.Background(), "watcher-train-001")
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateFeedbackSynced {
+		t.Fatalf("iteration state = %s, want %s", iteration.State, skillopt.TrainStateFeedbackSynced)
 	}
 	if !strings.Contains(stdout.String(), "imported 2 skillopt review feedback events") {
 		t.Fatalf("stdout = %q; home=%s", stdout.String(), home)
 	}
-	if _, err := pollSkillOptReviewWatches(context.Background(), store, blobStore, fake, &stdout, false); err != nil {
+	if _, err := pollSkillOptReviewWatches(context.Background(), paths, store, blobStore, fake, &stdout, false, home); err != nil {
 		t.Fatalf("second pollSkillOptReviewWatches returned error: %v", err)
 	}
 	events, err = store.ListRankedFeedbackEvents(context.Background(), "watcher-review-001")
@@ -6307,8 +6318,9 @@ func TestSkillOptReviewWatcherImportsValidYAML(t *testing.T) {
 }
 
 func TestSkillOptReviewWatcherCommentsInvalidYAMLDeduped(t *testing.T) {
-	_, store, blobStore := seedSkillOptReviewWatcherRun(t)
+	home, store, blobStore := seedSkillOptReviewWatcherRun(t)
 	defer store.Close()
+	paths := config.PathsForHome(home)
 	fake := &skillOptFakeGitHub{
 		comments: map[int64][]github.IssueComment{
 			67: {
@@ -6317,7 +6329,7 @@ func TestSkillOptReviewWatcherCommentsInvalidYAMLDeduped(t *testing.T) {
 		},
 	}
 	var stdout bytes.Buffer
-	if _, err := pollSkillOptReviewWatches(context.Background(), store, blobStore, fake, &stdout, false); err != nil {
+	if _, err := pollSkillOptReviewWatches(context.Background(), paths, store, blobStore, fake, &stdout, false, home); err != nil {
 		t.Fatalf("pollSkillOptReviewWatches returned error: %v", err)
 	}
 	if len(fake.postedComments) != 1 {
@@ -6334,7 +6346,7 @@ func TestSkillOptReviewWatcherCommentsInvalidYAMLDeduped(t *testing.T) {
 	if watch.Status != db.SkillOptReviewWatchStatusWatching || watch.LastSeenCommentID != 0 || watch.LastImportErrorHash == "" {
 		t.Fatalf("watch after invalid import = %+v", watch)
 	}
-	if _, err := pollSkillOptReviewWatches(context.Background(), store, blobStore, fake, &stdout, false); err != nil {
+	if _, err := pollSkillOptReviewWatches(context.Background(), paths, store, blobStore, fake, &stdout, false, home); err != nil {
 		t.Fatalf("second pollSkillOptReviewWatches returned error: %v", err)
 	}
 	if len(fake.postedComments) != 1 {
@@ -6348,7 +6360,7 @@ func TestSkillOptReviewWatcherCommentsInvalidYAMLDeduped(t *testing.T) {
 		t.Fatalf("ranked events = %+v", events)
 	}
 	fake.comments[67][0].Body = "run_id: watcher-review-001\nitems:\n  - item_id: item-001\n    ranking:\n      - C > A > D > B\n  - item_id: item-002\n    ranking:\n      - B > C > A > D\n"
-	if _, err := pollSkillOptReviewWatches(context.Background(), store, blobStore, fake, &stdout, false); err != nil {
+	if _, err := pollSkillOptReviewWatches(context.Background(), paths, store, blobStore, fake, &stdout, false, home); err != nil {
 		t.Fatalf("third pollSkillOptReviewWatches returned error: %v", err)
 	}
 	events, err = store.ListRankedFeedbackEvents(context.Background(), "watcher-review-001")
@@ -6357,6 +6369,109 @@ func TestSkillOptReviewWatcherCommentsInvalidYAMLDeduped(t *testing.T) {
 	}
 	if len(events) != 2 {
 		t.Fatalf("ranked events after edit = %+v", events)
+	}
+}
+
+func TestSkillOptReviewWatcherKeepsImportedWhenTrainReviewLockBusy(t *testing.T) {
+	home, store, blobStore := seedSkillOptReviewWatcherRun(t)
+	defer store.Close()
+	release, _, err := acquireSkillOptTrainReviewLock(context.Background(), store, "watcher-train", "watcher-train-001")
+	if err != nil {
+		t.Fatalf("acquireSkillOptTrainReviewLock returned error: %v", err)
+	}
+	defer func() {
+		_ = release(context.Background())
+	}()
+	fake := &skillOptFakeGitHub{
+		comments: map[int64][]github.IssueComment{
+			67: {
+				{ID: 100, Body: "run_id: watcher-review-001\nitems:\n  - item_id: item-001\n    ranking:\n      - C > A > D > B\n  - item_id: item-002\n    ranking:\n      - B > C > A > D\n", URL: "https://github.com/owner/previews/issues/67#issuecomment-100", Author: "alice", CreatedAt: "2026-06-04T10:00:00Z"},
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	if _, err := pollSkillOptReviewWatches(context.Background(), config.PathsForHome(home), store, blobStore, fake, &stdout, false, home); err != nil {
+		t.Fatalf("pollSkillOptReviewWatches returned error: %v", err)
+	}
+	if len(fake.postedComments) != 1 ||
+		!strings.Contains(fake.postedComments[0].Body, "already active") ||
+		!strings.Contains(fake.postedComments[0].Body, skillOptReviewWatchSuccessMarker) {
+		t.Fatalf("posted comments = %+v", fake.postedComments)
+	}
+	if len(fake.closedIssues) != 0 {
+		t.Fatalf("closed issues = %+v", fake.closedIssues)
+	}
+	watch, err := store.GetSkillOptReviewWatch(context.Background(), "owner/previews", 67)
+	if err != nil {
+		t.Fatalf("GetSkillOptReviewWatch returned error: %v", err)
+	}
+	if watch.Status != db.SkillOptReviewWatchStatusImported {
+		t.Fatalf("watch status = %s, want imported while lock is active", watch.Status)
+	}
+	iteration, err := store.GetSkillOptTrainIteration(context.Background(), "watcher-train-001")
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateReviewPublished {
+		t.Fatalf("iteration state = %s, want review_published while lock is active", iteration.State)
+	}
+}
+
+func TestSkillOptReviewWatcherRetriesImportedAckAndClose(t *testing.T) {
+	home, store, blobStore := seedSkillOptReviewWatcherRun(t)
+	defer store.Close()
+	fake := &skillOptFakeGitHub{
+		comments: map[int64][]github.IssueComment{
+			67: {
+				{ID: 100, Body: "run_id: watcher-review-001\nitems:\n  - item_id: item-001\n    ranking:\n      - C > A > D > B\n  - item_id: item-002\n    ranking:\n      - B > C > A > D\n", URL: "https://github.com/owner/previews/issues/67#issuecomment-100", Author: "alice", CreatedAt: "2026-06-04T10:00:00Z"},
+			},
+		},
+		closeIssueErr: errors.New("temporary close failure"),
+	}
+	paths := config.PathsForHome(home)
+	var stdout bytes.Buffer
+	if _, err := pollSkillOptReviewWatches(context.Background(), paths, store, blobStore, fake, &stdout, false, home); err == nil || !strings.Contains(err.Error(), "temporary close failure") {
+		t.Fatalf("first poll error = %v, want close failure", err)
+	}
+	watch, err := store.GetSkillOptReviewWatch(context.Background(), "owner/previews", 67)
+	if err != nil {
+		t.Fatalf("GetSkillOptReviewWatch returned error: %v", err)
+	}
+	if watch.Status != db.SkillOptReviewWatchStatusImported {
+		t.Fatalf("watch status after failed close = %s, want imported", watch.Status)
+	}
+	if len(fake.postedComments) != 1 || len(fake.closedIssues) != 0 {
+		t.Fatalf("posted=%+v closed=%+v", fake.postedComments, fake.closedIssues)
+	}
+	fake.comments[67] = append(fake.comments[67], github.IssueComment{ID: 101, Body: fake.postedComments[0].Body, Author: "gitmoot"})
+	fake.closeIssueErr = nil
+	if _, err := pollSkillOptReviewWatches(context.Background(), paths, store, blobStore, fake, &stdout, false, home); err != nil {
+		t.Fatalf("second pollSkillOptReviewWatches returned error: %v", err)
+	}
+	watch, err = store.GetSkillOptReviewWatch(context.Background(), "owner/previews", 67)
+	if err != nil {
+		t.Fatalf("GetSkillOptReviewWatch after retry returned error: %v", err)
+	}
+	if watch.Status != db.SkillOptReviewWatchStatusClosed {
+		t.Fatalf("watch status after retry = %s, want closed", watch.Status)
+	}
+	if len(fake.postedComments) != 1 {
+		t.Fatalf("posted comments after retry = %+v, want no duplicate success comment", fake.postedComments)
+	}
+	if len(fake.closedIssues) != 1 {
+		t.Fatalf("closed issues = %+v", fake.closedIssues)
+	}
+}
+
+func TestSkillOptReviewWatcherCloseDecisionKeepsBlockedReviewOpen(t *testing.T) {
+	if skillOptReviewWatchShouldCloseAfterContinuation(skillOptReviewWatchContinuation{Phase: skillopt.TrainStateReviewPublished}) {
+		t.Fatal("review_published continuation should keep the review issue open")
+	}
+	if !skillOptReviewWatchShouldCloseAfterContinuation(skillOptReviewWatchContinuation{Phase: skillopt.TrainStateFeedbackSynced}) {
+		t.Fatal("advanced continuation should close the review issue")
+	}
+	if skillOptReviewWatchShouldCloseAfterContinuation(skillOptReviewWatchContinuation{Phase: skillopt.TrainStateReviewPublished, Busy: true, Err: errSkillOptTrainReviewBusy}) {
+		t.Fatal("busy continuation should keep the review issue open so the watcher can retry")
 	}
 }
 
@@ -7630,10 +7745,12 @@ type skillOptFakeGitHub struct {
 
 	createdIssue       github.CreateIssueInput
 	postedComments     []skillOptPostedGitHubComment
+	closedIssues       []skillOptClosedGitHubIssue
 	listedComments     []skillOptListedGitHubComments
 	comments           map[int64][]github.IssueComment
 	createIssueErr     error
 	postCommentErr     error
+	closeIssueErr      error
 	host               string
 	commentKinds       map[int64]string
 	commentURLOverride string
@@ -7643,6 +7760,11 @@ type skillOptPostedGitHubComment struct {
 	Repo        github.Repository
 	IssueNumber int64
 	Body        string
+}
+
+type skillOptClosedGitHubIssue struct {
+	Repo        github.Repository
+	IssueNumber int64
 }
 
 type skillOptListedGitHubComments struct {
@@ -7662,13 +7784,45 @@ func seedSkillOptReviewWatcherRun(t *testing.T) (string, *db.Store, artifact.Sto
 		t.Fatalf("Open returned error: %v", err)
 	}
 	blobStore := artifact.NewStore(paths.ArtifactBlobs)
+	template := cliSkillOptTemplate("planner", "Plan landing page improvements.")
+	if err := store.UpsertAgentTemplate(context.Background(), template); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	installed, err := store.GetAgentTemplate(context.Background(), "planner")
+	if err != nil {
+		t.Fatalf("GetAgentTemplate returned error: %v", err)
+	}
+	if err := store.UpsertSkillOptTrainSession(context.Background(), db.SkillOptTrainSession{
+		ID:                "watcher-train",
+		TemplateID:        "planner",
+		TemplateVersionID: installed.VersionID,
+		TargetRepo:        "owner/product",
+		State:             skillopt.TrainStateReviewPublished,
+	}); err != nil {
+		t.Fatalf("UpsertSkillOptTrainSession returned error: %v", err)
+	}
+	if err := store.UpsertSkillOptTrainIteration(context.Background(), db.SkillOptTrainIteration{
+		ID:                    "watcher-train-001",
+		SessionID:             "watcher-train",
+		EvalRunID:             "watcher-review-001",
+		Mode:                  db.EvalRunModeExplore,
+		ExplorationLevel:      db.ExplorationLevelHigh,
+		State:                 skillopt.TrainStateReviewPublished,
+		IssueRepo:             "owner/previews",
+		IssueNumber:           67,
+		BaseTemplateVersionID: installed.VersionID,
+	}); err != nil {
+		t.Fatalf("UpsertSkillOptTrainIteration returned error: %v", err)
+	}
 	if err := store.UpsertEvalRun(context.Background(), db.EvalRun{
-		ID:               "watcher-review-001",
-		TargetRepo:       "owner/product",
-		State:            "review",
-		Mode:             db.EvalRunModeExplore,
-		ExplorationLevel: db.ExplorationLevelHigh,
-		OptionsCount:     4,
+		ID:                "watcher-review-001",
+		TemplateID:        "planner",
+		TemplateVersionID: installed.VersionID,
+		TargetRepo:        "owner/product",
+		State:             "review",
+		Mode:              db.EvalRunModeExplore,
+		ExplorationLevel:  db.ExplorationLevelHigh,
+		OptionsCount:      4,
 	}); err != nil {
 		t.Fatalf("UpsertEvalRun returned error: %v", err)
 	}
@@ -7717,6 +7871,14 @@ func (f *skillOptFakeGitHub) CreateIssue(_ context.Context, input github.CreateI
 	}
 	f.createdIssue = input
 	return github.Issue{Number: 8, URL: f.baseURL() + "/" + input.Repo.FullName() + "/issues/8"}, nil
+}
+
+func (f *skillOptFakeGitHub) CloseIssue(_ context.Context, repo github.Repository, issueNumber int64) (github.Issue, error) {
+	if f.closeIssueErr != nil {
+		return github.Issue{}, f.closeIssueErr
+	}
+	f.closedIssues = append(f.closedIssues, skillOptClosedGitHubIssue{Repo: repo, IssueNumber: issueNumber})
+	return github.Issue{Number: issueNumber, State: "closed", URL: f.baseURL() + "/" + repo.FullName() + "/issues/" + fmt.Sprint(issueNumber)}, nil
 }
 
 func (f *skillOptFakeGitHub) PostIssueComment(_ context.Context, repo github.Repository, issueNumber int64, body string) (github.IssueComment, error) {
