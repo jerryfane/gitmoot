@@ -10,6 +10,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jerryfane/gitmoot/internal/artifact"
 	"github.com/jerryfane/gitmoot/internal/config"
@@ -22,6 +23,7 @@ import (
 
 const skillOptReviewWatchErrorMarker = "<!-- gitmoot:skillopt-review-watch-error -->"
 const skillOptReviewWatchSuccessMarker = "<!-- gitmoot:skillopt-review-watch-success -->"
+const skillOptReviewWatchStaleMarker = "<!-- gitmoot:skillopt-review-watch-stale -->"
 
 func pollSkillOptReviewWatches(ctx context.Context, paths config.Paths, store *db.Store, blobStore artifact.Store, gh github.Client, stdout io.Writer, dryRun bool, home string) (int, error) {
 	if store == nil {
@@ -39,6 +41,11 @@ func pollSkillOptReviewWatches(ctx context.Context, paths config.Paths, store *d
 		return 0, err
 	}
 	watches = append(watches, importedWatches...)
+	staleNotifiedWatches, err := store.ListSkillOptReviewWatches(ctx, db.SkillOptReviewWatchStatusStaleNotified)
+	if err != nil {
+		return 0, err
+	}
+	watches = append(watches, staleNotifiedWatches...)
 	polled := 0
 	var pollErr error
 	for _, watch := range watches {
@@ -73,6 +80,7 @@ func pollSkillOptReviewWatch(ctx context.Context, paths config.Paths, store *db.
 		return comments[i].ID < comments[j].ID
 	})
 	successPosted := hasGitmootSkillOptReviewWatchSuccessComment(comments)
+	stalePosted := hasGitmootSkillOptReviewWatchStaleComment(comments)
 	if watch.Status == db.SkillOptReviewWatchStatusImported {
 		result, err := skillOptReviewWatchImportResultFromStore(ctx, store, watch.RunID)
 		if err != nil {
@@ -90,6 +98,7 @@ func pollSkillOptReviewWatch(ctx context.Context, paths config.Paths, store *db.
 		return fmt.Errorf("skillopt review watch %s#%d: %w", watch.Repo, watch.IssueNumber, err)
 	}
 	collector := feedback.GitHubCollector{BlobStore: blobStore, GitHub: gh}
+	invalidFeedbackSeen := false
 	for _, comment := range comments {
 		if comment.ID <= watch.LastSeenCommentID || isGitmootSkillOptReviewWatchComment(comment.Body) {
 			continue
@@ -99,6 +108,7 @@ func pollSkillOptReviewWatch(ctx context.Context, paths config.Paths, store *db.
 			if err := postSkillOptReviewWatchImportError(ctx, store, gh, repo, &watch, comment, err); err != nil {
 				return err
 			}
+			invalidFeedbackSeen = true
 			continue
 		}
 		if !validation.Parseable {
@@ -112,6 +122,7 @@ func pollSkillOptReviewWatch(ctx context.Context, paths config.Paths, store *db.
 			if err := postSkillOptReviewWatchImportError(ctx, store, gh, repo, &watch, comment, err); err != nil {
 				return err
 			}
+			invalidFeedbackSeen = true
 			continue
 		}
 		watch.Status = db.SkillOptReviewWatchStatusImported
@@ -126,6 +137,12 @@ func pollSkillOptReviewWatch(ctx context.Context, paths config.Paths, store *db.
 		}
 		writeLine(stdout, "imported %d skillopt review feedback events from %s#%d comment %d", result.Count(), watch.Repo, watch.IssueNumber, comment.ID)
 		return nil
+	}
+	if invalidFeedbackSeen {
+		return store.UpsertSkillOptReviewWatch(ctx, watch)
+	}
+	if err := maybePostSkillOptReviewWatchStaleNotice(ctx, store, gh, repo, &watch, expected, stalePosted); err != nil {
+		return err
 	}
 	return store.UpsertSkillOptReviewWatch(ctx, watch)
 }
@@ -221,6 +238,7 @@ func isGitmootSkillOptReviewWatchComment(body string) bool {
 	body = strings.TrimSpace(body)
 	return strings.Contains(body, skillOptReviewWatchErrorMarker) ||
 		strings.Contains(body, skillOptReviewWatchSuccessMarker) ||
+		strings.Contains(body, skillOptReviewWatchStaleMarker) ||
 		strings.Contains(body, "<!-- gitmoot:skillopt-feedback-packet -->") ||
 		strings.HasPrefix(body, "# Gitmoot SkillOpt Feedback:")
 }
@@ -232,6 +250,57 @@ func hasGitmootSkillOptReviewWatchSuccessComment(comments []github.IssueComment)
 		}
 	}
 	return false
+}
+
+func hasGitmootSkillOptReviewWatchStaleComment(comments []github.IssueComment) bool {
+	for _, comment := range comments {
+		if strings.Contains(comment.Body, skillOptReviewWatchStaleMarker) {
+			return true
+		}
+	}
+	return false
+}
+
+func maybePostSkillOptReviewWatchStaleNotice(ctx context.Context, store *db.Store, gh github.Client, repo github.Repository, watch *db.SkillOptReviewWatch, expectedItemIDs []string, stalePosted bool) error {
+	if watch.Status != db.SkillOptReviewWatchStatusWatching || watch.StaleNotified || !skillOptReviewWatchIsStale(*watch, time.Now().UTC()) {
+		return nil
+	}
+	if stalePosted {
+		watch.Status = db.SkillOptReviewWatchStatusStaleNotified
+		watch.StaleNotified = true
+		return store.UpsertSkillOptReviewWatch(ctx, *watch)
+	}
+	continuation := skillOptReviewWatchContinuationForNotice(ctx, store, watch.RunID)
+	body := skillOptReviewWatchStaleNoticeComment(*watch, expectedItemIDs, continuation)
+	if _, err := gh.PostIssueComment(ctx, repo, watch.IssueNumber, body); err != nil {
+		return fmt.Errorf("skillopt review watch %s#%d: post stale notice: %w", watch.Repo, watch.IssueNumber, err)
+	}
+	watch.Status = db.SkillOptReviewWatchStatusStaleNotified
+	watch.StaleNotified = true
+	return store.UpsertSkillOptReviewWatch(ctx, *watch)
+}
+
+func skillOptReviewWatchIsStale(watch db.SkillOptReviewWatch, now time.Time) bool {
+	staleAfter := strings.TrimSpace(watch.StaleAfter)
+	if staleAfter == "" {
+		return false
+	}
+	deadline, err := time.Parse(time.RFC3339Nano, staleAfter)
+	if err != nil {
+		return false
+	}
+	return !now.Before(deadline)
+}
+
+func skillOptReviewWatchContinuationForNotice(ctx context.Context, store *db.Store, runID string) skillOptReviewWatchContinuation {
+	iteration, err := store.GetSkillOptTrainIterationByEvalRun(ctx, runID)
+	if err != nil {
+		return skillOptReviewWatchContinuation{}
+	}
+	return skillOptReviewWatchContinuation{
+		SessionID: iteration.SessionID,
+		Phase:     iteration.State,
+	}
 }
 
 func postSkillOptReviewWatchImportError(ctx context.Context, store *db.Store, gh github.Client, repo github.Repository, watch *db.SkillOptReviewWatch, comment github.IssueComment, importErr error) error {
@@ -265,6 +334,36 @@ func skillOptReviewWatchImportErrorComment(runID string, commentID int64, messag
 	builder.WriteString("- error: ")
 	builder.WriteString(strings.ReplaceAll(message, "\n", " "))
 	builder.WriteString("\n\nPlease reply with a complete fenced `yaml` block for the expected `run_id` and all review `item_id` values.\n")
+	return builder.String()
+}
+
+func skillOptReviewWatchStaleNoticeComment(watch db.SkillOptReviewWatch, expectedItemIDs []string, continuation skillOptReviewWatchContinuation) string {
+	var builder strings.Builder
+	builder.WriteString(skillOptReviewWatchStaleMarker)
+	builder.WriteString("\nGitmoot is still waiting for SkillOpt review feedback.\n\n")
+	fmt.Fprintf(&builder, "- review_issue: `%s#%d`\n", strings.TrimSpace(watch.Repo), watch.IssueNumber)
+	fmt.Fprintf(&builder, "- run_id: `%s`\n", strings.TrimSpace(watch.RunID))
+	if len(expectedItemIDs) > 0 {
+		fmt.Fprintf(&builder, "- waiting_for: complete YAML feedback for item_ids `%s`\n", strings.Join(expectedItemIDs, ", "))
+	} else {
+		builder.WriteString("- waiting_for: complete YAML feedback for this review run\n")
+	}
+	if continuation.SessionID != "" {
+		fmt.Fprintf(&builder, "- train_session: `%s`\n", continuation.SessionID)
+	}
+	if continuation.Phase != "" {
+		fmt.Fprintf(&builder, "- train_phase: `%s`\n", continuation.Phase)
+	}
+	builder.WriteString("\nAfter posting the feedback YAML, send this prompt to your agent:\n\n")
+	builder.WriteString("```text\n")
+	fmt.Fprintf(&builder, "I posted the SkillOpt review feedback for run %s on %s#%d. Please continue the Gitmoot SkillOpt review watcher flow, import the feedback if needed, and continue the train loop.\n", strings.TrimSpace(watch.RunID), strings.TrimSpace(watch.Repo), watch.IssueNumber)
+	builder.WriteString("```\n\n")
+	if continuation.SessionID != "" {
+		builder.WriteString("Equivalent CLI fallback:\n\n")
+		builder.WriteString("```sh\n")
+		fmt.Fprintf(&builder, "gitmoot skillopt train continue --session %s\n", shellArg(continuation.SessionID))
+		builder.WriteString("```\n")
+	}
 	return builder.String()
 }
 
