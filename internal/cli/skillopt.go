@@ -365,11 +365,121 @@ func printSkillOptTrainStartPlan(stdout io.Writer, plan skillOptTrainStartPlan) 
 	writeLine(stdout, "next_action: %s", plan.Summary.NextAction)
 }
 
+type skillOptTrainStatusSnapshot struct {
+	SessionID        string                         `json:"session_id"`
+	IterationID      string                         `json:"iteration_id,omitempty"`
+	TemplateID       string                         `json:"template_id,omitempty"`
+	TemplateVersion  string                         `json:"template_version,omitempty"`
+	TargetRepo       string                         `json:"target_repo,omitempty"`
+	WorkspaceRepo    string                         `json:"workspace_repo,omitempty"`
+	TaskKind         string                         `json:"task_kind,omitempty"`
+	CurrentPhase     string                         `json:"current_phase"`
+	CurrentStep      string                         `json:"current_step"`
+	CompletedSteps   []string                       `json:"completed_steps"`
+	BlockedStep      string                         `json:"blocked_step,omitempty"`
+	NextAction       string                         `json:"next_action"`
+	IssueURL         string                         `json:"issue_url,omitempty"`
+	PullRequestURL   string                         `json:"pull_request_url,omitempty"`
+	CandidateVersion string                         `json:"candidate_version,omitempty"`
+	PreviewPolicy    skillOptTrainPreviewPolicyJSON `json:"preview_policy"`
+	Counts           skillOptTrainStatusCountsJSON  `json:"counts"`
+	Progress         skillOptTrainStatusProgress    `json:"progress"`
+	Verbose          *skillOptTrainStatusVerbose    `json:"verbose,omitempty"`
+}
+
+type skillOptTrainPreviewPolicyJSON struct {
+	Mode               string `json:"mode"`
+	Renderer           string `json:"renderer"`
+	Publisher          string `json:"publisher"`
+	Repo               string `json:"repo,omitempty"`
+	RouteTemplate      string `json:"route_template,omitempty"`
+	ExpectedReviewRepo string `json:"expected_review_repo,omitempty"`
+}
+
+type skillOptTrainStatusCountsJSON struct {
+	ReviewItems          int `json:"review_items"`
+	FeedbackEvents       int `json:"feedback_events"`
+	RankedFeedbackEvents int `json:"ranked_feedback_events"`
+	PairwisePreferences  int `json:"pairwise_preferences"`
+}
+
+type skillOptTrainStatusProgress struct {
+	ReviewItems          int    `json:"review_items"`
+	FeedbackEvents       int    `json:"feedback_events"`
+	RankedFeedbackEvents int    `json:"ranked_feedback_events"`
+	PairwisePreferences  int    `json:"pairwise_preferences"`
+	GeneratedOptions     int    `json:"generated_options"`
+	ETA                  string `json:"eta"`
+}
+
+type skillOptTrainStatusVerbose struct {
+	EvalRunID             string                         `json:"eval_run_id,omitempty"`
+	BaseTemplateVersionID string                         `json:"base_template_version_id,omitempty"`
+	Mode                  string                         `json:"mode,omitempty"`
+	ExplorationLevel      string                         `json:"exploration_level,omitempty"`
+	CreatedAt             string                         `json:"created_at,omitempty"`
+	UpdatedAt             string                         `json:"updated_at,omitempty"`
+	Elapsed               string                         `json:"elapsed"`
+	ReviewIssue           skillOptTrainStatusReviewIssue `json:"review_issue,omitempty"`
+	Candidate             skillOptTrainStatusCandidate   `json:"candidate,omitempty"`
+	Optimizer             map[string]any                 `json:"optimizer,omitempty"`
+	Jobs                  skillOptTrainStatusJobs        `json:"jobs"`
+	ActiveLocks           []skillOptTrainStatusLock      `json:"active_locks,omitempty"`
+	Items                 []skillOptTrainStatusItem      `json:"items,omitempty"`
+	MetadataStatus        map[string]string              `json:"metadata_status,omitempty"`
+}
+
+type skillOptTrainStatusReviewIssue struct {
+	Repo   string `json:"repo,omitempty"`
+	Number int64  `json:"number,omitempty"`
+	URL    string `json:"url,omitempty"`
+}
+
+type skillOptTrainStatusCandidate struct {
+	VersionID         string `json:"version_id,omitempty"`
+	PullRequestURL    string `json:"pull_request_url,omitempty"`
+	NoCandidateReason string `json:"no_candidate_reason,omitempty"`
+}
+
+type skillOptTrainStatusJobs struct {
+	Total     int                         `json:"total"`
+	Queued    int                         `json:"queued"`
+	Running   int                         `json:"running"`
+	Succeeded int                         `json:"succeeded"`
+	Failed    int                         `json:"failed"`
+	Other     int                         `json:"other"`
+	Items     []skillOptTrainStatusJobRef `json:"items,omitempty"`
+}
+
+type skillOptTrainStatusJobRef struct {
+	ID    string `json:"id"`
+	Agent string `json:"agent,omitempty"`
+	Type  string `json:"type,omitempty"`
+	State string `json:"state"`
+}
+
+type skillOptTrainStatusLock struct {
+	Name       string `json:"name"`
+	Key        string `json:"key"`
+	OwnerJobID string `json:"owner_job_id,omitempty"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+}
+
+type skillOptTrainStatusItem struct {
+	ItemID       string   `json:"item_id"`
+	Title        string   `json:"title,omitempty"`
+	OptionLabels []string `json:"option_labels,omitempty"`
+}
+
 func runSkillOptTrainStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("skillopt train status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	sessionID := fs.String("session", "", "train session id")
+	jsonOutput := fs.Bool("json", false, "print status as JSON")
+	verbose := fs.Bool("verbose", false, "include detailed progress and metadata")
+	watch := fs.Bool("watch", false, "refresh status until the session reaches a waiting or terminal phase")
+	poll := fs.Duration("poll", 2*time.Second, "watch poll interval")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -384,19 +494,63 @@ func runSkillOptTrainStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "skillopt train status requires --session")
 		return 2
 	}
-	var session db.SkillOptTrainSession
-	var iteration *db.SkillOptTrainIteration
-	var counts skillopt.TrainStatusCounts
+	if *poll <= 0 {
+		fmt.Fprintln(stderr, "skillopt train status poll interval must be positive")
+		return 2
+	}
+	if *watch && *jsonOutput {
+		fmt.Fprintln(stderr, "skillopt train status does not support --watch with --json; use --watch for text refreshes or --json without --watch")
+		return 2
+	}
+	var snapshot skillOptTrainStatusSnapshot
 	if err := withStore(*home, func(store *db.Store) error {
-		var err error
-		session, iteration, counts, err = loadSkillOptTrainStatus(context.Background(), store, *sessionID)
-		return err
+		for {
+			loaded, err := loadSkillOptTrainStatusSnapshot(context.Background(), store, *sessionID, *verbose || *watch)
+			if err != nil {
+				return err
+			}
+			snapshot = loaded
+			outputSnapshot := skillOptTrainStatusOutputSnapshot(snapshot, *verbose)
+			if !*watch {
+				return nil
+			}
+			if *jsonOutput {
+				if err := writeJSON(stdout, outputSnapshot); err != nil {
+					return err
+				}
+			} else {
+				printSkillOptTrainStatusSnapshot(stdout, outputSnapshot, *verbose)
+				writeLine(stdout, "watch_state: %s", skillOptTrainWatchState(snapshot))
+			}
+			if skillOptTrainWatchDone(snapshot) {
+				return nil
+			}
+			time.Sleep(*poll)
+		}
 	}); err != nil {
 		fmt.Fprintf(stderr, "skillopt train status: %v\n", err)
 		return 1
 	}
-	printSkillOptTrainStatus(stdout, skillopt.BuildTrainStatusSummary(session, iteration, counts), counts)
+	if *watch {
+		return 0
+	}
+	if *jsonOutput {
+		if err := writeJSON(stdout, skillOptTrainStatusOutputSnapshot(snapshot, *verbose)); err != nil {
+			fmt.Fprintf(stderr, "skillopt train status: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	printSkillOptTrainStatusSnapshot(stdout, snapshot, *verbose)
 	return 0
+}
+
+func skillOptTrainStatusOutputSnapshot(snapshot skillOptTrainStatusSnapshot, verbose bool) skillOptTrainStatusSnapshot {
+	if verbose {
+		return snapshot
+	}
+	snapshot.Verbose = nil
+	return snapshot
 }
 
 func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
@@ -3509,6 +3663,343 @@ func loadSkillOptTrainStatusCounts(ctx context.Context, store *db.Store, runID s
 	}, nil
 }
 
+func loadSkillOptTrainStatusSnapshot(ctx context.Context, store *db.Store, sessionID string, verbose bool) (skillOptTrainStatusSnapshot, error) {
+	session, iteration, counts, err := loadSkillOptTrainStatus(ctx, store, sessionID)
+	if err != nil {
+		return skillOptTrainStatusSnapshot{}, err
+	}
+	summary := skillopt.BuildTrainStatusSummary(session, iteration, counts)
+	snapshot := buildSkillOptTrainStatusSnapshot(session, iteration, summary, counts)
+	if verbose {
+		details, err := buildSkillOptTrainStatusVerbose(ctx, store, session, iteration)
+		if err != nil {
+			return skillOptTrainStatusSnapshot{}, err
+		}
+		snapshot.Verbose = &details
+	}
+	return snapshot, nil
+}
+
+func buildSkillOptTrainStatusSnapshot(session db.SkillOptTrainSession, iteration *db.SkillOptTrainIteration, summary skillopt.TrainStatusSummary, counts skillopt.TrainStatusCounts) skillOptTrainStatusSnapshot {
+	policy := summary.PreviewPolicy
+	generatedOptions := 0
+	if iteration != nil {
+		generatedOptions = metadataNumber(decodedSkillOptMetadataValue(decodedSkillOptMetadata(iteration.MetadataJSON)["generation"]), "generated_options")
+	} else {
+		generatedOptions = metadataNumber(decodedSkillOptMetadataValue(decodedSkillOptMetadata(session.MetadataJSON)["generation"]), "generated_options")
+	}
+	currentStep := strings.TrimSpace(summary.BlockedStep)
+	if currentStep == "" {
+		currentStep = summary.CurrentPhase
+	}
+	return skillOptTrainStatusSnapshot{
+		SessionID:        summary.SessionID,
+		IterationID:      summary.IterationID,
+		TemplateID:       strings.TrimSpace(session.TemplateID),
+		TemplateVersion:  strings.TrimSpace(session.TemplateVersionID),
+		TargetRepo:       strings.TrimSpace(session.TargetRepo),
+		WorkspaceRepo:    strings.TrimSpace(session.WorkspaceRepo),
+		TaskKind:         strings.TrimSpace(session.TaskKind),
+		CurrentPhase:     summary.CurrentPhase,
+		CurrentStep:      currentStep,
+		CompletedSteps:   append([]string(nil), summary.CompletedSteps...),
+		BlockedStep:      summary.BlockedStep,
+		NextAction:       summary.NextAction,
+		IssueURL:         summary.IssueURL,
+		PullRequestURL:   summary.PullRequestURL,
+		CandidateVersion: summary.CandidateVersion,
+		PreviewPolicy: skillOptTrainPreviewPolicyJSON{
+			Mode:               policy.Mode,
+			Renderer:           policy.Renderer,
+			Publisher:          policy.Publisher,
+			Repo:               policy.Repo,
+			RouteTemplate:      policy.RouteTemplate,
+			ExpectedReviewRepo: policy.ExpectedReviewRepo,
+		},
+		Counts: skillOptTrainStatusCountsJSON{
+			ReviewItems:          counts.ReviewItems,
+			FeedbackEvents:       counts.FeedbackEvents,
+			RankedFeedbackEvents: counts.RankedFeedbackEvents,
+			PairwisePreferences:  counts.PairwisePreferences,
+		},
+		Progress: skillOptTrainStatusProgress{
+			ReviewItems:          counts.ReviewItems,
+			FeedbackEvents:       counts.FeedbackEvents,
+			RankedFeedbackEvents: counts.RankedFeedbackEvents,
+			PairwisePreferences:  counts.PairwisePreferences,
+			GeneratedOptions:     generatedOptions,
+			ETA:                  "unknown",
+		},
+	}
+}
+
+func buildSkillOptTrainStatusVerbose(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration *db.SkillOptTrainIteration) (skillOptTrainStatusVerbose, error) {
+	details := skillOptTrainStatusVerbose{
+		CreatedAt: session.CreatedAt,
+		UpdatedAt: session.UpdatedAt,
+		Elapsed:   skillOptElapsedText(session.CreatedAt),
+		Jobs:      skillOptTrainStatusJobs{},
+	}
+	statuses := map[string]string{}
+	addStatus := func(name string, metadata map[string]any) {
+		if status := metadataString(metadata, "status"); status != "" {
+			statuses[name] = status
+		}
+	}
+	statusMetadata := decodedSkillOptMetadata(session.MetadataJSON)
+	var iterationMetadata map[string]any
+	if iteration != nil {
+		iterationMetadata = decodedSkillOptMetadata(iteration.MetadataJSON)
+		statusMetadata = iterationMetadata
+	}
+	addStatus("generation", decodedSkillOptMetadataValue(statusMetadata["generation"]))
+	addStatus("review", decodedSkillOptMetadataValue(statusMetadata["review"]))
+	addStatus("feedback_sync", decodedSkillOptMetadataValue(statusMetadata["feedback_sync"]))
+	addStatus("optimizer", decodedSkillOptMetadataValue(statusMetadata["optimizer"]))
+	addStatus("candidate_import", decodedSkillOptMetadataValue(statusMetadata["candidate_import"]))
+	addStatus("candidate_review", decodedSkillOptMetadataValue(statusMetadata["candidate_review"]))
+	addStatus("candidate_decision", decodedSkillOptMetadataValue(statusMetadata["candidate_decision"]))
+	if len(statuses) > 0 {
+		details.MetadataStatus = statuses
+	}
+	if iteration == nil {
+		return details, nil
+	}
+	details.EvalRunID = strings.TrimSpace(iteration.EvalRunID)
+	details.BaseTemplateVersionID = strings.TrimSpace(iteration.BaseTemplateVersionID)
+	details.Mode = strings.TrimSpace(iteration.Mode)
+	details.ExplorationLevel = strings.TrimSpace(iteration.ExplorationLevel)
+	details.CreatedAt = iteration.CreatedAt
+	details.UpdatedAt = iteration.UpdatedAt
+	details.Elapsed = skillOptElapsedText(iteration.CreatedAt)
+	details.ReviewIssue = skillOptTrainStatusReviewIssue{
+		Repo:   strings.TrimSpace(iteration.IssueRepo),
+		Number: iteration.IssueNumber,
+		URL:    strings.TrimSpace(iteration.IssueURL),
+	}
+	candidateImport := decodedSkillOptMetadataValue(iterationMetadata["candidate_import"])
+	details.Candidate = skillOptTrainStatusCandidate{
+		VersionID:         strings.TrimSpace(iteration.CandidateVersionID),
+		PullRequestURL:    strings.TrimSpace(iteration.PullRequestURL),
+		NoCandidateReason: metadataString(candidateImport, "no_candidate_reason"),
+	}
+	if optimizer := decodedSkillOptMetadataValue(iterationMetadata["optimizer"]); len(optimizer) > 0 {
+		details.Optimizer = optimizer
+	}
+	activeLocks, err := skillOptTrainActiveLocks(ctx, store, session.ID, iteration.ID)
+	if err != nil {
+		return skillOptTrainStatusVerbose{}, err
+	}
+	details.ActiveLocks = activeLocks
+	jobs, err := skillOptTrainStatusJobSummary(ctx, store, iterationMetadata)
+	if err != nil {
+		return skillOptTrainStatusVerbose{}, err
+	}
+	details.Jobs = jobs
+	items, err := skillOptTrainStatusItems(ctx, store, iteration.EvalRunID)
+	if err != nil {
+		return skillOptTrainStatusVerbose{}, err
+	}
+	details.Items = items
+	return details, nil
+}
+
+func skillOptTrainActiveLocks(ctx context.Context, store *db.Store, sessionID string, iterationID string) ([]skillOptTrainStatusLock, error) {
+	candidates := []struct {
+		name string
+		key  string
+	}{
+		{name: "generation", key: skillOptTrainGenerationLockKey(sessionID, iterationID)},
+		{name: "review", key: skillOptTrainReviewLockKey(sessionID, iterationID)},
+		{name: "optimizer", key: skillOptTrainOptimizerLockKey(sessionID, iterationID)},
+		{name: "candidate_review", key: skillOptTrainCandidateReviewLockKey(sessionID, iterationID)},
+		{name: "start_next", key: skillOptTrainStartNextLockKey(sessionID)},
+	}
+	locks := []skillOptTrainStatusLock{}
+	now := time.Now().UTC()
+	for _, candidate := range candidates {
+		lock, err := store.GetResourceLock(ctx, candidate.key)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, err
+		}
+		if !skillOptResourceLockActive(lock, now) {
+			continue
+		}
+		locks = append(locks, skillOptTrainStatusLock{
+			Name:       candidate.name,
+			Key:        lock.ResourceKey,
+			OwnerJobID: strings.TrimSpace(lock.OwnerJobID),
+			ExpiresAt:  strings.TrimSpace(lock.ExpiresAt),
+		})
+	}
+	return locks, nil
+}
+
+func skillOptResourceLockActive(lock db.ResourceLock, now time.Time) bool {
+	expiresAt := strings.TrimSpace(lock.ExpiresAt)
+	if expiresAt == "" {
+		return true
+	}
+	parsed, ok := parseSkillOptStatusTime(expiresAt)
+	if !ok {
+		return true
+	}
+	return parsed.After(now)
+}
+
+func skillOptTrainStatusJobSummary(ctx context.Context, store *db.Store, metadata map[string]any) (skillOptTrainStatusJobs, error) {
+	generation := decodedSkillOptMetadataValue(metadata["generation"])
+	jobIDs := metadataStringSlice(generation, "jobs")
+	summary := skillOptTrainStatusJobs{}
+	for _, jobID := range jobIDs {
+		job, err := store.GetJob(ctx, jobID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return skillOptTrainStatusJobs{}, err
+		}
+		summary.Total++
+		switch strings.TrimSpace(strings.ToLower(job.State)) {
+		case "queued":
+			summary.Queued++
+		case "running":
+			summary.Running++
+		case "succeeded":
+			summary.Succeeded++
+		case "failed":
+			summary.Failed++
+		default:
+			summary.Other++
+		}
+		summary.Items = append(summary.Items, skillOptTrainStatusJobRef{
+			ID:    strings.TrimSpace(job.ID),
+			Agent: strings.TrimSpace(job.Agent),
+			Type:  strings.TrimSpace(job.Type),
+			State: strings.TrimSpace(job.State),
+		})
+	}
+	return summary, nil
+}
+
+func skillOptTrainStatusItems(ctx context.Context, store *db.Store, runID string) ([]skillOptTrainStatusItem, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, nil
+	}
+	run, err := store.GetEvalRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	rankedRun := skillOptRunUsesRankedOptions(run)
+	reviewItems, err := store.ListEvalReviewItems(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]skillOptTrainStatusItem, 0, len(reviewItems))
+	for _, item := range reviewItems {
+		statusItem := skillOptTrainStatusItem{
+			ItemID: strings.TrimSpace(item.ItemID),
+			Title:  strings.TrimSpace(item.Title),
+		}
+		options, err := store.ListEvalReviewOptions(ctx, runID, item.ItemID)
+		if err != nil {
+			return nil, err
+		}
+		for _, option := range options {
+			statusItem.OptionLabels = append(statusItem.OptionLabels, strings.ToUpper(strings.TrimSpace(option.Label)))
+		}
+		if len(statusItem.OptionLabels) == 0 && !rankedRun {
+			if strings.TrimSpace(item.BaselineArtifactID) != "" {
+				statusItem.OptionLabels = append(statusItem.OptionLabels, "BASELINE")
+			}
+			if strings.TrimSpace(item.CandidateArtifactID) != "" {
+				statusItem.OptionLabels = append(statusItem.OptionLabels, "CANDIDATE")
+			}
+			if len(statusItem.OptionLabels) == 0 {
+				statusItem.OptionLabels = append(statusItem.OptionLabels, "BASELINE", "CANDIDATE")
+			}
+		}
+		items = append(items, statusItem)
+	}
+	return items, nil
+}
+
+func metadataStringSlice(metadata map[string]any, key string) []string {
+	value, ok := metadata[key]
+	if !ok {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(fmt.Sprint(item)); text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return nil
+		}
+		return []string{strings.TrimSpace(typed)}
+	default:
+		return nil
+	}
+}
+
+func skillOptElapsedText(startedAt string) string {
+	started, ok := parseSkillOptStatusTime(startedAt)
+	if !ok {
+		return "unknown"
+	}
+	elapsed := time.Since(started)
+	if elapsed < 0 {
+		return "unknown"
+	}
+	return elapsed.Round(time.Second).String()
+}
+
+func parseSkillOptStatusTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func skillOptTrainWatchState(snapshot skillOptTrainStatusSnapshot) string {
+	if skillOptTrainWatchDone(snapshot) {
+		return "waiting"
+	}
+	return "active"
+}
+
+func skillOptTrainWatchDone(snapshot skillOptTrainStatusSnapshot) bool {
+	if skillopt.IsTerminalTrainState(snapshot.CurrentPhase) {
+		return true
+	}
+	if snapshot.Verbose == nil {
+		return true
+	}
+	if len(snapshot.Verbose.ActiveLocks) > 0 {
+		return false
+	}
+	return true
+}
+
 func printSkillOptTrainStatus(stdout io.Writer, summary skillopt.TrainStatusSummary, counts skillopt.TrainStatusCounts) {
 	writeLine(stdout, "session: %s", summary.SessionID)
 	writeLine(stdout, "iteration: %s", emptyText(summary.IterationID))
@@ -3528,6 +4019,53 @@ func printSkillOptTrainStatus(stdout io.Writer, summary skillopt.TrainStatusSumm
 	writeLine(stdout, "review_items: %d", counts.ReviewItems)
 	writeLine(stdout, "feedback: %d", summary.FeedbackCount)
 	writeLine(stdout, "pairwise_preferences: %d", counts.PairwisePreferences)
+}
+
+func printSkillOptTrainStatusSnapshot(stdout io.Writer, snapshot skillOptTrainStatusSnapshot, verbose bool) {
+	writeLine(stdout, "session: %s", snapshot.SessionID)
+	writeLine(stdout, "iteration: %s", emptyText(snapshot.IterationID))
+	writeLine(stdout, "preview_mode: %s", snapshot.PreviewPolicy.Mode)
+	writeLine(stdout, "preview_renderer: %s", snapshot.PreviewPolicy.Renderer)
+	writeLine(stdout, "preview_publisher: %s", snapshot.PreviewPolicy.Publisher)
+	writeLine(stdout, "preview_repo: %s", emptyText(snapshot.PreviewPolicy.Repo))
+	writeLine(stdout, "preview_route_template: %s", emptyText(snapshot.PreviewPolicy.RouteTemplate))
+	writeLine(stdout, "expected_review_repo: %s", emptyText(snapshot.PreviewPolicy.ExpectedReviewRepo))
+	writeLine(stdout, "current_phase: %s", snapshot.CurrentPhase)
+	writeLine(stdout, "completed_steps: %s", strings.Join(snapshot.CompletedSteps, ","))
+	writeLine(stdout, "blocked_step: %s", emptyText(snapshot.BlockedStep))
+	writeLine(stdout, "current_step: %s", snapshot.CurrentStep)
+	writeLine(stdout, "next_action: %s", snapshot.NextAction)
+	writeLine(stdout, "issue: %s", emptyText(snapshot.IssueURL))
+	writeLine(stdout, "pull_request: %s", emptyText(snapshot.PullRequestURL))
+	writeLine(stdout, "candidate: %s", emptyText(snapshot.CandidateVersion))
+	writeLine(stdout, "review_items: %d", snapshot.Counts.ReviewItems)
+	writeLine(stdout, "feedback: %d", snapshot.Counts.FeedbackEvents+snapshot.Counts.RankedFeedbackEvents)
+	writeLine(stdout, "pairwise_preferences: %d", snapshot.Counts.PairwisePreferences)
+	if !verbose || snapshot.Verbose == nil {
+		return
+	}
+	writeLine(stdout, "elapsed: %s", snapshot.Verbose.Elapsed)
+	writeLine(stdout, "eta: %s", snapshot.Progress.ETA)
+	writeLine(stdout, "generated_options: %d", snapshot.Progress.GeneratedOptions)
+	writeLine(stdout, "jobs_total: %d", snapshot.Verbose.Jobs.Total)
+	writeLine(stdout, "jobs_running: %d", snapshot.Verbose.Jobs.Running)
+	writeLine(stdout, "jobs_succeeded: %d", snapshot.Verbose.Jobs.Succeeded)
+	writeLine(stdout, "jobs_failed: %d", snapshot.Verbose.Jobs.Failed)
+	if snapshot.Verbose.EvalRunID != "" {
+		writeLine(stdout, "eval_run: %s", snapshot.Verbose.EvalRunID)
+	}
+	if snapshot.Verbose.Mode != "" {
+		writeLine(stdout, "mode: %s", snapshot.Verbose.Mode)
+	}
+	if snapshot.Verbose.ExplorationLevel != "" {
+		writeLine(stdout, "exploration_level: %s", snapshot.Verbose.ExplorationLevel)
+	}
+	if snapshot.Verbose.ReviewIssue.URL != "" {
+		writeLine(stdout, "review_issue: %s", snapshot.Verbose.ReviewIssue.URL)
+	}
+	if snapshot.Verbose.Candidate.NoCandidateReason != "" {
+		writeLine(stdout, "no_candidate_reason: %s", snapshot.Verbose.Candidate.NoCandidateReason)
+	}
 }
 
 func readSkillOptTrainRequest(requestText string, requestFile string) (string, error) {

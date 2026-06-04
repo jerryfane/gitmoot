@@ -722,6 +722,83 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "status", "--home", home, "--session", "landing-train", "--json", "--verbose"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("train status json exit code = %d, stderr=%s", code, stderr.String())
+	}
+	var statusJSON skillOptTrainStatusSnapshot
+	if err := json.Unmarshal(stdout.Bytes(), &statusJSON); err != nil {
+		t.Fatalf("train status json did not decode: %v\n%s", err, stdout.String())
+	}
+	if statusJSON.SessionID != "landing-train" ||
+		statusJSON.CurrentPhase != skillopt.TrainStateItemsReady ||
+		statusJSON.CurrentStep != skillopt.TrainStateOptionsGenerated ||
+		statusJSON.PreviewPolicy.ExpectedReviewRepo != "owner/previews" ||
+		statusJSON.Counts.ReviewItems != 2 ||
+		statusJSON.Progress.ETA != "unknown" ||
+		statusJSON.Verbose == nil ||
+		statusJSON.Verbose.EvalRunID != "landing-train-review-001" ||
+		len(statusJSON.Verbose.Items) != 2 {
+		t.Fatalf("train status json = %+v", statusJSON)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "status", "--home", home, "--session", "landing-train", "--watch", "--verbose", "--poll", "1ms"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("train status watch exit code = %d, stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"current_phase: items_ready",
+		"current_step: options_generated",
+		"elapsed:",
+		"eta: unknown",
+		"watch_state: waiting",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("train status watch stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "status", "--home", home, "--session", "landing-train", "--watch", "--json", "--poll", "1ms"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("train status watch json exit code = %d, want 2; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does not support --watch with --json") {
+		t.Fatalf("train status watch json stderr = %q", stderr.String())
+	}
+
+	store = openCLIJobStore(t, home)
+	lockExpiresAt := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	if acquired, err := store.AcquireResourceLock(context.Background(), db.ResourceLock{
+		ResourceKey: skillOptTrainGenerationLockKey("landing-train", "landing-train-001"),
+		OwnerJobID:  "test-generation",
+		OwnerToken:  "token-1",
+		ExpiresAt:   lockExpiresAt,
+	}, time.Now().UTC()); err != nil || !acquired {
+		t.Fatalf("AcquireResourceLock returned acquired=%v err=%v", acquired, err)
+	}
+	lockedStatus, err := loadSkillOptTrainStatusSnapshot(context.Background(), store, "landing-train", true)
+	if err != nil {
+		t.Fatalf("loadSkillOptTrainStatusSnapshot returned error: %v", err)
+	}
+	if lockedStatus.Verbose == nil || len(lockedStatus.Verbose.ActiveLocks) != 1 || lockedStatus.Verbose.ActiveLocks[0].Name != "generation" {
+		t.Fatalf("locked status active locks = %+v", lockedStatus.Verbose)
+	}
+	if skillOptTrainWatchDone(lockedStatus) {
+		t.Fatalf("watch marked locked status done: %+v", lockedStatus.Verbose.ActiveLocks)
+	}
+	if released, err := store.ReleaseResourceLock(context.Background(), skillOptTrainGenerationLockKey("landing-train", "landing-train-001"), "test-generation", "token-1"); err != nil || !released {
+		t.Fatalf("ReleaseResourceLock returned released=%v err=%v", released, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after active lock test returned error: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
 	code = Run([]string{"skillopt", "train", "stop", "--home", home, "--session", "landing-train", "--reason", "trial complete"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("train stop exit code = %d, stderr=%s", code, stderr.String())
@@ -784,6 +861,130 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close after terminal stop returned error: %v", err)
+	}
+}
+
+func TestSkillOptTrainStatusGeneratedProgressUsesCurrentIteration(t *testing.T) {
+	session := db.SkillOptTrainSession{
+		ID:           "landing-train",
+		State:        skillopt.TrainStateItemsReady,
+		MetadataJSON: `{"generation":{"status":"succeeded","generated_options":8}}`,
+	}
+	iteration := db.SkillOptTrainIteration{
+		ID:        "landing-train-002",
+		State:     skillopt.TrainStateItemsReady,
+		EvalRunID: "landing-train-review-002",
+	}
+	counts := skillopt.TrainStatusCounts{ReviewItems: 2}
+	summary := skillopt.BuildTrainStatusSummary(session, &iteration, counts)
+	snapshot := buildSkillOptTrainStatusSnapshot(session, &iteration, summary, counts)
+	if snapshot.Progress.GeneratedOptions != 0 {
+		t.Fatalf("generated options = %d, want 0 for current iteration without generation metadata", snapshot.Progress.GeneratedOptions)
+	}
+
+	iteration.MetadataJSON = `{"generation":{"status":"succeeded","generated_options":0}}`
+	summary = skillopt.BuildTrainStatusSummary(session, &iteration, counts)
+	snapshot = buildSkillOptTrainStatusSnapshot(session, &iteration, summary, counts)
+	if snapshot.Progress.GeneratedOptions != 0 {
+		t.Fatalf("generated options = %d, want explicit current iteration zero", snapshot.Progress.GeneratedOptions)
+	}
+
+	summary = skillopt.BuildTrainStatusSummary(session, nil, skillopt.TrainStatusCounts{})
+	snapshot = buildSkillOptTrainStatusSnapshot(session, nil, summary, skillopt.TrainStatusCounts{})
+	if snapshot.Progress.GeneratedOptions != 8 {
+		t.Fatalf("generated options = %d, want session fallback when no iteration exists", snapshot.Progress.GeneratedOptions)
+	}
+}
+
+func TestSkillOptTrainStatusVerboseUsesCurrentIterationMetadata(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	session := db.SkillOptTrainSession{
+		ID:           "landing-train",
+		State:        skillopt.TrainStateItemsReady,
+		MetadataJSON: `{"generation":{"status":"running"}}`,
+	}
+	iteration := db.SkillOptTrainIteration{
+		ID:    "landing-train-002",
+		State: skillopt.TrainStateItemsReady,
+	}
+	details, err := buildSkillOptTrainStatusVerbose(context.Background(), store, session, &iteration)
+	if err != nil {
+		t.Fatalf("buildSkillOptTrainStatusVerbose returned error: %v", err)
+	}
+	if len(details.MetadataStatus) != 0 {
+		t.Fatalf("metadata status = %+v, want current iteration metadata without stale session generation", details.MetadataStatus)
+	}
+
+	iteration.MetadataJSON = `{"review":{"status":"publishing"}}`
+	details, err = buildSkillOptTrainStatusVerbose(context.Background(), store, session, &iteration)
+	if err != nil {
+		t.Fatalf("buildSkillOptTrainStatusVerbose with iteration metadata returned error: %v", err)
+	}
+	if details.MetadataStatus["review"] != "publishing" || details.MetadataStatus["generation"] != "" {
+		t.Fatalf("metadata status = %+v, want current iteration review only", details.MetadataStatus)
+	}
+
+	details, err = buildSkillOptTrainStatusVerbose(context.Background(), store, session, nil)
+	if err != nil {
+		t.Fatalf("buildSkillOptTrainStatusVerbose without iteration returned error: %v", err)
+	}
+	if details.MetadataStatus["generation"] != "running" {
+		t.Fatalf("metadata status = %+v, want session fallback without iteration", details.MetadataStatus)
+	}
+}
+
+func TestSkillOptTrainStatusItemsReportsABLabels(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.UpsertEvalRun(ctx, db.EvalRun{
+		ID:           "landing-train-review-001",
+		Mode:         db.EvalRunModeValidate,
+		OptionsCount: 2,
+	}); err != nil {
+		t.Fatalf("UpsertEvalRun returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{
+		RunID:               "landing-train-review-001",
+		ItemID:              "item-001",
+		Title:               "Landing page",
+		BaselineArtifactID:  "artifact-baseline",
+		CandidateArtifactID: "artifact-candidate",
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem returned error: %v", err)
+	}
+	items, err := skillOptTrainStatusItems(ctx, store, "landing-train-review-001")
+	if err != nil {
+		t.Fatalf("skillOptTrainStatusItems returned error: %v", err)
+	}
+	if len(items) != 1 || strings.Join(items[0].OptionLabels, ",") != "BASELINE,CANDIDATE" {
+		t.Fatalf("items = %+v, want A/B option labels", items)
+	}
+}
+
+func TestSkillOptTrainWatchDoneIgnoresStaleMetadataWithoutActiveLock(t *testing.T) {
+	snapshot := skillOptTrainStatusSnapshot{
+		CurrentPhase: skillopt.TrainStateOptionsGenerated,
+		Verbose: &skillOptTrainStatusVerbose{
+			MetadataStatus: map[string]string{"review": "publishing"},
+		},
+	}
+	if !skillOptTrainWatchDone(snapshot) {
+		t.Fatalf("watch treated stale metadata as active: %+v", snapshot.Verbose.MetadataStatus)
+	}
+
+	snapshot.Verbose.ActiveLocks = []skillOptTrainStatusLock{{Name: "review", Key: "skillopt-train-review:landing-train:landing-train-001"}}
+	if skillOptTrainWatchDone(snapshot) {
+		t.Fatalf("watch ignored active lock: %+v", snapshot.Verbose.ActiveLocks)
 	}
 }
 
