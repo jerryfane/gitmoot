@@ -70,6 +70,7 @@ type feedbackFileEntry struct {
 type ImportResult struct {
 	FeedbackEvents       []db.FeedbackEvent
 	RankedFeedbackEvents []db.RankedFeedbackEvent
+	Diagnostics          []string
 }
 
 func (r ImportResult) Count() int {

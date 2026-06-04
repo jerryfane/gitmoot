@@ -152,6 +152,7 @@ func TestGitHubCollectorPublishesIssueBody(t *testing.T) {
 	}
 	body := fake.createdIssue.Body
 	for _, want := range []string{
+		"Reply by copying the fenced `yaml` block below",
 		"Allowed choices: `a`, `b`, `tie`, `neither`, `skip`",
 		"## Phase Recommendation",
 		"recommend continue validate",
@@ -189,6 +190,10 @@ func TestGitHubCollectorPublishesRankedIssueBody(t *testing.T) {
 	body := fake.createdIssue.Body
 	for _, want := range []string{
 		"Rank every option",
+		"Reply by copying the fenced `yaml` block below",
+		"Valid `quality` values: `poor`, `acceptable`, `strong`",
+		"Valid `continue_mode` values: `explore`, `refine`, `distill`, `validate`",
+		"Valid `promote` values: `yes`, `no`",
 		"## Review Table",
 		"## Phase Recommendation",
 		"recommend continue explore",
@@ -332,6 +337,9 @@ func TestGitHubCollectorSyncImportsValidCommentsAndIgnoresUnrelated(t *testing.T
 	if len(events) != 1 {
 		t.Fatalf("events = %+v, want 1 imported event", events)
 	}
+	if len(result.Diagnostics) == 0 {
+		t.Fatalf("diagnostics = %+v, want ignored-comment diagnostics", result.Diagnostics)
+	}
 	if events[0].RunID != "run-1" || events[0].ItemID != "item-001" || events[0].Reviewer != "bob" || events[0].Source != SourceGitHub || events[0].SourceURL != "https://github.com/owner/repo/issues/42#issuecomment-2" {
 		t.Fatalf("event = %+v", events[0])
 	}
@@ -351,6 +359,56 @@ func TestGitHubCollectorSyncImportsValidCommentsAndIgnoresUnrelated(t *testing.T
 	}
 	if len(stored) != 1 {
 		t.Fatalf("duplicate sync persisted duplicate events: %+v", stored)
+	}
+}
+
+func TestGitHubCollectorSyncReportsNoComments(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubFeedbackRun(t, "run-1", "owner/repo")
+	fake := &fakeFeedbackGitHub{
+		comments: map[int64][]github.IssueComment{42: nil},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	_, err := collector.Sync(ctx, store, "run-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	if err == nil || !strings.Contains(err.Error(), "no comments found") {
+		t.Fatalf("Sync err = %v, want no comments diagnostic", err)
+	}
+}
+
+func TestGitHubCollectorSyncReportsWrongRunIDWhenNoValidFeedback(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubFeedbackRun(t, "run-1", "owner/repo")
+	fake := &fakeFeedbackGitHub{
+		comments: map[int64][]github.IssueComment{
+			42: {
+				{ID: 1, Body: "```yaml\nrun_id: other-run\nitems:\n  - item_id: item-001\n    choice: b\n```", Author: "alice"},
+			},
+		},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	_, err := collector.Sync(ctx, store, "run-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	if err == nil || !strings.Contains(err.Error(), `wrong run_id "other-run", want "run-1"`) {
+		t.Fatalf("Sync err = %v, want wrong run_id diagnostic", err)
+	}
+}
+
+func TestGitHubCollectorSyncReportsMissingItemFeedback(t *testing.T) {
+	ctx := context.Background()
+	store, blobs := setupGitHubFeedbackRun(t, "run-1", "owner/repo")
+	fake := &fakeFeedbackGitHub{
+		comments: map[int64][]github.IssueComment{
+			42: {
+				{ID: 1, Body: "```yaml\nrun_id: run-1\nitems:\n  - choice: b\n```", Author: "alice"},
+			},
+		},
+	}
+	collector := GitHubCollector{BlobStore: blobs, GitHub: fake}
+
+	_, err := collector.Sync(ctx, store, "run-1", github.Repository{Owner: "owner", Name: "repo"}, 42)
+	if err == nil || !strings.Contains(err.Error(), `missing item feedback for run "run-1"`) {
+		t.Fatalf("Sync err = %v, want missing item feedback diagnostic", err)
 	}
 }
 

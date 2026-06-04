@@ -676,13 +676,26 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 			return skillOptTrainContinueOutput{}, err
 		}
 		feedbackCount := len(status.Feedback) + len(status.RankedFeedback)
+		var syncLines []string
 		if !status.TrainingReady {
-			lines := []string{
+			lines, synced := autoSyncSkillOptTrainReviewFeedback(ctx, paths, store, *iteration)
+			syncLines = append(syncLines, lines...)
+			if synced {
+				status, err = loadSkillOptReviewStatus(ctx, store, artifact.NewStore(paths.ArtifactBlobs), iteration.EvalRunID)
+				if err != nil {
+					return skillOptTrainContinueOutput{}, err
+				}
+				feedbackCount = len(status.Feedback) + len(status.RankedFeedback)
+			}
+		}
+		if !status.TrainingReady {
+			lines := append([]string{}, syncLines...)
+			lines = append(lines,
 				fmt.Sprintf("feedback_events: %d", feedbackCount),
 				fmt.Sprintf("pairwise_preferences: %d", len(status.PairwisePreferences)),
 				fmt.Sprintf("packet_blockers: %d", len(status.PacketBlockers)),
 				fmt.Sprintf("training_blockers: %d", len(status.TrainingBlockers)),
-			}
+			)
 			for _, blocker := range status.PacketBlockers {
 				lines = append(lines, fmt.Sprintf("packet_blocker: %s", blocker))
 			}
@@ -731,6 +744,9 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 			fmt.Sprintf("recommended_next_mode: %s", status.Recommendation.RecommendedMode),
 			fmt.Sprintf("ranking_stability: %s", status.Recommendation.RankingStability),
 			"next: export the training package before running the optimizer",
+		}
+		if len(syncLines) > 0 {
+			lines = append(syncLines, lines...)
 		}
 		return skillOptTrainContinueOutput{Summary: updatedSummary, Counts: updatedCounts, ContinueReady: true, Lines: lines}, nil
 	case skillopt.TrainStateFeedbackSynced, skillopt.TrainStateTrainingPackageCreated, skillopt.TrainStateOptimizerCompleted, skillopt.TrainStateOptimizerCompletedNoCandidate:
@@ -2684,6 +2700,40 @@ type skillOptTrainReviewPublishResult struct {
 	IssueNumber int64
 	URL         string
 	PreviewURLs int
+}
+
+func autoSyncSkillOptTrainReviewFeedback(ctx context.Context, paths config.Paths, store *db.Store, iteration db.SkillOptTrainIteration) ([]string, bool) {
+	repoText := strings.TrimSpace(iteration.IssueRepo)
+	issueNumber := iteration.IssueNumber
+	if repoText == "" || issueNumber <= 0 {
+		return nil, false
+	}
+	repo, err := daemon.ParseRepository(repoText)
+	if err != nil {
+		return []string{
+			"github_feedback_sync: failed",
+			fmt.Sprintf("github_feedback_error: invalid review repo %q: %v", repoText, err),
+		}, false
+	}
+	collector := feedback.GitHubCollector{
+		BlobStore: artifact.NewStore(paths.ArtifactBlobs),
+		GitHub:    newSkillOptGitHubClient(),
+	}
+	result, err := collector.Sync(ctx, store, iteration.EvalRunID, repo, issueNumber)
+	if err != nil {
+		return []string{
+			"github_feedback_sync: failed",
+			fmt.Sprintf("github_feedback_error: %v", err),
+		}, false
+	}
+	lines := []string{
+		"github_feedback_sync: imported",
+		fmt.Sprintf("github_feedback_events: %d", result.Count()),
+	}
+	for _, diagnostic := range result.Diagnostics {
+		lines = append(lines, fmt.Sprintf("github_feedback_diagnostic: %s", diagnostic))
+	}
+	return lines, result.Count() > 0
 }
 
 func publishSkillOptTrainReview(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration) (skillOptTrainReviewPublishResult, error) {
@@ -5664,7 +5714,7 @@ func runSkillOptFeedbackGitHubSync(args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "skillopt feedback github sync requires --issue or --pr")
 		return 2
 	}
-	var count int
+	var result feedback.ImportResult
 	if err := withSkillOptStore(*home, func(paths config.Paths, store *db.Store) error {
 		run, err := store.GetEvalRun(context.Background(), strings.TrimSpace(*runID))
 		if err != nil {
@@ -5678,17 +5728,19 @@ func runSkillOptFeedbackGitHubSync(args []string, stdout, stderr io.Writer) int 
 			BlobStore: artifact.NewStore(paths.ArtifactBlobs),
 			GitHub:    newSkillOptGitHubClient(),
 		}
-		result, err := collector.Sync(context.Background(), store, run.ID, repo, targetNumber)
+		result, err = collector.Sync(context.Background(), store, run.ID, repo, targetNumber)
 		if err != nil {
 			return err
 		}
-		count = result.Count()
 		return nil
 	}); err != nil {
 		fmt.Fprintf(stderr, "skillopt feedback github sync: %v\n", err)
 		return 1
 	}
-	writeLine(stdout, "imported %d github feedback events", count)
+	writeLine(stdout, "imported %d github feedback events", result.Count())
+	for _, diagnostic := range result.Diagnostics {
+		writeLine(stdout, "github_feedback_diagnostic: %s", diagnostic)
+	}
 	return 0
 }
 

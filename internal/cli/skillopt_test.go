@@ -1041,6 +1041,75 @@ func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
 	if fakeGitHub.createdIssue.Repo.FullName() != "owner/product" || !strings.Contains(fakeGitHub.createdIssue.Body, "## Inline Options Without Public Links") {
 		t.Fatalf("created review issue = %+v", fakeGitHub.createdIssue)
 	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("third train continue without comments exit code = %d, stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"current_phase: review_published",
+		"github_feedback_sync: failed",
+		"github_feedback_error: no comments found",
+		"next: sync human feedback from the review surface",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("third continue without comments stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	fakeGitHub.comments = map[int64][]github.IssueComment{
+		8: {
+			{
+				ID: 11,
+				Body: `LGTM, copying the review block.
+
+` + "```yaml" + `
+run_id: landing-train-review-001
+items:
+  - item_id: hero-saas
+    ranking:
+      - B > A
+    quality: acceptable
+    continue_mode: refine
+    promote: no
+    reasoning: Option B has the clearer hero.
+  - item_id: ecommerce-proof
+    ranking:
+      - A > B
+    quality: acceptable
+    continue_mode: refine
+    promote: no
+    reasoning: Option A has stronger proof.
+` + "```",
+				URL:       "https://github.com/owner/product/issues/8#issuecomment-11",
+				Author:    "jerry",
+				CreatedAt: "2026-06-03T12:00:00Z",
+			},
+		},
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("fourth train continue exit code = %d, stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"current_phase: feedback_synced",
+		"continue_ready: true",
+		"github_feedback_sync: imported",
+		"github_feedback_events: 2",
+		"feedback_events: 2",
+		"next: export the training package before running the optimizer",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("fourth continue stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if len(fakeGitHub.listedComments) != 2 || fakeGitHub.listedComments[1].Repo.FullName() != "owner/product" || fakeGitHub.listedComments[1].IssueNumber != 8 {
+		t.Fatalf("listed comments = %+v", fakeGitHub.listedComments)
+	}
 }
 
 func TestSkillOptTrainContinueGeneratesRequiredVuePreviewBundles(t *testing.T) {

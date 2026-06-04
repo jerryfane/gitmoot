@@ -88,7 +88,7 @@ func (c GitHubCollector) Body(ctx context.Context, store *db.Store, runID string
 	}
 	builder.WriteString("Review each item without trying to infer which option is baseline or candidate.\n\n")
 	writePhaseRecommendation(&builder, recommendation)
-	builder.WriteString("Reply in a comment with one of these formats. Allowed choices: `a`, `b`, `tie`, `neither`, `skip`.\n\n")
+	builder.WriteString("Reply by copying the fenced `yaml` block below into a new comment and filling every item. Allowed choices: `a`, `b`, `tie`, `neither`, `skip`.\n\n")
 	builder.WriteString("## Copy-Paste YAML Reply\n\n")
 	builder.WriteString("```yaml\n")
 	yamlTemplate, err := githubFeedbackYAMLTemplate(run.ID, items)
@@ -126,7 +126,10 @@ func (c GitHubCollector) rankedBody(ctx context.Context, store *db.Store, run db
 	}
 	builder.WriteString("- Compare each item across the option links below.\n")
 	builder.WriteString("- Rank every option from best to worst using the exact labels shown.\n")
-	builder.WriteString("- Optional `quality`, `continue_mode`, and `promote` fields help Gitmoot decide whether to explore more, refine, validate, or promote.\n\n")
+	builder.WriteString("- Reply by copying the fenced `yaml` block below into a new comment and filling every item.\n")
+	builder.WriteString("- Valid `quality` values: `poor`, `acceptable`, `strong`.\n")
+	builder.WriteString("- Valid `continue_mode` values: `explore`, `refine`, `distill`, `validate`.\n")
+	builder.WriteString("- Valid `promote` values: `yes`, `no`.\n\n")
 	writePhaseRecommendation(&builder, recommendation)
 	builder.WriteString("## Review Table\n\n")
 	writeGitHubRankedReviewTable(&builder, items, assignments)
@@ -263,18 +266,25 @@ func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, ru
 	}
 	var imported []db.FeedbackEvent
 	var importedRanked []db.RankedFeedbackEvent
+	var diagnostics []string
+	if len(comments) == 0 {
+		return ImportResult{}, errors.New("no comments found on GitHub issue or pull request")
+	}
 	for _, comment := range comments {
 		parsed, ok, err := ParseGitHubFeedbackComment(comment.Body)
 		if err != nil {
 			return ImportResult{}, fmt.Errorf("comment %d: %w", comment.ID, feedbackImportErrorHint(err))
 		}
 		if !ok {
+			diagnostics = append(diagnostics, fmt.Sprintf("comment %d: no parseable feedback YAML or short-form feedback", comment.ID))
 			continue
 		}
 		if parsed.RunID == "" {
+			diagnostics = append(diagnostics, fmt.Sprintf("comment %d: missing run_id", comment.ID))
 			continue
 		}
 		if parsed.RunID != runID {
+			diagnostics = append(diagnostics, fmt.Sprintf("comment %d: wrong run_id %q, want %q", comment.ID, parsed.RunID, runID))
 			continue
 		}
 		reviewer := strings.TrimSpace(comment.Author)
@@ -294,14 +304,23 @@ func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, ru
 		}
 		commentEvents := make([]db.FeedbackEvent, 0, len(parsed.Items))
 		commentRankedEvents := make([]db.RankedFeedbackEvent, 0, len(parsed.Items))
+		seenKnownItem := false
+		reportedMissingItemFeedback := false
 		for _, entry := range parsed.Items {
 			itemID := strings.TrimSpace(entry.ItemID)
+			if itemID == "" {
+				diagnostics = append(diagnostics, fmt.Sprintf("comment %d: missing item feedback for run %q", comment.ID, runID))
+				reportedMissingItemFeedback = true
+				continue
+			}
 			if _, ok := knownItems[itemID]; !ok {
 				if parsed.ShortForm {
+					diagnostics = append(diagnostics, fmt.Sprintf("comment %d: unknown feedback item_id %q", comment.ID, itemID))
 					continue
 				}
 				return ImportResult{}, fmt.Errorf("comment %d: unknown feedback item_id %q", comment.ID, itemID)
 			}
+			seenKnownItem = true
 			assignment := assignments[itemID].blindAssignment
 			if len(assignment.Options) > 0 {
 				event, err := rankedFeedbackEventFromEntry(runID, itemID, entry, assignment, reviewer, SourceGitHub, sourceURL, createdAt)
@@ -331,8 +350,18 @@ func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, ru
 			}
 			commentEvents = append(commentEvents, event)
 		}
+		if !seenKnownItem && !reportedMissingItemFeedback {
+			diagnostics = append(diagnostics, fmt.Sprintf("comment %d: missing item feedback for run %q", comment.ID, runID))
+		}
 		imported = append(imported, commentEvents...)
 		importedRanked = append(importedRanked, commentRankedEvents...)
+	}
+	result := ImportResult{FeedbackEvents: imported, RankedFeedbackEvents: importedRanked, Diagnostics: diagnostics}
+	if result.Count() == 0 {
+		if len(diagnostics) > 0 {
+			return ImportResult{}, fmt.Errorf("no github feedback imported: %s", strings.Join(diagnostics, "; "))
+		}
+		return ImportResult{}, errors.New("no parseable feedback YAML or short-form comments found")
 	}
 	for _, event := range imported {
 		if err := store.UpsertFeedbackEvent(ctx, event); err != nil {
@@ -344,7 +373,7 @@ func (c GitHubCollector) ImportComments(ctx context.Context, store *db.Store, ru
 			return ImportResult{}, err
 		}
 	}
-	return ImportResult{FeedbackEvents: imported, RankedFeedbackEvents: importedRanked}, nil
+	return result, nil
 }
 
 type githubAssignment struct {
@@ -446,6 +475,9 @@ func parseFullYAMLFeedback(content string) (feedbackFile, bool, error) {
 	parsed.RunID = strings.TrimSpace(parsed.RunID)
 	parsed.Reviewer = strings.TrimSpace(parsed.Reviewer)
 	if len(parsed.Items) == 0 {
+		if parsed.RunID != "" && strings.Contains(content, "items:") {
+			return parsed, true, nil
+		}
 		return feedbackFile{}, false, nil
 	}
 	normalizeFeedbackFileEntries(&parsed)
@@ -457,7 +489,7 @@ func parseFullYAMLFeedback(content string) (feedbackFile, bool, error) {
 		}
 	}
 	if !hasFeedbackItem {
-		return feedbackFile{}, false, nil
+		return parsed, true, nil
 	}
 	return parsed, true, nil
 }
