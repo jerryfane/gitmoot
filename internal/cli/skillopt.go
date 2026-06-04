@@ -85,6 +85,7 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
 	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--backend codex] [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--optimizer-backend name] [--target-backend name] [--evaluator-id id] [--evaluator-model name] [--evaluator-backend name] [--skill-update-mode mode] [--num-epochs N] [--batch-size N] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
+	fmt.Fprintln(w, "  gitmoot skillopt train recover --session <id> [--out-root path]")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
 }
 
@@ -100,6 +101,8 @@ func runSkillOptTrain(args []string, stdout, stderr io.Writer) int {
 		return runSkillOptTrainStatus(args[1:], stdout, stderr)
 	case "continue":
 		return runSkillOptTrainContinue(args[1:], stdout, stderr)
+	case "recover":
+		return runSkillOptTrainRecover(args[1:], stdout, stderr)
 	case "stop":
 		return runSkillOptTrainStop(args[1:], stdout, stderr)
 	default:
@@ -114,6 +117,7 @@ func printSkillOptTrainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--session <id>] [--workspace-repo owner/repo] [--preview-repo owner/repo] [--preview-mode none|optional|required] [--preview-renderer none|vue-vite] [--preview-publisher none|github-pages] [--preview-route-template template] [--request-file path] [--task-kind kind] [--mode explore|refine|distill|validate] [--exploration-level high|medium|low] [--options N] [--min-items N] [--preferred-gate hard|soft|hard_then_soft] [--dry-run] [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
 	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--backend codex] [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--optimizer-backend name] [--target-backend name] [--evaluator-id id] [--evaluator-model name] [--evaluator-backend name] [--skill-update-mode mode] [--num-epochs N] [--batch-size N] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
+	fmt.Fprintln(w, "  gitmoot skillopt train recover --session <id> [--out-root path]")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
 }
 
@@ -561,6 +565,54 @@ func skillOptTrainStatusOutputSnapshot(snapshot skillOptTrainStatusSnapshot, ver
 	}
 	snapshot.Verbose = nil
 	return snapshot
+}
+
+func runSkillOptTrainRecover(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("skillopt train recover", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	sessionID := fs.String("session", "", "train session id")
+	outRoot := fs.String("out-root", "", "optimizer output directory; defaults to the persisted train optimizer path")
+	jsonOutput := fs.Bool("json", false, "print recovery result as JSON")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "skillopt train recover does not accept positional arguments")
+		return 2
+	}
+	if strings.TrimSpace(*sessionID) == "" {
+		fmt.Fprintln(stderr, "skillopt train recover requires --session")
+		return 2
+	}
+	var result skillOptTrainRecoverResult
+	if err := withStoreAndPaths(*home, func(paths config.Paths, store *db.Store) error {
+		var recoverErr error
+		result, recoverErr = recoverSkillOptTrainOptimizerArtifacts(context.Background(), paths, store, *sessionID, *outRoot)
+		return recoverErr
+	}); err != nil {
+		if result.SessionID != "" {
+			if *jsonOutput {
+				_ = writeJSON(stdout, result)
+			} else {
+				printSkillOptTrainRecoverResult(stdout, result)
+			}
+		}
+		fmt.Fprintf(stderr, "skillopt train recover: %v\n", err)
+		return 1
+	}
+	if *jsonOutput {
+		if err := writeJSON(stdout, result); err != nil {
+			fmt.Fprintf(stderr, "skillopt train recover: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	printSkillOptTrainRecoverResult(stdout, result)
+	return 0
 }
 
 func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
@@ -1207,6 +1259,21 @@ type skillOptTrainOptimizerResult struct {
 	CandidateVersionID    string
 	NoCandidateReason     string
 	NoCandidateNextAction string
+}
+
+type skillOptTrainRecoverResult struct {
+	SessionID            string   `json:"session_id"`
+	IterationID          string   `json:"iteration_id"`
+	Classification       string   `json:"classification"`
+	CurrentPhase         string   `json:"current_phase"`
+	CandidateVersionID   string   `json:"candidate_version_id,omitempty"`
+	NoCandidateReason    string   `json:"no_candidate_reason,omitempty"`
+	NextAction           string   `json:"next_action,omitempty"`
+	RecoveryAvailable    bool     `json:"recovery_available"`
+	OutRoot              string   `json:"out_root,omitempty"`
+	CandidatePackagePath string   `json:"candidate_package,omitempty"`
+	ArtifactDir          string   `json:"artifact_dir,omitempty"`
+	Artifacts            []string `json:"artifacts,omitempty"`
 }
 
 type skillOptTrainBackendResolution struct {
@@ -4255,6 +4322,10 @@ func buildSkillOptTrainStatusVerbose(ctx context.Context, store *db.Store, sessi
 		NoCandidateReason: metadataString(candidateImport, "no_candidate_reason"),
 	}
 	if optimizer := decodedSkillOptMetadataValue(iterationMetadata["optimizer"]); len(optimizer) > 0 {
+		optimizerPaths, err := resolveSkillOptTrainOptimizerPaths(config.Paths{}, session, *iteration, skillOptTrainOptimizerRequest{})
+		if err == nil {
+			optimizer["recovery_available"] = skillOptTrainOptimizerRecoveryAvailable(optimizerPaths)
+		}
 		details.Optimizer = optimizer
 	}
 	activeLocks, err := skillOptTrainActiveLocks(ctx, store, session.ID, iteration.ID)
@@ -4549,6 +4620,11 @@ func printSkillOptTrainStatusSnapshot(stdout io.Writer, snapshot skillOptTrainSt
 	}
 	if snapshot.Verbose.Candidate.NoCandidateReason != "" {
 		writeLine(stdout, "no_candidate_reason: %s", snapshot.Verbose.Candidate.NoCandidateReason)
+	}
+	if snapshot.Verbose.Optimizer != nil {
+		if available, ok := snapshot.Verbose.Optimizer["recovery_available"]; ok {
+			writeLine(stdout, "optimizer_recovery_available: %v", available)
+		}
 	}
 	for _, lock := range snapshot.Verbose.ActiveLocks {
 		writeLine(stdout, "active_lock: %s", skillOptTrainStatusLockText(lock))
@@ -5140,6 +5216,324 @@ func skillOptTrainOptimizerRecoveryAvailable(paths skillOptTrainOptimizerPaths) 
 		}
 	}
 	return false
+}
+
+func recoverSkillOptTrainOptimizerArtifacts(ctx context.Context, paths config.Paths, store *db.Store, sessionID string, outRoot string) (skillOptTrainRecoverResult, error) {
+	session, iteration, _, err := loadSkillOptTrainStatus(ctx, store, sessionID)
+	if err != nil {
+		return skillOptTrainRecoverResult{}, err
+	}
+	if iteration == nil {
+		return skillOptTrainRecoverResult{SessionID: strings.TrimSpace(session.ID), Classification: "unrecoverable"}, errors.New("train session has no iteration to recover")
+	}
+	optimizerPaths, err := resolveSkillOptTrainOptimizerPaths(paths, session, *iteration, skillOptTrainOptimizerRequest{OutRoot: outRoot})
+	if err != nil {
+		return skillOptTrainRecoverResult{}, err
+	}
+	result := skillOptTrainRecoverResult{
+		SessionID:            strings.TrimSpace(session.ID),
+		IterationID:          strings.TrimSpace(iteration.ID),
+		CurrentPhase:         skillopt.NormalizeTrainState(iteration.State),
+		RecoveryAvailable:    skillOptTrainOptimizerRecoveryAvailable(optimizerPaths),
+		OutRoot:              optimizerPaths.OutRoot,
+		CandidatePackagePath: optimizerPaths.CandidatePackagePath,
+		ArtifactDir:          optimizerPaths.ArtifactDir,
+		Artifacts:            existingSkillOptTrainOptimizerArtifacts(optimizerPaths),
+	}
+	switch skillopt.NormalizeTrainState(iteration.State) {
+	case skillopt.TrainStateCandidateCreated, skillopt.TrainStateCandidateReviewPublished, skillopt.TrainStateCandidatePromoted, skillopt.TrainStateCandidateRejected:
+		result.Classification = "already_completed_candidate"
+		result.CandidateVersionID = strings.TrimSpace(iteration.CandidateVersionID)
+		result.NextAction = "candidate already exists; continue with candidate review or decision"
+		return result, nil
+	case skillopt.TrainStateOptimizerCompletedNoCandidate:
+		result.Classification = "already_completed_no_candidate"
+		result.NoCandidateReason = skillOptMetadataString(iteration.MetadataJSON, "candidate_import", "no_candidate_reason")
+		result.NextAction = skillOptNoCandidateNextAction()
+		return result, nil
+	}
+	releaseOptimizerLock, _, err := acquireSkillOptTrainOptimizerLock(ctx, store, session.ID, iteration.ID, skillOptTrainOptimizerLockTTL, skillOptTrainOptimizerRequest{OutRoot: optimizerPaths.OutRoot})
+	if err != nil {
+		result.Classification = "optimizer_active"
+		result.NextAction = "wait for the active optimizer run to finish before recovering artifacts"
+		return result, err
+	}
+	defer func() {
+		_ = releaseOptimizerLock(context.Background())
+	}()
+	session, iteration, _, err = loadSkillOptTrainStatus(ctx, store, sessionID)
+	if err != nil {
+		result.Classification = "corrupted_unrecoverable"
+		return result, err
+	}
+	if iteration == nil {
+		result.CurrentPhase = ""
+		result.Classification = "unrecoverable"
+		return result, errors.New("train session has no iteration to recover")
+	}
+	optimizerPaths, err = resolveSkillOptTrainOptimizerPaths(paths, session, *iteration, skillOptTrainOptimizerRequest{OutRoot: outRoot})
+	if err != nil {
+		result.Classification = "corrupted_unrecoverable"
+		return result, err
+	}
+	result.CurrentPhase = skillopt.NormalizeTrainState(iteration.State)
+	result.RecoveryAvailable = skillOptTrainOptimizerRecoveryAvailable(optimizerPaths)
+	result.OutRoot = optimizerPaths.OutRoot
+	result.CandidatePackagePath = optimizerPaths.CandidatePackagePath
+	result.ArtifactDir = optimizerPaths.ArtifactDir
+	result.Artifacts = existingSkillOptTrainOptimizerArtifacts(optimizerPaths)
+	switch skillopt.NormalizeTrainState(iteration.State) {
+	case skillopt.TrainStateCandidateCreated, skillopt.TrainStateCandidateReviewPublished, skillopt.TrainStateCandidatePromoted, skillopt.TrainStateCandidateRejected:
+		result.Classification = "already_completed_candidate"
+		result.CandidateVersionID = strings.TrimSpace(iteration.CandidateVersionID)
+		result.NextAction = "candidate already exists; continue with candidate review or decision"
+		return result, nil
+	case skillopt.TrainStateOptimizerCompletedNoCandidate:
+		result.Classification = "already_completed_no_candidate"
+		result.NoCandidateReason = skillOptMetadataString(iteration.MetadataJSON, "candidate_import", "no_candidate_reason")
+		result.NextAction = skillOptNoCandidateNextAction()
+		return result, nil
+	}
+	candidateContent, err := os.ReadFile(optimizerPaths.CandidatePackagePath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			result.Classification = "corrupted_unrecoverable"
+			return result, fmt.Errorf("read optimizer candidate package: %w", err)
+		}
+		if reason := noCandidateReasonFromSkillOptTrainOptimizerArtifacts(optimizerPaths); reason != "" {
+			session, iteration, err = markSkillOptTrainOptimizerRecoveredComplete(ctx, store, session, *iteration, optimizerPaths)
+			if err != nil {
+				result.Classification = "corrupted_unrecoverable"
+				return result, err
+			}
+			if err := recordSkillOptTrainNoCandidate(ctx, store, session, *iteration, optimizerPaths, reason); err != nil {
+				result.Classification = "corrupted_unrecoverable"
+				return result, err
+			}
+			result.Classification = "completed_no_candidate"
+			result.CurrentPhase = skillopt.TrainStateOptimizerCompletedNoCandidate
+			result.NoCandidateReason = reason
+			result.NextAction = skillOptNoCandidateNextAction()
+			return result, nil
+		}
+		if result.RecoveryAvailable {
+			result.Classification = "incomplete_resumable"
+			result.NextAction = "candidate package is missing; rerun the optimizer with --rerun-optimizer or inspect the artifact directory"
+			return result, errors.New("optimizer artifacts are present but candidate.json is missing")
+		}
+		result.Classification = "unavailable"
+		result.NextAction = "run the optimizer before attempting recovery"
+		return result, errors.New("no recoverable optimizer artifacts found")
+	}
+	var candidate skillopt.CandidatePackage
+	if err := json.Unmarshal(candidateContent, &candidate); err != nil {
+		result.Classification = "corrupted_unrecoverable"
+		return result, fmt.Errorf("decode optimizer candidate package: %w", err)
+	}
+	if err := validateSkillOptTrainCandidatePackage(ctx, store, session, *iteration, candidate); err != nil {
+		if errors.Is(err, skillopt.ErrNoCandidate) {
+			reason := skillOptNoCandidateReason(err)
+			session, iteration, err = markSkillOptTrainOptimizerRecoveredComplete(ctx, store, session, *iteration, optimizerPaths)
+			if err != nil {
+				result.Classification = "corrupted_unrecoverable"
+				return result, err
+			}
+			if err := recordSkillOptTrainNoCandidate(ctx, store, session, *iteration, optimizerPaths, reason); err != nil {
+				result.Classification = "corrupted_unrecoverable"
+				return result, err
+			}
+			result.Classification = "completed_no_candidate"
+			result.CurrentPhase = skillopt.TrainStateOptimizerCompletedNoCandidate
+			result.NoCandidateReason = reason
+			result.NextAction = skillOptNoCandidateNextAction()
+			return result, nil
+		}
+		result.Classification = "corrupted_unrecoverable"
+		return result, err
+	}
+	if err := validateSkillOptTrainOptimizerRecoverableCompleteState(*iteration); err != nil {
+		result.Classification = "corrupted_unrecoverable"
+		return result, err
+	}
+	version, err := importSkillOptTrainCandidate(ctx, paths, store, session, *iteration, optimizerPaths)
+	if err != nil {
+		if errors.Is(err, skillopt.ErrNoCandidate) {
+			reason := skillOptNoCandidateReason(err)
+			session, iteration, err = markSkillOptTrainOptimizerRecoveredComplete(ctx, store, session, *iteration, optimizerPaths)
+			if err != nil {
+				result.Classification = "corrupted_unrecoverable"
+				return result, err
+			}
+			if err := recordSkillOptTrainNoCandidate(ctx, store, session, *iteration, optimizerPaths, reason); err != nil {
+				result.Classification = "corrupted_unrecoverable"
+				return result, err
+			}
+			result.Classification = "completed_no_candidate"
+			result.CurrentPhase = skillopt.TrainStateOptimizerCompletedNoCandidate
+			result.NoCandidateReason = reason
+			result.NextAction = skillOptNoCandidateNextAction()
+			return result, nil
+		}
+		result.Classification = "corrupted_unrecoverable"
+		return result, err
+	}
+	session, iteration, err = markSkillOptTrainOptimizerRecoveredComplete(ctx, store, session, *iteration, optimizerPaths)
+	if err != nil {
+		result.Classification = "corrupted_unrecoverable"
+		return result, err
+	}
+	metadata := map[string]any{
+		"status":            "recovered",
+		"candidate_version": version.ID,
+		"candidate_package": optimizerPaths.CandidatePackagePath,
+		"artifact_dir":      optimizerPaths.ArtifactDir,
+		"completed_at":      time.Now().UTC().Format(time.RFC3339Nano),
+		"source":            "gitmoot skillopt train recover",
+	}
+	session.State = skillopt.TrainStateCandidateCreated
+	iteration.State = skillopt.TrainStateCandidateCreated
+	iteration.CandidateVersionID = version.ID
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "candidate_import", metadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "candidate_import", metadata)
+	if err := store.UpsertSkillOptTrainSession(ctx, session); err != nil {
+		result.Classification = "corrupted_unrecoverable"
+		return result, err
+	}
+	if err := store.UpsertSkillOptTrainIteration(ctx, *iteration); err != nil {
+		result.Classification = "corrupted_unrecoverable"
+		return result, err
+	}
+	result.Classification = "completed_candidate"
+	result.CurrentPhase = skillopt.TrainStateCandidateCreated
+	result.CandidateVersionID = version.ID
+	result.NextAction = "publish candidate diff and preview review with train continue"
+	return result, nil
+}
+
+func validateSkillOptTrainOptimizerRecoverableCompleteState(iteration db.SkillOptTrainIteration) error {
+	state := skillopt.NormalizeTrainState(iteration.State)
+	switch state {
+	case skillopt.TrainStateOptimizerCompleted, skillopt.TrainStateTrainingPackageCreated:
+		return nil
+	default:
+		return fmt.Errorf("cannot recover optimizer artifacts while iteration is in state %s", state)
+	}
+}
+
+func markSkillOptTrainOptimizerRecoveredComplete(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, paths skillOptTrainOptimizerPaths) (db.SkillOptTrainSession, *db.SkillOptTrainIteration, error) {
+	if err := validateSkillOptTrainOptimizerRecoverableCompleteState(iteration); err != nil {
+		return db.SkillOptTrainSession{}, nil, err
+	}
+	if skillopt.NormalizeTrainState(iteration.State) == skillopt.TrainStateOptimizerCompleted {
+		return session, &iteration, nil
+	}
+	metadata := map[string]any{
+		"status":           "recovered",
+		"training_package": paths.TrainingPackagePath,
+		"out_root":         paths.OutRoot,
+		"artifact_root":    paths.ArtifactRoot,
+		"candidate_output": paths.CandidatePackagePath,
+		"artifact_dir":     paths.ArtifactDir,
+		"completed_at":     time.Now().UTC().Format(time.RFC3339Nano),
+		"source":           "gitmoot skillopt train recover",
+	}
+	session.State = skillopt.TrainStateOptimizerCompleted
+	iteration.State = skillopt.TrainStateOptimizerCompleted
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "optimizer", metadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "optimizer", metadata)
+	if err := store.UpsertSkillOptTrainSession(ctx, session); err != nil {
+		return db.SkillOptTrainSession{}, nil, err
+	}
+	if err := store.UpsertSkillOptTrainIteration(ctx, iteration); err != nil {
+		return db.SkillOptTrainSession{}, nil, err
+	}
+	return session, &iteration, nil
+}
+
+func existingSkillOptTrainOptimizerArtifacts(paths skillOptTrainOptimizerPaths) []string {
+	candidates := []string{
+		paths.CandidatePackagePath,
+		filepath.Join(paths.OutRoot, "summary.json"),
+		filepath.Join(paths.OutRoot, "runtime_state.json"),
+		filepath.Join(paths.OutRoot, "history.json"),
+		filepath.Join(paths.OutRoot, "best_skill.md"),
+	}
+	existing := []string{}
+	for _, path := range candidates {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err == nil {
+			existing = append(existing, path)
+		}
+	}
+	return existing
+}
+
+func noCandidateReasonFromSkillOptTrainOptimizerArtifacts(paths skillOptTrainOptimizerPaths) string {
+	for _, path := range []string{
+		filepath.Join(paths.OutRoot, "summary.json"),
+		filepath.Join(paths.OutRoot, "runtime_state.json"),
+		filepath.Join(paths.OutRoot, "history.json"),
+	} {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var data any
+		if err := json.Unmarshal(content, &data); err != nil {
+			continue
+		}
+		if reason := noCandidateReasonFromValue(data); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+func noCandidateReasonFromValue(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		if raw, ok := typed["no_candidate_reason"]; ok {
+			if text, ok := raw.(string); ok {
+				reason := strings.TrimSpace(text)
+				if reason != "" {
+					return reason
+				}
+			}
+		}
+		for _, nested := range typed {
+			if reason := noCandidateReasonFromValue(nested); reason != "" {
+				return reason
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if reason := noCandidateReasonFromValue(nested); reason != "" {
+				return reason
+			}
+		}
+	}
+	return ""
+}
+
+func printSkillOptTrainRecoverResult(stdout io.Writer, result skillOptTrainRecoverResult) {
+	writeLine(stdout, "session: %s", result.SessionID)
+	writeLine(stdout, "iteration: %s", emptyText(result.IterationID))
+	writeLine(stdout, "recovery_state: %s", emptyText(result.Classification))
+	writeLine(stdout, "current_phase: %s", emptyText(result.CurrentPhase))
+	writeLine(stdout, "recovery_available: %t", result.RecoveryAvailable)
+	writeLine(stdout, "optimizer_out_root: %s", emptyText(result.OutRoot))
+	writeLine(stdout, "candidate_package: %s", emptyText(result.CandidatePackagePath))
+	writeLine(stdout, "artifact_dir: %s", emptyText(result.ArtifactDir))
+	writeLine(stdout, "candidate: %s", emptyText(result.CandidateVersionID))
+	if result.NoCandidateReason != "" {
+		writeLine(stdout, "no_candidate_reason: %s", result.NoCandidateReason)
+	}
+	if len(result.Artifacts) > 0 {
+		writeLine(stdout, "artifacts: %s", strings.Join(result.Artifacts, ","))
+	}
+	writeLine(stdout, "next: %s", emptyText(result.NextAction))
 }
 
 func buildSkillOptTrainOptimizerCommand(iteration db.SkillOptTrainIteration, request skillOptTrainOptimizerRequest, paths skillOptTrainOptimizerPaths) (string, []string, error) {

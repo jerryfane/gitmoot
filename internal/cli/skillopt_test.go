@@ -4567,6 +4567,16 @@ func TestSkillOptTrainContinueReportsRecoveryAfterOptimizerFailureArtifacts(t *t
 		t.Fatalf("candidate package was not written before failure: %v", err)
 	}
 
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "status", "--home", home, "--session", "optimizer-train", "--verbose"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("train status after recoverable optimizer failure exit code = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "optimizer_recovery_available: true") {
+		t.Fatalf("train status did not advertise recovery:\n%s", stdout.String())
+	}
+
 	store := openCLIJobStore(t, home)
 	defer store.Close()
 	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
@@ -4575,6 +4585,332 @@ func TestSkillOptTrainContinueReportsRecoveryAfterOptimizerFailureArtifacts(t *t
 	}
 	if iteration.State != skillopt.TrainStateTrainingPackageCreated || iteration.CandidateVersionID != "" {
 		t.Fatalf("iteration after recoverable optimizer failure = %+v", iteration)
+	}
+}
+
+func TestSkillOptTrainRecoverImportsCandidateArtifacts(t *testing.T) {
+	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
+	outRoot := filepath.Join(t.TempDir(), "optimizer")
+	runner := &skillOptTrainFakeOptimizerRunner{
+		candidate:          cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan with recovered candidate guidance."),
+		failAfterCandidate: true,
+	}
+	previousRunner := skillOptTrainOptimizerRunner
+	skillOptTrainOptimizerRunner = runner
+	defer func() {
+		skillOptTrainOptimizerRunner = previousRunner
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optimizer-train", "--out-root", outRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train continue recoverable failure exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "recover", "--home", home, "--session", "optimizer-train"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("train recover candidate exit code = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"recovery_state: completed_candidate",
+		"current_phase: candidate_created",
+		"candidate: planner@v2",
+		"next: publish candidate diff and preview review",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("train recover candidate stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateCandidateCreated || iteration.CandidateVersionID != "planner@v2" {
+		t.Fatalf("iteration after candidate recovery = %+v", iteration)
+	}
+	if _, err := store.GetAgentTemplateCandidateReview(context.Background(), "planner@v2"); err != nil {
+		t.Fatalf("GetAgentTemplateCandidateReview recovered candidate returned error: %v", err)
+	}
+}
+
+func TestSkillOptTrainRecoverRecordsNoCandidateArtifacts(t *testing.T) {
+	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
+	outRoot := filepath.Join(t.TempDir(), "optimizer")
+	runner := &skillOptTrainFakeOptimizerRunner{
+		candidate:          cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan the work."),
+		failAfterCandidate: true,
+	}
+	previousRunner := skillOptTrainOptimizerRunner
+	skillOptTrainOptimizerRunner = runner
+	defer func() {
+		skillOptTrainOptimizerRunner = previousRunner
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optimizer-train", "--out-root", outRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train continue no-candidate recoverable failure exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "recover", "--home", home, "--session", "optimizer-train"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("train recover no-candidate exit code = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"recovery_state: completed_no_candidate",
+		"current_phase: optimizer_completed_no_candidate",
+		"no_candidate_reason: candidate content is unchanged from the base version",
+		"next: do not publish a candidate review",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("train recover no-candidate stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateOptimizerCompletedNoCandidate || iteration.CandidateVersionID != "" {
+		t.Fatalf("iteration after no-candidate recovery = %+v", iteration)
+	}
+}
+
+func TestSkillOptTrainRecoverReportsIncompleteArtifacts(t *testing.T) {
+	home, _ := seedSkillOptTrainFeedbackSynced(t)
+	outRoot := filepath.Join(t.TempDir(), "optimizer")
+	runner := &skillOptTrainFakeOptimizerRunner{fail: true}
+	previousRunner := skillOptTrainOptimizerRunner
+	skillOptTrainOptimizerRunner = runner
+	defer func() {
+		skillOptTrainOptimizerRunner = previousRunner
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optimizer-train", "--out-root", outRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train continue failed optimizer exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if err := os.WriteFile(filepath.Join(outRoot, "summary.json"), []byte(`{"status":"failed","reason":"timeout","no_candidate_reason":null}`), 0o644); err != nil {
+		t.Fatalf("write summary artifact returned error: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "recover", "--home", home, "--session", "optimizer-train"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train recover incomplete exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "recovery_state: incomplete_resumable") ||
+		!strings.Contains(stderr.String(), "candidate.json is missing") {
+		t.Fatalf("train recover incomplete stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateTrainingPackageCreated || iteration.CandidateVersionID != "" {
+		t.Fatalf("iteration after incomplete recovery = %+v", iteration)
+	}
+}
+
+func TestSkillOptTrainRecoverRejectsCorruptedCandidateArtifacts(t *testing.T) {
+	home, _ := seedSkillOptTrainFeedbackSynced(t)
+	outRoot := filepath.Join(t.TempDir(), "optimizer")
+	runner := &skillOptTrainFakeOptimizerRunner{fail: true}
+	previousRunner := skillOptTrainOptimizerRunner
+	skillOptTrainOptimizerRunner = runner
+	defer func() {
+		skillOptTrainOptimizerRunner = previousRunner
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optimizer-train", "--out-root", outRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train continue failed optimizer exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if err := os.WriteFile(filepath.Join(outRoot, "candidate.json"), []byte(`{not-json`), 0o644); err != nil {
+		t.Fatalf("write corrupted candidate returned error: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "recover", "--home", home, "--session", "optimizer-train"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train recover corrupted exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "recovery_state: corrupted_unrecoverable") ||
+		!strings.Contains(stderr.String(), "decode optimizer candidate package") {
+		t.Fatalf("train recover corrupted stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateTrainingPackageCreated || iteration.CandidateVersionID != "" {
+		t.Fatalf("iteration after corrupted recovery = %+v", iteration)
+	}
+}
+
+func TestSkillOptTrainRecoverLeavesStateOnMissingCandidateArtifact(t *testing.T) {
+	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
+	outRoot := filepath.Join(t.TempDir(), "optimizer")
+	runner := &skillOptTrainFakeOptimizerRunner{
+		candidate:          cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan with missing artifact recovery guidance."),
+		failAfterCandidate: true,
+	}
+	previousRunner := skillOptTrainOptimizerRunner
+	skillOptTrainOptimizerRunner = runner
+	defer func() {
+		skillOptTrainOptimizerRunner = previousRunner
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optimizer-train", "--out-root", outRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train continue recoverable failure exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if err := os.Remove(filepath.Join(outRoot, "artifacts", "candidate.diff.md")); err != nil {
+		t.Fatalf("remove candidate diff artifact returned error: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "recover", "--home", home, "--session", "optimizer-train"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train recover missing artifact exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "recovery_state: corrupted_unrecoverable") ||
+		!strings.Contains(stderr.String(), `candidate artifact "candidate-diff"`) {
+		t.Fatalf("train recover missing artifact stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateTrainingPackageCreated || iteration.CandidateVersionID != "" {
+		t.Fatalf("iteration after missing artifact recovery = %+v", iteration)
+	}
+	if _, err := store.GetAgentTemplateCandidateReview(context.Background(), "planner@v2"); err == nil {
+		t.Fatalf("missing artifact recovery unexpectedly imported candidate review")
+	}
+}
+
+func TestSkillOptTrainRecoverRejectsCandidateBeforePackageState(t *testing.T) {
+	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
+	outRoot := filepath.Join(t.TempDir(), "optimizer")
+	artifactDir := filepath.Join(outRoot, "artifacts")
+	diffContent := []byte("candidate diff\n")
+	diffSize := int64(len(diffContent))
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("create artifact dir returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "candidate.diff.md"), diffContent, 0o644); err != nil {
+		t.Fatalf("write candidate diff artifact returned error: %v", err)
+	}
+	candidate := cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan with premature recovery guidance.")
+	candidate.Summary.DiffArtifactID = "candidate-diff"
+	candidate.Artifacts = []skillopt.CandidateArtifactRef{{
+		ID:        "candidate-diff",
+		Path:      "candidate.diff.md",
+		Hash:      artifact.ContentHash(diffContent),
+		MediaType: "text/markdown",
+		Driver:    "text",
+		SizeBytes: &diffSize,
+	}}
+	encoded, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatalf("marshal candidate package returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outRoot, "candidate.json"), encoded, 0o644); err != nil {
+		t.Fatalf("write candidate package returned error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"skillopt", "train", "recover", "--home", home, "--session", "optimizer-train", "--out-root", outRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train recover premature candidate exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "recovery_state: corrupted_unrecoverable") ||
+		!strings.Contains(stderr.String(), "cannot recover optimizer artifacts while iteration is in state feedback_synced") {
+		t.Fatalf("train recover premature candidate stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateFeedbackSynced || iteration.CandidateVersionID != "" {
+		t.Fatalf("iteration after premature recovery = %+v", iteration)
+	}
+	if _, err := store.GetAgentTemplateCandidateReview(context.Background(), "planner@v2"); err == nil {
+		t.Fatalf("premature recovery unexpectedly imported candidate review")
+	}
+}
+
+func TestSkillOptTrainRecoverRefusesActiveOptimizerLock(t *testing.T) {
+	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
+	outRoot := filepath.Join(t.TempDir(), "optimizer")
+	runner := &skillOptTrainFakeOptimizerRunner{
+		candidate:          cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan with locked recovery guidance."),
+		failAfterCandidate: true,
+	}
+	previousRunner := skillOptTrainOptimizerRunner
+	skillOptTrainOptimizerRunner = runner
+	defer func() {
+		skillOptTrainOptimizerRunner = previousRunner
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optimizer-train", "--out-root", outRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train continue recoverable failure exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	store := openCLIJobStore(t, home)
+	release, _, err := acquireSkillOptTrainOptimizerLock(context.Background(), store, "optimizer-train", "optimizer-train-001", time.Hour, skillOptTrainOptimizerRequest{OutRoot: outRoot})
+	if err != nil {
+		t.Fatalf("acquire optimizer lock returned error: %v", err)
+	}
+	defer store.Close()
+	defer func() {
+		_ = release(context.Background())
+	}()
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"skillopt", "train", "recover", "--home", home, "--session", "optimizer-train"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train recover locked optimizer exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "recovery_state: optimizer_active") ||
+		!strings.Contains(stderr.String(), "skillopt train optimizer is already running") {
+		t.Fatalf("train recover locked stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateTrainingPackageCreated || iteration.CandidateVersionID != "" {
+		t.Fatalf("iteration after locked recovery = %+v", iteration)
+	}
+	if _, err := store.GetAgentTemplateCandidateReview(context.Background(), "planner@v2"); err == nil {
+		t.Fatalf("locked recovery unexpectedly imported candidate review")
 	}
 }
 
