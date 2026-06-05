@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -3632,8 +3633,9 @@ func TestSkillOptTrainContinueResolvesRelativeOptimizerBinary(t *testing.T) {
 	if runner.calls[0].command != wantCommand {
 		t.Fatalf("optimizer command = %q, want absolute %q", runner.calls[0].command, wantCommand)
 	}
-	if runner.calls[0].dir != outRoot {
-		t.Fatalf("optimizer dir = %q, want %q", runner.calls[0].dir, outRoot)
+	wantAttemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
+	if runner.calls[0].dir != wantAttemptRoot {
+		t.Fatalf("optimizer dir = %q, want %q", runner.calls[0].dir, wantAttemptRoot)
 	}
 }
 
@@ -5905,7 +5907,11 @@ func TestSkillOptTrainContinueRejectsCandidateForDifferentSessionTemplate(t *tes
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close after rerun setup failure returned error: %v", err)
 	}
-	if afterSetupFailure.State != skillopt.TrainStateOptimizerCompleted || afterSetupFailure.MetadataJSON != iteration.MetadataJSON {
+	beforeMetadata := decodedSkillOptMetadata(iteration.MetadataJSON)
+	afterMetadata := decodedSkillOptMetadata(afterSetupFailure.MetadataJSON)
+	delete(decodedSkillOptMetadataValue(beforeMetadata["candidate_import"]), "completed_at")
+	delete(decodedSkillOptMetadataValue(afterMetadata["candidate_import"]), "completed_at")
+	if afterSetupFailure.State != skillopt.TrainStateOptimizerCompleted || !reflect.DeepEqual(afterMetadata, beforeMetadata) {
 		t.Fatalf("rerun setup failure changed completed optimizer state: before=%+v after=%+v", iteration, afterSetupFailure)
 	}
 
