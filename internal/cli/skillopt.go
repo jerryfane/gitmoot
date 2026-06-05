@@ -5284,8 +5284,27 @@ func printSkillOptNoCandidateDetails(stdout io.Writer, details map[string]any) {
 	if attemptedPatch := metadataString(details, "attempted_patch"); attemptedPatch != "" {
 		writeLine(stdout, "attempted_patch: %s", attemptedPatch)
 	}
+	if baselineGate := metadataString(details, "baseline_gate"); baselineGate != "" {
+		writeLine(stdout, "baseline_gate: %s", baselineGate)
+	}
+	if candidateGate := metadataString(details, "candidate_gate"); candidateGate != "" {
+		writeLine(stdout, "candidate_gate: %s", candidateGate)
+	}
 	if retryAttempts := metadataString(details, "retry_attempts"); retryAttempts != "" {
 		writeLine(stdout, "retry_attempts: %s", retryAttempts)
+	}
+	if duplicateRetry := metadataBoolPtr(details, "duplicate_retry_detected"); duplicateRetry != nil {
+		writeLine(stdout, "duplicate_retry_detected: %t", *duplicateRetry)
+	}
+	if evaluatorReason := metadataString(details, "evaluator_reason"); evaluatorReason != "" {
+		writeLine(stdout, "evaluator_reason: %s", evaluatorReason)
+	}
+	nextActions := metadataStringSlice(details, "next_actions")
+	if len(nextActions) == 0 {
+		nextActions = metadataStringSlice(details, "next_action")
+	}
+	for _, nextAction := range nextActions {
+		writeLine(stdout, "next_action_option: %s", nextAction)
 	}
 	rejection := decodedSkillOptMetadataValue(details["rejection"])
 	if len(rejection) == 0 {
@@ -6670,16 +6689,33 @@ func skillOptNoCandidateDetailsFromGateRejection(gateRejection map[string]any) m
 		return nil
 	}
 	details := map[string]any{}
-	for _, key := range []string{"attempted_patch", "retry_attempts", "next_action"} {
+	for _, key := range []string{"attempted_patch", "retry_attempts"} {
 		if value := metadataString(gateRejection, key); value != "" {
 			details[key] = value
 		}
+	}
+	nextActions := metadataStringSlice(gateRejection, "next_actions")
+	if len(nextActions) == 0 {
+		nextActions = metadataStringSlice(gateRejection, "next_action")
+	}
+	if len(nextActions) > 0 {
+		details["next_action"] = nextActions[0]
+		details["next_actions"] = nextActions
+	}
+	if value := metadataBoolPtr(gateRejection, "duplicate_retry_detected"); value != nil {
+		details["duplicate_retry_detected"] = *value
 	}
 	rejection := map[string]any{}
 	for _, key := range []string{"baseline", "candidate"} {
 		if value := decodedSkillOptMetadataValue(gateRejection[key]); len(value) > 0 {
 			rejection[key] = value
+			if gateScore := metadataString(value, "gate_score"); gateScore != "" {
+				details[key+"_gate"] = gateScore
+			}
 		}
+	}
+	if evaluatorReason := skillOptNoCandidateEvaluatorReason(gateRejection, rejection); evaluatorReason != "" {
+		details["evaluator_reason"] = evaluatorReason
 	}
 	for _, key := range []string{"primary_reason", "human_reason", "optimizer_hint"} {
 		if value := metadataString(gateRejection, key); value != "" {
@@ -6695,6 +6731,21 @@ func skillOptNoCandidateDetailsFromGateRejection(gateRejection map[string]any) m
 		details["rejection"] = rejection
 	}
 	return details
+}
+
+func skillOptNoCandidateEvaluatorReason(gateRejection map[string]any, rejection map[string]any) string {
+	for _, source := range []map[string]any{
+		decodedSkillOptMetadataValue(rejection["candidate"]),
+		decodedSkillOptMetadataValue(rejection["baseline"]),
+		gateRejection,
+	} {
+		for _, key := range []string{"evaluator_reason", "evaluator_reasoning", "reasoning", "human_reason", "optimizer_hint", "primary_reason"} {
+			if value := metadataString(source, key); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
 }
 
 func skillOptTrainOptimizerReportLines(result skillOptTrainOptimizerResult) []string {
