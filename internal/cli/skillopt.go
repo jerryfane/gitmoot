@@ -5401,6 +5401,21 @@ func printSkillOptNoCandidateDetails(stdout io.Writer, details map[string]any) {
 	if duplicateRetry := metadataBoolPtr(details, "duplicate_retry_detected"); duplicateRetry != nil {
 		writeLine(stdout, "duplicate_retry_detected: %t", *duplicateRetry)
 	}
+	if diagnosticCategories := metadataStringSlice(details, "diagnostic_categories"); len(diagnosticCategories) > 0 {
+		writeLine(stdout, "diagnostic_categories: %s", strings.Join(diagnosticCategories, ","))
+	}
+	if selectionGateRelation := metadataString(details, "selection_gate_relation"); selectionGateRelation != "" {
+		writeLine(stdout, "selection_gate_relation: %s", selectionGateRelation)
+	}
+	if retryBudgetExhausted := metadataBoolPtr(details, "retry_budget_exhausted"); retryBudgetExhausted != nil {
+		writeLine(stdout, "retry_budget_exhausted: %t", *retryBudgetExhausted)
+	}
+	if retryStopReasons := metadataStringSlice(details, "retry_stop_reasons"); len(retryStopReasons) > 0 {
+		writeLine(stdout, "retry_stop_reasons: %s", strings.Join(retryStopReasons, ","))
+	}
+	if stopReason := metadataString(details, "stop_reason"); stopReason != "" {
+		writeLine(stdout, "stop_reason: %s", stopReason)
+	}
 	if evaluatorReason := metadataString(details, "evaluator_reason"); evaluatorReason != "" {
 		writeLine(stdout, "evaluator_reason: %s", evaluatorReason)
 	}
@@ -5409,6 +5424,9 @@ func printSkillOptNoCandidateDetails(stdout io.Writer, details map[string]any) {
 	}
 	if failedDimensions := metadataStringSlice(details, "failed_dimensions"); len(failedDimensions) > 0 {
 		writeLine(stdout, "failed_dimensions: %s", strings.Join(failedDimensions, ","))
+	}
+	if feedbackThemes := metadataStringSlice(details, "feedback_themes"); len(feedbackThemes) > 0 {
+		writeLine(stdout, "feedback_themes: %s", strings.Join(feedbackThemes, "; "))
 	}
 	printSkillOptHumanFeedbackContext(stdout, decodedSkillOptMetadataValue(details["human_feedback_context"]))
 	nextActions := metadataStringSlice(details, "next_actions")
@@ -6830,6 +6848,7 @@ func skillOptNoCandidatePackageMetadata(candidatePackagePath string) (string, st
 		if len(details) == 0 {
 			details = decodedSkillOptMetadataValue(source["no_candidate_details"])
 		}
+		details = skillOptNoCandidateDetailsWithDiagnostics(details, source)
 	}
 	for _, gateRejection := range []map[string]any{
 		decodedSkillOptMetadataValue(summary["gate_rejection"]),
@@ -6851,11 +6870,66 @@ func skillOptNoCandidatePackageMetadata(candidatePackagePath string) (string, st
 		if len(details) == 0 {
 			details = skillOptNoCandidateDetailsFromGateRejection(gateRejection)
 		}
+		details = skillOptNoCandidateDetailsWithDiagnostics(details, gateRejection)
 	}
 	if reason == "" {
 		return "", "", nil
 	}
 	return reason, nextAction, details
+}
+
+func skillOptNoCandidateDetailsWithDiagnostics(details map[string]any, source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return details
+	}
+	diagnostics := decodedSkillOptMetadataValue(source["no_candidate_diagnostics"])
+	if len(diagnostics) == 0 {
+		diagnostics = decodedSkillOptMetadataValue(source["diagnostics"])
+	}
+	if len(diagnostics) == 0 {
+		diagnostics = map[string]any{}
+	}
+	if categories := metadataStringSlice(source, "diagnostic_categories"); len(categories) > 0 && len(metadataStringSlice(diagnostics, "categories")) == 0 {
+		diagnostics["categories"] = categories
+	}
+	for _, key := range []string{"selection_gate_relation", "stop_reason"} {
+		if value := metadataString(source, key); value != "" && metadataString(diagnostics, key) == "" {
+			diagnostics[key] = value
+		}
+	}
+	if value := metadataBoolPtr(source, "retry_budget_exhausted"); value != nil && metadataBoolPtr(diagnostics, "retry_budget_exhausted") == nil {
+		diagnostics["retry_budget_exhausted"] = *value
+	}
+	if stopReasons := metadataStringSlice(source, "retry_stop_reasons"); len(stopReasons) > 0 && len(metadataStringSlice(diagnostics, "retry_stop_reasons")) == 0 {
+		diagnostics["retry_stop_reasons"] = stopReasons
+	}
+	if len(diagnostics) == 0 && len(metadataStringSlice(source, "feedback_themes")) == 0 {
+		return details
+	}
+	if details == nil {
+		details = map[string]any{}
+	}
+	if len(diagnostics) > 0 {
+		details["diagnostics"] = diagnostics
+		if categories := metadataStringSlice(diagnostics, "categories"); len(categories) > 0 {
+			details["diagnostic_categories"] = categories
+		}
+		for _, key := range []string{"selection_gate_relation", "stop_reason"} {
+			if value := metadataString(diagnostics, key); value != "" {
+				details[key] = value
+			}
+		}
+		if value := metadataBoolPtr(diagnostics, "retry_budget_exhausted"); value != nil {
+			details["retry_budget_exhausted"] = *value
+		}
+		if stopReasons := metadataStringSlice(diagnostics, "retry_stop_reasons"); len(stopReasons) > 0 {
+			details["retry_stop_reasons"] = stopReasons
+		}
+	}
+	if themes := metadataStringSlice(source, "feedback_themes"); len(themes) > 0 {
+		details["feedback_themes"] = themes
+	}
+	return details
 }
 
 func skillOptNoCandidateDetailsFromGateRejection(gateRejection map[string]any) map[string]any {

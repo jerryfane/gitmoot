@@ -3237,6 +3237,16 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 			"candidate_gate": 0.84,
 			"retry_attempts": "1/1",
 			"duplicate_retry_detected": true,
+			"diagnostic_categories": [
+				"old_review_training_signal",
+				"candidate_feedback_unresolved",
+				"retry_budget_exhausted"
+			],
+			"selection_gate_relation": "candidate_below_baseline",
+			"retry_budget_exhausted": true,
+			"retry_stop_reasons": ["budget_exhausted"],
+			"stop_reason": "budget_exhausted",
+			"feedback_themes": ["MoonAI-style premium branding", "scroll animations"],
 			"evaluator_reason": "Candidate was valid but had weaker imagery.",
 			"optimizer_hint": "Resolve imported review themes and artifact contract.",
 			"failed_dimensions": ["human_feedback_alignment", "artifact_contract"],
@@ -3356,6 +3366,8 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 		statusJSON.NoCandidateReason != "gate_rejected_best_origin_initial_skill" ||
 		statusJSON.NoCandidateDetails["attempted_patch"] != "artifact delivery only" ||
 		statusJSON.NoCandidateDetails["duplicate_retry_detected"] != true ||
+		statusJSON.NoCandidateDetails["selection_gate_relation"] != "candidate_below_baseline" ||
+		statusJSON.NoCandidateDetails["retry_budget_exhausted"] != true ||
 		statusJSON.NoCandidateDetails["optimizer_hint"] != "Resolve imported review themes and artifact contract." ||
 		statusJSON.NoCandidateDetails["human_feedback_context"] == nil ||
 		statusJSON.Verbose == nil ||
@@ -3380,9 +3392,15 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 		"candidate_gate: 0.84",
 		"retry_attempts: 1/1",
 		"duplicate_retry_detected: true",
+		"diagnostic_categories: old_review_training_signal,candidate_feedback_unresolved,retry_budget_exhausted",
+		"selection_gate_relation: candidate_below_baseline",
+		"retry_budget_exhausted: true",
+		"retry_stop_reasons: budget_exhausted",
+		"stop_reason: budget_exhausted",
 		"evaluator_reason: Candidate was valid but had weaker imagery.",
 		"optimizer_hint: Resolve imported review themes and artifact contract.",
 		"failed_dimensions: human_feedback_alignment,artifact_contract",
+		"feedback_themes: MoonAI-style premium branding; scroll animations",
 		"human_feedback_source_item_ids: item-001",
 		"human_feedback_rankings: D > B > C > A",
 		"human_feedback_preserve: D: clean hero",
@@ -3411,6 +3429,52 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 		!strings.Contains(stdout.String(), "started_iteration: optimizer-train-002") ||
 		!strings.Contains(stdout.String(), "base_version: "+baseVersionID) {
 		t.Fatalf("start-next after no-candidate stdout = %s", stdout.String())
+	}
+}
+
+func TestSkillOptNoCandidatePackageMetadataPreservesTopLevelDiagnostics(t *testing.T) {
+	candidate := cliSkillOptCandidatePackage(t, "planner", "planner@v1", "Plan the work.")
+	candidate.EvalReport = json.RawMessage(`{
+		"promotable": false,
+		"no_candidate_reason": "no_meaningful_skill_change",
+		"next_action": "Do not import or publish a candidate review; continue training with revised feedback or stop the run.",
+		"no_candidate_diagnostics": {
+			"categories": ["retry_budget_exhausted", "candidate_content_unchanged"],
+			"selection_gate_relation": "unknown",
+			"retry_budget_exhausted": true,
+			"retry_stop_reasons": ["noop_retry_budget_exhausted"]
+		},
+		"feedback_themes": ["better mobile layout", "stronger product visuals"]
+	}`)
+	candidate.Summary.Metadata = json.RawMessage(`{
+		"promotable": false,
+		"no_candidate_reason": "no_meaningful_skill_change"
+	}`)
+	path := filepath.Join(t.TempDir(), "candidate.json")
+	encoded, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatalf("marshal candidate: %v", err)
+	}
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+
+	reason, nextAction, details := skillOptNoCandidatePackageMetadata(path)
+	if reason != "no_meaningful_skill_change" ||
+		!strings.Contains(nextAction, "continue training") ||
+		metadataBoolPtr(details, "retry_budget_exhausted") == nil ||
+		!*metadataBoolPtr(details, "retry_budget_exhausted") ||
+		metadataString(details, "selection_gate_relation") != "unknown" {
+		t.Fatalf("metadata = reason=%q next=%q details=%+v", reason, nextAction, details)
+	}
+	if got := metadataStringSlice(details, "diagnostic_categories"); strings.Join(got, ",") != "retry_budget_exhausted,candidate_content_unchanged" {
+		t.Fatalf("diagnostic categories = %v", got)
+	}
+	if got := metadataStringSlice(details, "retry_stop_reasons"); strings.Join(got, ",") != "noop_retry_budget_exhausted" {
+		t.Fatalf("retry stop reasons = %v", got)
+	}
+	if got := metadataStringSlice(details, "feedback_themes"); strings.Join(got, "; ") != "better mobile layout; stronger product visuals" {
+		t.Fatalf("feedback themes = %v", got)
 	}
 }
 
