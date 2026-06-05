@@ -3252,8 +3252,14 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 			"optimizer_hint": "Resolve imported review themes and artifact contract.",
 			"failed_dimensions": ["human_feedback_alignment", "artifact_contract"],
 			"human_feedback_context": {
+				"feedback_source": "imported_human_review",
+				"feedback_target": "baseline_review_outputs",
+				"review_issue": "jerryfane/gitmoot-previews#21",
+				"review_run_id": "landing-page-preview-trial-005-review-004",
+				"reviewed_skill_version": "landing-page-builder@v10",
 				"source_item_ids": ["item-001"],
 				"rankings": ["D > B > C > A"],
+				"themes": ["MoonAI-style premium branding", "scroll animations"],
 				"preserve": ["D: clean hero"],
 				"improve": ["MoonAI-style premium branding", "scroll animations"],
 				"avoid": ["C: overlapping text"]
@@ -3273,8 +3279,14 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 	baselineGateScore := 0.89
 	candidateGateScore := 0.84
 	humanFeedbackContext := json.RawMessage(`{
+		"feedback_source": "imported_human_review",
+		"feedback_target": "baseline_review_outputs",
+		"review_issue": "jerryfane/gitmoot-previews#21",
+		"review_run_id": "landing-page-preview-trial-005-review-004",
+		"reviewed_skill_version": "landing-page-builder@v10",
 		"source_item_ids": ["item-001"],
 		"rankings": ["D > B > C > A"],
+		"themes": ["MoonAI-style premium branding", "scroll animations"],
 		"preserve": ["D: clean hero"],
 		"improve": ["MoonAI-style premium branding", "scroll animations"],
 		"avoid": ["C: overlapping text"]
@@ -3340,6 +3352,9 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 	if !strings.Contains(iteration.MetadataJSON, `"status":"no_candidate"`) ||
 		!strings.Contains(iteration.MetadataJSON, `"no_candidate_reason":"gate_rejected_best_origin_initial_skill"`) ||
 		!strings.Contains(iteration.MetadataJSON, `"attempted_patch":"artifact delivery only"`) ||
+		!strings.Contains(iteration.MetadataJSON, `"feedback_target":"baseline_review_outputs"`) ||
+		!strings.Contains(iteration.MetadataJSON, `"score_basis":"feedback_resolution"`) ||
+		!strings.Contains(iteration.MetadataJSON, `"retry_budget":"1"`) ||
 		!strings.Contains(iteration.MetadataJSON, `"duplicate_retry_detected":true`) ||
 		!strings.Contains(iteration.MetadataJSON, `"evaluator_reason":"Candidate was valid but had weaker imagery."`) ||
 		!strings.Contains(iteration.MetadataJSON, `"optimizer_hint":"Resolve imported review themes and artifact contract."`) ||
@@ -3366,6 +3381,9 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 	if statusJSON.StatusPhase != "optimizer_completed_no_candidate" ||
 		statusJSON.NoCandidateReason != "gate_rejected_best_origin_initial_skill" ||
 		statusJSON.NoCandidateDetails["attempted_patch"] != "artifact delivery only" ||
+		statusJSON.NoCandidateDetails["feedback_target"] != "baseline_review_outputs" ||
+		statusJSON.NoCandidateDetails["score_basis"] != "feedback_resolution" ||
+		statusJSON.NoCandidateDetails["retry_budget"] != "1" ||
 		statusJSON.NoCandidateDetails["duplicate_retry_detected"] != true ||
 		statusJSON.NoCandidateDetails["selection_gate_relation"] != "candidate_below_baseline" ||
 		statusJSON.NoCandidateDetails["retry_budget_exhausted"] != true ||
@@ -3388,10 +3406,17 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 		"optimizer_attempt: attempt-001",
 		"optimizer_attempt_state: completed_no_candidate",
 		"optimizer_attempt_path: " + filepath.Join(outRoot, "attempts", "attempt-001"),
+		"feedback_source: imported_human_review",
+		"feedback_target: baseline_review_outputs",
+		"review_issue: jerryfane/gitmoot-previews#21",
+		"review_run_id: landing-page-preview-trial-005-review-004",
+		"reviewed_skill_version: landing-page-builder@v10",
+		"score_basis: feedback_resolution",
 		"attempted_patch: artifact delivery only",
 		"baseline_gate: 0.89",
 		"candidate_gate: 0.84",
 		"retry_attempts: 1/1",
+		"retry_budget: 1",
 		"duplicate_retry_detected: true",
 		"diagnostic_categories: old_review_training_signal,candidate_feedback_unresolved,retry_budget_exhausted",
 		"selection_gate_relation: candidate_below_baseline",
@@ -3402,8 +3427,14 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 		"optimizer_hint: Resolve imported review themes and artifact contract.",
 		"failed_dimensions: human_feedback_alignment,artifact_contract",
 		"feedback_themes: MoonAI-style premium branding; scroll animations",
+		"human_feedback_feedback_source: imported_human_review",
+		"human_feedback_feedback_target: baseline_review_outputs",
+		"human_feedback_review_issue: jerryfane/gitmoot-previews#21",
+		"human_feedback_review_run_id: landing-page-preview-trial-005-review-004",
+		"human_feedback_reviewed_skill_version: landing-page-builder@v10",
 		"human_feedback_source_item_ids: item-001",
 		"human_feedback_rankings: D > B > C > A",
+		"human_feedback_themes: MoonAI-style premium branding; scroll animations",
 		"human_feedback_preserve: D: clean hero",
 		"human_feedback_improve: MoonAI-style premium branding; scroll animations",
 		"human_feedback_avoid: C: overlapping text",
@@ -3475,6 +3506,41 @@ func TestSkillOptNoCandidatePackageMetadataPreservesTopLevelDiagnostics(t *testi
 		t.Fatalf("retry stop reasons = %v", got)
 	}
 	if got := metadataStringSlice(details, "feedback_themes"); strings.Join(got, "; ") != "better mobile layout; stronger product visuals" {
+		t.Fatalf("feedback themes = %v", got)
+	}
+}
+
+func TestSkillOptNoCandidatePackageMetadataPreservesFeedbackContextWithoutDiagnostics(t *testing.T) {
+	candidate := cliSkillOptCandidatePackage(t, "planner", "planner@v1", "Plan the work.")
+	candidate.EvalReport = json.RawMessage(`{
+		"promotable": false,
+		"no_candidate_reason": "gate_rejected_best_origin_initial_skill",
+		"human_feedback_context": {
+			"feedback_source": "imported_human_review",
+			"feedback_target": "baseline_review_outputs",
+			"review_issue": "jerryfane/gitmoot-previews#21",
+			"themes": ["better mobile layout"]
+		}
+	}`)
+	path := filepath.Join(t.TempDir(), "candidate.json")
+	encoded, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatalf("marshal candidate: %v", err)
+	}
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+
+	reason, _, details := skillOptNoCandidatePackageMetadata(path)
+	if reason != "gate_rejected_best_origin_initial_skill" {
+		t.Fatalf("reason = %q", reason)
+	}
+	if metadataString(details, "feedback_target") != "baseline_review_outputs" ||
+		metadataString(details, "score_basis") != "feedback_resolution" ||
+		metadataString(details, "review_issue") != "jerryfane/gitmoot-previews#21" {
+		t.Fatalf("feedback context details = %+v", details)
+	}
+	if got := metadataStringSlice(details, "feedback_themes"); strings.Join(got, "; ") != "better mobile layout" {
 		t.Fatalf("feedback themes = %v", got)
 	}
 }

@@ -5386,17 +5386,38 @@ func printSkillOptNoCandidateDetails(stdout io.Writer, details map[string]any) {
 	if len(details) == 0 {
 		return
 	}
+	for _, key := range []string{
+		"feedback_source",
+		"feedback_target",
+		"review_issue",
+		"review_run_id",
+		"reviewed_skill_version",
+		"score_basis",
+	} {
+		if value := metadataString(details, key); value != "" {
+			writeLine(stdout, "%s: %s", key, value)
+		}
+	}
 	if attemptedPatch := metadataString(details, "attempted_patch"); attemptedPatch != "" {
 		writeLine(stdout, "attempted_patch: %s", attemptedPatch)
 	}
-	if baselineGate := metadataString(details, "baseline_gate"); baselineGate != "" {
-		writeLine(stdout, "baseline_gate: %s", baselineGate)
-	}
-	if candidateGate := metadataString(details, "candidate_gate"); candidateGate != "" {
-		writeLine(stdout, "candidate_gate: %s", candidateGate)
+	for _, key := range []string{
+		"baseline_hard",
+		"baseline_soft",
+		"baseline_gate",
+		"candidate_hard",
+		"candidate_soft",
+		"candidate_gate",
+	} {
+		if value := metadataString(details, key); value != "" {
+			writeLine(stdout, "%s: %s", key, value)
+		}
 	}
 	if retryAttempts := metadataString(details, "retry_attempts"); retryAttempts != "" {
 		writeLine(stdout, "retry_attempts: %s", retryAttempts)
+	}
+	if retryBudget := metadataString(details, "retry_budget"); retryBudget != "" {
+		writeLine(stdout, "retry_budget: %s", retryBudget)
 	}
 	if duplicateRetry := metadataBoolPtr(details, "duplicate_retry_detected"); duplicateRetry != nil {
 		writeLine(stdout, "duplicate_retry_detected: %t", *duplicateRetry)
@@ -5458,9 +5479,23 @@ func printSkillOptHumanFeedbackContext(stdout io.Writer, context map[string]any)
 	if len(context) == 0 {
 		return
 	}
-	for _, key := range []string{"source_item_ids", "rankings", "preserve", "improve", "avoid"} {
+	for _, key := range []string{
+		"feedback_source",
+		"feedback_target",
+		"review_issue",
+		"review_run_id",
+		"reviewed_skill_version",
+		"source_item_ids",
+		"rankings",
+		"themes",
+		"preserve",
+		"improve",
+		"avoid",
+	} {
 		if values := metadataStringSlice(context, key); len(values) > 0 {
 			writeLine(stdout, "human_feedback_%s: %s", key, strings.Join(values, "; "))
+		} else if value := metadataString(context, key); value != "" {
+			writeLine(stdout, "human_feedback_%s: %s", key, value)
 		}
 	}
 }
@@ -6880,7 +6915,7 @@ func skillOptNoCandidatePackageMetadata(candidatePackagePath string) (string, st
 
 func skillOptNoCandidateDetailsWithDiagnostics(details map[string]any, source map[string]any) map[string]any {
 	if len(source) == 0 {
-		return details
+		return skillOptNoCandidateDetailsWithFeedbackContext(details, nil)
 	}
 	diagnostics := decodedSkillOptMetadataValue(source["no_candidate_diagnostics"])
 	if len(diagnostics) == 0 {
@@ -6904,7 +6939,7 @@ func skillOptNoCandidateDetailsWithDiagnostics(details map[string]any, source ma
 		diagnostics["retry_stop_reasons"] = stopReasons
 	}
 	if len(diagnostics) == 0 && len(metadataStringSlice(source, "feedback_themes")) == 0 {
-		return details
+		return skillOptNoCandidateDetailsWithFeedbackContext(details, source)
 	}
 	if details == nil {
 		details = map[string]any{}
@@ -6929,7 +6964,10 @@ func skillOptNoCandidateDetailsWithDiagnostics(details map[string]any, source ma
 	if themes := metadataStringSlice(source, "feedback_themes"); len(themes) > 0 {
 		details["feedback_themes"] = themes
 	}
-	return details
+	if retryBudget := skillOptRetryBudgetFromAttempts(metadataString(details, "retry_attempts")); retryBudget != "" && metadataString(details, "retry_budget") == "" {
+		details["retry_budget"] = retryBudget
+	}
+	return skillOptNoCandidateDetailsWithFeedbackContext(details, source)
 }
 
 func skillOptNoCandidateDetailsFromGateRejection(gateRejection map[string]any) map[string]any {
@@ -6950,6 +6988,9 @@ func skillOptNoCandidateDetailsFromGateRejection(gateRejection map[string]any) m
 		details["next_action"] = nextActions[0]
 		details["next_actions"] = nextActions
 	}
+	if retryBudget := skillOptRetryBudgetFromAttempts(metadataString(gateRejection, "retry_attempts")); retryBudget != "" {
+		details["retry_budget"] = retryBudget
+	}
 	if value := metadataBoolPtr(gateRejection, "duplicate_retry_detected"); value != nil {
 		details["duplicate_retry_detected"] = *value
 	}
@@ -6959,6 +7000,12 @@ func skillOptNoCandidateDetailsFromGateRejection(gateRejection map[string]any) m
 			rejection[key] = value
 			if gateScore := metadataString(value, "gate_score"); gateScore != "" {
 				details[key+"_gate"] = gateScore
+			}
+			if hard := metadataString(value, "hard"); hard != "" {
+				details[key+"_hard"] = hard
+			}
+			if soft := metadataString(value, "soft"); soft != "" {
+				details[key+"_soft"] = soft
 			}
 		}
 	}
@@ -6983,10 +7030,52 @@ func skillOptNoCandidateDetailsFromGateRejection(gateRejection map[string]any) m
 	}
 	if humanFeedbackContext := decodedSkillOptMetadataValue(gateRejection["human_feedback_context"]); len(humanFeedbackContext) > 0 {
 		rejection["human_feedback_context"] = humanFeedbackContext
-		details["human_feedback_context"] = humanFeedbackContext
 	}
 	if len(rejection) > 0 {
 		details["rejection"] = rejection
+	}
+	return skillOptNoCandidateDetailsWithFeedbackContext(details, gateRejection)
+}
+
+func skillOptRetryBudgetFromAttempts(retryAttempts string) string {
+	retryAttempts = strings.TrimSpace(retryAttempts)
+	if retryAttempts == "" {
+		return ""
+	}
+	parts := strings.Split(retryAttempts, "/")
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func skillOptNoCandidateDetailsWithFeedbackContext(details map[string]any, source map[string]any) map[string]any {
+	context := decodedSkillOptMetadataValue(nil)
+	if len(details) > 0 {
+		context = decodedSkillOptMetadataValue(details["human_feedback_context"])
+	}
+	if len(context) == 0 && len(source) > 0 {
+		context = decodedSkillOptMetadataValue(source["human_feedback_context"])
+	}
+	if len(context) == 0 {
+		return details
+	}
+	if details == nil {
+		details = map[string]any{}
+	}
+	details["human_feedback_context"] = context
+	for _, key := range []string{"feedback_source", "feedback_target", "review_issue", "review_run_id", "reviewed_skill_version"} {
+		if value := metadataString(context, key); value != "" && metadataString(details, key) == "" {
+			details[key] = value
+		}
+	}
+	if metadataString(details, "score_basis") == "" && strings.EqualFold(metadataString(context, "feedback_target"), "baseline_review_outputs") {
+		details["score_basis"] = "feedback_resolution"
+	}
+	if len(metadataStringSlice(details, "feedback_themes")) == 0 {
+		if themes := metadataStringSlice(context, "themes"); len(themes) > 0 {
+			details["feedback_themes"] = themes
+		}
 	}
 	return details
 }
