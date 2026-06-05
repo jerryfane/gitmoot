@@ -3795,6 +3795,22 @@ type skillOptTrainReviewPublishResult struct {
 	PreviewURLs int
 }
 
+type skillOptPreviewPublication struct {
+	URL          string
+	CommitSHA    string
+	PagesStatus  string
+	StatusReason string
+}
+
+type skillOptLatestPagesBuild struct {
+	Status string `json:"status"`
+	Error  struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	CommitSHA string `json:"commit_sha"`
+	Commit    string `json:"commit"`
+}
+
 const skillOptReviewWatchDefaultStaleThreshold = 24 * time.Hour
 
 func autoSyncSkillOptTrainReviewFeedback(ctx context.Context, paths config.Paths, store *db.Store, iteration db.SkillOptTrainIteration) ([]string, bool) {
@@ -4178,7 +4194,7 @@ func publishSkillOptTrainPreviewURLs(ctx context.Context, paths config.Paths, st
 			_ = cleanup()
 			return publishedCount, err
 		}
-		url, err := publishGitHubPagesPreview(ctx, previewRepo, route, distDir)
+		publication, err := publishGitHubPagesPreview(ctx, previewRepo, route, distDir)
 		_ = cleanup()
 		if err != nil {
 			if policy.Mode == skillopt.TrainPreviewModeRequired {
@@ -4186,9 +4202,14 @@ func publishSkillOptTrainPreviewURLs(ctx context.Context, paths config.Paths, st
 			}
 			continue
 		}
-		metadata["preview_url"] = url
+		metadata["preview_url"] = publication.URL
 		metadata["preview_route"] = route
 		metadata["preview_repo"] = previewRepo.FullName()
+		metadata["preview_commit"] = publication.CommitSHA
+		metadata["preview_status"] = publication.PagesStatus
+		if strings.TrimSpace(publication.StatusReason) != "" {
+			metadata["preview_status_reason"] = publication.StatusReason
+		}
 		option.MetadataJSON = encodeOptionMetadata(metadata)
 		if err := store.UpsertEvalReviewOption(ctx, option); err != nil {
 			return publishedCount, err
@@ -4350,47 +4371,123 @@ func renderVueVitePreviewBundle(ctx context.Context, bundle skillopt.PreviewBund
 	return distDir, cleanup, nil
 }
 
-func publishGitHubPagesPreview(ctx context.Context, repo db.Repo, route string, distDir string) (string, error) {
+func publishGitHubPagesPreview(ctx context.Context, repo db.Repo, route string, distDir string) (skillOptPreviewPublication, error) {
 	checkout := strings.TrimSpace(repo.CheckoutPath)
 	if err := requireCleanPreviewRepo(ctx, checkout); err != nil {
-		return "", err
+		return skillOptPreviewPublication{}, err
 	}
 	head, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "rev-parse", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("read preview repo head: %w", err)
+		return skillOptPreviewPublication{}, fmt.Errorf("read preview repo head: %w", err)
 	}
 	headSHA := strings.TrimSpace(head.Stdout)
 	target, err := safeJoinPreviewPath(checkout, route)
 	if err != nil {
-		return "", err
+		return skillOptPreviewPublication{}, err
 	}
 	if err := os.RemoveAll(target); err != nil {
-		return "", err
+		return skillOptPreviewPublication{}, err
 	}
 	if err := copyDir(distDir, target); err != nil {
 		restorePreviewRoute(ctx, checkout, route, headSHA)
-		return "", err
+		return skillOptPreviewPublication{}, err
 	}
 	if _, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "add", "--", route); err != nil {
 		restorePreviewRoute(ctx, checkout, route, headSHA)
-		return "", fmt.Errorf("git add preview route: %w", err)
+		return skillOptPreviewPublication{}, fmt.Errorf("git add preview route: %w", err)
 	}
 	status, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "status", "--porcelain", "--", route)
 	if err != nil {
 		restorePreviewRoute(ctx, checkout, route, headSHA)
-		return "", fmt.Errorf("check preview route status: %w", err)
+		return skillOptPreviewPublication{}, fmt.Errorf("check preview route status: %w", err)
 	}
 	if strings.TrimSpace(status.Stdout) != "" {
 		if _, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "commit", "-m", "Publish SkillOpt preview "+strings.TrimSuffix(route, "/")); err != nil {
 			restorePreviewRoute(ctx, checkout, route, headSHA)
-			return "", fmt.Errorf("git commit preview route: %w", err)
+			return skillOptPreviewPublication{}, fmt.Errorf("git commit preview route: %w", err)
 		}
 		if _, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "push"); err != nil {
 			restorePreviewRoute(ctx, checkout, route, headSHA)
-			return "", fmt.Errorf("git push preview route: %w", err)
+			return skillOptPreviewPublication{}, fmt.Errorf("git push preview route: %w", err)
 		}
 	}
-	return githubPagesURL(repo, route), nil
+	commit, err := skillOptTrainPreviewRunner.Run(ctx, checkout, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return skillOptPreviewPublication{}, fmt.Errorf("read published preview commit: %w", err)
+	}
+	commitSHA := strings.TrimSpace(commit.Stdout)
+	pagesStatus, pagesReason := observeGitHubPagesBuildStatus(ctx, repo, commitSHA)
+	return skillOptPreviewPublication{
+		URL:          githubPagesURL(repo, route),
+		CommitSHA:    commitSHA,
+		PagesStatus:  pagesStatus,
+		StatusReason: pagesReason,
+	}, nil
+}
+
+func observeGitHubPagesBuildStatus(ctx context.Context, repo db.Repo, commitSHA string) (string, string) {
+	return observeGitHubPagesBuildStatusWithPoll(ctx, repo, commitSHA, 15*time.Second, 2*time.Second)
+}
+
+func observeGitHubPagesBuildStatusWithPoll(ctx context.Context, repo db.Repo, commitSHA string, timeout time.Duration, interval time.Duration) (string, string) {
+	fullName := repo.FullName()
+	if strings.TrimSpace(fullName) == "" {
+		return "pending", "preview repo is unknown"
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		status, reason, done := readGitHubPagesBuildStatus(ctx, repo, commitSHA)
+		if done {
+			return status, reason
+		}
+		if timeout <= 0 || !time.Now().Before(deadline) {
+			return status, reason
+		}
+		select {
+		case <-ctx.Done():
+			return "pending", "latest GitHub Pages build wait was canceled: " + ctx.Err().Error()
+		case <-time.After(interval):
+		}
+	}
+}
+
+func readGitHubPagesBuildStatus(ctx context.Context, repo db.Repo, commitSHA string) (string, string, bool) {
+	fullName := repo.FullName()
+	result, err := skillOptTrainPreviewRunner.Run(ctx, strings.TrimSpace(repo.CheckoutPath), "gh", "api", "repos/"+fullName+"/pages/builds/latest")
+	if err != nil {
+		return "pending", "latest GitHub Pages build could not be read: " + err.Error(), true
+	}
+	var build skillOptLatestPagesBuild
+	if err := json.Unmarshal([]byte(result.Stdout), &build); err != nil {
+		return "pending", "latest GitHub Pages build response could not be decoded: " + err.Error(), true
+	}
+	status := normalizeGitHubPagesBuildStatus(build.Status)
+	buildCommit := firstNonEmpty(strings.TrimSpace(build.CommitSHA), strings.TrimSpace(build.Commit))
+	if buildCommit != "" && commitSHA != "" && !strings.EqualFold(buildCommit, commitSHA) {
+		return "stale", fmt.Sprintf("latest GitHub Pages build is for commit %s, expected %s", buildCommit, commitSHA), false
+	}
+	if status == "failed" && strings.TrimSpace(build.Error.Message) != "" {
+		return status, strings.TrimSpace(build.Error.Message), true
+	}
+	if status == "pending" {
+		return status, "", false
+	}
+	return status, "", true
+}
+
+func normalizeGitHubPagesBuildStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "built":
+		return "ready"
+	case "errored":
+		return "failed"
+	case "building", "queued":
+		return "pending"
+	case "":
+		return "pending"
+	default:
+		return strings.ToLower(strings.TrimSpace(status))
+	}
 }
 
 func restorePreviewRoute(ctx context.Context, checkout string, route string, headSHA string) {

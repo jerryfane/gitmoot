@@ -791,7 +791,19 @@ func optionReference(option blindOptionAssignment, includeLocalPaths bool) strin
 	metadata := optionMetadata(option)
 	for _, key := range []string{"preview_url", "url"} {
 		if value := metadataString(metadata, key); value != "" {
-			return fmt.Sprintf("[open](%s)", value)
+			label := "open"
+			switch strings.ToLower(strings.TrimSpace(metadataString(metadata, "preview_status"))) {
+			case "pending":
+				label = "pending deployment"
+			case "failed":
+				label = "failed deployment"
+			case "stale":
+				label = "stale deployment"
+			}
+			if reason := metadataString(metadata, "preview_status_reason"); reason != "" && label != "open" {
+				return fmt.Sprintf("[%s](%s) (%s)", label, value, strings.ReplaceAll(reason, "\n", " "))
+			}
+			return fmt.Sprintf("[%s](%s)", label, value)
 		}
 	}
 	if path := metadataString(metadata, "path"); includeLocalPaths && path != "" {

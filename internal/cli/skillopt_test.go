@@ -1072,6 +1072,141 @@ func TestPublishGitHubPagesPreviewRestoresCheckoutOnCommitFailure(t *testing.T) 
 	}
 }
 
+func TestPublishGitHubPagesPreviewReportsPagesStatus(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		pages      string
+		pagesError string
+		wantStatus string
+		wantReason string
+	}{
+		{name: "ready", pages: "built", wantStatus: "ready"},
+		{name: "pending", pages: "queued", wantStatus: "pending"},
+		{name: "failed", pages: "errored", pagesError: "Pages build failed", wantStatus: "failed", wantReason: "Pages build failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			previewDir := t.TempDir()
+			runGit(t, previewDir, "init")
+			runGit(t, previewDir, "config", "user.email", "gitmoot@example.com")
+			runGit(t, previewDir, "config", "user.name", "Gitmoot")
+			runGit(t, previewDir, "branch", "-m", "main")
+			if err := os.WriteFile(filepath.Join(previewDir, "README.md"), []byte("previews\n"), 0o644); err != nil {
+				t.Fatalf("write README: %v", err)
+			}
+			runGit(t, previewDir, "add", "README.md")
+			runGit(t, previewDir, "commit", "-m", "init")
+			distDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(distDir, "index.html"), []byte("<main>preview</main>\n"), 0o644); err != nil {
+				t.Fatalf("write dist index: %v", err)
+			}
+			previewRunner := &skillOptTrainFakePreviewRunner{pagesStatus: tt.pages, pagesError: tt.pagesError}
+			oldPreviewRunner := skillOptTrainPreviewRunner
+			skillOptTrainPreviewRunner = previewRunner
+			defer func() {
+				skillOptTrainPreviewRunner = oldPreviewRunner
+			}()
+
+			result, err := publishGitHubPagesPreview(context.Background(), db.Repo{Owner: "owner", Name: "previews", CheckoutPath: previewDir}, "runs/run-1/item/a/", distDir)
+			if err != nil {
+				t.Fatalf("publishGitHubPagesPreview returned error: %v", err)
+			}
+			if result.PagesStatus != tt.wantStatus || !strings.Contains(result.StatusReason, tt.wantReason) {
+				t.Fatalf("publication = %+v, want status=%s reason=%q", result, tt.wantStatus, tt.wantReason)
+			}
+			if result.CommitSHA == "" || result.URL != "https://owner.github.io/previews/runs/run-1/item/a/" {
+				t.Fatalf("publication missing commit/url: %+v", result)
+			}
+		})
+	}
+}
+
+func TestObserveGitHubPagesBuildStatusWaitsForPublishedCommit(t *testing.T) {
+	previewRunner := &skillOptTrainFakePreviewRunner{
+		pagesStatus:  "built",
+		pagesCommits: []string{"old-commit", "new-commit"},
+	}
+	oldPreviewRunner := skillOptTrainPreviewRunner
+	skillOptTrainPreviewRunner = previewRunner
+	defer func() {
+		skillOptTrainPreviewRunner = oldPreviewRunner
+	}()
+
+	status, reason := observeGitHubPagesBuildStatusWithPoll(
+		context.Background(),
+		db.Repo{Owner: "owner", Name: "previews", CheckoutPath: t.TempDir()},
+		"new-commit",
+		50*time.Millisecond,
+		time.Millisecond,
+	)
+	if status != "ready" || reason != "" {
+		t.Fatalf("status=%q reason=%q, want ready with no reason", status, reason)
+	}
+	ghCalls := 0
+	for _, call := range previewRunner.calls {
+		if call.command == "gh" {
+			ghCalls++
+		}
+	}
+	if ghCalls < 2 {
+		t.Fatalf("gh api calls = %d, want at least 2", ghCalls)
+	}
+}
+
+func TestObserveGitHubPagesBuildStatusPollsMatchingPendingBuild(t *testing.T) {
+	previewRunner := &skillOptTrainFakePreviewRunner{
+		pagesStatuses: []string{"queued", "building", "built"},
+		pagesCommits:  []string{"new-commit"},
+	}
+	oldPreviewRunner := skillOptTrainPreviewRunner
+	skillOptTrainPreviewRunner = previewRunner
+	defer func() {
+		skillOptTrainPreviewRunner = oldPreviewRunner
+	}()
+
+	status, reason := observeGitHubPagesBuildStatusWithPoll(
+		context.Background(),
+		db.Repo{Owner: "owner", Name: "previews", CheckoutPath: t.TempDir()},
+		"new-commit",
+		50*time.Millisecond,
+		time.Millisecond,
+	)
+	if status != "ready" || reason != "" {
+		t.Fatalf("status=%q reason=%q, want ready with no reason", status, reason)
+	}
+	ghCalls := 0
+	for _, call := range previewRunner.calls {
+		if call.command == "gh" {
+			ghCalls++
+		}
+	}
+	if ghCalls < 3 {
+		t.Fatalf("gh api calls = %d, want at least 3", ghCalls)
+	}
+}
+
+func TestObserveGitHubPagesBuildStatusMarksStaleAfterTimeout(t *testing.T) {
+	previewRunner := &skillOptTrainFakePreviewRunner{
+		pagesStatus:  "built",
+		pagesCommits: []string{"old-commit"},
+	}
+	oldPreviewRunner := skillOptTrainPreviewRunner
+	skillOptTrainPreviewRunner = previewRunner
+	defer func() {
+		skillOptTrainPreviewRunner = oldPreviewRunner
+	}()
+
+	status, reason := observeGitHubPagesBuildStatusWithPoll(
+		context.Background(),
+		db.Repo{Owner: "owner", Name: "previews", CheckoutPath: t.TempDir()},
+		"new-commit",
+		0,
+		time.Millisecond,
+	)
+	if status != "stale" || !strings.Contains(reason, "old-commit") || !strings.Contains(reason, "new-commit") {
+		t.Fatalf("status=%q reason=%q, want stale reason with commit mismatch", status, reason)
+	}
+}
+
 func runGitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	result, err := subprocess.ExecRunner{}.Run(context.Background(), dir, "git", args...)
@@ -8675,6 +8810,10 @@ func (r *skillOptTrainFakeOptimizerRunner) LookPath(file string) (string, error)
 
 type skillOptTrainFakePreviewRunner struct {
 	failGitCommit bool
+	pagesStatus   string
+	pagesError    string
+	pagesStatuses []string
+	pagesCommits  []string
 	calls         []skillOptTrainFakePreviewCall
 }
 
@@ -8713,7 +8852,50 @@ func (r *skillOptTrainFakePreviewRunner) Run(ctx context.Context, dir string, co
 		result.Stderr = "commit failed\n"
 		return result, errors.New("exit status 1")
 	}
+	if command == "gh" && len(args) == 2 && args[0] == "api" && strings.HasSuffix(args[1], "/pages/builds/latest") {
+		status := strings.TrimSpace(r.pagesStatus)
+		if len(r.pagesStatuses) > 0 {
+			status = strings.TrimSpace(r.pagesStatuses[0])
+			if len(r.pagesStatuses) > 1 {
+				r.pagesStatuses = r.pagesStatuses[1:]
+			}
+		}
+		if status == "" {
+			status = "built"
+		}
+		commitSHA := ""
+		if len(r.pagesCommits) > 0 {
+			commitSHA = strings.TrimSpace(r.pagesCommits[0])
+			if len(r.pagesCommits) > 1 {
+				r.pagesCommits = r.pagesCommits[1:]
+			}
+		}
+		if commitSHA == "" {
+			commitSHA = strings.TrimSpace(runGitOutputFromRunner(ctx, dir, "rev-parse", "HEAD"))
+		}
+		payload := map[string]any{
+			"status":     status,
+			"commit_sha": commitSHA,
+		}
+		if strings.TrimSpace(r.pagesError) != "" {
+			payload["error"] = map[string]any{"message": strings.TrimSpace(r.pagesError)}
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return result, err
+		}
+		result.Stdout = string(encoded)
+		return result, nil
+	}
 	return subprocess.ExecRunner{}.Run(ctx, dir, command, args...)
+}
+
+func runGitOutputFromRunner(ctx context.Context, dir string, args ...string) string {
+	result, err := subprocess.ExecRunner{}.Run(ctx, dir, "git", args...)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(result.Stdout)
 }
 
 func (r *skillOptTrainFakePreviewRunner) LookPath(file string) (string, error) {

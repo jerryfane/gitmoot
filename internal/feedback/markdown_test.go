@@ -624,6 +624,26 @@ func TestMarkdownCollectorUsesCollisionSafeItemFilenames(t *testing.T) {
 	}
 }
 
+func TestOptionReferenceLabelsPreviewDeploymentStatus(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		metadata string
+		want     string
+	}{
+		{name: "ready", metadata: `{"preview_url":"https://example.com/a","preview_status":"ready"}`, want: "[open](https://example.com/a)"},
+		{name: "pending", metadata: `{"preview_url":"https://example.com/a","preview_status":"pending"}`, want: "[pending deployment](https://example.com/a)"},
+		{name: "failed", metadata: `{"preview_url":"https://example.com/a","preview_status":"failed","preview_status_reason":"Pages build failed"}`, want: "[failed deployment](https://example.com/a) (Pages build failed)"},
+		{name: "stale", metadata: `{"preview_url":"https://example.com/a","preview_status":"stale"}`, want: "[stale deployment](https://example.com/a)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := optionReference(blindOptionAssignment{Label: "a", ArtifactID: "artifact-a", MetadataJSON: tt.metadata}, false)
+			if got != tt.want {
+				t.Fatalf("optionReference = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func setupMarkdownRankedFeedbackRun(t *testing.T, runID string) (*db.Store, artifact.Store) {
 	t.Helper()
 	ctx := context.Background()
