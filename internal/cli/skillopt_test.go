@@ -2821,12 +2821,16 @@ func TestSkillOptTrainContinueRunsOptimizerAndImportsCandidate(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("train continue optimizer exit code = %d, stderr=%s", code, stderr.String())
 	}
+	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
 	for _, want := range []string{
 		"current_phase: candidate_created",
 		"candidate: planner@v2",
 		"continue_ready: true",
-		"training_package: " + filepath.Join(outRoot, "training.json"),
-		"candidate_package: " + filepath.Join(outRoot, "candidate.json"),
+		"training_package: " + filepath.Join(attemptRoot, "training.json"),
+		"optimizer_root: " + outRoot,
+		"optimizer_attempt: attempt-001",
+		"optimizer_attempt_path: " + attemptRoot,
+		"candidate_package: " + filepath.Join(attemptRoot, "candidate.json"),
 		"optimizer_dry_run: true",
 		"imported_candidate: planner@v2",
 		"next: publish candidate diff and preview review",
@@ -2841,11 +2845,11 @@ func TestSkillOptTrainContinueRunsOptimizerAndImportsCandidate(t *testing.T) {
 	call := runner.calls[0]
 	for _, want := range []string{
 		"optimize",
-		"--training-package", filepath.Join(outRoot, "training.json"),
+		"--training-package", filepath.Join(attemptRoot, "training.json"),
 		"--artifact-root", config.PathsForHome(home).ArtifactBlobs,
-		"--out-root", outRoot,
-		"--candidate-output", filepath.Join(outRoot, "candidate.json"),
-		"--artifact-dir", filepath.Join(outRoot, "artifacts"),
+		"--out-root", attemptRoot,
+		"--candidate-output", filepath.Join(attemptRoot, "candidate.json"),
+		"--artifact-dir", filepath.Join(attemptRoot, "artifacts"),
 		"--gate-metric", "mixed",
 		"--optimizer-model", "gpt-5.5",
 		"--target-model", "gpt-5.5",
@@ -2863,7 +2867,7 @@ func TestSkillOptTrainContinueRunsOptimizerAndImportsCandidate(t *testing.T) {
 			t.Fatalf("optimizer args missing %q: %+v", want, call.args)
 		}
 	}
-	trainingPackage, err := os.ReadFile(filepath.Join(outRoot, "training.json"))
+	trainingPackage, err := os.ReadFile(filepath.Join(attemptRoot, "training.json"))
 	if err != nil {
 		t.Fatalf("read training package: %v", err)
 	}
@@ -3057,7 +3061,9 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 		"current_phase: optimizer_completed_no_candidate",
 		"candidate: -",
 		"continue_ready: true",
-		"candidate_package: " + filepath.Join(outRoot, "candidate.json"),
+		"optimizer_attempt: attempt-001",
+		"optimizer_attempt_path: " + filepath.Join(outRoot, "attempts", "attempt-001"),
+		"candidate_package: " + filepath.Join(outRoot, "attempts", "attempt-001", "candidate.json"),
 		"optimizer_dry_run: true",
 		"no_candidate_reason: gate_rejected_best_origin_initial_skill",
 		"next: Do not import or publish a candidate review; collect more feedback",
@@ -3098,7 +3104,10 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 	}
 	if statusJSON.StatusPhase != "optimizer_completed_no_candidate" ||
 		statusJSON.NoCandidateReason != "gate_rejected_best_origin_initial_skill" ||
-		statusJSON.NoCandidateDetails["attempted_patch"] != "artifact delivery only" {
+		statusJSON.NoCandidateDetails["attempted_patch"] != "artifact delivery only" ||
+		statusJSON.Verbose == nil ||
+		statusJSON.Verbose.Optimizer["optimizer_attempt"] != "attempt-001" ||
+		statusJSON.Verbose.Optimizer["optimizer_attempt_state"] != "completed_no_candidate" {
 		t.Fatalf("train status no-candidate json = %+v", statusJSON)
 	}
 
@@ -3110,6 +3119,9 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 	}
 	for _, want := range []string{
 		"no_candidate_reason: gate_rejected_best_origin_initial_skill",
+		"optimizer_attempt: attempt-001",
+		"optimizer_attempt_state: completed_no_candidate",
+		"optimizer_attempt_path: " + filepath.Join(outRoot, "attempts", "attempt-001"),
 		"attempted_patch: artifact delivery only",
 		"retry_attempts: 1/1",
 		"rejection: baseline_gate=0.89 candidate_gate=0.84",
@@ -3163,6 +3175,10 @@ func TestSkillOptTrainContinueRerunsOptimizerAfterNoCandidate(t *testing.T) {
 	if len(runner.calls) != 1 {
 		t.Fatalf("optimizer calls after no-candidate = %+v, want one", runner.calls)
 	}
+	firstAttemptRoot := argValue(runner.calls[0].args, "--out-root")
+	if firstAttemptRoot != filepath.Join(outRoot, "attempts", "attempt-001") {
+		t.Fatalf("first optimizer attempt out-root = %q, want attempt-001 under %q", firstAttemptRoot, outRoot)
+	}
 
 	runner.candidate = cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan with rerun candidate guidance.")
 	stdout.Reset()
@@ -3179,8 +3195,13 @@ func TestSkillOptTrainContinueRerunsOptimizerAfterNoCandidate(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("optimizer calls after rerun = %+v, want two", runner.calls)
 	}
+	secondAttemptRoot := argValue(runner.calls[1].args, "--out-root")
+	if secondAttemptRoot != filepath.Join(outRoot, "attempts", "attempt-002") {
+		t.Fatalf("second optimizer attempt out-root = %q, want attempt-002 under %q", secondAttemptRoot, outRoot)
+	}
 	if !strings.Contains(stdout.String(), "current_phase: candidate_created") ||
-		!strings.Contains(stdout.String(), "imported_candidate: planner@v2") {
+		!strings.Contains(stdout.String(), "imported_candidate: planner@v2") ||
+		!strings.Contains(stdout.String(), "optimizer_attempt: attempt-002") {
 		t.Fatalf("rerun after no-candidate stdout = %s", stdout.String())
 	}
 }
@@ -3368,10 +3389,11 @@ echo "fake optimizer ok"
 	if !strings.Contains(stdout.String(), "current_phase: candidate_created") || !strings.Contains(stdout.String(), "imported_candidate: planner@v2") {
 		t.Fatalf("fake executable stdout = %s", stdout.String())
 	}
-	if _, err := os.Stat(filepath.Join(outRoot, "training.json")); err != nil {
+	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
+	if _, err := os.Stat(filepath.Join(attemptRoot, "training.json")); err != nil {
 		t.Fatalf("training package was not written: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(outRoot, "candidate.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(attemptRoot, "candidate.json")); err != nil {
 		t.Fatalf("candidate package was not written: %v", err)
 	}
 }
@@ -4985,7 +5007,8 @@ func TestSkillOptTrainContinueRecordsOptimizerFailureAtPackageGate(t *testing.T)
 		t.Fatalf("optimizer calls after retry = %+v, want two", runner.calls)
 	}
 	retryCall := runner.calls[1]
-	if argValue(retryCall.args, "--out-root") != outRoot || argValue(retryCall.args, "--training-package") != filepath.Join(outRoot, "training.json") {
+	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
+	if argValue(retryCall.args, "--out-root") != attemptRoot || argValue(retryCall.args, "--training-package") != filepath.Join(attemptRoot, "training.json") {
 		t.Fatalf("retry did not reuse persisted optimizer paths: %+v", retryCall.args)
 	}
 	if !strings.Contains(stdout.String(), "current_phase: candidate_created") || !strings.Contains(stdout.String(), "imported_candidate: planner@v2") {
@@ -5023,7 +5046,8 @@ func TestSkillOptTrainContinueReportsRecoveryAfterOptimizerFailureArtifacts(t *t
 	if !strings.Contains(stdout.String(), "recovery_available: true") {
 		t.Fatalf("optimizer failure stdout did not report recovery:\n%s", stdout.String())
 	}
-	if _, err := os.Stat(filepath.Join(outRoot, "candidate.json")); err != nil {
+	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
+	if _, err := os.Stat(filepath.Join(attemptRoot, "candidate.json")); err != nil {
 		t.Fatalf("candidate package was not written before failure: %v", err)
 	}
 
@@ -5180,7 +5204,8 @@ func TestSkillOptTrainRecoverReportsIncompleteArtifacts(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("train continue failed optimizer exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if err := os.WriteFile(filepath.Join(outRoot, "summary.json"), []byte(`{"status":"failed","reason":"timeout","no_candidate_reason":null}`), 0o644); err != nil {
+	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
+	if err := os.WriteFile(filepath.Join(attemptRoot, "summary.json"), []byte(`{"status":"failed","reason":"timeout","no_candidate_reason":null}`), 0o644); err != nil {
 		t.Fatalf("write summary artifact returned error: %v", err)
 	}
 
@@ -5220,7 +5245,8 @@ func TestSkillOptTrainRecoverRejectsCorruptedCandidateArtifacts(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("train continue failed optimizer exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if err := os.WriteFile(filepath.Join(outRoot, "candidate.json"), []byte(`{not-json`), 0o644); err != nil {
+	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
+	if err := os.WriteFile(filepath.Join(attemptRoot, "candidate.json"), []byte(`{not-json`), 0o644); err != nil {
 		t.Fatalf("write corrupted candidate returned error: %v", err)
 	}
 
@@ -5263,7 +5289,8 @@ func TestSkillOptTrainRecoverLeavesStateOnMissingCandidateArtifact(t *testing.T)
 	if code != 1 {
 		t.Fatalf("train continue recoverable failure exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if err := os.Remove(filepath.Join(outRoot, "artifacts", "candidate.diff.md")); err != nil {
+	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
+	if err := os.Remove(filepath.Join(attemptRoot, "artifacts", "candidate.diff.md")); err != nil {
 		t.Fatalf("remove candidate diff artifact returned error: %v", err)
 	}
 
@@ -5294,7 +5321,8 @@ func TestSkillOptTrainRecoverLeavesStateOnMissingCandidateArtifact(t *testing.T)
 func TestSkillOptTrainRecoverRejectsCandidateBeforePackageState(t *testing.T) {
 	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
 	outRoot := filepath.Join(t.TempDir(), "optimizer")
-	artifactDir := filepath.Join(outRoot, "artifacts")
+	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
+	artifactDir := filepath.Join(attemptRoot, "artifacts")
 	diffContent := []byte("candidate diff\n")
 	diffSize := int64(len(diffContent))
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
@@ -5317,7 +5345,7 @@ func TestSkillOptTrainRecoverRejectsCandidateBeforePackageState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal candidate package returned error: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(outRoot, "candidate.json"), encoded, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(attemptRoot, "candidate.json"), encoded, 0o644); err != nil {
 		t.Fatalf("write candidate package returned error: %v", err)
 	}
 
@@ -5522,18 +5550,48 @@ func TestSkillOptTrainContinueRejectsCandidateForDifferentSessionTemplate(t *tes
 		t.Fatalf("deterministic import retry reran optimizer: %+v", runner.calls)
 	}
 
-	staleOutRoot := argValue(runner.calls[0].args, "--out-root")
-	if staleOutRoot == "" {
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"skillopt", "train", "continue",
+		"--home", home,
+		"--session", "optimizer-train",
+		"--rerun-optimizer",
+		"--gate", "unsupported",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("train continue rerun setup failure exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `optimizer gate "unsupported" is not supported`) {
+		t.Fatalf("rerun setup failure stderr = %q", stderr.String())
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("rerun setup failure started optimizer: %+v", runner.calls)
+	}
+	store = openCLIJobStore(t, home)
+	afterSetupFailure, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration after rerun setup failure returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after rerun setup failure returned error: %v", err)
+	}
+	if afterSetupFailure.State != skillopt.TrainStateOptimizerCompleted || afterSetupFailure.MetadataJSON != iteration.MetadataJSON {
+		t.Fatalf("rerun setup failure changed completed optimizer state: before=%+v after=%+v", iteration, afterSetupFailure)
+	}
+
+	firstAttemptRoot := argValue(runner.calls[0].args, "--out-root")
+	if firstAttemptRoot == "" {
 		t.Fatalf("first optimizer call did not include --out-root: %+v", runner.calls[0].args)
 	}
 	staleFiles := []string{
-		filepath.Join(staleOutRoot, "candidate.json"),
-		filepath.Join(staleOutRoot, "history.json"),
-		filepath.Join(staleOutRoot, "summary.json"),
-		filepath.Join(staleOutRoot, "runtime_state.json"),
-		filepath.Join(staleOutRoot, "best_skill.md"),
-		filepath.Join(staleOutRoot, "steps", "step_0001", "step_record.json"),
-		filepath.Join(staleOutRoot, "artifacts", "stale.diff.md"),
+		filepath.Join(firstAttemptRoot, "candidate.json"),
+		filepath.Join(firstAttemptRoot, "history.json"),
+		filepath.Join(firstAttemptRoot, "summary.json"),
+		filepath.Join(firstAttemptRoot, "runtime_state.json"),
+		filepath.Join(firstAttemptRoot, "best_skill.md"),
+		filepath.Join(firstAttemptRoot, "steps", "step_0001", "step_record.json"),
+		filepath.Join(firstAttemptRoot, "artifacts", "stale.diff.md"),
 	}
 	for _, path := range staleFiles {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -5543,37 +5601,60 @@ func TestSkillOptTrainContinueRejectsCandidateForDifferentSessionTemplate(t *tes
 			t.Fatalf("write stale optimizer artifact returned error: %v", err)
 		}
 	}
-	unrelatedFile := filepath.Join(staleOutRoot, "unrelated", "keep.txt")
+	unrelatedFile := filepath.Join(firstAttemptRoot, "unrelated", "keep.txt")
 	if err := os.MkdirAll(filepath.Dir(unrelatedFile), 0o755); err != nil {
 		t.Fatalf("create unrelated out-root file dir returned error: %v", err)
 	}
 	if err := os.WriteFile(unrelatedFile, []byte("do not remove\n"), 0o644); err != nil {
 		t.Fatalf("write unrelated out-root file returned error: %v", err)
 	}
-	trainingPackagePath := filepath.Join(staleOutRoot, "training.json")
+	trainingPackagePath := filepath.Join(firstAttemptRoot, "training.json")
 	if _, err := os.Stat(trainingPackagePath); err != nil {
 		t.Fatalf("expected persisted training package before rerun: %v", err)
 	}
+	secondAttemptRoot := filepath.Join(outRoot, "attempts", "attempt-002")
 	runner.beforeRun = func(dir string, args []string) error {
 		if len(runner.calls) != 2 {
 			return nil
 		}
-		if dir != staleOutRoot || argValue(args, "--out-root") != staleOutRoot {
-			return fmt.Errorf("rerun did not reuse optimizer out-root; dir=%s args=%v", dir, args)
+		if dir != secondAttemptRoot || argValue(args, "--out-root") != secondAttemptRoot {
+			return fmt.Errorf("rerun did not use isolated optimizer attempt; dir=%s args=%v", dir, args)
 		}
 		if _, err := os.Stat(trainingPackagePath); err != nil {
-			return fmt.Errorf("rerun cleanup removed training package: %w", err)
+			return fmt.Errorf("rerun removed previous attempt training package: %w", err)
 		}
 		if _, err := os.Stat(unrelatedFile); err != nil {
-			return fmt.Errorf("rerun cleanup removed unrelated out-root file: %w", err)
+			return fmt.Errorf("rerun removed previous attempt unrelated file: %w", err)
 		}
 		for _, path := range staleFiles {
-			if path == trainingPackagePath {
-				continue
+			if _, err := os.Stat(path); err != nil {
+				return fmt.Errorf("previous attempt artifact was not preserved before rerun: %s: %w", path, err)
 			}
-			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("stale optimizer artifact still exists before rerun: %s", path)
-			}
+		}
+		if _, err := os.Stat(filepath.Join(secondAttemptRoot, "candidate.json")); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("new attempt unexpectedly contains stale candidate before rerun")
+		}
+		store := openCLIJobStore(t, home)
+		iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+		if err != nil {
+			_ = store.Close()
+			return fmt.Errorf("GetLatestSkillOptTrainIteration during rerun returned error: %w", err)
+		}
+		if err := store.Close(); err != nil {
+			return fmt.Errorf("Close during rerun returned error: %w", err)
+		}
+		if iteration.State != skillopt.TrainStateTrainingPackageCreated {
+			return fmt.Errorf("active optimizer rerun state = %s, want %s", iteration.State, skillopt.TrainStateTrainingPackageCreated)
+		}
+		optimizer := decodedSkillOptMetadataValue(decodedSkillOptMetadata(iteration.MetadataJSON)["optimizer"])
+		if metadataString(optimizer, "status") != "running" ||
+			metadataString(optimizer, "optimizer_attempt") != "attempt-002" ||
+			metadataString(optimizer, "optimizer_attempt_path") != secondAttemptRoot {
+			return fmt.Errorf("active optimizer attempt was not persisted before rerun launch: %s", iteration.MetadataJSON)
+		}
+		candidateImport := decodedSkillOptMetadataValue(decodedSkillOptMetadata(iteration.MetadataJSON)["candidate_import"])
+		if attemptState := skillOptTrainOptimizerAttemptState(skillopt.NormalizeTrainState(iteration.State), optimizer, candidateImport); attemptState != "running" {
+			return fmt.Errorf("active optimizer attempt state = %q, want running; metadata=%s", attemptState, iteration.MetadataJSON)
 		}
 		return nil
 	}
@@ -5592,8 +5673,15 @@ func TestSkillOptTrainContinueRejectsCandidateForDifferentSessionTemplate(t *tes
 	if len(runner.calls) != 2 {
 		t.Fatalf("optimizer calls after explicit optimizer rerun = %+v, want two", runner.calls)
 	}
-	if !strings.Contains(stdout.String(), "current_phase: candidate_created") || !strings.Contains(stdout.String(), "imported_candidate: planner@v2") {
+	if !strings.Contains(stdout.String(), "current_phase: candidate_created") ||
+		!strings.Contains(stdout.String(), "imported_candidate: planner@v2") ||
+		!strings.Contains(stdout.String(), "optimizer_attempt: attempt-002") {
 		t.Fatalf("explicit optimizer rerun stdout = %s", stdout.String())
+	}
+	for _, path := range staleFiles {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("previous attempt artifact was not preserved after rerun: %s: %v", path, err)
+		}
 	}
 }
 

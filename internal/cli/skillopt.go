@@ -1276,6 +1276,9 @@ type skillOptTrainOptimizerResult struct {
 	OutRoot               string
 	CandidatePackagePath  string
 	ArtifactDir           string
+	OptimizerRoot         string
+	OptimizerAttempt      string
+	OptimizerAttemptPath  string
 	Command               string
 	Args                  []string
 	DryRun                bool
@@ -1297,6 +1300,9 @@ type skillOptTrainRecoverResult struct {
 	NextAction           string   `json:"next_action,omitempty"`
 	RecoveryAvailable    bool     `json:"recovery_available"`
 	OutRoot              string   `json:"out_root,omitempty"`
+	OptimizerRoot        string   `json:"optimizer_root,omitempty"`
+	OptimizerAttempt     string   `json:"optimizer_attempt,omitempty"`
+	OptimizerAttemptPath string   `json:"optimizer_attempt_path,omitempty"`
 	CandidatePackagePath string   `json:"candidate_package,omitempty"`
 	ArtifactDir          string   `json:"artifact_dir,omitempty"`
 	Artifacts            []string `json:"artifacts,omitempty"`
@@ -1313,6 +1319,9 @@ type skillOptTrainBackendResolution struct {
 
 type skillOptTrainOptimizerPaths struct {
 	OutRoot              string
+	OptimizerRoot        string
+	OptimizerAttempt     string
+	OptimizerAttemptPath string
 	ArtifactRoot         string
 	TrainingPackagePath  string
 	CandidatePackagePath string
@@ -2736,18 +2745,17 @@ func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, sto
 		OutRoot:              optimizerPaths.OutRoot,
 		CandidatePackagePath: optimizerPaths.CandidatePackagePath,
 		ArtifactDir:          optimizerPaths.ArtifactDir,
+		OptimizerRoot:        optimizerPaths.OptimizerRoot,
+		OptimizerAttempt:     optimizerPaths.OptimizerAttempt,
+		OptimizerAttemptPath: optimizerPaths.OptimizerAttemptPath,
 		DryRun:               request.DryRun,
 		BackendResolution:    backendResolution,
 		RecoveryAvailable:    skillOptTrainOptimizerRecoveryAvailable(optimizerPaths),
 		OptimizerLockState:   skillOptTrainOptimizerLockState(request),
 	}
 	state := skillopt.NormalizeTrainState(iteration.State)
-	if state == skillopt.TrainStateOptimizerCompleted && request.RerunOptimizer {
-		state = skillopt.TrainStateTrainingPackageCreated
-	}
-	if state == skillopt.TrainStateOptimizerCompletedNoCandidate && request.RerunOptimizer {
-		session.State = skillopt.TrainStateTrainingPackageCreated
-		iteration.State = skillopt.TrainStateTrainingPackageCreated
+	rerunFromCompletedOptimizer := request.RerunOptimizer && (state == skillopt.TrainStateOptimizerCompleted || state == skillopt.TrainStateOptimizerCompletedNoCandidate)
+	if rerunFromCompletedOptimizer {
 		state = skillopt.TrainStateTrainingPackageCreated
 	}
 	if state == skillopt.TrainStateFeedbackSynced {
@@ -2771,26 +2779,30 @@ func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, sto
 		state = skillopt.TrainStateTrainingPackageCreated
 	}
 	if state == skillopt.TrainStateTrainingPackageCreated {
-		if err := skillopt.CanTransitionTrainIteration(iteration.State, skillopt.TrainStateOptimizerCompleted); err != nil {
-			return skillOptTrainOptimizerResult{}, err
+		if !rerunFromCompletedOptimizer {
+			if err := skillopt.CanTransitionTrainIteration(iteration.State, skillopt.TrainStateOptimizerCompleted); err != nil {
+				return skillOptTrainOptimizerResult{}, err
+			}
 		}
 		command, args, err := buildSkillOptTrainOptimizerCommand(iteration, request, optimizerPaths)
 		if err != nil {
+			if rerunFromCompletedOptimizer {
+				return result, err
+			}
 			if metaErr := recordSkillOptTrainOptimizerFailure(ctx, store, session, iteration, request, optimizerPaths, command, args, subprocess.Result{}, err); metaErr != nil {
 				return result, fmt.Errorf("%w; failed to record optimizer failure: %v", err, metaErr)
 			}
 			return result, err
 		}
+		if rerunFromCompletedOptimizer {
+			session.State = skillopt.TrainStateTrainingPackageCreated
+			iteration.State = skillopt.TrainStateTrainingPackageCreated
+		}
+		if err := recordSkillOptTrainOptimizerStarted(ctx, store, &session, &iteration, request, optimizerPaths, command, args); err != nil {
+			return result, err
+		}
 		result.Command = command
 		result.Args = args
-		if request.RerunOptimizer {
-			if err := cleanSkillOptTrainOptimizerRerunArtifacts(optimizerPaths); err != nil {
-				if metaErr := recordSkillOptTrainOptimizerFailure(ctx, store, session, iteration, request, optimizerPaths, command, args, subprocess.Result{}, err); metaErr != nil {
-					return result, fmt.Errorf("%w; failed to record optimizer failure: %v", err, metaErr)
-				}
-				return result, err
-			}
-		}
 		runResult, err := runSkillOptTrainOptimizer(ctx, optimizerPaths, request, command, args)
 		result.RecoveryAvailable = skillOptTrainOptimizerRecoveryAvailable(optimizerPaths)
 		if err != nil {
@@ -2834,12 +2846,15 @@ func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, sto
 		}
 		result.CandidateVersionID = version.ID
 		metadata := map[string]any{
-			"status":            "succeeded",
-			"candidate_version": version.ID,
-			"candidate_package": optimizerPaths.CandidatePackagePath,
-			"artifact_dir":      optimizerPaths.ArtifactDir,
-			"completed_at":      time.Now().UTC().Format(time.RFC3339Nano),
-			"source":            "gitmoot skillopt train continue",
+			"status":                 "succeeded",
+			"candidate_version":      version.ID,
+			"candidate_package":      optimizerPaths.CandidatePackagePath,
+			"artifact_dir":           optimizerPaths.ArtifactDir,
+			"optimizer_root":         optimizerPaths.OptimizerRoot,
+			"optimizer_attempt":      optimizerPaths.OptimizerAttempt,
+			"optimizer_attempt_path": optimizerPaths.OptimizerAttemptPath,
+			"completed_at":           time.Now().UTC().Format(time.RFC3339Nano),
+			"source":                 "gitmoot skillopt train continue",
 		}
 		session.State = skillopt.TrainStateCandidateCreated
 		iteration.State = skillopt.TrainStateCandidateCreated
@@ -2855,71 +2870,6 @@ func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, sto
 		return result, nil
 	}
 	return skillOptTrainOptimizerResult{}, fmt.Errorf("train iteration %s is at %s; expected %s, %s, or %s", iteration.ID, iteration.State, skillopt.TrainStateFeedbackSynced, skillopt.TrainStateTrainingPackageCreated, skillopt.TrainStateOptimizerCompleted)
-}
-
-func cleanSkillOptTrainOptimizerRerunArtifacts(paths skillOptTrainOptimizerPaths) error {
-	outRoot := strings.TrimSpace(paths.OutRoot)
-	if outRoot == "" {
-		return errors.New("optimizer out-root is required for rerun cleanup")
-	}
-	absOutRoot, err := filepath.Abs(outRoot)
-	if err != nil {
-		return fmt.Errorf("resolve optimizer out-root for rerun cleanup: %w", err)
-	}
-	if err := os.MkdirAll(absOutRoot, 0o755); err != nil {
-		return fmt.Errorf("create optimizer out-root for rerun cleanup: %w", err)
-	}
-	trainingPackagePath := strings.TrimSpace(paths.TrainingPackagePath)
-	preserveTrainingPackage := ""
-	if trainingPackagePath != "" {
-		if absTrainingPackage, err := filepath.Abs(trainingPackagePath); err == nil {
-			preserveTrainingPackage = filepath.Clean(absTrainingPackage)
-		}
-	}
-	for _, name := range []string{
-		"candidate.json",
-		"summary.json",
-		"runtime_state.json",
-		"history.json",
-		"best_skill.md",
-		"initial_skill.md",
-		"config.json",
-		"lr_history.jsonl",
-		"token_summary.json",
-		"optimizer",
-		"steps",
-		"skills",
-		"artifacts",
-		"selection_eval_baseline",
-		"test_eval_baseline",
-		"test_eval",
-	} {
-		path := filepath.Join(absOutRoot, name)
-		if preserveTrainingPackage != "" && filepath.Clean(path) == preserveTrainingPackage {
-			continue
-		}
-		if err := os.RemoveAll(path); err != nil {
-			return fmt.Errorf("remove stale optimizer artifact %s: %w", path, err)
-		}
-	}
-	for _, path := range []string{paths.CandidatePackagePath, paths.ArtifactDir} {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			continue
-		}
-		absPath, err := filepath.Abs(path)
-		if err != nil {
-			return fmt.Errorf("resolve optimizer artifact path for rerun cleanup: %w", err)
-		}
-		cleanPath := filepath.Clean(absPath)
-		if cleanPath == preserveTrainingPackage || strings.HasPrefix(cleanPath, filepath.Clean(absOutRoot)+string(os.PathSeparator)) {
-			continue
-		}
-		if err := os.RemoveAll(cleanPath); err != nil {
-			return fmt.Errorf("remove stale optimizer artifact %s: %w", cleanPath, err)
-		}
-	}
-	return nil
 }
 
 func skillOptTrainOptimizerLockState(request skillOptTrainOptimizerRequest) string {
@@ -4969,6 +4919,10 @@ func buildSkillOptTrainStatusVerbose(ctx context.Context, store *db.Store, sessi
 		NoCandidateDetails: decodedSkillOptMetadataValue(candidateImport["no_candidate_details"]),
 	}
 	if optimizer := decodedSkillOptMetadataValue(iterationMetadata["optimizer"]); len(optimizer) > 0 {
+		candidateImport := decodedSkillOptMetadataValue(iterationMetadata["candidate_import"])
+		if attemptState := skillOptTrainOptimizerAttemptState(skillopt.NormalizeTrainState(iteration.State), optimizer, candidateImport); attemptState != "" {
+			optimizer["optimizer_attempt_state"] = attemptState
+		}
 		optimizerPaths, err := resolveSkillOptTrainOptimizerPaths(config.Paths{}, session, *iteration, skillOptTrainOptimizerRequest{})
 		if err == nil {
 			optimizer["recovery_available"] = skillOptTrainOptimizerRecoveryAvailable(optimizerPaths)
@@ -5278,6 +5232,15 @@ func printSkillOptTrainStatusSnapshot(stdout io.Writer, snapshot skillOptTrainSt
 		printSkillOptNoCandidateDetails(stdout, snapshot.Verbose.Candidate.NoCandidateDetails)
 	}
 	if snapshot.Verbose.Optimizer != nil {
+		if attempt := metadataString(snapshot.Verbose.Optimizer, "optimizer_attempt"); attempt != "" {
+			writeLine(stdout, "optimizer_attempt: %s", attempt)
+		}
+		if status := metadataString(snapshot.Verbose.Optimizer, "optimizer_attempt_state"); status != "" {
+			writeLine(stdout, "optimizer_attempt_state: %s", status)
+		}
+		if path := metadataString(snapshot.Verbose.Optimizer, "optimizer_attempt_path"); path != "" {
+			writeLine(stdout, "optimizer_attempt_path: %s", path)
+		}
 		if available, ok := snapshot.Verbose.Optimizer["recovery_available"]; ok {
 			writeLine(stdout, "optimizer_recovery_available: %v", available)
 		}
@@ -5285,6 +5248,33 @@ func printSkillOptTrainStatusSnapshot(stdout io.Writer, snapshot skillOptTrainSt
 	for _, lock := range snapshot.Verbose.ActiveLocks {
 		writeLine(stdout, "active_lock: %s", skillOptTrainStatusLockText(lock))
 	}
+}
+
+func skillOptTrainOptimizerAttemptState(currentPhase string, optimizer map[string]any, candidateImport map[string]any) string {
+	optimizerStatus := metadataString(optimizer, "status")
+	if optimizerStatus == "running" {
+		return "running"
+	}
+	switch strings.TrimSpace(currentPhase) {
+	case skillopt.TrainStateOptimizerCompletedNoCandidate:
+		return "completed_no_candidate"
+	case skillopt.TrainStateCandidateCreated, skillopt.TrainStateCandidateReviewPublished, skillopt.TrainStateCandidatePromoted, skillopt.TrainStateCandidateRejected:
+		return "completed_candidate"
+	}
+	optimizerAttempt := metadataString(optimizer, "optimizer_attempt")
+	importAttempt := metadataString(candidateImport, "optimizer_attempt")
+	if optimizerAttempt != "" && importAttempt != "" && optimizerAttempt != importAttempt {
+		candidateImport = nil
+	}
+	switch metadataString(candidateImport, "status") {
+	case "no_candidate":
+		return "completed_no_candidate"
+	case "succeeded", "recovered":
+		return "completed_candidate"
+	case "failed":
+		return "candidate_import_failed"
+	}
+	return optimizerStatus
 }
 
 func printSkillOptNoCandidateDetails(stdout io.Writer, details map[string]any) {
@@ -5795,61 +5785,163 @@ func skillOptTrainBackendConfigStatus(resolution skillOptTrainBackendResolution)
 func resolveSkillOptTrainOptimizerPaths(paths config.Paths, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, request skillOptTrainOptimizerRequest) (skillOptTrainOptimizerPaths, error) {
 	outRoot := strings.TrimSpace(request.OutRoot)
 	optimizerMetadata := decodedSkillOptMetadataValue(decodedSkillOptMetadata(iteration.MetadataJSON)["optimizer"])
+	persistedOptimizerRoot := metadataString(optimizerMetadata, "optimizer_root")
+	persistedAttempt := metadataString(optimizerMetadata, "optimizer_attempt")
+	persistedAttemptPath := metadataString(optimizerMetadata, "optimizer_attempt_path")
 	persistedOutRoot := metadataString(optimizerMetadata, "out_root")
 	persistedTrainingPackage := metadataString(optimizerMetadata, "training_package")
 	persistedCandidateOutput := metadataString(optimizerMetadata, "candidate_output")
 	persistedArtifactDir := metadataString(optimizerMetadata, "artifact_dir")
+	persistedBaseRoot := persistedOptimizerRoot
+	if persistedBaseRoot == "" {
+		persistedBaseRoot = inferSkillOptTrainOptimizerRoot(persistedOutRoot, persistedAttempt)
+	}
 	if persistedTrainingPackage != "" && skillopt.NormalizeTrainState(iteration.State) != skillopt.TrainStateFeedbackSynced {
 		if outRoot != "" {
 			absRequestedOutRoot, err := filepath.Abs(outRoot)
 			if err != nil {
 				return skillOptTrainOptimizerPaths{}, fmt.Errorf("resolve optimizer out-root: %w", err)
 			}
-			absPersistedOutRoot := persistedOutRoot
-			if absPersistedOutRoot == "" {
-				absPersistedOutRoot = filepath.Dir(persistedTrainingPackage)
+			absPersistedRoot := persistedBaseRoot
+			if absPersistedRoot == "" {
+				absPersistedRoot = persistedOutRoot
 			}
-			if absPersistedOutRoot, err = filepath.Abs(absPersistedOutRoot); err != nil {
+			if absPersistedRoot == "" {
+				absPersistedRoot = filepath.Dir(persistedTrainingPackage)
+			}
+			if absPersistedRoot, err = filepath.Abs(absPersistedRoot); err != nil {
 				return skillOptTrainOptimizerPaths{}, fmt.Errorf("resolve persisted optimizer out-root: %w", err)
 			}
-			if absRequestedOutRoot != absPersistedOutRoot {
+			absPersistedOutRoot := ""
+			if persistedOutRoot != "" {
+				if absPersistedOutRoot, err = filepath.Abs(persistedOutRoot); err != nil {
+					return skillOptTrainOptimizerPaths{}, fmt.Errorf("resolve persisted optimizer attempt out-root: %w", err)
+				}
+			}
+			if absRequestedOutRoot != absPersistedRoot && absRequestedOutRoot != absPersistedOutRoot {
 				return skillOptTrainOptimizerPaths{}, fmt.Errorf("optimizer package already exported at %s; retry with the same --out-root or omit --out-root", persistedTrainingPackage)
 			}
 		}
-		outRoot = persistedOutRoot
+		outRoot = persistedBaseRoot
 		if outRoot == "" {
-			outRoot = filepath.Dir(persistedTrainingPackage)
+			outRoot = persistedOutRoot
+		}
+		if outRoot == "" {
+			outRoot = filepath.Dir(filepath.Dir(filepath.Dir(persistedTrainingPackage)))
 		}
 	}
 	if outRoot == "" {
-		outRoot = persistedOutRoot
+		outRoot = persistedBaseRoot
+	}
+	if outRoot == "" {
+		outRoot = inferSkillOptTrainOptimizerRoot(persistedOutRoot, persistedAttempt)
 	}
 	if outRoot == "" {
 		outRoot = filepath.Join(paths.Evals, "train", session.ID, iteration.ID, "optimizer")
 	}
-	absOutRoot, err := filepath.Abs(outRoot)
+	absOptimizerRoot, err := filepath.Abs(outRoot)
 	if err != nil {
 		return skillOptTrainOptimizerPaths{}, fmt.Errorf("resolve optimizer out-root: %w", err)
 	}
-	trainingPackagePath := filepath.Join(absOutRoot, "training.json")
-	candidatePackagePath := filepath.Join(absOutRoot, "candidate.json")
-	artifactDir := filepath.Join(absOutRoot, "artifacts")
-	if persistedTrainingPackage != "" && skillopt.NormalizeTrainState(iteration.State) != skillopt.TrainStateFeedbackSynced {
-		trainingPackagePath = persistedTrainingPackage
-		if persistedCandidateOutput != "" {
-			candidatePackagePath = persistedCandidateOutput
+	state := skillopt.NormalizeTrainState(iteration.State)
+	attempt := persistedAttempt
+	attemptPath := persistedAttemptPath
+	if state == skillopt.TrainStateFeedbackSynced || persistedTrainingPackage == "" {
+		attempt = "attempt-001"
+		attemptPath = filepath.Join(absOptimizerRoot, "attempts", attempt)
+	} else if request.RerunOptimizer {
+		nextAttempt, err := nextSkillOptTrainOptimizerAttempt(absOptimizerRoot, attempt)
+		if err != nil {
+			return skillOptTrainOptimizerPaths{}, err
 		}
-		if persistedArtifactDir != "" {
-			artifactDir = persistedArtifactDir
+		attempt = nextAttempt
+		attemptPath = filepath.Join(absOptimizerRoot, "attempts", attempt)
+	} else if attemptPath == "" {
+		attemptPath = persistedOutRoot
+	}
+	if attemptPath == "" {
+		attemptPath = filepath.Join(absOptimizerRoot, "attempts", firstNonEmpty(attempt, "attempt-001"))
+	}
+	absAttemptPath, err := filepath.Abs(attemptPath)
+	if err != nil {
+		return skillOptTrainOptimizerPaths{}, fmt.Errorf("resolve optimizer attempt path: %w", err)
+	}
+	if attempt == "" {
+		attempt = filepath.Base(absAttemptPath)
+	}
+	trainingPackagePath := filepath.Join(absAttemptPath, "training.json")
+	candidatePackagePath := filepath.Join(absAttemptPath, "candidate.json")
+	artifactDir := filepath.Join(absAttemptPath, "artifacts")
+	if persistedTrainingPackage != "" && state != skillopt.TrainStateFeedbackSynced {
+		trainingPackagePath = persistedTrainingPackage
+		if request.RerunOptimizer {
+			candidatePackagePath = filepath.Join(absAttemptPath, "candidate.json")
+			artifactDir = filepath.Join(absAttemptPath, "artifacts")
+		} else {
+			if persistedCandidateOutput != "" {
+				candidatePackagePath = persistedCandidateOutput
+			}
+			if persistedArtifactDir != "" {
+				artifactDir = persistedArtifactDir
+			}
 		}
 	}
 	return skillOptTrainOptimizerPaths{
-		OutRoot:              absOutRoot,
+		OutRoot:              absAttemptPath,
+		OptimizerRoot:        absOptimizerRoot,
+		OptimizerAttempt:     attempt,
+		OptimizerAttemptPath: absAttemptPath,
 		ArtifactRoot:         paths.ArtifactBlobs,
 		TrainingPackagePath:  trainingPackagePath,
 		CandidatePackagePath: candidatePackagePath,
 		ArtifactDir:          artifactDir,
 	}, nil
+}
+
+func inferSkillOptTrainOptimizerRoot(outRoot string, attempt string) string {
+	outRoot = strings.TrimSpace(outRoot)
+	attempt = strings.TrimSpace(attempt)
+	if outRoot == "" || attempt == "" {
+		return outRoot
+	}
+	clean := filepath.Clean(outRoot)
+	if filepath.Base(clean) != attempt {
+		return outRoot
+	}
+	attemptsDir := filepath.Dir(clean)
+	if filepath.Base(attemptsDir) != "attempts" {
+		return outRoot
+	}
+	return filepath.Dir(attemptsDir)
+}
+
+func nextSkillOptTrainOptimizerAttempt(root string, currentAttempt string) (string, error) {
+	maxAttempt := skillOptTrainOptimizerAttemptNumber(currentAttempt)
+	entries, err := os.ReadDir(filepath.Join(root, "attempts"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read optimizer attempts: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if number := skillOptTrainOptimizerAttemptNumber(entry.Name()); number > maxAttempt {
+			maxAttempt = number
+		}
+	}
+	return fmt.Sprintf("attempt-%03d", maxAttempt+1), nil
+}
+
+func skillOptTrainOptimizerAttemptNumber(attempt string) int {
+	attempt = strings.TrimSpace(attempt)
+	if !strings.HasPrefix(attempt, "attempt-") {
+		return 0
+	}
+	number, err := strconv.Atoi(strings.TrimPrefix(attempt, "attempt-"))
+	if err != nil || number < 0 {
+		return 0
+	}
+	return number
 }
 
 func exportSkillOptTrainPackage(ctx context.Context, store *db.Store, iteration db.SkillOptTrainIteration, paths skillOptTrainOptimizerPaths) (map[string]any, error) {
@@ -5866,14 +5958,17 @@ func exportSkillOptTrainPackage(ctx context.Context, store *db.Store, iteration 
 		return nil, fmt.Errorf("write training package: %w", err)
 	}
 	return map[string]any{
-		"status":           "package_created",
-		"training_package": paths.TrainingPackagePath,
-		"out_root":         paths.OutRoot,
-		"artifact_root":    paths.ArtifactRoot,
-		"candidate_output": paths.CandidatePackagePath,
-		"artifact_dir":     paths.ArtifactDir,
-		"created_at":       time.Now().UTC().Format(time.RFC3339Nano),
-		"source":           "gitmoot skillopt train continue",
+		"status":                 "package_created",
+		"training_package":       paths.TrainingPackagePath,
+		"out_root":               paths.OutRoot,
+		"optimizer_root":         paths.OptimizerRoot,
+		"optimizer_attempt":      paths.OptimizerAttempt,
+		"optimizer_attempt_path": paths.OptimizerAttemptPath,
+		"artifact_root":          paths.ArtifactRoot,
+		"candidate_output":       paths.CandidatePackagePath,
+		"artifact_dir":           paths.ArtifactDir,
+		"created_at":             time.Now().UTC().Format(time.RFC3339Nano),
+		"source":                 "gitmoot skillopt train continue",
 	}, nil
 }
 
@@ -5913,6 +6008,9 @@ func recoverSkillOptTrainOptimizerArtifacts(ctx context.Context, paths config.Pa
 		CurrentPhase:         skillopt.NormalizeTrainState(iteration.State),
 		RecoveryAvailable:    skillOptTrainOptimizerRecoveryAvailable(optimizerPaths),
 		OutRoot:              optimizerPaths.OutRoot,
+		OptimizerRoot:        optimizerPaths.OptimizerRoot,
+		OptimizerAttempt:     optimizerPaths.OptimizerAttempt,
+		OptimizerAttemptPath: optimizerPaths.OptimizerAttemptPath,
 		CandidatePackagePath: optimizerPaths.CandidatePackagePath,
 		ArtifactDir:          optimizerPaths.ArtifactDir,
 		Artifacts:            existingSkillOptTrainOptimizerArtifacts(optimizerPaths),
@@ -5956,6 +6054,9 @@ func recoverSkillOptTrainOptimizerArtifacts(ctx context.Context, paths config.Pa
 	result.CurrentPhase = skillopt.NormalizeTrainState(iteration.State)
 	result.RecoveryAvailable = skillOptTrainOptimizerRecoveryAvailable(optimizerPaths)
 	result.OutRoot = optimizerPaths.OutRoot
+	result.OptimizerRoot = optimizerPaths.OptimizerRoot
+	result.OptimizerAttempt = optimizerPaths.OptimizerAttempt
+	result.OptimizerAttemptPath = optimizerPaths.OptimizerAttemptPath
 	result.CandidatePackagePath = optimizerPaths.CandidatePackagePath
 	result.ArtifactDir = optimizerPaths.ArtifactDir
 	result.Artifacts = existingSkillOptTrainOptimizerArtifacts(optimizerPaths)
@@ -6060,12 +6161,15 @@ func recoverSkillOptTrainOptimizerArtifacts(ctx context.Context, paths config.Pa
 		return result, err
 	}
 	metadata := map[string]any{
-		"status":            "recovered",
-		"candidate_version": version.ID,
-		"candidate_package": optimizerPaths.CandidatePackagePath,
-		"artifact_dir":      optimizerPaths.ArtifactDir,
-		"completed_at":      time.Now().UTC().Format(time.RFC3339Nano),
-		"source":            "gitmoot skillopt train recover",
+		"status":                 "recovered",
+		"candidate_version":      version.ID,
+		"candidate_package":      optimizerPaths.CandidatePackagePath,
+		"artifact_dir":           optimizerPaths.ArtifactDir,
+		"optimizer_root":         optimizerPaths.OptimizerRoot,
+		"optimizer_attempt":      optimizerPaths.OptimizerAttempt,
+		"optimizer_attempt_path": optimizerPaths.OptimizerAttemptPath,
+		"completed_at":           time.Now().UTC().Format(time.RFC3339Nano),
+		"source":                 "gitmoot skillopt train recover",
 	}
 	session.State = skillopt.TrainStateCandidateCreated
 	iteration.State = skillopt.TrainStateCandidateCreated
@@ -6105,14 +6209,17 @@ func markSkillOptTrainOptimizerRecoveredComplete(ctx context.Context, store *db.
 		return session, &iteration, nil
 	}
 	metadata := map[string]any{
-		"status":           "recovered",
-		"training_package": paths.TrainingPackagePath,
-		"out_root":         paths.OutRoot,
-		"artifact_root":    paths.ArtifactRoot,
-		"candidate_output": paths.CandidatePackagePath,
-		"artifact_dir":     paths.ArtifactDir,
-		"completed_at":     time.Now().UTC().Format(time.RFC3339Nano),
-		"source":           "gitmoot skillopt train recover",
+		"status":                 "recovered",
+		"training_package":       paths.TrainingPackagePath,
+		"out_root":               paths.OutRoot,
+		"optimizer_root":         paths.OptimizerRoot,
+		"optimizer_attempt":      paths.OptimizerAttempt,
+		"optimizer_attempt_path": paths.OptimizerAttemptPath,
+		"artifact_root":          paths.ArtifactRoot,
+		"candidate_output":       paths.CandidatePackagePath,
+		"artifact_dir":           paths.ArtifactDir,
+		"completed_at":           time.Now().UTC().Format(time.RFC3339Nano),
+		"source":                 "gitmoot skillopt train recover",
 	}
 	session.State = skillopt.TrainStateOptimizerCompleted
 	iteration.State = skillopt.TrainStateOptimizerCompleted
@@ -6201,6 +6308,9 @@ func printSkillOptTrainRecoverResult(stdout io.Writer, result skillOptTrainRecov
 	writeLine(stdout, "current_phase: %s", emptyText(result.CurrentPhase))
 	writeLine(stdout, "recovery_available: %t", result.RecoveryAvailable)
 	writeLine(stdout, "optimizer_out_root: %s", emptyText(result.OutRoot))
+	writeLine(stdout, "optimizer_root: %s", emptyText(result.OptimizerRoot))
+	writeLine(stdout, "optimizer_attempt: %s", emptyText(result.OptimizerAttempt))
+	writeLine(stdout, "optimizer_attempt_path: %s", emptyText(result.OptimizerAttemptPath))
 	writeLine(stdout, "candidate_package: %s", emptyText(result.CandidatePackagePath))
 	writeLine(stdout, "artifact_dir: %s", emptyText(result.ArtifactDir))
 	writeLine(stdout, "candidate: %s", emptyText(result.CandidateVersionID))
@@ -6353,23 +6463,50 @@ func subprocessDiagnostics(result subprocess.Result) string {
 
 func skillOptTrainOptimizerMetadata(request skillOptTrainOptimizerRequest, paths skillOptTrainOptimizerPaths, command string, args []string, result subprocess.Result, status string, failure error) map[string]any {
 	metadata := map[string]any{
-		"status":           status,
-		"command":          command,
-		"args":             args,
-		"training_package": paths.TrainingPackagePath,
-		"out_root":         paths.OutRoot,
-		"candidate_output": paths.CandidatePackagePath,
-		"artifact_dir":     paths.ArtifactDir,
-		"dry_run":          request.DryRun,
-		"stdout":           truncateForMetadata(result.Stdout),
-		"stderr":           truncateForMetadata(result.Stderr),
-		"completed_at":     time.Now().UTC().Format(time.RFC3339Nano),
-		"source":           "gitmoot skillopt train continue",
+		"status":                 status,
+		"command":                command,
+		"args":                   args,
+		"training_package":       paths.TrainingPackagePath,
+		"out_root":               paths.OutRoot,
+		"optimizer_root":         paths.OptimizerRoot,
+		"optimizer_attempt":      paths.OptimizerAttempt,
+		"optimizer_attempt_path": paths.OptimizerAttemptPath,
+		"candidate_output":       paths.CandidatePackagePath,
+		"artifact_dir":           paths.ArtifactDir,
+		"dry_run":                request.DryRun,
+		"stdout":                 truncateForMetadata(result.Stdout),
+		"stderr":                 truncateForMetadata(result.Stderr),
+		"completed_at":           time.Now().UTC().Format(time.RFC3339Nano),
+		"source":                 "gitmoot skillopt train continue",
 	}
 	if failure != nil {
 		metadata["error"] = failure.Error()
 	}
 	return metadata
+}
+
+func recordSkillOptTrainOptimizerStarted(ctx context.Context, store *db.Store, session *db.SkillOptTrainSession, iteration *db.SkillOptTrainIteration, request skillOptTrainOptimizerRequest, paths skillOptTrainOptimizerPaths, command string, args []string) error {
+	metadata := map[string]any{
+		"status":                 "running",
+		"command":                command,
+		"args":                   args,
+		"training_package":       paths.TrainingPackagePath,
+		"out_root":               paths.OutRoot,
+		"optimizer_root":         paths.OptimizerRoot,
+		"optimizer_attempt":      paths.OptimizerAttempt,
+		"optimizer_attempt_path": paths.OptimizerAttemptPath,
+		"candidate_output":       paths.CandidatePackagePath,
+		"artifact_dir":           paths.ArtifactDir,
+		"dry_run":                request.DryRun,
+		"started_at":             time.Now().UTC().Format(time.RFC3339Nano),
+		"source":                 "gitmoot skillopt train continue",
+	}
+	session.MetadataJSON = mergeSkillOptTrainMetadata(session.MetadataJSON, "optimizer", metadata)
+	iteration.MetadataJSON = mergeSkillOptTrainMetadata(iteration.MetadataJSON, "optimizer", metadata)
+	if err := store.UpsertSkillOptTrainSession(ctx, *session); err != nil {
+		return err
+	}
+	return store.UpsertSkillOptTrainIteration(ctx, *iteration)
 }
 
 func recordSkillOptTrainOptimizerFailure(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, request skillOptTrainOptimizerRequest, paths skillOptTrainOptimizerPaths, command string, args []string, result subprocess.Result, failure error) error {
@@ -6384,12 +6521,15 @@ func recordSkillOptTrainOptimizerFailure(ctx context.Context, store *db.Store, s
 
 func recordSkillOptTrainCandidateImportFailure(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, paths skillOptTrainOptimizerPaths, failure error) error {
 	metadata := map[string]any{
-		"status":            "failed",
-		"candidate_package": paths.CandidatePackagePath,
-		"artifact_dir":      paths.ArtifactDir,
-		"error":             failure.Error(),
-		"completed_at":      time.Now().UTC().Format(time.RFC3339Nano),
-		"source":            "gitmoot skillopt train continue",
+		"status":                 "failed",
+		"candidate_package":      paths.CandidatePackagePath,
+		"artifact_dir":           paths.ArtifactDir,
+		"optimizer_root":         paths.OptimizerRoot,
+		"optimizer_attempt":      paths.OptimizerAttempt,
+		"optimizer_attempt_path": paths.OptimizerAttemptPath,
+		"error":                  failure.Error(),
+		"completed_at":           time.Now().UTC().Format(time.RFC3339Nano),
+		"source":                 "gitmoot skillopt train continue",
 	}
 	session.State = skillopt.TrainStateOptimizerCompleted
 	iteration.State = skillopt.TrainStateOptimizerCompleted
@@ -6414,13 +6554,16 @@ func recordSkillOptTrainNoCandidate(ctx context.Context, store *db.Store, sessio
 		nextAction = packageNextAction
 	}
 	metadata := map[string]any{
-		"status":              "no_candidate",
-		"candidate_package":   paths.CandidatePackagePath,
-		"artifact_dir":        paths.ArtifactDir,
-		"no_candidate_reason": reason,
-		"next_action":         nextAction,
-		"completed_at":        time.Now().UTC().Format(time.RFC3339Nano),
-		"source":              "gitmoot skillopt train continue",
+		"status":                 "no_candidate",
+		"candidate_package":      paths.CandidatePackagePath,
+		"artifact_dir":           paths.ArtifactDir,
+		"optimizer_root":         paths.OptimizerRoot,
+		"optimizer_attempt":      paths.OptimizerAttempt,
+		"optimizer_attempt_path": paths.OptimizerAttemptPath,
+		"no_candidate_reason":    reason,
+		"next_action":            nextAction,
+		"completed_at":           time.Now().UTC().Format(time.RFC3339Nano),
+		"source":                 "gitmoot skillopt train continue",
 	}
 	if len(packageDetails) > 0 {
 		metadata["no_candidate_details"] = packageDetails
@@ -6558,6 +6701,9 @@ func skillOptTrainOptimizerReportLines(result skillOptTrainOptimizerResult) []st
 	lines := []string{
 		fmt.Sprintf("training_package: %s", result.TrainingPackagePath),
 		fmt.Sprintf("optimizer_out_root: %s", result.OutRoot),
+		fmt.Sprintf("optimizer_root: %s", result.OptimizerRoot),
+		fmt.Sprintf("optimizer_attempt: %s", result.OptimizerAttempt),
+		fmt.Sprintf("optimizer_attempt_path: %s", result.OptimizerAttemptPath),
 		fmt.Sprintf("candidate_package: %s", result.CandidatePackagePath),
 		fmt.Sprintf("artifact_dir: %s", result.ArtifactDir),
 		fmt.Sprintf("backend: %s", result.BackendResolution.Backend),
