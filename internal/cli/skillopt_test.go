@@ -3016,7 +3016,20 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 	candidate := cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan the work.")
 	candidate.EvalReport = json.RawMessage(`{
 		"promotable": false,
-		"no_candidate_reason": "gate_rejected_best_origin_initial_skill"
+		"no_candidate_reason": "gate_rejected_best_origin_initial_skill",
+		"no_candidate_details": {
+			"attempted_patch": "artifact delivery only",
+			"baseline_gate": 0.89,
+			"candidate_gate": 0.84,
+			"retry_attempts": "1/1",
+			"duplicate_retry_detected": true,
+			"evaluator_reason": "Candidate was valid but had weaker imagery.",
+			"next_action": [
+				"collect more feedback",
+				"rerun with higher retry budget",
+				"manually revise skill direction"
+			]
+		}
 	}`)
 	candidate.Summary.Metadata = json.RawMessage(`{
 		"promotable": false,
@@ -3082,7 +3095,9 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 	}
 	if !strings.Contains(iteration.MetadataJSON, `"status":"no_candidate"`) ||
 		!strings.Contains(iteration.MetadataJSON, `"no_candidate_reason":"gate_rejected_best_origin_initial_skill"`) ||
-		!strings.Contains(iteration.MetadataJSON, `"attempted_patch":"artifact delivery only"`) {
+		!strings.Contains(iteration.MetadataJSON, `"attempted_patch":"artifact delivery only"`) ||
+		!strings.Contains(iteration.MetadataJSON, `"duplicate_retry_detected":true`) ||
+		!strings.Contains(iteration.MetadataJSON, `"evaluator_reason":"Candidate was valid but had weaker imagery."`) {
 		t.Fatalf("iteration metadata after no-candidate = %s", iteration.MetadataJSON)
 	}
 	if _, err := store.GetAgentTemplateVersionByID(context.Background(), "planner@v2"); !errors.Is(err, sql.ErrNoRows) {
@@ -3105,6 +3120,7 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 	if statusJSON.StatusPhase != "optimizer_completed_no_candidate" ||
 		statusJSON.NoCandidateReason != "gate_rejected_best_origin_initial_skill" ||
 		statusJSON.NoCandidateDetails["attempted_patch"] != "artifact delivery only" ||
+		statusJSON.NoCandidateDetails["duplicate_retry_detected"] != true ||
 		statusJSON.Verbose == nil ||
 		statusJSON.Verbose.Optimizer["optimizer_attempt"] != "attempt-001" ||
 		statusJSON.Verbose.Optimizer["optimizer_attempt_state"] != "completed_no_candidate" {
@@ -3123,8 +3139,13 @@ func TestSkillOptTrainContinueRecordsNoCandidateResult(t *testing.T) {
 		"optimizer_attempt_state: completed_no_candidate",
 		"optimizer_attempt_path: " + filepath.Join(outRoot, "attempts", "attempt-001"),
 		"attempted_patch: artifact delivery only",
+		"baseline_gate: 0.89",
+		"candidate_gate: 0.84",
 		"retry_attempts: 1/1",
-		"rejection: baseline_gate=0.89 candidate_gate=0.84",
+		"duplicate_retry_detected: true",
+		"evaluator_reason: Candidate was valid but had weaker imagery.",
+		"next_action_option: collect more feedback",
+		"next_action_option: rerun with higher retry budget",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("train status no-candidate text missing %q:\n%s", want, stdout.String())
