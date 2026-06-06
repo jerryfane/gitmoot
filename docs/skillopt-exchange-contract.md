@@ -28,6 +28,8 @@ The exported package has:
 
 - `kind: gitmoot-skillopt-training-package`
 - `contract_version: 1`
+- `training_mode`: the Gitmoot training/review workflow mode, such as
+  `explore`, `refine`, `distill`, or `validate`
 - `template`: the logical template id, current or pinned version id, content
   hash, metadata, source, and exact template content
 - `eval_run`: run id, target repo, state, mode, exploration level, option
@@ -42,7 +44,10 @@ The exported package has:
   reasoning
 - `pairwise_preferences`: derived pairwise preferences expanded from ranked
   feedback, for example `C > A > D > B` becomes six ordered preferences
-- `evaluator_config`: the run metadata used by the external optimizer
+- `evaluator_config`: evaluator and run metadata used by the external
+  optimizer. Top-level workflow mode is exported as `training_mode`, not as
+  `evaluator_config.mode`; `evaluator_config.mode` is reserved for evaluator
+  implementation ids or drivers.
 
 Artifact package entries reference local SHA256 blobs stored under Gitmoot home.
 The export does not copy blobs into the repository by default.

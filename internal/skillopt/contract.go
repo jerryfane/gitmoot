@@ -217,6 +217,7 @@ type PairwisePreference struct {
 type TrainingPackage struct {
 	Kind                 string                `json:"kind"`
 	ContractVersion      int                   `json:"contract_version"`
+	TrainingMode         string                `json:"training_mode,omitempty"`
 	Template             TemplateSnapshot      `json:"template"`
 	EvalRun              EvalRun               `json:"eval_run"`
 	Items                []EvalItem            `json:"items"`
@@ -337,10 +338,15 @@ func ExportTrainingPackage(ctx context.Context, store *db.Store, runID string) (
 	if err != nil {
 		return TrainingPackage{}, fmt.Errorf("eval run metadata_json: %w", err)
 	}
-	evaluatorProfile := EvaluatorProfileFromConfig(metadata)
+	evaluatorConfig, err := evaluatorConfigFromRunMetadata(metadata)
+	if err != nil {
+		return TrainingPackage{}, fmt.Errorf("eval run evaluator_config: %w", err)
+	}
+	evaluatorProfile := EvaluatorProfileFromConfig(evaluatorConfig)
 	return TrainingPackage{
 		Kind:            TrainingPackageKind,
 		ContractVersion: ContractVersion,
+		TrainingMode:    run.Mode,
 		Template:        snapshot,
 		EvalRun: EvalRun{
 			ID:                run.ID,
@@ -359,9 +365,43 @@ func ExportTrainingPackage(ctx context.Context, store *db.Store, runID string) (
 		RankedFeedbackEvents: rankedFeedbackEvents,
 		PairwisePreferences:  pairwisePreferences,
 		FeedbackContext:      feedbackContext,
-		EvaluatorConfig:      metadata,
+		EvaluatorConfig:      evaluatorConfig,
 		EvaluatorProfile:     evaluatorProfile,
 	}, nil
+}
+
+func evaluatorConfigFromRunMetadata(metadata json.RawMessage) (json.RawMessage, error) {
+	metadata = bytes.TrimSpace(metadata)
+	if len(metadata) == 0 {
+		return nil, nil
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(metadata, &decoded); err != nil {
+		return nil, err
+	}
+	if rawMode, ok := decoded["mode"]; ok {
+		var mode string
+		if err := json.Unmarshal(rawMode, &mode); err == nil && isTrainingMode(mode) {
+			delete(decoded, "mode")
+		}
+	}
+	if len(decoded) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(decoded)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func isTrainingMode(value string) bool {
+	switch strings.TrimSpace(value) {
+	case db.EvalRunModeExplore, db.EvalRunModeRefine, db.EvalRunModeDistill, db.EvalRunModeValidate:
+		return true
+	default:
+		return false
+	}
 }
 
 func buildTrainingFeedbackContext(run db.EvalRun, feedback []FeedbackEvent, ranked []RankedFeedbackEvent) (json.RawMessage, error) {

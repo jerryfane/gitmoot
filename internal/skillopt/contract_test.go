@@ -122,7 +122,7 @@ func TestExportTrainingPackageIncludesPreferredGateMetadata(t *testing.T) {
 		Mode:              db.EvalRunModeExplore,
 		ExplorationLevel:  db.ExplorationLevelHigh,
 		OptionsCount:      4,
-		MetadataJSON:      `{"evaluation":{"preferred_gate":"soft"},"source":"gitmoot skillopt train start"}`,
+		MetadataJSON:      `{"mode":"explore","evaluation":{"preferred_gate":"soft"},"source":"gitmoot skillopt train start"}`,
 	}); err != nil {
 		t.Fatalf("UpsertEvalRun returned error: %v", err)
 	}
@@ -143,9 +143,97 @@ func TestExportTrainingPackageIncludesPreferredGateMetadata(t *testing.T) {
 	if err := json.Unmarshal(pkg.EvaluatorConfig, &evaluator); err != nil {
 		t.Fatalf("decode evaluator config: %v", err)
 	}
+	if pkg.TrainingMode != db.EvalRunModeExplore {
+		t.Fatalf("training mode = %q, want %q", pkg.TrainingMode, db.EvalRunModeExplore)
+	}
+	if evaluator["mode"] != nil {
+		t.Fatalf("evaluator config leaked training mode = %s", string(pkg.EvaluatorConfig))
+	}
 	evaluation, ok := evaluator["evaluation"].(map[string]any)
 	if !ok || evaluation["preferred_gate"] != "soft" {
 		t.Fatalf("evaluator config = %s", string(pkg.EvaluatorConfig))
+	}
+}
+
+func TestExportTrainingPackagePreservesEvaluatorMode(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	template := testTemplate("judge", "Judge carefully.")
+	if err := store.UpsertAgentTemplate(ctx, template); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	installed, err := store.GetAgentTemplate(ctx, "judge")
+	if err != nil {
+		t.Fatalf("GetAgentTemplate returned error: %v", err)
+	}
+	if err := store.UpsertEvalRun(ctx, db.EvalRun{
+		ID:                "judge-run-1",
+		TemplateID:        "judge",
+		TemplateVersionID: installed.VersionID,
+		TargetRepo:        "owner/repo",
+		State:             "review",
+		Mode:              db.EvalRunModeRefine,
+		MetadataJSON:      `{"mode":"llm_judge","evaluation":{"preferred_gate":"soft"}}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalRun returned error: %v", err)
+	}
+
+	pkg, err := ExportTrainingPackage(ctx, store, "judge-run-1")
+	if err != nil {
+		t.Fatalf("ExportTrainingPackage returned error: %v", err)
+	}
+	if pkg.TrainingMode != db.EvalRunModeRefine {
+		t.Fatalf("training mode = %q, want %q", pkg.TrainingMode, db.EvalRunModeRefine)
+	}
+	var evaluator map[string]any
+	if err := json.Unmarshal(pkg.EvaluatorConfig, &evaluator); err != nil {
+		t.Fatalf("decode evaluator config: %v", err)
+	}
+	if evaluator["mode"] != "llm_judge" {
+		t.Fatalf("evaluator config did not preserve evaluator mode: %s", string(pkg.EvaluatorConfig))
+	}
+}
+
+func TestExportTrainingPackagePreservesEvaluatorConfigNumberFidelity(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	template := testTemplate("judge", "Judge carefully.")
+	if err := store.UpsertAgentTemplate(ctx, template); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	installed, err := store.GetAgentTemplate(ctx, "judge")
+	if err != nil {
+		t.Fatalf("GetAgentTemplate returned error: %v", err)
+	}
+	if err := store.UpsertEvalRun(ctx, db.EvalRun{
+		ID:                "judge-run-2",
+		TemplateID:        "judge",
+		TemplateVersionID: installed.VersionID,
+		TargetRepo:        "owner/repo",
+		State:             "review",
+		Mode:              db.EvalRunModeExplore,
+		MetadataJSON:      `{"mode":"explore","evaluation":{"seed":9007199254740993123}}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalRun returned error: %v", err)
+	}
+
+	pkg, err := ExportTrainingPackage(ctx, store, "judge-run-2")
+	if err != nil {
+		t.Fatalf("ExportTrainingPackage returned error: %v", err)
+	}
+	if strings.Contains(string(pkg.EvaluatorConfig), `"mode"`) {
+		t.Fatalf("evaluator config leaked training mode = %s", string(pkg.EvaluatorConfig))
+	}
+	if !strings.Contains(string(pkg.EvaluatorConfig), `9007199254740993123`) {
+		t.Fatalf("evaluator config rewrote large numeric value: %s", string(pkg.EvaluatorConfig))
 	}
 }
 
