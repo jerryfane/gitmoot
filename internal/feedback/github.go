@@ -2,6 +2,7 @@ package feedback
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -172,16 +173,15 @@ func (c GitHubCollector) rankedBody(ctx context.Context, store *db.Store, run db
 		fmt.Fprintf(&builder, "- Train session: `%s`\n", iteration.SessionID)
 		fmt.Fprintf(&builder, "- Train iteration: `%s`\n", iteration.ID)
 	}
-	builder.WriteString("- Compare each item across the option links below.\n")
+	builder.WriteString("- Compare each item across the option links or inline text below.\n")
 	builder.WriteString("- Rank every option from best to worst using the exact labels shown.\n")
 	builder.WriteString("- Reply by copying the fenced `yaml` block below into a new comment and filling every item.\n")
 	builder.WriteString("- Valid `quality` values: `poor`, `acceptable`, `strong`.\n")
 	builder.WriteString("- Valid `continue_mode` values: `explore`, `refine`, `distill`, `validate`.\n")
 	builder.WriteString("- Valid `promote` values: `yes`, `no`.\n\n")
 	writePhaseRecommendation(&builder, recommendation)
-	builder.WriteString("## Review Table\n\n")
-	writeGitHubRankedReviewTable(&builder, items, assignments)
-	if err := c.writeUnlinkedRankedOptionContent(ctx, store, &builder, items, assignments); err != nil {
+	builder.WriteString("## Review Items\n\n")
+	if err := c.writeGitHubRankedReviewItems(ctx, store, &builder, items, assignments); err != nil {
 		return "", err
 	}
 	builder.WriteString("## Copy-Paste YAML Reply\n\n")
@@ -195,55 +195,137 @@ func (c GitHubCollector) rankedBody(ctx context.Context, store *db.Store, run db
 	return builder.String(), nil
 }
 
-func (c GitHubCollector) writeUnlinkedRankedOptionContent(ctx context.Context, store *db.Store, builder *strings.Builder, items []db.EvalReviewItem, assignments map[string]githubAssignment) error {
-	wroteHeader := false
+func (c GitHubCollector) writeGitHubRankedReviewItems(ctx context.Context, store *db.Store, builder *strings.Builder, items []db.EvalReviewItem, assignments map[string]githubAssignment) error {
 	for _, item := range items {
 		assignment := assignments[item.ItemID]
-		wroteItem := false
+		fmt.Fprintf(builder, "### `%s` - %s\n\n", item.ItemID, itemTitle(item))
+		if original := c.reviewItemOriginalText(ctx, store, item); original != "" {
+			builder.WriteString("Original post:\n")
+			writeMarkdownQuote(builder, original)
+			builder.WriteString("\n")
+		}
+		if contextText := reviewItemContextText(item); contextText != "" {
+			fmt.Fprintf(builder, "Context: %s\n\n", contextText)
+		}
+		builder.WriteString("| Option | Reply |\n")
+		builder.WriteString("| --- | --- |\n")
 		for _, option := range assignment.Options {
 			if optionHasPreviewBundleWithoutReference(option) {
 				return missingPreviewURLForBundleError(item.ItemID, option.Label)
 			}
-			if optionReference(option, false) != "" {
-				continue
-			}
-			content, err := c.optionText(ctx, store, option.ArtifactID)
+			preview, err := c.reviewOptionPreview(ctx, store, option)
 			if err != nil {
 				return fmt.Errorf("item %s option %s: %w", item.ItemID, option.Label, err)
 			}
-			if !wroteHeader {
-				builder.WriteString("## Inline Options Without Public Links\n\n")
-				builder.WriteString("These options do not have preview URLs yet, so their content is included here to keep the review actionable.\n\n")
-				wroteHeader = true
-			}
-			if !wroteItem {
-				fmt.Fprintf(builder, "### %s\n\n", itemTitle(item))
-				wroteItem = true
-			}
-			fmt.Fprintf(builder, "#### Option %s\n\n", displayOptionLabel(option.Label))
-			writeMarkdownFence(builder, content)
-			builder.WriteString("\n")
+			fmt.Fprintf(builder, "| %s | %s |\n", displayOptionLabel(option.Label), preview.MarkdownTableCell())
 		}
+		builder.WriteString("\n")
 	}
 	return nil
 }
 
-func writeGitHubRankedReviewTable(builder *strings.Builder, items []db.EvalReviewItem, assignments map[string]githubAssignment) {
-	builder.WriteString("| Item | What to compare | Options |\n")
-	builder.WriteString("| --- | --- | --- |\n")
-	for _, item := range items {
-		assignment := assignments[item.ItemID]
-		optionRefs := make([]string, 0, len(assignment.Options))
-		for _, option := range assignment.Options {
-			ref := optionReference(option, false)
-			if ref == "" {
-				ref = "`" + strings.ReplaceAll(option.ArtifactID, "`", "") + "`"
-			}
-			optionRefs = append(optionRefs, fmt.Sprintf("Option %s: %s", displayOptionLabel(option.Label), ref))
-		}
-		fmt.Fprintf(builder, "| `%s` | %s | %s |\n", item.ItemID, markdownTableCell(itemTitle(item)), markdownTableCell(strings.Join(optionRefs, "<br>")))
+type githubOptionPreview struct {
+	Content    string
+	IsMarkdown bool
+}
+
+func (p githubOptionPreview) MarkdownTableCell() string {
+	if p.IsMarkdown {
+		return markdownTableCell(p.Content)
 	}
-	builder.WriteString("\n")
+	return markdownTableCell(markdownInlineCode(p.Content))
+}
+
+func (c GitHubCollector) reviewOptionPreview(ctx context.Context, store *db.Store, option blindOptionAssignment) (githubOptionPreview, error) {
+	if ref := optionReference(option, false); ref != "" {
+		return githubOptionPreview{Content: ref, IsMarkdown: true}, nil
+	}
+	content, err := c.optionText(ctx, store, option.ArtifactID)
+	if err != nil {
+		return githubOptionPreview{}, err
+	}
+	return githubOptionPreview{Content: TextArtifactPreview(content)}, nil
+}
+
+func (c GitHubCollector) reviewItemOriginalText(ctx context.Context, store *db.Store, item db.EvalReviewItem) string {
+	metadata := reviewItemMetadata(item)
+	for _, key := range []string{"original_post", "original", "tweet", "post", "source_text", "input"} {
+		if value := metadataString(metadata, key); value != "" {
+			return value
+		}
+	}
+	if strings.TrimSpace(item.SourceArtifactID) == "" {
+		return ""
+	}
+	content, err := c.optionText(ctx, store, item.SourceArtifactID)
+	if err != nil {
+		return ""
+	}
+	return TextArtifactPreview(content)
+}
+
+func reviewItemContextText(item db.EvalReviewItem) string {
+	metadata := reviewItemMetadata(item)
+	for _, key := range []string{"context", "brief", "description"} {
+		if value := metadataString(metadata, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func reviewItemMetadata(item db.EvalReviewItem) map[string]any {
+	metadata := map[string]any{}
+	if strings.TrimSpace(item.MetadataJSON) != "" {
+		_ = json.Unmarshal([]byte(item.MetadataJSON), &metadata)
+	}
+	return metadata
+}
+
+func writeMarkdownQuote(builder *strings.Builder, value string) {
+	for _, line := range strings.Split(strings.TrimSpace(value), "\n") {
+		fmt.Fprintf(builder, "> %s\n", strings.TrimSpace(line))
+	}
+}
+
+func TextArtifactPreview(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(content), &decoded); err == nil {
+		if preview := textPreviewFromJSON(decoded); preview != "" {
+			return preview
+		}
+		if compact, err := json.Marshal(decoded); err == nil {
+			return string(compact)
+		}
+	}
+	return content
+}
+
+func textPreviewFromJSON(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]any:
+		for _, key := range []string{"reply", "tweet", "text", "post", "content", "message", "summary", "original_post", "original", "source_text", "input"} {
+			if text, ok := typed[key].(string); ok && strings.TrimSpace(text) != "" {
+				return strings.TrimSpace(text)
+			}
+		}
+	}
+	return ""
+}
+
+func markdownInlineCode(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\n", " ")
+	value = strings.ReplaceAll(value, "`", "'")
+	if value == "" {
+		return "-"
+	}
+	return "`" + value + "`"
 }
 
 func markdownTableCell(value string) string {

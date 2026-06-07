@@ -1377,7 +1377,10 @@ func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
 		!strings.Contains(stdout.String(), "preview_urls: 0") {
 		t.Fatalf("second continue stdout = %q", stdout.String())
 	}
-	if fakeGitHub.createdIssue.Repo.FullName() != "owner/product" || !strings.Contains(fakeGitHub.createdIssue.Body, "## Inline Options Without Public Links") {
+	if fakeGitHub.createdIssue.Repo.FullName() != "owner/product" ||
+		!strings.Contains(fakeGitHub.createdIssue.Body, "## Review Items") ||
+		!strings.Contains(fakeGitHub.createdIssue.Body, "| Option | Reply |") ||
+		strings.Contains(fakeGitHub.createdIssue.Body, "## Inline Options Without Public Links") {
 		t.Fatalf("created review issue = %+v", fakeGitHub.createdIssue)
 	}
 
@@ -1615,7 +1618,7 @@ func TestSkillOptTrainContinueGeneratesRequiredVuePreviewBundles(t *testing.T) {
 	}
 	wantPreviewURL := "https://owner.github.io/previews/runs/preview-train-review-001/hero-saas/a/"
 	if fakeGitHub.createdIssue.Repo.FullName() != "owner/previews" ||
-		!strings.Contains(fakeGitHub.createdIssue.Body, "Option A: [open]("+wantPreviewURL+")") ||
+		!strings.Contains(fakeGitHub.createdIssue.Body, "| A | [open]("+wantPreviewURL+") |") ||
 		strings.Contains(fakeGitHub.createdIssue.Body, "## Inline Options Without Public Links") ||
 		strings.Contains(fakeGitHub.createdIssue.Body, `"renderer":"vue-vite"`) {
 		t.Fatalf("created preview review issue = %+v\n%s", fakeGitHub.createdIssue, fakeGitHub.createdIssue.Body)
