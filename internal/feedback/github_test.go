@@ -173,6 +173,32 @@ func TestGitHubCollectorPublishesIssueBody(t *testing.T) {
 func TestGitHubCollectorPublishesRankedIssueBody(t *testing.T) {
 	ctx := context.Background()
 	store, blobs := setupGitHubRankedFeedbackRun(t, "ranked-1", "owner/repo")
+	sourceBlob, err := blobs.Put([]byte(`{"tweet":"original post text"}`))
+	if err != nil {
+		t.Fatalf("Put source returned error: %v", err)
+	}
+	if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{ID: "source-post", Hash: sourceBlob.Hash, MediaType: "application/json", SizeBytes: sourceBlob.Size, Driver: "text"}); err != nil {
+		t.Fatalf("UpsertEvalArtifact source-post returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{
+		RunID:            "ranked-1",
+		ItemID:           "item-001",
+		Title:            "Ranked Item",
+		SourceArtifactID: "source-post",
+		MetadataJSON:     `{"brief":"Pick the reply that sounds most human."}`,
+	}); err != nil {
+		t.Fatalf("UpsertEvalReviewItem source update returned error: %v", err)
+	}
+	optionABlob, err := blobs.Put([]byte(`{"reply":"@team did each worker get its own meter [link](https://example.com)","risk":"low"}`))
+	if err != nil {
+		t.Fatalf("Put option a json returned error: %v", err)
+	}
+	if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{ID: "option-a-json", Hash: optionABlob.Hash, MediaType: "application/json", SizeBytes: optionABlob.Size, Driver: "text"}); err != nil {
+		t.Fatalf("UpsertEvalArtifact option-a-json returned error: %v", err)
+	}
+	if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{RunID: "ranked-1", ItemID: "item-001", Label: "a", ArtifactID: "option-a-json", Role: "option", MetadataJSON: `{"path":"/tmp/gitmoot-option-a.md"}`}); err != nil {
+		t.Fatalf("UpsertEvalReviewOption option-a-json returned error: %v", err)
+	}
 	fake := &fakeFeedbackGitHub{
 		issue: github.Issue{Number: 42, URL: "https://github.com/owner/repo/issues/42"},
 	}
@@ -194,14 +220,17 @@ func TestGitHubCollectorPublishesRankedIssueBody(t *testing.T) {
 		"Valid `quality` values: `poor`, `acceptable`, `strong`",
 		"Valid `continue_mode` values: `explore`, `refine`, `distill`, `validate`",
 		"Valid `promote` values: `yes`, `no`",
-		"## Review Table",
+		"## Review Items",
 		"## Phase Recommendation",
 		"recommend continue explore",
-		"| Item | What to compare | Options |",
-		"Option C: [open](https://example.com/c)",
-		"## Inline Options Without Public Links",
-		"#### Option A",
-		"option a answer",
+		"### `item-001` - Ranked Item",
+		"Original post:",
+		"> original post text",
+		"Context: Pick the reply that sounds most human.",
+		"| Option | Reply |",
+		"| A | `@team did each worker get its own meter [link](https://example.com)` |",
+		"| B | `option b answer` |",
+		"| C | [open](https://example.com/c) |",
 		"```yaml",
 		"run_id: ranked-1",
 		"item_id: item-001",
@@ -214,10 +243,32 @@ func TestGitHubCollectorPublishesRankedIssueBody(t *testing.T) {
 			t.Fatalf("ranked issue body missing %q:\n%s", want, body)
 		}
 	}
-	for _, leaked := range []string{"/tmp/gitmoot-option-a.md", "#### Option C", "option c answer"} {
+	for _, leaked := range []string{"## Review Table", "## Inline Options Without Public Links", "/tmp/gitmoot-option-a.md", "#### Option C", "option c answer", `"risk"`} {
 		if strings.Contains(body, leaked) {
 			t.Fatalf("ranked issue body leaked %q:\n%s", leaked, body)
 		}
+	}
+}
+
+func TestTextArtifactPreviewExtractsHumanFacingJSONField(t *testing.T) {
+	tests := map[string]struct {
+		content string
+		want    string
+	}{
+		"reply field":    {content: `{"reply":"hello there","risk":"low"}`, want: "hello there"},
+		"tweet field":    {content: `{"tweet":"tweet text"}`, want: "tweet text"},
+		"source field":   {content: `{"original_post":"source text"}`, want: "source text"},
+		"input field":    {content: `{"input":"input text"}`, want: "input text"},
+		"json string":    {content: `"plain json string"`, want: "plain json string"},
+		"compact object": {content: `{"z":2, "a":1}`, want: `{"a":1,"z":2}`},
+		"raw text":       {content: "not json", want: "not json"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := TextArtifactPreview(tt.content); got != tt.want {
+				t.Fatalf("TextArtifactPreview() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
