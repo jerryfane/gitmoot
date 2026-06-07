@@ -224,7 +224,11 @@ Low-level `skillopt feedback github publish` and `sync` enforce
 posting to the wrong repository.
 
 Review issues include a fenced `yaml` block so reviewers can copy, edit, and
-submit parseable feedback. `train continue` automatically syncs GitHub comments
+submit parseable feedback. Text reply skills render each review item as an
+`Option | Reply` table; JSON option artifacts show the human-facing text field
+such as `reply`, `tweet`, `text`, `post`, `content`, `message`, or `summary`
+instead of raw JSON metadata. Vue/Vite review items keep using preview links
+and missing-preview errors. `train continue` automatically syncs GitHub comments
 when the iteration is waiting in `review_published` and no feedback has been
 imported yet. Raw YAML and fenced YAML are both supported.
 
@@ -259,7 +263,11 @@ reminder, the watcher can still import it. If the watcher is not running, post
 the feedback YAML and use the prompt from the stale notice or run the CLI
 fallback manually.
 
-Reviewers can provide ranked feedback with optional quality and phase hints:
+Reviewers can provide ranked feedback with optional quality and phase hints.
+Use `>` for ordered preferences and `=` for ties. Gitmoot preserves tie groups
+when deriving pairwise preferences, so `A = B = C = D` imports as all tied and
+creates no pairwise winner, while `A > B = C > D` creates preferences across
+groups but not between `B` and `C`.
 
 ```yaml
 run_id: planner-train-review-001
@@ -267,7 +275,7 @@ reviewer: alice
 items:
   - item_id: release-plan
     ranking:
-      - C > A > D > B
+      - C > A = D > B
     quality: acceptable
     continue_mode: refine
     useful_traits:
@@ -493,9 +501,12 @@ These files let reviewers inspect the proposed skill, the baseline skill, and
 the candidate diff directly in GitHub. The review also separates selection
 score, evaluator/test scores, gate status, no-op status, and promotability so a
 candidate selected by the optimizer is not confused with a candidate that passed
-evaluator gates. If stored metadata marks the candidate as no-op or not
-promotable, the review body says promotion is unavailable instead of showing a
-promote command.
+evaluator gates. If the selected candidate sample is text or JSON, the review
+shows the same human-facing text inline under `Candidate Sample Preview`;
+Vue/Vite samples keep using GitHub Pages preview URLs, and missing samples keep
+the explicit no-sample message. If stored metadata marks the candidate as no-op
+or not promotable, the review body says promotion is unavailable instead of
+showing a promote command.
 
 Choose explicitly:
 
@@ -564,12 +575,16 @@ Manual smoke scenarios for review operations:
 1. Candidate decision: run a fake or dry-run train flow until candidate review
    is published. Confirm the review repo contains `best_skill.md`,
    `base_skill.md`, and `candidate.diff.md` under
-   `skillopt/runs/<session>/<iteration>/<candidate>/`. Run
+   `skillopt/runs/<session>/<iteration>/<candidate>/`, plus either a Vue preview
+   URL or inline text sample under `Candidate Sample Preview`. Run
    `gitmoot skillopt train status --session <id>` and confirm it is waiting for
    a candidate decision. Then run either `--promote <version>` or
    `--reject <version> --reason "<reason>"` and confirm status moves past the
    candidate decision gate.
-2. Preview publication status: run a Vue/Vite preview session with
+2. Text review display: publish a text/JSON review item and confirm the GitHub
+   issue shows an `Option | Reply` table and that tied rankings such as
+   `A = B = C = D` and `A > B = C > D` sync successfully.
+3. Preview publication status: run a Vue/Vite preview session with
    `--preview-repo owner/previews`, publish review items, and inspect the GitHub
    issue option links. Ready links should render as `open`; builds that have not
    completed should render as `pending deployment`; Pages failures should render

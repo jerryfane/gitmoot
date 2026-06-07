@@ -131,9 +131,15 @@ gitmoot skillopt train continue --session planner-train
 Low-level GitHub feedback publish/sync commands enforce the train run's
 expected review repo, so preview reviews cannot accidentally publish to the
 target product repo. Review issues include a fenced `yaml` block for copyable
-feedback, and `train continue` auto-syncs GitHub comments when the review is
+feedback. Text reply skills render each item as an `Option | Reply` table; JSON
+option artifacts show the human-facing text field such as `reply`, `tweet`,
+`text`, `post`, `content`, `message`, or `summary` instead of raw JSON
+metadata. Vue/Vite review items keep using preview links and missing-preview
+errors. `train continue` auto-syncs GitHub comments when the review is
 published and no feedback has been imported yet. Reviewers can use ranked
-feedback with optional quality and phase hints:
+feedback with optional quality and phase hints. Use `>` for ordered preferences
+and `=` for ties: `A = B = C = D` imports as all tied, while `A > B = C > D`
+creates preferences across tie groups but not between `B` and `C`.
 
 ```yaml
 run_id: planner-train-review-001
@@ -141,7 +147,7 @@ reviewer: alice
 items:
   - item_id: release-plan
     ranking:
-      - C > A > D > B
+      - C > A = D > B
     quality: acceptable
     continue_mode: refine
     reasoning: C is strongest, but A has a better risk summary.
@@ -193,8 +199,11 @@ commands. The review repo file contract is:
 These files let reviewers inspect the proposed skill, the baseline skill, and
 the candidate diff directly in GitHub. Candidate reviews also separate selection
 score, evaluator/test scores, gate status, no-op status, and promotability. If
-metadata marks the candidate as no-op or not promotable, the review says
-promotion is unavailable instead of showing a promote command.
+the selected candidate sample is text or JSON, the review shows the same
+human-facing text inline under `Candidate Sample Preview`; Vue/Vite samples keep
+using GitHub Pages preview URLs, and missing samples keep the explicit
+no-sample message. If metadata marks the candidate as no-op or not promotable,
+the review says promotion is unavailable instead of showing a promote command.
 
 Choose explicitly:
 
@@ -230,9 +239,13 @@ decisions without real model calls or real GitHub mutation.
 Manual smoke scenarios:
 
 1. Candidate decision: publish a candidate review, confirm the review repo has
-   `best_skill.md`, `base_skill.md`, and `candidate.diff.md`, then use status to
-   confirm the decision gate before promoting or rejecting with a reason.
-2. Preview publication status: publish Vue/Vite review options and confirm the
+   `best_skill.md`, `base_skill.md`, `candidate.diff.md`, and either a Vue
+   preview URL or inline text sample, then use status to confirm the decision
+   gate before promoting or rejecting with a reason.
+2. Text review display: publish a text/JSON review item and confirm the issue
+   shows an `Option | Reply` table and that tied rankings such as
+   `A = B = C = D` and `A > B = C > D` sync successfully.
+3. Preview publication status: publish Vue/Vite review options and confirm the
    issue links are labeled `open`, `pending deployment`, `failed deployment`,
    or `stale deployment` according to the GitHub Pages build state.
 
