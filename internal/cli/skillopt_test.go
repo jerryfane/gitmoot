@@ -4624,6 +4624,167 @@ func TestSkillOptTrainCandidateReviewBodyMarksNoOpNotPromotable(t *testing.T) {
 	}
 }
 
+func TestSkillOptTrainCandidateReviewBodyShowsTextSamplePreview(t *testing.T) {
+	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
+	paths := config.PathsForHome(home)
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+
+	candidate := cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan with a text reply candidate.")
+	version, err := skillopt.ImportCandidatePackage(context.Background(), store, candidate, "candidate.json")
+	if err != nil {
+		t.Fatalf("ImportCandidatePackage returned error: %v", err)
+	}
+	review, err := store.GetAgentTemplateCandidateReview(context.Background(), version.ID)
+	if err != nil {
+		t.Fatalf("GetAgentTemplateCandidateReview returned error: %v", err)
+	}
+	blobStore := artifact.NewStore(paths.ArtifactBlobs)
+	content := []byte(`{"reply":"so thats why my limits vanished before lunch","risk":"low"}`)
+	blob, err := blobStore.Put(content)
+	if err != nil {
+		t.Fatalf("Put sample artifact returned error: %v", err)
+	}
+	sampleID := "optimizer-train/optimizer-train-001/planner@v2/candidate-selection-sample"
+	if err := store.UpsertEvalArtifact(context.Background(), db.EvalArtifact{
+		ID:        sampleID,
+		Hash:      blob.Hash,
+		MediaType: "application/json",
+		SizeBytes: blob.Size,
+		Driver:    "text",
+	}); err != nil {
+		t.Fatalf("UpsertEvalArtifact sample returned error: %v", err)
+	}
+	review.SummaryMetadataJSON = fmt.Sprintf(`{"artifact_ids":[%q]}`, sampleID)
+	if err := store.UpsertAgentTemplateCandidateReview(context.Background(), review); err != nil {
+		t.Fatalf("UpsertAgentTemplateCandidateReview returned error: %v", err)
+	}
+	session, err := store.GetSkillOptTrainSession(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainSession returned error: %v", err)
+	}
+	iteration := db.SkillOptTrainIteration{
+		ID:                    "optimizer-train-001",
+		CandidateVersionID:    version.ID,
+		BaseTemplateVersionID: baseVersionID,
+	}
+	optionalPolicy, err := skillopt.BuildTrainPreviewPolicy("owner/product", "owner/previews", skillopt.TrainPreviewModeOptional, skillopt.TrainPreviewRendererVueVite, skillopt.TrainPreviewPublisherGitHubPages, "")
+	if err != nil {
+		t.Fatalf("BuildTrainPreviewPolicy optional returned error: %v", err)
+	}
+	optionalSession := session
+	optionalSession.MetadataJSON = skillOptTrainStartMetadata("Train planner outputs from human feedback.", db.EvalRunModeValidate, db.ExplorationLevelLow, 2, "hard_then_soft", nil, nil, optionalPolicy)
+	for _, tt := range []struct {
+		name    string
+		session db.SkillOptTrainSession
+	}{
+		{name: "no preview policy", session: session},
+		{name: "optional vue preview policy", session: optionalSession},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			previews := publishSkillOptTrainCandidateSamplePreviews(context.Background(), paths, store, tt.session, iteration)
+			body, err := skillOptTrainCandidateReviewBody(context.Background(), store, tt.session, iteration, home, nil, previews, nil)
+			if err != nil {
+				t.Fatalf("skillOptTrainCandidateReviewBody returned error: %v", err)
+			}
+			for _, want := range []string{
+				"### Candidate Sample Preview",
+				"Selection sample: inline preview from `optimizer-train/optimizer-train-001/planner@v2/candidate-selection-sample`",
+				"so thats why my limits vanished before lunch",
+				"Renderer: `text`",
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("candidate review body missing %q:\n%s", want, body)
+				}
+			}
+			for _, unwanted := range []string{
+				"Preview: no selected candidate sample artifact was available to publish.",
+				"candidate sample preview publishing is not configured",
+				`"risk"`,
+			} {
+				if strings.Contains(body, unwanted) {
+					t.Fatalf("candidate review body contained %q:\n%s", unwanted, body)
+				}
+			}
+		})
+	}
+	record, err := store.GetEvalArtifact(context.Background(), sampleID)
+	if err != nil {
+		t.Fatalf("GetEvalArtifact sample returned error: %v", err)
+	}
+	record.Driver = skillopt.TrainPreviewRendererVueVite
+	if err := store.UpsertEvalArtifact(context.Background(), record); err != nil {
+		t.Fatalf("UpsertEvalArtifact malformed preview driver returned error: %v", err)
+	}
+	previews := publishSkillOptTrainCandidateSamplePreviews(context.Background(), paths, store, optionalSession, iteration)
+	if len(previews) != 1 || previews[0].Error == "" {
+		t.Fatalf("optional malformed preview result = %+v, want bundle validation error", previews)
+	}
+	if strings.TrimSpace(previews[0].Content) != "" {
+		t.Fatalf("optional malformed preview unexpectedly used inline content: %+v", previews[0])
+	}
+}
+
+func TestSkillOptTrainCandidateReviewRequiredPreviewKeepsBundleFailure(t *testing.T) {
+	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
+	paths := config.PathsForHome(home)
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+
+	candidate := cliSkillOptCandidatePackage(t, "planner", baseVersionID, "Plan with a text reply candidate.")
+	version, err := skillopt.ImportCandidatePackage(context.Background(), store, candidate, "candidate.json")
+	if err != nil {
+		t.Fatalf("ImportCandidatePackage returned error: %v", err)
+	}
+	review, err := store.GetAgentTemplateCandidateReview(context.Background(), version.ID)
+	if err != nil {
+		t.Fatalf("GetAgentTemplateCandidateReview returned error: %v", err)
+	}
+	blobStore := artifact.NewStore(paths.ArtifactBlobs)
+	content := []byte(`{"reply":"so thats why my limits vanished before lunch"}`)
+	blob, err := blobStore.Put(content)
+	if err != nil {
+		t.Fatalf("Put sample artifact returned error: %v", err)
+	}
+	sampleID := "optimizer-train/optimizer-train-001/planner@v2/candidate-selection-sample"
+	if err := store.UpsertEvalArtifact(context.Background(), db.EvalArtifact{
+		ID:        sampleID,
+		Hash:      blob.Hash,
+		MediaType: "application/json",
+		SizeBytes: blob.Size,
+		Driver:    "text",
+	}); err != nil {
+		t.Fatalf("UpsertEvalArtifact sample returned error: %v", err)
+	}
+	review.SummaryMetadataJSON = fmt.Sprintf(`{"artifact_ids":[%q]}`, sampleID)
+	if err := store.UpsertAgentTemplateCandidateReview(context.Background(), review); err != nil {
+		t.Fatalf("UpsertAgentTemplateCandidateReview returned error: %v", err)
+	}
+	requiredPolicy, err := skillopt.BuildTrainPreviewPolicy("owner/product", "owner/previews", skillopt.TrainPreviewModeRequired, skillopt.TrainPreviewRendererVueVite, skillopt.TrainPreviewPublisherGitHubPages, "")
+	if err != nil {
+		t.Fatalf("BuildTrainPreviewPolicy required returned error: %v", err)
+	}
+	session, err := store.GetSkillOptTrainSession(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetSkillOptTrainSession returned error: %v", err)
+	}
+	session.MetadataJSON = skillOptTrainStartMetadata("Train planner outputs from human feedback.", db.EvalRunModeValidate, db.ExplorationLevelLow, 2, "hard_then_soft", nil, nil, requiredPolicy)
+	previews := publishSkillOptTrainCandidateSamplePreviews(context.Background(), paths, store, session, db.SkillOptTrainIteration{
+		ID:                    "optimizer-train-001",
+		CandidateVersionID:    version.ID,
+		BaseTemplateVersionID: baseVersionID,
+	})
+	if len(previews) != 1 || previews[0].Error == "" {
+		t.Fatalf("required preview result = %+v, want bundle validation error", previews)
+	}
+	if !strings.Contains(previews[0].Error, "preview bundle") {
+		t.Fatalf("required preview error = %q", previews[0].Error)
+	}
+	if strings.TrimSpace(previews[0].Content) != "" {
+		t.Fatalf("required preview unexpectedly used inline content: %+v", previews[0])
+	}
+}
+
 func TestSkillOptTrainContinuePublishesCandidateReviewAndRejects(t *testing.T) {
 	home, baseVersionID := seedSkillOptTrainFeedbackSynced(t)
 	runner := &skillOptTrainFakeOptimizerRunner{

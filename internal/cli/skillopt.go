@@ -1455,6 +1455,7 @@ type skillOptTrainCandidateReviewPreview struct {
 	Route        string
 	URL          string
 	Renderer     string
+	Content      string
 	Status       string
 	StatusReason string
 	Error        string
@@ -2233,11 +2234,6 @@ func publishSkillOptTrainCandidateSamplePreviews(ctx context.Context, paths conf
 		ArtifactID: artifactID,
 		Renderer:   skillopt.TrainPreviewRendererVueVite,
 	}
-	policy := skillopt.ResolveTrainPreviewPolicy(session)
-	if policy.Mode == skillopt.TrainPreviewModeNone || policy.Renderer != skillopt.TrainPreviewRendererVueVite || policy.Publisher != skillopt.TrainPreviewPublisherGitHubPages {
-		preview.Error = "candidate sample preview publishing is not configured for vue-vite GitHub Pages"
-		return []skillOptTrainCandidateReviewPreview{preview}
-	}
 	record, err := store.GetEvalArtifact(ctx, artifactID)
 	if err != nil {
 		preview.Error = err.Error()
@@ -2248,9 +2244,24 @@ func publishSkillOptTrainCandidateSamplePreviews(ctx context.Context, paths conf
 		preview.Error = err.Error()
 		return []skillOptTrainCandidateReviewPreview{preview}
 	}
+	policy := skillopt.ResolveTrainPreviewPolicy(session)
 	bundle, err := skillopt.ParsePreviewBundle(content)
 	if err != nil {
-		preview.Error = err.Error()
+		if policy.Mode == skillopt.TrainPreviewModeRequired && policy.Renderer == skillopt.TrainPreviewRendererVueVite {
+			preview.Error = err.Error()
+			return []skillOptTrainCandidateReviewPreview{preview}
+		}
+		textPreview, ok := skillOptTextArtifactPreview(record, content)
+		if !ok {
+			preview.Error = err.Error()
+			return []skillOptTrainCandidateReviewPreview{preview}
+		}
+		preview.Renderer = firstNonEmpty(strings.TrimSpace(record.Driver), strings.TrimSpace(record.MediaType), "text")
+		preview.Content = textPreview
+		return []skillOptTrainCandidateReviewPreview{preview}
+	}
+	if policy.Mode == skillopt.TrainPreviewModeNone || policy.Renderer != skillopt.TrainPreviewRendererVueVite || policy.Publisher != skillopt.TrainPreviewPublisherGitHubPages {
+		preview.Error = "candidate sample preview publishing is not configured for vue-vite GitHub Pages"
 		return []skillOptTrainCandidateReviewPreview{preview}
 	}
 	preview.Renderer = bundle.Renderer
@@ -2280,6 +2291,27 @@ func publishSkillOptTrainCandidateSamplePreviews(ctx context.Context, paths conf
 	preview.Status = publication.PagesStatus
 	preview.StatusReason = publication.StatusReason
 	return []skillOptTrainCandidateReviewPreview{preview}
+}
+
+func skillOptTextArtifactPreview(record db.EvalArtifact, content []byte) (string, bool) {
+	if !utf8.Valid(content) {
+		return "", false
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(record.MediaType))
+	driver := strings.ToLower(strings.TrimSpace(record.Driver))
+	if driver != "" && driver != "text" {
+		return "", false
+	}
+	if !strings.HasPrefix(mediaType, "text/") &&
+		mediaType != "application/json" &&
+		mediaType != "application/x-ndjson" {
+		return "", false
+	}
+	text := truncateForMetadata(feedback.TextArtifactPreview(string(content)))
+	if strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	return text, true
 }
 
 func skillOptCandidateSelectionSampleArtifactID(ctx context.Context, store *db.Store, candidateID string) string {
@@ -2329,6 +2361,7 @@ func skillOptCandidateReviewPreviewsMetadata(previews []skillOptTrainCandidateRe
 			"route":         preview.Route,
 			"url":           preview.URL,
 			"renderer":      preview.Renderer,
+			"content":       preview.Content,
 			"status":        preview.Status,
 			"status_reason": preview.StatusReason,
 			"error":         preview.Error,
@@ -2365,6 +2398,7 @@ func skillOptCandidateReviewPreviewsFromMetadata(value any) []skillOptTrainCandi
 			Route:        metadataString(metadata, "route"),
 			URL:          metadataString(metadata, "url"),
 			Renderer:     metadataString(metadata, "renderer"),
+			Content:      metadataString(metadata, "content"),
 			Status:       metadataString(metadata, "status"),
 			StatusReason: metadataString(metadata, "status_reason"),
 			Error:        metadataString(metadata, "error"),
@@ -2435,7 +2469,10 @@ func skillOptTrainCandidateReviewBody(ctx context.Context, store *db.Store, sess
 				fmt.Fprintf(&builder, "- %s: publish failed for `%s`: `%s`\n", label, preview.ArtifactID, truncateForMetadata(preview.Error))
 				continue
 			}
-			if strings.TrimSpace(preview.URL) != "" {
+			if strings.TrimSpace(preview.Content) != "" {
+				fmt.Fprintf(&builder, "- %s: inline preview from `%s`\n", label, preview.ArtifactID)
+				writeSkillOptMarkdownFence(&builder, preview.Content)
+			} else if strings.TrimSpace(preview.URL) != "" {
 				fmt.Fprintf(&builder, "- %s: [%s](%s)\n", label, preview.URL, preview.URL)
 			} else {
 				fmt.Fprintf(&builder, "- %s: `%s`\n", label, preview.ArtifactID)
