@@ -1217,7 +1217,39 @@ func runGitOutput(t *testing.T, dir string, args ...string) string {
 	return result.Stdout
 }
 
-func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
+func TestSkillOptTrainGeneratorSelectionHonorsExplicitGeneratorType(t *testing.T) {
+	dispatch, err := skillOptTrainGeneratorSelection(
+		context.Background(),
+		nil,
+		db.SkillOptTrainSession{TemplateVersionID: "planner@v1"},
+		db.SkillOptTrainIteration{BaseTemplateVersionID: "planner@v1"},
+		db.EvalRun{TemplateVersionID: "planner@v1"},
+		skillOptTrainContinueRequest{GeneratorType: "skillopt-generator"},
+	)
+	if err != nil {
+		t.Fatalf("skillOptTrainGeneratorSelection returned error: %v", err)
+	}
+	if dispatch.Mode != skillOptTrainGenerationModeSkillOptGenerator || dispatch.Agent != "skillopt-generator" || dispatch.Type != "skillopt-generator" {
+		t.Fatalf("dispatch = %+v", dispatch)
+	}
+
+	dispatch, err = skillOptTrainGeneratorSelection(
+		context.Background(),
+		nil,
+		db.SkillOptTrainSession{TemplateVersionID: "planner@v1"},
+		db.SkillOptTrainIteration{BaseTemplateVersionID: "planner@v1"},
+		db.EvalRun{TemplateVersionID: "planner@v1"},
+		skillOptTrainContinueRequest{GeneratorAgent: "custom-generator"},
+	)
+	if err != nil {
+		t.Fatalf("custom skillOptTrainGeneratorSelection returned error: %v", err)
+	}
+	if dispatch.Mode != skillOptTrainGenerationModeCustomAgent || dispatch.Agent != "custom-generator" || dispatch.Type != "" {
+		t.Fatalf("custom dispatch = %+v", dispatch)
+	}
+}
+
+func TestSkillOptTrainContinueGeneratesOptionsWithCurrentSkill(t *testing.T) {
 	home := t.TempDir()
 	repoDir := t.TempDir()
 	runGit(t, repoDir, "init")
@@ -1274,8 +1306,11 @@ func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
 	runner := &agentStartRunner{results: []subprocess.Result{
 		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440201"}` + "\n"},
 		{Stdout: `{"gitmoot_result":{"decision":"implemented","summary":"# Option A\n\nHero with strong product narrative.","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}` + "\n"},
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440202"}` + "\n"},
 		{Stdout: `{"gitmoot_result":{"decision":"implemented","summary":"# Option B\n\nDashboard-led layout with proof metrics.","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}` + "\n"},
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440203"}` + "\n"},
 		{Stdout: `{"gitmoot_result":{"decision":"implemented","summary":"# Option A\n\nCheckout analytics proof block.","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}` + "\n"},
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440204"}` + "\n"},
 		{Stdout: `{"gitmoot_result":{"decision":"implemented","summary":"# Option B\n\nLifecycle commerce story with motion notes.","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}` + "\n"},
 	}}
 	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
@@ -1292,7 +1327,7 @@ func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
 		"continue_ready: true",
 		"generated_options: 4",
 		"jobs: 4",
-		"generator_agent: skillopt-generator-bg-",
+		"generator_agent: skillopt-target-landing-train-review-001-",
 		"generator_runtime: codex",
 		"next: publish the human review packet",
 	} {
@@ -1300,13 +1335,16 @@ func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
 			t.Fatalf("train continue stdout missing %q:\n%s", want, stdout.String())
 		}
 	}
-	if len(runner.calls) != 5 {
-		t.Fatalf("runtime calls = %+v, want start plus four deliveries", runner.calls)
+	if len(runner.calls) != 8 {
+		t.Fatalf("runtime calls = %+v, want one start and delivery per option", runner.calls)
 	}
 	runner.want(t, 0, repoDir, "codex", "exec", "--json", "--")
 	runner.want(t, 1, repoDir, "codex", "exec", "resume", "550e8400-e29b-41d4-a716-446655440201", "--")
 	if !strings.Contains(runner.calls[1].args[len(runner.calls[1].args)-1], "Option label: A") || !strings.Contains(runner.calls[1].args[len(runner.calls[1].args)-1], "Generate one review option") {
 		t.Fatalf("generation prompt = %q", runner.calls[1].args[len(runner.calls[1].args)-1])
+	}
+	if !strings.Contains(runner.calls[0].args[len(runner.calls[0].args)-1], "Template: planner@v1") || !strings.Contains(runner.calls[0].args[len(runner.calls[0].args)-1], "Plan the work.") {
+		t.Fatalf("target-skill startup prompt = %q", runner.calls[0].args[len(runner.calls[0].args)-1])
 	}
 
 	store = openCLIJobStore(t, home)
@@ -1353,7 +1391,7 @@ func TestSkillOptTrainContinueGeneratesOptionsWithManagedAgent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetEvalArtifact %s returned error: %v", options[0].ArtifactID, err)
 		}
-		if artifactRecord.MediaType != "text/markdown" || artifactRecord.Driver != "text" || !strings.Contains(options[0].MetadataJSON, `"job_id"`) {
+		if artifactRecord.MediaType != "text/markdown" || artifactRecord.Driver != "text" || !strings.Contains(options[0].MetadataJSON, `"job_id"`) || !strings.Contains(options[0].MetadataJSON, `"generation_mode":"target_skill"`) || !strings.Contains(options[0].MetadataJSON, `"template_version_id":"planner@v1"`) {
 			t.Fatalf("artifact=%+v option=%+v", artifactRecord, options[0])
 		}
 	}
@@ -1511,8 +1549,11 @@ func TestSkillOptTrainContinueGeneratesRequiredVuePreviewBundles(t *testing.T) {
 	runner := &agentStartRunner{results: []subprocess.Result{
 		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440501"}` + "\n"},
 		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option A hero")),
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440502"}` + "\n"},
 		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option B hero")),
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440503"}` + "\n"},
 		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option A proof")),
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440504"}` + "\n"},
 		cliImplementedSummaryResult(t, cliVuePreviewBundleSummary(t, "Option B proof")),
 	}}
 	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})

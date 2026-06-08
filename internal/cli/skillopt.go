@@ -28,6 +28,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/feedback"
 	gitutil "github.com/jerryfane/gitmoot/internal/git"
 	"github.com/jerryfane/gitmoot/internal/github"
+	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/skillopt"
 	"github.com/jerryfane/gitmoot/internal/subprocess"
 	"gopkg.in/yaml.v3"
@@ -626,7 +627,7 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	sessionID := fs.String("session", "", "train session id")
 	generatorAgent := fs.String("generator-agent", "", "existing agent to use for option generation")
-	generatorType := fs.String("generator-type", "", "managed agent type to use for option generation; defaults to skillopt-generator")
+	generatorType := fs.String("generator-type", "", "managed agent type to use for option generation; overrides the default current-skill generator")
 	skillOptBin := fs.String("skillopt-bin", "", "gitmoot-skillopt executable path; defaults to gitmoot-skillopt on PATH")
 	backend := fs.String("backend", "", "backend preset for optimizer, target, and evaluator; currently supports codex")
 	model := fs.String("model", "", "model name to pass to both optimizer and target when specific model flags are omitted")
@@ -3754,12 +3755,27 @@ func estimateSkillOptTrainGenerationLockTTL(ctx context.Context, store *db.Store
 			attemptsPerRole += skillOptTrainReviewOptionRetryBudget
 		}
 	}
-	_, dispatchType, err := skillOptTrainGeneratorSelection(request)
-	if err != nil {
-		return 0, err
+	var dispatch skillOptTrainGenerationDispatch
+	if strings.TrimSpace(iteration.SessionID) != "" {
+		session, err := store.GetSkillOptTrainSession(ctx, iteration.SessionID)
+		if err != nil {
+			return 0, err
+		}
+		dispatch, err = skillOptTrainGeneratorSelection(ctx, store, session, iteration, run, request)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		dispatch = skillOptTrainFallbackGeneratorDispatch(request)
 	}
-	jobTimeout := skillOptTrainGenerationJobTimeoutHint(request, dispatchType)
-	concurrency := skillOptTrainGenerationConcurrencyHint(request, dispatchType)
+	if strings.TrimSpace(dispatch.Mode) == "" {
+		dispatch = skillOptTrainFallbackGeneratorDispatch(request)
+	}
+	if strings.TrimSpace(dispatch.Agent) == "" && strings.TrimSpace(dispatch.Type) == "" && dispatch.Mode != skillOptTrainGenerationModeTargetSkill {
+		return 0, errors.New("skillopt train generation dispatch is empty")
+	}
+	jobTimeout := skillOptTrainGenerationJobTimeoutHint(request, dispatch.Type)
+	concurrency := skillOptTrainGenerationConcurrencyHint(request, dispatch.Type)
 	if concurrency <= 0 {
 		concurrency = 1
 	}
@@ -3884,19 +3900,19 @@ func generateSkillOptTrainOptions(ctx context.Context, paths config.Paths, store
 		}
 		return skillOptTrainGenerationResult{}, fmt.Errorf("eval run %s has partial generated items; inspect or clear review artifacts before continuing", run.ID)
 	}
-	dispatchAgent, dispatchType, err := skillOptTrainGeneratorSelection(request)
+	dispatch, err := skillOptTrainGeneratorSelection(ctx, store, session, iteration, run, request)
 	if err != nil {
 		return skillOptTrainGenerationResult{}, err
 	}
 	blobStore := artifact.NewStore(paths.ArtifactBlobs)
-	concurrency, err := skillOptTrainGenerationConcurrency(request, dispatchType)
+	concurrency, err := skillOptTrainGenerationConcurrency(request, dispatch.Type)
 	if err != nil {
 		return skillOptTrainGenerationResult{}, err
 	}
 	if err := ensureSkillOptTrainGenerationRepoReady(ctx, store, skillOptTrainGenerationRepo(session)); err != nil {
 		return skillOptTrainGenerationResult{}, err
 	}
-	generatedItems, err := generateSkillOptTrainItemOptions(ctx, store, blobStore, session, iteration, run, items, roles, rankedRun, request, dispatchAgent, dispatchType, concurrency)
+	generatedItems, err := generateSkillOptTrainItemOptions(ctx, store, blobStore, session, iteration, run, items, roles, rankedRun, request, dispatch, concurrency)
 	if err != nil {
 		return skillOptTrainGenerationResult{}, err
 	}
@@ -3927,16 +3943,19 @@ func generateSkillOptTrainOptions(ctx context.Context, paths config.Paths, store
 		return skillOptTrainGenerationResult{}, err
 	}
 	metadata := map[string]any{
-		"status":            "succeeded",
-		"generated_options": generated,
-		"jobs":              jobIDs,
-		"agent":             generatorAgent,
-		"runtime":           generatorRuntime,
-		"concurrency":       concurrency,
-		"lock_ttl":          request.GenerationLockTTL.String(),
-		"strategy":          skillOptTrainGenerationStrategy(run),
-		"prompts":           promptRecords,
-		"completed_at":      time.Now().UTC().Format(time.RFC3339Nano),
+		"status":              "succeeded",
+		"generated_options":   generated,
+		"jobs":                jobIDs,
+		"agent":               generatorAgent,
+		"runtime":             generatorRuntime,
+		"generation_mode":     dispatch.Mode,
+		"template_id":         dispatch.TemplateID,
+		"template_version_id": dispatch.TemplateVersionID,
+		"concurrency":         concurrency,
+		"lock_ttl":            request.GenerationLockTTL.String(),
+		"strategy":            skillOptTrainGenerationStrategy(run),
+		"prompts":             promptRecords,
+		"completed_at":        time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	return skillOptTrainGenerationResult{
 		GeneratedOptions: generated,
@@ -3963,6 +3982,10 @@ type skillOptTrainGeneratedOption struct {
 	Content               []byte
 	MediaType             string
 	Driver                string
+	GenerationMode        string
+	TemplateID            string
+	TemplateVersionID     string
+	SampleLabel           string
 	PreviewBundleMetadata *skillopt.PreviewBundleMetadata
 	Prompt                string
 	Prompts               []map[string]any
@@ -3971,7 +3994,7 @@ type skillOptTrainGeneratedOption struct {
 	ValidationErrors      []map[string]any
 }
 
-func generateSkillOptTrainItemOptions(ctx context.Context, store *db.Store, blobStore artifact.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, items []db.EvalReviewItem, roles []string, rankedRun bool, request skillOptTrainContinueRequest, dispatchAgent string, dispatchType string, concurrency int) ([]skillOptTrainGeneratedItemOptions, error) {
+func generateSkillOptTrainItemOptions(ctx context.Context, store *db.Store, blobStore artifact.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, items []db.EvalReviewItem, roles []string, rankedRun bool, request skillOptTrainContinueRequest, dispatch skillOptTrainGenerationDispatch, concurrency int) ([]skillOptTrainGeneratedItemOptions, error) {
 	if concurrency <= 0 {
 		concurrency = 1
 	}
@@ -3995,7 +4018,7 @@ func generateSkillOptTrainItemOptions(ctx context.Context, store *db.Store, blob
 				errs[index] = ctx.Err()
 				return
 			}
-			result, err := generateSkillOptTrainSingleItemOptions(ctx, store, blobStore, session, iteration, run, item, roles, rankedRun, request, dispatchAgent, dispatchType)
+			result, err := generateSkillOptTrainSingleItemOptions(ctx, store, blobStore, session, iteration, run, item, roles, rankedRun, request, dispatch)
 			if err != nil {
 				errs[index] = err
 				return
@@ -4012,14 +4035,14 @@ func generateSkillOptTrainItemOptions(ctx context.Context, store *db.Store, blob
 	return results, nil
 }
 
-func generateSkillOptTrainSingleItemOptions(ctx context.Context, store *db.Store, blobStore artifact.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, item db.EvalReviewItem, roles []string, rankedRun bool, request skillOptTrainContinueRequest, dispatchAgent string, dispatchType string) (skillOptTrainGeneratedItemOptions, error) {
+func generateSkillOptTrainSingleItemOptions(ctx context.Context, store *db.Store, blobStore artifact.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, item db.EvalReviewItem, roles []string, rankedRun bool, request skillOptTrainContinueRequest, dispatch skillOptTrainGenerationDispatch) (skillOptTrainGeneratedItemOptions, error) {
 	generatedItem := skillOptTrainGeneratedItemOptions{ItemID: item.ItemID}
 	replacementOptions := make([]db.EvalReviewOption, 0, len(roles))
 	artifactRecords := make([]db.EvalArtifact, 0, len(roles))
 	wantsVuePreviewBundle := skillOptTrainWantsVuePreviewBundle(session)
 	requiresVuePreviewBundle := skillOptTrainRequiresVuePreviewBundle(session)
 	for _, role := range roles {
-		generatedOption, err := generateSkillOptTrainSingleOption(ctx, store, session, iteration, run, item, role, rankedRun, request, dispatchAgent, dispatchType, wantsVuePreviewBundle, requiresVuePreviewBundle)
+		generatedOption, err := generateSkillOptTrainSingleOption(ctx, store, session, iteration, run, item, role, rankedRun, request, dispatch, wantsVuePreviewBundle, requiresVuePreviewBundle)
 		if err != nil {
 			return skillOptTrainGeneratedItemOptions{}, err
 		}
@@ -4032,7 +4055,7 @@ func generateSkillOptTrainSingleItemOptions(ctx context.Context, store *db.Store
 			return skillOptTrainGeneratedItemOptions{}, err
 		}
 		artifactRecords = append(artifactRecords, artifactRecord)
-		optionMetadata := skillOptTrainGeneratedOptionMetadata(generatedOption.Output, generatedOption.Prompt, generatedOption.PreviewBundleMetadata, generatedOption.RetryAttempts, generatedOption.ValidationErrors)
+		optionMetadata := skillOptTrainGeneratedOptionMetadata(generatedOption.Output, generatedOption.Prompt, generatedOption.GenerationMode, generatedOption.TemplateID, generatedOption.TemplateVersionID, generatedOption.SampleLabel, generatedOption.PreviewBundleMetadata, generatedOption.RetryAttempts, generatedOption.ValidationErrors)
 		if rankedRun {
 			replacementOptions = append(replacementOptions, db.EvalReviewOption{
 				RunID:        run.ID,
@@ -4066,7 +4089,7 @@ func generateSkillOptTrainSingleItemOptions(ctx context.Context, store *db.Store
 	return generatedItem, nil
 }
 
-func generateSkillOptTrainSingleOption(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, item db.EvalReviewItem, role string, rankedRun bool, request skillOptTrainContinueRequest, dispatchAgent string, dispatchType string, wantsVuePreviewBundle bool, requiresVuePreviewBundle bool) (skillOptTrainGeneratedOption, error) {
+func generateSkillOptTrainSingleOption(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, item db.EvalReviewItem, role string, rankedRun bool, request skillOptTrainContinueRequest, dispatch skillOptTrainGenerationDispatch, wantsVuePreviewBundle bool, requiresVuePreviewBundle bool) (skillOptTrainGeneratedOption, error) {
 	basePrompt := buildSkillOptTrainGenerationPrompt(session, iteration, run, item, role, rankedRun)
 	prompt := basePrompt
 	retryBudget := 0
@@ -4077,15 +4100,7 @@ func generateSkillOptTrainSingleOption(ctx context.Context, store *db.Store, ses
 	promptRecords := []map[string]any{}
 	jobIDs := []string{}
 	for attempt := 0; ; attempt++ {
-		output, err := dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
-			RepoFlag:         skillOptTrainGenerationRepo(session),
-			Agent:            dispatchAgent,
-			Action:           "ask",
-			Instructions:     prompt,
-			Type:             dispatchType,
-			Home:             request.Home,
-			AllowManagedSync: dispatchType != "",
-		})
+		output, err := dispatchSkillOptTrainGenerationJob(ctx, store, session, iteration, run, item, role, attempt, request, dispatch, prompt)
 		if err != nil {
 			return skillOptTrainGeneratedOption{}, fmt.Errorf("generate %s for %s: %w", role, item.ItemID, err)
 		}
@@ -4137,6 +4152,10 @@ func generateSkillOptTrainSingleOption(ctx context.Context, store *db.Store, ses
 			Content:               content,
 			MediaType:             mediaType,
 			Driver:                driver,
+			GenerationMode:        dispatch.Mode,
+			TemplateID:            dispatch.TemplateID,
+			TemplateVersionID:     dispatch.TemplateVersionID,
+			SampleLabel:           skillOptTrainGenerationSampleLabel(item.ItemID, role),
 			PreviewBundleMetadata: previewBundleMetadata,
 			Prompt:                prompt,
 			Prompts:               promptRecords,
@@ -4145,6 +4164,111 @@ func generateSkillOptTrainSingleOption(ctx context.Context, store *db.Store, ses
 			ValidationErrors:      validationErrors,
 		}, nil
 	}
+}
+
+func dispatchSkillOptTrainGenerationJob(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, item db.EvalReviewItem, role string, attempt int, request skillOptTrainContinueRequest, dispatch skillOptTrainGenerationDispatch, prompt string) (localAgentJobOutput, error) {
+	if dispatch.Mode != skillOptTrainGenerationModeTargetSkill {
+		return dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
+			RepoFlag:         skillOptTrainGenerationRepo(session),
+			Agent:            dispatch.Agent,
+			Action:           "ask",
+			Instructions:     prompt,
+			Type:             dispatch.Type,
+			Home:             request.Home,
+			AllowManagedSync: dispatch.Type != "",
+		})
+	}
+	agentName, err := startSkillOptTrainTargetSkillAgent(ctx, store, session, iteration, run, item, role, attempt, request, dispatch)
+	if err != nil {
+		return localAgentJobOutput{}, err
+	}
+	return dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
+		RepoFlag:     skillOptTrainGenerationRepo(session),
+		Agent:        agentName,
+		Action:       "ask",
+		Instructions: prompt,
+		Home:         request.Home,
+		JobTimeout:   skillOptTrainGenerationJobTimeoutHint(request, dispatch.Type),
+	})
+}
+
+func startSkillOptTrainTargetSkillAgent(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, item db.EvalReviewItem, role string, attempt int, request skillOptTrainContinueRequest, dispatch skillOptTrainGenerationDispatch) (string, error) {
+	repo, record, err := resolveLocalAgentRepo(ctx, store, skillOptTrainGenerationRepo(session))
+	if err != nil {
+		return "", err
+	}
+	if err := store.UpsertRepo(ctx, record); err != nil {
+		return "", err
+	}
+	template, err := loadInstalledTemplate(ctx, store, dispatch.TemplateVersionID)
+	if err != nil {
+		return "", err
+	}
+	agent := runtime.Agent{
+		Name:           skillOptTrainTargetSkillAgentName(run.ID, item.ItemID, role, attempt),
+		Role:           "generator",
+		Runtime:        firstNonEmpty(strings.TrimSpace(dispatch.Runtime), runtime.CodexRuntime),
+		RepoScope:      repo.FullName(),
+		TemplateID:     dispatch.TemplateVersionID,
+		Capabilities:   []string{"ask"},
+		AutonomyPolicy: "auto",
+		HealthStatus:   "idle",
+	}
+	adapter, err := runtimeStartAdapter(newRuntimeFactory(), agent.Runtime, record.CheckoutPath)
+	if err != nil {
+		return "", err
+	}
+	started, err := adapter.Start(ctx, runtime.StartRequest{Agent: agent, Prompt: agentStartupPrompt(agent, template)})
+	if err != nil {
+		return "", err
+	}
+	agent.RuntimeRef = strings.TrimSpace(started.RuntimeRef)
+	if err := runtime.ValidateAgent(agent); err != nil {
+		return "", err
+	}
+	if err := persistAgentSubscription(ctx, store, agent, []string{repo.FullName()}); err != nil {
+		return "", err
+	}
+	return agent.Name, nil
+}
+
+func skillOptTrainTargetSkillAgentName(runID string, itemID string, role string, attempt int) string {
+	parts := []string{"skillopt-target", runID, itemID, role}
+	if attempt > 0 {
+		parts = append(parts, fmt.Sprintf("retry-%d", attempt))
+	}
+	parts = append(parts, fmt.Sprintf("%x", time.Now().UTC().UnixNano()))
+	return skillOptSafeAgentName(strings.Join(parts, "-"))
+}
+
+func skillOptSafeAgentName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if !ok {
+			ok = r == '-' || r == '_' || r == '.' || r == '@'
+		}
+		if ok {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	name := strings.Trim(builder.String(), "-")
+	if name == "" {
+		return "skillopt-target"
+	}
+	return name
+}
+
+func skillOptTrainGenerationSampleLabel(itemID string, role string) string {
+	return strings.TrimSpace(itemID) + "/" + strings.TrimSpace(role)
 }
 
 func skillOptTrainWantsVuePreviewBundle(session db.SkillOptTrainSession) bool {
@@ -7608,19 +7732,79 @@ func ensureSkillOptTrainGenerationRepoReady(ctx context.Context, store *db.Store
 	return store.UpsertRepo(ctx, record)
 }
 
-func skillOptTrainGeneratorSelection(request skillOptTrainContinueRequest) (string, string, error) {
+const (
+	skillOptTrainGenerationModeTargetSkill       = "target_skill"
+	skillOptTrainGenerationModeSkillOptGenerator = "skillopt_generator"
+	skillOptTrainGenerationModeCustomAgent       = "custom_agent"
+)
+
+type skillOptTrainGenerationDispatch struct {
+	Mode              string
+	Agent             string
+	Type              string
+	Runtime           string
+	TemplateID        string
+	TemplateVersionID string
+}
+
+func skillOptTrainGeneratorSelection(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, request skillOptTrainContinueRequest) (skillOptTrainGenerationDispatch, error) {
 	agent := strings.TrimSpace(request.GeneratorAgent)
 	agentType := strings.TrimSpace(request.GeneratorType)
 	if agent != "" && agentType != "" {
-		return "", "", errors.New("use only one of --generator-agent or --generator-type")
+		return skillOptTrainGenerationDispatch{}, errors.New("use only one of --generator-agent or --generator-type")
 	}
 	if agent != "" {
-		return agent, "", nil
+		return skillOptTrainGenerationDispatch{Mode: skillOptTrainGenerationModeCustomAgent, Agent: agent}, nil
 	}
+	if agentType != "" {
+		return skillOptTrainGenerationDispatch{Mode: skillOptTrainGenerationModeSkillOptGenerator, Agent: agentType, Type: agentType}, nil
+	}
+	templateVersionID := skillOptTrainGenerationTemplateVersion(session, iteration, run)
+	if templateVersionID == "" {
+		return skillOptTrainFallbackGeneratorDispatch(request), nil
+	}
+	template, err := loadInstalledTemplate(ctx, store, templateVersionID)
+	if err != nil {
+		return skillOptTrainGenerationDispatch{}, err
+	}
+	return skillOptTrainGenerationDispatch{
+		Mode:              skillOptTrainGenerationModeTargetSkill,
+		Runtime:           skillOptTrainTargetSkillGenerationRuntime(request),
+		TemplateID:        template.ID,
+		TemplateVersionID: template.VersionID,
+	}, nil
+}
+
+func skillOptTrainFallbackGeneratorDispatch(request skillOptTrainContinueRequest) skillOptTrainGenerationDispatch {
+	agentType := strings.TrimSpace(request.GeneratorType)
 	if agentType == "" {
 		agentType = "skillopt-generator"
 	}
-	return agentType, agentType, nil
+	return skillOptTrainGenerationDispatch{Mode: skillOptTrainGenerationModeSkillOptGenerator, Agent: agentType, Type: agentType}
+}
+
+func skillOptTrainGenerationTemplateVersion(session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun) string {
+	return firstNonEmpty(
+		strings.TrimSpace(iteration.BaseTemplateVersionID),
+		strings.TrimSpace(run.TemplateVersionID),
+		strings.TrimSpace(session.TemplateVersionID),
+	)
+}
+
+func skillOptTrainTargetSkillGenerationRuntime(request skillOptTrainContinueRequest) string {
+	for _, value := range []string{
+		request.Optimizer.Backend,
+		request.Optimizer.TargetBackend,
+		request.Optimizer.OptimizerBackend,
+	} {
+		switch strings.TrimSpace(strings.ToLower(value)) {
+		case runtime.ClaudeRuntime, "claude-code":
+			return runtime.ClaudeRuntime
+		case runtime.CodexRuntime, "codex_exec":
+			return runtime.CodexRuntime
+		}
+	}
+	return runtime.CodexRuntime
 }
 
 func skillOptTrainGenerationConcurrency(request skillOptTrainContinueRequest, dispatchType string) (int, error) {
@@ -7807,13 +7991,17 @@ func prepareReviewItemContentArtifact(blobStore artifact.Store, runID string, it
 	}, nil
 }
 
-func skillOptTrainGeneratedOptionMetadata(output localAgentJobOutput, prompt string, previewBundleMetadata *skillopt.PreviewBundleMetadata, retryAttempts int, validationErrors []map[string]any) string {
+func skillOptTrainGeneratedOptionMetadata(output localAgentJobOutput, prompt string, generationMode string, templateID string, templateVersionID string, sampleLabel string, previewBundleMetadata *skillopt.PreviewBundleMetadata, retryAttempts int, validationErrors []map[string]any) string {
 	metadata := map[string]any{
-		"source":           "gitmoot skillopt train continue",
-		"job_id":           output.JobID,
-		"agent":            output.Agent,
-		"prompt":           prompt,
-		"raw_output_count": output.RawOutputCount,
+		"source":              "gitmoot skillopt train continue",
+		"job_id":              output.JobID,
+		"agent":               output.Agent,
+		"prompt":              prompt,
+		"raw_output_count":    output.RawOutputCount,
+		"generation_mode":     generationMode,
+		"template_id":         templateID,
+		"template_version_id": templateVersionID,
+		"sample_label":        sampleLabel,
 	}
 	if previewBundleMetadata != nil {
 		metadata["preview_bundle"] = *previewBundleMetadata
