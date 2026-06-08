@@ -16,6 +16,14 @@ type WorktreeManager interface {
 	AddWorktree(ctx context.Context, branch string, path string, base string) error
 }
 
+type ExistingBranchWorktreeManager interface {
+	AddExistingBranchWorktree(ctx context.Context, branch string, path string) error
+}
+
+type BranchExistenceChecker interface {
+	BranchExists(ctx context.Context, branch string) (bool, error)
+}
+
 type TaskWorktreeRequest struct {
 	Home       string
 	Repo       string
@@ -101,7 +109,7 @@ func (e Engine) AllocateTaskWorktree(ctx context.Context, request TaskWorktreeRe
 			_ = releaseCheckoutLock(context.Background())
 		}
 	}()
-	if err := manager.AddWorktree(ctx, request.Branch, path, request.BaseBranch); err != nil {
+	if err := addTaskWorktree(ctx, manager, request.Branch, path, request.BaseBranch); err != nil {
 		if createdLock {
 			_, _ = e.Store.ReleaseLock(ctx, lock)
 		}
@@ -131,6 +139,23 @@ func (e Engine) AllocateTaskWorktree(ctx context.Context, request TaskWorktreeRe
 		return db.Task{}, err
 	}
 	return task, nil
+}
+
+func addTaskWorktree(ctx context.Context, manager WorktreeManager, branch string, path string, base string) error {
+	if checker, ok := manager.(BranchExistenceChecker); ok {
+		exists, err := checker.BranchExists(ctx, branch)
+		if err != nil {
+			return err
+		}
+		if exists {
+			existingManager, ok := manager.(ExistingBranchWorktreeManager)
+			if !ok {
+				return errors.New("existing branch worktree manager is required")
+			}
+			return existingManager.AddExistingBranchWorktree(ctx, branch, path)
+		}
+	}
+	return manager.AddWorktree(ctx, branch, path, base)
 }
 
 func TaskWorktreePath(home string, repo string, taskID string) (string, error) {

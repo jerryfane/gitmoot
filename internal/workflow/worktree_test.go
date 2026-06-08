@@ -290,10 +290,53 @@ func TestEngineAllocateTaskWorktreeReusesExistingTaskWorktree(t *testing.T) {
 	}
 }
 
+func TestEngineAllocateTaskWorktreeUsesExistingBranchWhenBranchAlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	engine := testEngine(store)
+	home := t.TempDir()
+	if err := store.UpsertTask(ctx, db.Task{
+		ID:           "task-1",
+		RepoFullName: "owner/repo",
+		GoalID:       "goal-1",
+		Title:        "First",
+		State:        string(TaskImplementing),
+		Branch:       "task-1",
+	}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	manager := &fakeWorktreeManager{existingBranches: map[string]bool{"task-1": true}}
+
+	task, err := engine.AllocateTaskWorktree(ctx, TaskWorktreeRequest{
+		Home:     home,
+		Repo:     "owner/repo",
+		TaskID:   "task-1",
+		Branch:   "task-1",
+		Owner:    "lead",
+		Checkout: t.TempDir(),
+	}, manager)
+
+	if err != nil {
+		t.Fatalf("AllocateTaskWorktree returned error: %v", err)
+	}
+	wantPath := filepath.Join(home, "worktrees", "owner--repo", "task-1")
+	if task.WorktreePath != wantPath {
+		t.Fatalf("worktree path = %q, want %q", task.WorktreePath, wantPath)
+	}
+	if len(manager.calls) != 0 {
+		t.Fatalf("AddWorktree ran for existing branch: %+v", manager.calls)
+	}
+	if len(manager.existingCalls) != 1 || manager.existingCalls[0].branch != "task-1" || manager.existingCalls[0].path != wantPath {
+		t.Fatalf("existing branch worktree calls = %+v", manager.existingCalls)
+	}
+}
+
 type fakeWorktreeManager struct {
-	err   error
-	onAdd func()
-	calls []worktreeCall
+	err              error
+	onAdd            func()
+	existingBranches map[string]bool
+	calls            []worktreeCall
+	existingCalls    []worktreeCall
 }
 
 type worktreeCall struct {
@@ -308,4 +351,16 @@ func (f *fakeWorktreeManager) AddWorktree(_ context.Context, branch string, path
 	}
 	f.calls = append(f.calls, worktreeCall{branch: branch, path: path, base: base})
 	return f.err
+}
+
+func (f *fakeWorktreeManager) AddExistingBranchWorktree(_ context.Context, branch string, path string) error {
+	if f.onAdd != nil {
+		f.onAdd()
+	}
+	f.existingCalls = append(f.existingCalls, worktreeCall{branch: branch, path: path})
+	return f.err
+}
+
+func (f *fakeWorktreeManager) BranchExists(_ context.Context, branch string) (bool, error) {
+	return f.existingBranches[branch], nil
 }

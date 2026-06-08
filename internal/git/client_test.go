@@ -77,30 +77,63 @@ func TestClientRejectsUnsafeBranchNames(t *testing.T) {
 }
 
 func TestClientWorktreeCommandConstruction(t *testing.T) {
-	runner := &fakeRunner{results: []subprocess.Result{{}, {}}}
+	runner := &fakeRunner{results: []subprocess.Result{{}, {}, {}, {}}}
 	client := Client{Runner: runner, Dir: "/repo"}
 
 	if err := client.AddWorktree(context.Background(), "task-1", "/worktrees/task-1", "main"); err != nil {
 		t.Fatalf("AddWorktree returned error: %v", err)
+	}
+	exists, err := client.BranchExists(context.Background(), "task-1")
+	if err != nil {
+		t.Fatalf("BranchExists returned error: %v", err)
+	}
+	if !exists {
+		t.Fatal("BranchExists returned false after successful fake show-ref")
+	}
+	if err := client.AddExistingBranchWorktree(context.Background(), "task-1", "/worktrees/task-1-existing"); err != nil {
+		t.Fatalf("AddExistingBranchWorktree returned error: %v", err)
 	}
 	if err := client.RemoveWorktree(context.Background(), "/worktrees/task-1"); err != nil {
 		t.Fatalf("RemoveWorktree returned error: %v", err)
 	}
 
 	runner.wantArgs(t, 0, "git", "worktree", "add", "-b", "task-1", "/worktrees/task-1", "main")
-	runner.wantArgs(t, 1, "git", "worktree", "remove", "/worktrees/task-1")
+	runner.wantArgs(t, 1, "git", "show-ref", "--verify", "--quiet", "refs/heads/task-1")
+	runner.wantArgs(t, 2, "git", "worktree", "add", "/worktrees/task-1-existing", "task-1")
+	runner.wantArgs(t, 3, "git", "worktree", "remove", "/worktrees/task-1")
 }
 
 func TestClientAddWorktreeRejectsInvalidInput(t *testing.T) {
 	if err := (Client{}).AddWorktree(context.Background(), "bad branch", "/tmp/wt", "main"); err == nil {
 		t.Fatal("AddWorktree accepted unsafe branch")
 	}
+	if err := (Client{}).AddExistingBranchWorktree(context.Background(), "bad branch", "/tmp/wt"); err == nil {
+		t.Fatal("AddExistingBranchWorktree accepted unsafe branch")
+	}
+	if _, err := (Client{}).BranchExists(context.Background(), "bad branch"); err == nil {
+		t.Fatal("BranchExists accepted unsafe branch")
+	}
 	if err := (Client{}).AddWorktree(context.Background(), "task-1", "", "main"); err == nil {
 		t.Fatal("AddWorktree accepted empty path")
+	}
+	if err := (Client{}).AddExistingBranchWorktree(context.Background(), "task-1", " "); err == nil {
+		t.Fatal("AddExistingBranchWorktree accepted empty path")
 	}
 	if err := (Client{}).RemoveWorktree(context.Background(), " "); err == nil {
 		t.Fatal("RemoveWorktree accepted empty path")
 	}
+}
+
+func TestClientBranchExistsReturnsFalseForMissingBranch(t *testing.T) {
+	runner := &fakeRunner{errs: []error{errors.New("exit status 1")}}
+	exists, err := (Client{Runner: runner, Dir: "/repo"}).BranchExists(context.Background(), "missing")
+	if err != nil {
+		t.Fatalf("BranchExists returned error: %v", err)
+	}
+	if exists {
+		t.Fatal("BranchExists returned true for missing branch")
+	}
+	runner.wantArgs(t, 0, "git", "show-ref", "--verify", "--quiet", "refs/heads/missing")
 }
 
 func TestClientHeadSHA(t *testing.T) {

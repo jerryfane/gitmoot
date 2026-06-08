@@ -30,24 +30,47 @@ func (c Client) AddWorktree(ctx context.Context, branch string, path string, bas
 	if err := validateBranch(branch); err != nil {
 		return err
 	}
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return errors.New("worktree path is required")
+	path, err := validateWorktreePath(path)
+	if err != nil {
+		return err
 	}
 	args := []string{"worktree", "add", "-b", branch, path}
 	if strings.TrimSpace(base) != "" {
 		args = append(args, base)
 	}
-	_, err := c.run(ctx, args...)
+	_, err = c.run(ctx, args...)
 	return err
 }
 
-func (c Client) RemoveWorktree(ctx context.Context, path string) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return errors.New("worktree path is required")
+func (c Client) AddExistingBranchWorktree(ctx context.Context, branch string, path string) error {
+	if err := validateBranch(branch); err != nil {
+		return err
 	}
-	_, err := c.run(ctx, "worktree", "remove", path)
+	path, err := validateWorktreePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = c.run(ctx, "worktree", "add", path, branch)
+	return err
+}
+
+func (c Client) BranchExists(ctx context.Context, branch string) (bool, error) {
+	if err := validateBranch(branch); err != nil {
+		return false, err
+	}
+	_, err := c.run(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	if err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (c Client) RemoveWorktree(ctx context.Context, path string) error {
+	path, err := validateWorktreePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = c.run(ctx, "worktree", "remove", path)
 	return err
 }
 
@@ -172,4 +195,12 @@ func validateBranch(branch string) error {
 		return fmt.Errorf("branch %q must not end with .lock", branch)
 	}
 	return nil
+}
+
+func validateWorktreePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("worktree path is required")
+	}
+	return path, nil
 }
