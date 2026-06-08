@@ -1443,7 +1443,7 @@ func (s queuedJobResourceSelector) selects(ctx context.Context, store *db.Store,
 	if selected >= s.limit {
 		return false
 	}
-	checkoutKey := queuedJobCheckoutKey(job)
+	checkoutKey := queuedJobCheckoutKey(ctx, store, job)
 	runtimeKey := queuedJobRuntimeResourceKey(ctx, store, job)
 	if s.checkouts[checkoutKey] || (runtimeKey != "" && s.runtimes[runtimeKey]) {
 		return false
@@ -1464,12 +1464,30 @@ func queuedJobMatchesRepo(job db.Job, repoFilter string) bool {
 	return err == nil && payload.Repo == repoFilter
 }
 
-func queuedJobCheckoutKey(job db.Job) string {
+func queuedJobCheckoutKey(ctx context.Context, store *db.Store, job db.Job) string {
 	payload, err := daemonJobPayload(job)
 	if err != nil || strings.TrimSpace(payload.Repo) == "" {
 		return "job:" + job.ID
 	}
+	if path, ok := queuedJobTaskWorktreePath(ctx, store, payload); ok {
+		return "worktree:" + path
+	}
 	return "repo:" + payload.Repo
+}
+
+func queuedJobTaskWorktreePath(ctx context.Context, store *db.Store, payload workflow.JobPayload) (string, bool) {
+	if store == nil || strings.TrimSpace(payload.TaskID) == "" {
+		return "", false
+	}
+	task, err := store.GetTask(ctx, payload.TaskID)
+	if err != nil {
+		return "", false
+	}
+	if strings.TrimSpace(task.RepoFullName) != "" && task.RepoFullName != payload.Repo {
+		return "", false
+	}
+	path, err := normalizeTaskWorktreePath(task.WorktreePath)
+	return path, err == nil && path != ""
 }
 
 func queuedJobRuntimeResourceKey(ctx context.Context, store *db.Store, job db.Job) string {
@@ -1765,19 +1783,8 @@ func (w jobWorker) refreshImplementedPayloadForRetry(ctx context.Context, job db
 	if job.Type != "implement" || payload.Result == nil || payload.Result.Decision != "implemented" {
 		return payload, false, nil
 	}
-	repoRecord, err := w.Store.GetRepo(ctx, payload.Repo)
+	checkout, err := w.resolveJobCheckout(ctx, job, payload)
 	if err != nil {
-		return workflow.JobPayload{}, false, err
-	}
-	checkout := strings.TrimSpace(repoRecord.CheckoutPath)
-	if checkout == "" {
-		return workflow.JobPayload{}, false, fmt.Errorf("repo %s has no checkout path", payload.Repo)
-	}
-	repo, err := daemon.ParseRepository(payload.Repo)
-	if err != nil {
-		return workflow.JobPayload{}, false, err
-	}
-	if err := preflightDaemonRepoCheckout(ctx, repo, checkout); err != nil {
 		return workflow.JobPayload{}, false, err
 	}
 	payload, err = refreshDaemonJobPayload(ctx, w.Store, checkout, job, payload)
@@ -1817,18 +1824,57 @@ func (w jobWorker) defaultCommenter(_ string) github.Client {
 
 func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string) workflow.Engine {
 	return workflow.Engine{
-		Store: store,
-		MergeGate: workflow.PolicyMergeGate{
-			Store:        store,
-			GitHub:       gh,
-			Git:          gitutil.Client{Dir: checkout},
-			CheckoutPath: checkout,
-			DeleteBranch: true,
-		},
+		Store:     store,
+		MergeGate: daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout},
 		PayloadRefresher: func(ctx context.Context, job db.Job, payload workflow.JobPayload) (workflow.JobPayload, error) {
 			return refreshDaemonJobPayload(ctx, store, checkout, job, payload)
 		},
 	}
+}
+
+type daemonMergeGate struct {
+	Store            *db.Store
+	GitHub           github.Client
+	FallbackCheckout string
+}
+
+func (g daemonMergeGate) Evaluate(ctx context.Context, request workflow.MergeRequest) (workflow.MergeDecision, error) {
+	checkout, err := mergeGateCheckout(ctx, g.Store, request.Repo, g.FallbackCheckout)
+	if err != nil {
+		return workflow.MergeDecision{}, err
+	}
+	return workflow.PolicyMergeGate{
+		Store:        g.Store,
+		GitHub:       g.githubClient(checkout),
+		Git:          gitutil.Client{Dir: checkout},
+		CheckoutPath: checkout,
+		DeleteBranch: true,
+	}.Evaluate(ctx, request)
+}
+
+func (g daemonMergeGate) githubClient(checkout string) github.Client {
+	if g.GitHub == nil {
+		return github.NewClient(checkout)
+	}
+	if _, ok := g.GitHub.(*github.GhClient); ok {
+		return github.NewClient(checkout)
+	}
+	return g.GitHub
+}
+
+func mergeGateCheckout(ctx context.Context, store *db.Store, repo string, fallback string) (string, error) {
+	if store == nil {
+		return strings.TrimSpace(fallback), nil
+	}
+	record, err := store.GetRepo(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	checkout := strings.TrimSpace(record.CheckoutPath)
+	if checkout == "" {
+		return "", fmt.Errorf("repo %s has no checkout path", repo)
+	}
+	return checkout, nil
 }
 
 func refreshDaemonJobPayload(ctx context.Context, store *db.Store, checkout string, job db.Job, payload workflow.JobPayload) (workflow.JobPayload, error) {
@@ -1878,19 +1924,8 @@ func agentHasCapability(capabilities []string, target string) bool {
 }
 
 func (w jobWorker) defaultCheckout(ctx context.Context, job db.Job, payload workflow.JobPayload, agent runtime.Agent) (string, error) {
-	repoRecord, err := w.Store.GetRepo(ctx, payload.Repo)
+	checkout, err := w.resolveJobCheckout(ctx, job, payload)
 	if err != nil {
-		return "", err
-	}
-	checkout := strings.TrimSpace(repoRecord.CheckoutPath)
-	if checkout == "" {
-		return "", fmt.Errorf("repo %s has no checkout path", payload.Repo)
-	}
-	repo, err := daemon.ParseRepository(payload.Repo)
-	if err != nil {
-		return "", err
-	}
-	if err := preflightDaemonRepoCheckout(ctx, repo, checkout); err != nil {
 		return "", err
 	}
 	switch job.Type {
@@ -1913,6 +1948,75 @@ func (w jobWorker) defaultCheckout(ctx context.Context, job db.Job, payload work
 		}
 	}
 	return checkout, nil
+}
+
+func (w jobWorker) resolveJobCheckout(ctx context.Context, job db.Job, payload workflow.JobPayload) (string, error) {
+	repoRecord, err := w.Store.GetRepo(ctx, payload.Repo)
+	if err != nil {
+		return "", err
+	}
+	checkout := strings.TrimSpace(repoRecord.CheckoutPath)
+	if checkout == "" {
+		return "", fmt.Errorf("repo %s has no checkout path", payload.Repo)
+	}
+	repo, err := daemon.ParseRepository(payload.Repo)
+	if err != nil {
+		return "", err
+	}
+	if err := preflightDaemonRepoCheckout(ctx, repo, checkout); err != nil {
+		return "", err
+	}
+	taskCheckout, ok, err := w.taskWorktreeCheckout(ctx, payload)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		checkout = taskCheckout
+		if err := preflightDaemonRepoCheckout(ctx, repo, checkout); err != nil {
+			return "", err
+		}
+	}
+	return checkout, nil
+}
+
+func (w jobWorker) taskWorktreeCheckout(ctx context.Context, payload workflow.JobPayload) (string, bool, error) {
+	if strings.TrimSpace(payload.TaskID) == "" {
+		return "", false, nil
+	}
+	task, err := w.Store.GetTask(ctx, payload.TaskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(task.RepoFullName) != "" && task.RepoFullName != payload.Repo {
+		return "", false, fmt.Errorf("task %s belongs to repo %s, not %s", payload.TaskID, task.RepoFullName, payload.Repo)
+	}
+	if strings.TrimSpace(task.Branch) != "" && task.Branch != payload.Branch {
+		return "", false, fmt.Errorf("task %s branch is %s, not job branch %s", payload.TaskID, task.Branch, payload.Branch)
+	}
+	checkout := strings.TrimSpace(task.WorktreePath)
+	if checkout == "" {
+		return "", false, nil
+	}
+	checkout, err = normalizeTaskWorktreePath(checkout)
+	if err != nil {
+		return "", false, err
+	}
+	return checkout, true, nil
+}
+
+func normalizeTaskWorktreePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("normalize task worktree path: %w", err)
+	}
+	return filepath.Clean(absolute), nil
 }
 
 func (w jobWorker) validateTargetCheckout(ctx context.Context, payload workflow.JobPayload, checkout string) error {

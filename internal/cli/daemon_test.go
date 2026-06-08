@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1783,6 +1784,217 @@ func TestRunQueuedJobsFailsImplementWithoutBranchLockBeforeDelivery(t *testing.T
 	}
 }
 
+func TestRunQueuedJobsUsesTaskWorktreeForImplement(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	checkout := createDaemonWorkerGitCheckout(t, "main")
+	worktree := filepath.Join(t.TempDir(), "task-1")
+	runDaemonWorkerGit(t, checkout, "worktree", "add", "-b", "task-1", worktree, "main")
+	head, err := (gitutil.Client{Dir: worktree}).HeadSHA(ctx)
+	if err != nil {
+		t.Fatalf("HeadSHA returned error: %v", err)
+	}
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	seedDaemonWorkerAgent(t, store, "lead", runtime.ShellRuntime, "unused", []string{"implement"}, "owner/repo")
+	if err := store.UpsertAgent(ctx, db.Agent{Name: "reviewer", Role: "reviewer", Runtime: runtime.ShellRuntime, RuntimeRef: "unused", RepoScope: "owner/repo", Capabilities: []string{"review"}, AutonomyPolicy: runtime.AutonomyPolicyAuto, HealthStatus: "ok"}); err != nil {
+		t.Fatalf("UpsertAgent reviewer returned error: %v", err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-1", RepoFullName: "owner/repo", GoalID: "goal-1", Title: "Task 1", State: string(workflow.TaskImplementing), Branch: "task-1", WorktreePath: worktree}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "owner/repo", Branch: "task-1", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-implement-worktree", Agent: "lead", Action: "implement", Repo: "owner/repo", Branch: "task-1", PullRequest: 7, HeadSHA: head, GoalID: "goal-1", TaskID: "task-1", TaskTitle: "Task 1"})
+	adapter := &cliWorkerFakeAdapter{output: `{"gitmoot_result":{"decision":"implemented","summary":"implemented","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}`}
+	worker := defaultJobWorker(store, io.Discard)
+	adapterCheckout := ""
+	worker.AdapterFactory = func(_ runtime.Agent, checkout string) (workflow.DeliveryAdapter, error) {
+		adapterCheckout = checkout
+		return adapter, nil
+	}
+	worker.WorkflowFactory = func(checkout string) workflow.Engine {
+		return workflow.Engine{
+			Store:             store,
+			RequiredReviewers: []string{"reviewer"},
+			PayloadRefresher: func(ctx context.Context, job db.Job, payload workflow.JobPayload) (workflow.JobPayload, error) {
+				return refreshDaemonJobPayload(ctx, store, checkout, job, payload)
+			},
+		}
+	}
+
+	if err := runQueuedJobs(ctx, worker, 1); err != nil {
+		t.Fatalf("runQueuedJobs returned error: %v", err)
+	}
+
+	wantCheckout, err := filepath.Abs(worktree)
+	if err != nil {
+		t.Fatalf("Abs returned error: %v", err)
+	}
+	if adapterCheckout != filepath.Clean(wantCheckout) {
+		t.Fatalf("adapter checkout = %q, want %q", adapterCheckout, filepath.Clean(wantCheckout))
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", adapter.calls)
+	}
+}
+
+func TestRunQueuedJobsUsesTaskWorktreeForReview(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	checkout := createDaemonWorkerGitCheckout(t, "main")
+	worktree := filepath.Join(t.TempDir(), "task-1")
+	runDaemonWorkerGit(t, checkout, "worktree", "add", "-b", "task-1", worktree, "main")
+	head, err := (gitutil.Client{Dir: worktree}).HeadSHA(ctx)
+	if err != nil {
+		t.Fatalf("HeadSHA returned error: %v", err)
+	}
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	seedDaemonWorkerAgent(t, store, "reviewer", runtime.ShellRuntime, "unused", []string{"review"}, "owner/repo")
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-1", RepoFullName: "owner/repo", GoalID: "goal-1", Title: "Task 1", State: string(workflow.TaskReviewing), Branch: "task-1", WorktreePath: worktree}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-review-worktree", Agent: "reviewer", Action: "review", Repo: "owner/repo", Branch: "task-1", PullRequest: 7, HeadSHA: head, GoalID: "goal-1", TaskID: "task-1", TaskTitle: "Task 1"})
+	adapter := &cliWorkerFakeAdapter{output: `{"gitmoot_result":{"decision":"approved","summary":"approved","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}`}
+	worker := defaultJobWorker(store, io.Discard)
+	adapterCheckout := ""
+	worker.AdapterFactory = func(_ runtime.Agent, checkout string) (workflow.DeliveryAdapter, error) {
+		adapterCheckout = checkout
+		return adapter, nil
+	}
+	worker.WorkflowFactory = func(string) workflow.Engine {
+		return workflow.Engine{Store: store}
+	}
+
+	if err := runQueuedJobs(ctx, worker, 1); err != nil {
+		t.Fatalf("runQueuedJobs returned error: %v", err)
+	}
+
+	wantCheckout, err := filepath.Abs(worktree)
+	if err != nil {
+		t.Fatalf("Abs returned error: %v", err)
+	}
+	if adapterCheckout != filepath.Clean(wantCheckout) {
+		t.Fatalf("adapter checkout = %q, want %q", adapterCheckout, filepath.Clean(wantCheckout))
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", adapter.calls)
+	}
+}
+
+func TestRunQueuedJobsKeepsReviewOnRegisteredCheckoutWithoutTaskWorktree(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	checkout := createDaemonWorkerGitCheckout(t, "task-1")
+	head, err := (gitutil.Client{Dir: checkout}).HeadSHA(ctx)
+	if err != nil {
+		t.Fatalf("HeadSHA returned error: %v", err)
+	}
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	seedDaemonWorkerAgent(t, store, "reviewer", runtime.ShellRuntime, "unused", []string{"review"}, "owner/repo")
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-1", RepoFullName: "owner/repo", GoalID: "goal-1", Title: "Task 1", State: string(workflow.TaskReviewing), Branch: "task-1"}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-review-main-checkout", Agent: "reviewer", Action: "review", Repo: "owner/repo", Branch: "task-1", PullRequest: 7, HeadSHA: head, GoalID: "goal-1", TaskID: "task-1", TaskTitle: "Task 1"})
+	adapter := &cliWorkerFakeAdapter{output: `{"gitmoot_result":{"decision":"approved","summary":"approved","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}`}
+	worker := defaultJobWorker(store, io.Discard)
+	adapterCheckout := ""
+	worker.AdapterFactory = func(_ runtime.Agent, checkout string) (workflow.DeliveryAdapter, error) {
+		adapterCheckout = checkout
+		return adapter, nil
+	}
+	worker.WorkflowFactory = func(string) workflow.Engine {
+		return workflow.Engine{Store: store}
+	}
+
+	if err := runQueuedJobs(ctx, worker, 1); err != nil {
+		t.Fatalf("runQueuedJobs returned error: %v", err)
+	}
+
+	if adapterCheckout != checkout {
+		t.Fatalf("adapter checkout = %q, want registered checkout %q", adapterCheckout, checkout)
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", adapter.calls)
+	}
+}
+
+func TestMergeGateCheckoutUsesRegisteredCheckoutOverTaskWorktree(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	checkout := createDaemonWorkerGitCheckout(t, "main")
+	worktree := filepath.Join(t.TempDir(), "task-1")
+	runDaemonWorkerGit(t, checkout, "worktree", "add", "-b", "task-1", worktree, "main")
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+
+	got, err := mergeGateCheckout(ctx, store, "owner/repo", worktree)
+	if err != nil {
+		t.Fatalf("mergeGateCheckout returned error: %v", err)
+	}
+	if got != checkout {
+		t.Fatalf("merge gate checkout = %q, want registered checkout %q", got, checkout)
+	}
+}
+
+func TestDaemonMergeGatePreservesInjectedGitHubClient(t *testing.T) {
+	fake := github.NoopClient{}
+	gate := daemonMergeGate{GitHub: fake}
+
+	if got := gate.githubClient("/tmp/checkout"); got != fake {
+		t.Fatalf("github client = %#v, want injected fake %#v", got, fake)
+	}
+}
+
+func TestSelectRunnableQueuedJobsAllowsSeparateTaskWorktrees(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerAgent(t, store, "lead-a", runtime.ShellRuntime, "unused", []string{"implement"}, "owner/repo")
+	seedDaemonWorkerAgent(t, store, "lead-b", runtime.ShellRuntime, "unused", []string{"implement"}, "owner/repo")
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-a", RepoFullName: "owner/repo", State: string(workflow.TaskImplementing), Branch: "task-a", WorktreePath: "/tmp/gitmoot/task-a"}); err != nil {
+		t.Fatalf("UpsertTask task-a returned error: %v", err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-b", RepoFullName: "owner/repo", State: string(workflow.TaskImplementing), Branch: "task-b", WorktreePath: "/tmp/gitmoot/task-b"}); err != nil {
+		t.Fatalf("UpsertTask task-b returned error: %v", err)
+	}
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "lead-a", Action: "implement", Repo: "owner/repo", Branch: "task-a", TaskID: "task-a"})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "lead-b", Action: "implement", Repo: "owner/repo", Branch: "task-b", TaskID: "task-b"})
+	jobs, err := store.ListQueuedJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListQueuedJobs returned error: %v", err)
+	}
+
+	selected, remaining := selectRunnableQueuedJobs(ctx, store, jobs, 2)
+
+	if len(selected) != 2 || len(remaining) != 0 {
+		t.Fatalf("selected=%d remaining=%d, want two selected separate worktrees", len(selected), len(remaining))
+	}
+}
+
+func TestSelectRunnableQueuedJobsKeepsSameRuntimeSerializedAcrossWorktrees(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerAgent(t, store, "lead-a", runtime.CodexRuntime, "session-1", []string{"implement"}, "owner/repo")
+	seedDaemonWorkerAgent(t, store, "lead-b", runtime.CodexRuntime, "session-1", []string{"implement"}, "owner/repo")
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-a", RepoFullName: "owner/repo", State: string(workflow.TaskImplementing), Branch: "task-a", WorktreePath: "/tmp/gitmoot/task-a"}); err != nil {
+		t.Fatalf("UpsertTask task-a returned error: %v", err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-b", RepoFullName: "owner/repo", State: string(workflow.TaskImplementing), Branch: "task-b", WorktreePath: "/tmp/gitmoot/task-b"}); err != nil {
+		t.Fatalf("UpsertTask task-b returned error: %v", err)
+	}
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "lead-a", Action: "implement", Repo: "owner/repo", Branch: "task-a", TaskID: "task-a"})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "lead-b", Action: "implement", Repo: "owner/repo", Branch: "task-b", TaskID: "task-b"})
+	jobs, err := store.ListQueuedJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListQueuedJobs returned error: %v", err)
+	}
+
+	selected, remaining := selectRunnableQueuedJobs(ctx, store, jobs, 2)
+
+	if len(selected) != 1 || len(remaining) != 1 {
+		t.Fatalf("selected=%d remaining=%d, want same runtime session serialized", len(selected), len(remaining))
+	}
+}
+
 func TestRunQueuedJobsFailsReviewOnWrongCheckoutBranchBeforeDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
@@ -2706,6 +2918,31 @@ func daemonWorkerStore(t *testing.T) *db.Store {
 		}
 	})
 	return store
+}
+
+func createDaemonWorkerGitCheckout(t *testing.T, branch string) string {
+	t.Helper()
+	checkout := t.TempDir()
+	runDaemonWorkerGit(t, checkout, "init", "-b", branch)
+	runDaemonWorkerGit(t, checkout, "config", "user.email", "gitmoot@example.com")
+	runDaemonWorkerGit(t, checkout, "config", "user.name", "Gitmoot")
+	if err := os.WriteFile(filepath.Join(checkout, "README.md"), []byte("test\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile README returned error: %v", err)
+	}
+	runDaemonWorkerGit(t, checkout, "add", "README.md")
+	runDaemonWorkerGit(t, checkout, "commit", "-m", "initial")
+	runDaemonWorkerGit(t, checkout, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	return checkout
+}
+
+func runDaemonWorkerGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
+	}
 }
 
 func seedDaemonWorkerRepo(t *testing.T, store *db.Store, fullName string, checkout string) {
