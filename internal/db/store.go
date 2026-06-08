@@ -378,6 +378,8 @@ type sqlExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+const sqliteBusyTimeoutMillis = 5000
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -386,6 +388,10 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
+	if err := configureWritableSQLite(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	store := &Store{db: db}
 	if err := store.Migrate(context.Background()); err != nil {
 		_ = db.Close()
@@ -402,11 +408,32 @@ func OpenReadOnly(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	if err := configureReadOnlySQLite(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := db.PingContext(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func configureWritableSQLite(ctx context.Context, db *sql.DB) error {
+	if err := configureReadOnlySQLite(ctx, db); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
+		return fmt.Errorf("configure sqlite WAL: %w", err)
+	}
+	return nil
+}
+
+func configureReadOnlySQLite(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, sqliteBusyTimeoutMillis)); err != nil {
+		return fmt.Errorf("configure sqlite busy timeout: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -1461,6 +1488,11 @@ func (s *Store) ListGoals(ctx context.Context) ([]Goal, error) {
 
 func (s *Store) UpsertTask(ctx context.Context, task Task) error {
 	return upsertTask(ctx, s.db, task)
+}
+
+func (s *Store) ClearTaskWorktreePath(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET worktree_path = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	return err
 }
 
 func upsertTask(ctx context.Context, execer sqlExecer, task Task) error {

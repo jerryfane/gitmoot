@@ -274,6 +274,14 @@ same checkout remain serialized even when the worker count is higher.
    registering all intended repos if one daemon should supervise the whole
    Gitmoot home.
 
+   Gitmoot records agent autonomy policy as `read-only`, `workspace-write`,
+   `danger-full-access`, or `auto`. For Codex these map to Codex sandbox
+   policies; for Claude Code they map to Claude permission modes. Implementation
+   jobs require a writable policy. If an implementation worker is read-only or
+   its runtime asks for write permission, Gitmoot blocks the job before treating
+   it as implementation work and tells the user to restart or subscribe a
+   writable worker.
+
 6. Start and open the first task PR.
 
    ```sh
@@ -281,9 +289,11 @@ same checkout remain serialized even when the worker count is higher.
    ```
 
    The lead agent or the human creates the task branch, implements the task,
-   pushes it, and opens a PR. The PR comments become the public audit trail.
-   The local Gitmoot database tracks the task, jobs, branch locks, PR head SHA,
-   and merge gate state.
+   pushes it, and opens a PR. When Gitmoot allocates a task worktree, writable
+   jobs for that task run from `$GITMOOT_HOME/worktrees/<owner>--<repo>/<task-id>/`
+   instead of moving the registered checkout. The PR comments become the public
+   audit trail. The local Gitmoot database tracks the task, jobs, branch locks,
+   worktree path, PR head SHA, and merge gate state.
 
 7. Route other agents through PR comments.
 
@@ -300,7 +310,8 @@ same checkout remain serialized even when the worker count is higher.
 
    Implement jobs require the agent to hold the branch lock. Review and ask jobs
    are routed through the runtime adapter and must return the `gitmoot_result`
-   JSON contract.
+   JSON contract. Jobs tied to a task worktree use that worktree for validation;
+   jobs without a task worktree use the registered checkout.
 
    For a local chat ask that should not go through a PR comment, call the same
    registered agent directly:
@@ -331,14 +342,20 @@ same checkout remain serialized even when the worker count is higher.
 9. Merge and continue.
 
    By default Gitmoot merges with a squash merge guarded by the current head SHA.
-   After merge it records the merged commit, releases the branch lock, updates
-   the local base branch, and can enqueue the next task once the task queueing
-   policy selects it.
+   After merge it records the merged commit, releases the branch lock, removes
+   the task worktree when one is recorded, updates the local base branch, and can
+   enqueue the next task once the task queueing policy selects it. If worktree
+   cleanup fails, the merge remains recorded and Gitmoot keeps the worktree path
+   on the task so it can be cleaned manually.
 
 ## Local-Only Limits
 
 - The machine running `gitmoot daemon start` must stay online.
 - Polling is the V1 mechanism; there is no webhook receiver yet.
+- Parallel implementation needs separate task worktrees and separate runtime
+  sessions or managed background instances. Checkout mutation operations are
+  serialized per checkout path; runtime session locks still serialize jobs that
+  reuse the same Codex or Claude session.
 - GitHub Checks are best implemented later through GitHub App mode. V1 uses
   commit statuses and `gh pr checks`.
 - Use explicit session ids for long workflows. `last` is convenient but can

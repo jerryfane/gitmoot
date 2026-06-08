@@ -1936,6 +1936,20 @@ func TestMergeGateCheckoutUsesRegisteredCheckoutOverTaskWorktree(t *testing.T) {
 	}
 }
 
+func TestNewDaemonPolicyMergeGateIncludesWorktreeCleaner(t *testing.T) {
+	gate := newDaemonPolicyMergeGate(nil, github.NoopClient{}, "/tmp/gitmoot-checkout")
+
+	if gate.Worktrees == nil {
+		t.Fatal("daemon merge gate missing worktree cleaner")
+	}
+	if gate.CheckoutPath != "/tmp/gitmoot-checkout" {
+		t.Fatalf("checkout path = %q", gate.CheckoutPath)
+	}
+	if !gate.DeleteBranch {
+		t.Fatal("daemon merge gate should delete merged branches")
+	}
+}
+
 func TestDaemonMergeGatePreservesInjectedGitHubClient(t *testing.T) {
 	fake := github.NoopClient{}
 	gate := daemonMergeGate{GitHub: fake}

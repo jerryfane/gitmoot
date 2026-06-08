@@ -59,6 +59,44 @@ func TestOpenMigratesSchema(t *testing.T) {
 	}
 }
 
+func TestOpenConfiguresSQLiteContentionPragmas(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gitmoot.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+
+	var busyTimeout int
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("PRAGMA busy_timeout returned error: %v", err)
+	}
+	if busyTimeout != sqliteBusyTimeoutMillis {
+		t.Fatalf("busy_timeout = %d, want %d", busyTimeout, sqliteBusyTimeoutMillis)
+	}
+	var journalMode string
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatalf("PRAGMA journal_mode returned error: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("journal_mode = %q, want wal", journalMode)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	readOnly, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly returned error: %v", err)
+	}
+	defer readOnly.Close()
+	if err := readOnly.db.QueryRowContext(context.Background(), `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("read-only PRAGMA busy_timeout returned error: %v", err)
+	}
+	if busyTimeout != sqliteBusyTimeoutMillis {
+		t.Fatalf("read-only busy_timeout = %d, want %d", busyTimeout, sqliteBusyTimeoutMillis)
+	}
+}
+
 func TestSkillOptTrainSessionAndIterationStorage(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
@@ -2009,6 +2047,16 @@ func TestTaskWorktreePathStorage(t *testing.T) {
 	}
 	if updated.State != "implementing" || updated.Title != "Updated" {
 		t.Fatalf("task update did not apply: %+v", updated)
+	}
+	if err := store.ClearTaskWorktreePath(ctx, "task-1"); err != nil {
+		t.Fatalf("ClearTaskWorktreePath returned error: %v", err)
+	}
+	cleared, err := store.GetTask(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("GetTask cleared returned error: %v", err)
+	}
+	if cleared.WorktreePath != "" {
+		t.Fatalf("cleared worktree path = %q, want empty", cleared.WorktreePath)
 	}
 }
 

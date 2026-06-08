@@ -93,6 +93,34 @@ Fixes:
 - Confirm `CODEX_HOME` if sessions are stored outside `~/.codex`.
 - Re-subscribe the agent with the correct session reference.
 
+## Read-Only Or Permission-Blocked Workers
+
+Symptoms:
+
+- An implementation job is blocked before the agent starts.
+- A job comment says the worker is read-only or cannot make changes.
+- Runtime output asks for permission or reports that writes are blocked.
+
+Checks:
+
+```sh
+gitmoot agent list
+gitmoot agent show <agent>
+gitmoot job show <job-id>
+gitmoot job events <job-id>
+```
+
+Fixes:
+
+- If read-only was intentional, do not rerun the implementation job with that
+  worker. Restart the agent in write mode or subscribe a writable worker, then
+  rerun the task.
+- For Codex agents, use an autonomy policy that permits writes for implementation
+  jobs. For Claude Code agents, use a permission mode that accepts edits for
+  implementation jobs.
+- Review and ask jobs can still run with read-only workers when they do not need
+  to modify files.
+
 ## Agent Templates
 
 Symptoms:
@@ -274,6 +302,37 @@ Fixes:
   runtime sessions or an agent type with `max_background` greater than one.
 - Use `gitmoot agent gc` to remove expired managed background instances.
 
+## Parallel Implementation And Worktrees
+
+Symptoms:
+
+- Parallel tasks contend on one checkout.
+- A job reports that the checkout is already being mutated.
+- Two jobs using different branches still block each other because they share one
+  registered checkout.
+
+Checks:
+
+```sh
+gitmoot task list --repo owner/repo
+gitmoot job list --repo owner/repo
+gitmoot job events <job-id>
+gitmoot lock list --repo owner/repo
+```
+
+Fixes:
+
+- Use task worktrees for parallel implementation. Gitmoot stores each task
+  worktree path on the task and routes task-tied jobs there.
+- Keep the registered checkout clean. Gitmoot still uses it for base branch
+  updates and merge-gate cleanup.
+- Use separate runtime sessions or managed background instances for jobs that
+  should truly run concurrently. Worktrees isolate files; runtime session locks
+  still serialize reuse of the same Codex or Claude session.
+- Temporary forkable workers, such as the future #177 flow, should remain gated
+  on task worktree isolation. Forking sessions without checkout isolation only
+  moves the contention from runtime memory to local git state.
+
 ## Malformed Agent Output
 
 Symptoms:
@@ -339,3 +398,6 @@ Fixes:
 - Update the PR branch if it is behind or diverged from base.
 - Fix failing external CI or Gitmoot statuses.
 - Rerun reviews after the PR head SHA changes.
+- If a merged task reports a worktree cleanup warning, inspect the stored task
+  worktree path, clean or remove that worktree manually, then clear stale local
+  state only after confirming the path is no longer needed.

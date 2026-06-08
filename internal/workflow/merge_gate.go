@@ -37,10 +37,15 @@ type NextTaskEnqueuer interface {
 	EnqueueNextTask(ctx context.Context, completedTaskID string) error
 }
 
+type WorktreeCleaner interface {
+	RemoveWorktree(ctx context.Context, path string) error
+}
+
 type PolicyMergeGate struct {
 	Store        *db.Store
 	GitHub       MergeGateGitHub
 	Git          MergeGateGit
+	Worktrees    WorktreeCleaner
 	NextTasks    NextTaskEnqueuer
 	CheckoutPath string
 	DeleteBranch bool
@@ -161,6 +166,9 @@ func (g PolicyMergeGate) finishMerged(ctx context.Context, request MergeRequest,
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		postMergeWarnings = append(postMergeWarnings, "load branch lock: "+err.Error())
 	}
+	if err := g.cleanupTaskWorktree(ctx, request, pr.HeadRef); err != nil {
+		postMergeWarnings = append(postMergeWarnings, "cleanup task worktree: "+err.Error())
+	}
 	if g.Git != nil && strings.TrimSpace(pr.BaseRef) != "" {
 		if err := g.Git.UpdateBase(ctx, "origin", pr.BaseRef); err != nil {
 			postMergeWarnings = append(postMergeWarnings, "update base: "+err.Error())
@@ -177,6 +185,37 @@ func (g PolicyMergeGate) finishMerged(ctx context.Context, request MergeRequest,
 		_ = g.Store.UpsertMergeGate(ctx, db.MergeGate{RepoFullName: request.Repo, PullRequest: int64(request.PullRequest), State: "merged", Reason: reason})
 	}
 	return MergeDecision{Ready: true, Merged: true, MergeCommitSHA: mergeSHA, Reason: reason}, nil
+}
+
+func (g PolicyMergeGate) cleanupTaskWorktree(ctx context.Context, request MergeRequest, headBranch string) error {
+	if g.Worktrees == nil || strings.TrimSpace(request.TaskID) == "" {
+		return nil
+	}
+	task, err := g.Store.GetTask(ctx, request.TaskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	path := strings.TrimSpace(task.WorktreePath)
+	if path == "" {
+		return nil
+	}
+	if strings.TrimSpace(task.RepoFullName) != "" && task.RepoFullName != request.Repo {
+		return fmt.Errorf("task %s belongs to repo %s, not %s", request.TaskID, task.RepoFullName, request.Repo)
+	}
+	expectedBranch := strings.TrimSpace(request.Branch)
+	if expectedBranch == "" {
+		expectedBranch = strings.TrimSpace(headBranch)
+	}
+	if strings.TrimSpace(task.Branch) != "" && task.Branch != expectedBranch {
+		return fmt.Errorf("task %s branch is %s, not merged branch %s", request.TaskID, task.Branch, expectedBranch)
+	}
+	if err := g.Worktrees.RemoveWorktree(ctx, path); err != nil {
+		return err
+	}
+	return g.Store.ClearTaskWorktreePath(ctx, request.TaskID)
 }
 
 func (g PolicyMergeGate) acquireLocalCheckoutMutationLock(ctx context.Context, request MergeRequest) (func(context.Context) error, error) {

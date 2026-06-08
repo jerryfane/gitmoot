@@ -87,6 +87,144 @@ func TestPolicyMergeGateMergesPassingPullRequest(t *testing.T) {
 	}
 }
 
+func TestPolicyMergeGateCleansTaskWorktreeAfterMerge(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-9", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-9", RepoFullName: "jerryfane/gitmoot", GoalID: "goal-1", Title: "Task 9", State: string(TaskReadyToMerge), Branch: "task-9", WorktreePath: "/tmp/gitmoot/worktrees/jerryfane--gitmoot/task-9"}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	insertCompletedJob(t, store, db.Job{ID: "review-job", Agent: "audit", Type: "review"}, JobPayload{
+		Repo:        "jerryfane/gitmoot",
+		Branch:      "task-9",
+		PullRequest: 9,
+		HeadSHA:     "head123",
+		TaskID:      "task-9",
+		ReviewRound: "review-1",
+		Result:      &AgentResult{Decision: "approved", Summary: "ready"},
+	})
+	mergeable := true
+	gh := &fakeMergeGateGitHub{
+		pr:          github.PullRequest{Number: 9, State: "open", URL: "https://github.com/jerryfane/gitmoot/pull/9", HeadRef: "task-9", BaseRef: "main", HeadSHA: "head123", Mergeable: &mergeable},
+		status:      github.CombinedStatus{State: "success"},
+		mergeResult: github.MergeResult{Merged: true, SHA: "merge123"},
+	}
+	cleaner := &fakeWorktreeCleaner{}
+	gate := PolicyMergeGate{Store: store, GitHub: gh, Git: &fakeMergeGateGit{clean: true}, Worktrees: cleaner}
+
+	decision, err := gate.Evaluate(ctx, MergeRequest{Repo: "jerryfane/gitmoot", PullRequest: 9, TaskID: "task-9", Reviewer: "audit"})
+
+	if err != nil {
+		t.Fatalf("Evaluate returned error: %v", err)
+	}
+	if !decision.Merged || decision.Reason != "merged" {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if len(cleaner.removed) != 1 || cleaner.removed[0] != "/tmp/gitmoot/worktrees/jerryfane--gitmoot/task-9" {
+		t.Fatalf("removed worktrees = %+v", cleaner.removed)
+	}
+	task, err := store.GetTask(ctx, "task-9")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if task.WorktreePath != "" {
+		t.Fatalf("task worktree path = %q, want cleared", task.WorktreePath)
+	}
+}
+
+func TestPolicyMergeGateReportsWorktreeCleanupWarning(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-9", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-9", RepoFullName: "jerryfane/gitmoot", GoalID: "goal-1", Title: "Task 9", State: string(TaskReadyToMerge), Branch: "task-9", WorktreePath: "/tmp/gitmoot/worktrees/jerryfane--gitmoot/task-9"}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	insertCompletedJob(t, store, db.Job{ID: "review-job", Agent: "audit", Type: "review"}, JobPayload{
+		Repo:        "jerryfane/gitmoot",
+		Branch:      "task-9",
+		PullRequest: 9,
+		HeadSHA:     "head123",
+		TaskID:      "task-9",
+		ReviewRound: "review-1",
+		Result:      &AgentResult{Decision: "approved", Summary: "ready"},
+	})
+	mergeable := true
+	gh := &fakeMergeGateGitHub{
+		pr:          github.PullRequest{Number: 9, State: "open", URL: "https://github.com/jerryfane/gitmoot/pull/9", HeadRef: "task-9", BaseRef: "main", HeadSHA: "head123", Mergeable: &mergeable},
+		status:      github.CombinedStatus{State: "success"},
+		mergeResult: github.MergeResult{Merged: true, SHA: "merge123"},
+	}
+	cleaner := &fakeWorktreeCleaner{err: errors.New("worktree has uncommitted files")}
+	gate := PolicyMergeGate{Store: store, GitHub: gh, Git: &fakeMergeGateGit{clean: true}, Worktrees: cleaner}
+
+	decision, err := gate.Evaluate(ctx, MergeRequest{Repo: "jerryfane/gitmoot", PullRequest: 9, TaskID: "task-9", Reviewer: "audit"})
+
+	if err != nil {
+		t.Fatalf("Evaluate returned error: %v", err)
+	}
+	if !decision.Merged || !strings.Contains(decision.Reason, "cleanup task worktree") {
+		t.Fatalf("decision = %+v, want cleanup warning", decision)
+	}
+	task, err := store.GetTask(ctx, "task-9")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if task.WorktreePath == "" {
+		t.Fatal("task worktree path was cleared despite cleanup failure")
+	}
+}
+
+func TestPolicyMergeGateDoesNotCleanWorktreeForMismatchedTaskBranch(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-9", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-8", RepoFullName: "jerryfane/gitmoot", GoalID: "goal-1", Title: "Task 8", State: string(TaskImplementing), Branch: "task-8", WorktreePath: "/tmp/gitmoot/worktrees/jerryfane--gitmoot/task-8"}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	insertCompletedJob(t, store, db.Job{ID: "review-job", Agent: "audit", Type: "review"}, JobPayload{
+		Repo:        "jerryfane/gitmoot",
+		Branch:      "task-9",
+		PullRequest: 9,
+		HeadSHA:     "head123",
+		TaskID:      "task-8",
+		ReviewRound: "review-1",
+		Result:      &AgentResult{Decision: "approved", Summary: "ready"},
+	})
+	mergeable := true
+	gh := &fakeMergeGateGitHub{
+		pr:          github.PullRequest{Number: 9, State: "open", URL: "https://github.com/jerryfane/gitmoot/pull/9", HeadRef: "task-9", BaseRef: "main", HeadSHA: "head123", Mergeable: &mergeable},
+		status:      github.CombinedStatus{State: "success"},
+		mergeResult: github.MergeResult{Merged: true, SHA: "merge123"},
+	}
+	cleaner := &fakeWorktreeCleaner{}
+	gate := PolicyMergeGate{Store: store, GitHub: gh, Git: &fakeMergeGateGit{clean: true}, Worktrees: cleaner}
+
+	decision, err := gate.Evaluate(ctx, MergeRequest{Repo: "jerryfane/gitmoot", Branch: "task-9", PullRequest: 9, TaskID: "task-8", Reviewer: "audit"})
+
+	if err != nil {
+		t.Fatalf("Evaluate returned error: %v", err)
+	}
+	if !decision.Merged || !strings.Contains(decision.Reason, "task task-8 branch is task-8") {
+		t.Fatalf("decision = %+v, want branch mismatch cleanup warning", decision)
+	}
+	if len(cleaner.removed) != 0 {
+		t.Fatalf("removed worktrees = %+v, want none", cleaner.removed)
+	}
+	task, err := store.GetTask(ctx, "task-8")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if task.WorktreePath == "" {
+		t.Fatal("mismatched task worktree path was cleared")
+	}
+}
+
 func TestPolicyMergeGateLocksCheckoutDuringLocalBaseUpdate(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
@@ -735,6 +873,16 @@ func (f *fakeMergeGateGit) UpdateBase(_ context.Context, remote string, branch s
 	}
 	f.updated = append(f.updated, remote+"/"+branch)
 	return nil
+}
+
+type fakeWorktreeCleaner struct {
+	removed []string
+	err     error
+}
+
+func (f *fakeWorktreeCleaner) RemoveWorktree(_ context.Context, path string) error {
+	f.removed = append(f.removed, path)
+	return f.err
 }
 
 func hasStatus(statuses []github.CommitStatusInput, context string, state string) bool {

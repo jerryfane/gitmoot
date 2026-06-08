@@ -186,14 +186,8 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 		checkout := repoRecord.CheckoutPath
 		gh := github.NewClient(checkout)
 		engine := workflow.Engine{
-			Store: store,
-			MergeGate: workflow.PolicyMergeGate{
-				Store:        store,
-				GitHub:       gh,
-				Git:          gitutil.Client{Dir: checkout},
-				CheckoutPath: checkout,
-				DeleteBranch: true,
-			},
+			Store:     store,
+			MergeGate: newDaemonPolicyMergeGate(store, gh, checkout),
 		}
 		fmt.Fprintf(stdout, "watching %s every %s\n", repo.FullName(), poll.String())
 		return runSingleRepoSupervisor(ctx, *home, daemon.Daemon{
@@ -1843,13 +1837,7 @@ func (g daemonMergeGate) Evaluate(ctx context.Context, request workflow.MergeReq
 	if err != nil {
 		return workflow.MergeDecision{}, err
 	}
-	return workflow.PolicyMergeGate{
-		Store:        g.Store,
-		GitHub:       g.githubClient(checkout),
-		Git:          gitutil.Client{Dir: checkout},
-		CheckoutPath: checkout,
-		DeleteBranch: true,
-	}.Evaluate(ctx, request)
+	return newDaemonPolicyMergeGate(g.Store, g.githubClient(checkout), checkout).Evaluate(ctx, request)
 }
 
 func (g daemonMergeGate) githubClient(checkout string) github.Client {
@@ -1875,6 +1863,17 @@ func mergeGateCheckout(ctx context.Context, store *db.Store, repo string, fallba
 		return "", fmt.Errorf("repo %s has no checkout path", repo)
 	}
 	return checkout, nil
+}
+
+func newDaemonPolicyMergeGate(store *db.Store, gh github.Client, checkout string) workflow.PolicyMergeGate {
+	return workflow.PolicyMergeGate{
+		Store:        store,
+		GitHub:       gh,
+		Git:          gitutil.Client{Dir: checkout},
+		Worktrees:    gitutil.Client{Dir: checkout},
+		CheckoutPath: checkout,
+		DeleteBranch: true,
+	}
 }
 
 func refreshDaemonJobPayload(ctx context.Context, store *db.Store, checkout string, job db.Job, payload workflow.JobPayload) (workflow.JobPayload, error) {
