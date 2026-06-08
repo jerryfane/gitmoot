@@ -36,5 +36,11 @@ logs = %q
 workspaces = %q
 evals = %q
 artifact_blobs = %q
+
+[parallel_sessions]
+same_session = "fork_temp_session"
+merge_back = "summary"
+max_temp_sessions_per_agent = 4
+eligible_actions = ["ask", "review", "implement"]
 `, paths.Database, paths.Logs, paths.Workspaces, paths.Evals, paths.ArtifactBlobs)
 }

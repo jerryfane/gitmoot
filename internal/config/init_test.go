@@ -31,4 +31,7 @@ func TestInitializeCreatesLocalState(t *testing.T) {
 	if !strings.Contains(string(config), "artifact_blobs") {
 		t.Fatalf("config missing artifact blob path:\n%s", string(config))
 	}
+	if !strings.Contains(string(config), "[parallel_sessions]") {
+		t.Fatalf("config missing parallel session policy:\n%s", string(config))
+	}
 }
