@@ -99,7 +99,7 @@ func TestClientWorktreeCommandConstruction(t *testing.T) {
 
 	runner.wantArgs(t, 0, "git", "worktree", "add", "-b", "task-1", "/worktrees/task-1", "main")
 	runner.wantArgs(t, 1, "git", "show-ref", "--verify", "--quiet", "refs/heads/task-1")
-	runner.wantArgs(t, 2, "git", "worktree", "add", "/worktrees/task-1-existing", "task-1")
+	runner.wantArgs(t, 2, "git", "worktree", "add", "--force", "/worktrees/task-1-existing", "task-1")
 	runner.wantArgs(t, 3, "git", "worktree", "remove", "/worktrees/task-1")
 }
 
