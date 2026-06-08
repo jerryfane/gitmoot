@@ -20,8 +20,11 @@ type TaskWorktreeRequest struct {
 	Home       string
 	Repo       string
 	TaskID     string
+	GoalID     string
+	TaskTitle  string
 	Branch     string
 	BaseBranch string
+	Owner      string
 	Checkout   string
 }
 
@@ -37,6 +40,9 @@ func (e Engine) AllocateTaskWorktree(ctx context.Context, request TaskWorktreeRe
 	}
 	if strings.TrimSpace(request.Branch) == "" {
 		return db.Task{}, errors.New("task worktree branch is required")
+	}
+	if strings.TrimSpace(request.Owner) == "" {
+		return db.Task{}, errors.New("task worktree owner is required")
 	}
 	path, err := TaskWorktreePath(request.Home, request.Repo, request.TaskID)
 	if err != nil {
@@ -59,8 +65,35 @@ func (e Engine) AllocateTaskWorktree(ctx context.Context, request TaskWorktreeRe
 	if err == nil && existing.ID != request.TaskID {
 		return db.Task{}, errors.New("task branch is already assigned to another task")
 	}
+	lock := db.BranchLock{RepoFullName: request.Repo, Branch: request.Branch, Owner: request.Owner}
+	createdLock, err := e.Store.CreateLock(ctx, lock)
+	if err != nil {
+		return db.Task{}, err
+	}
+	if !createdLock {
+		existingLock, err := e.Store.GetBranchLock(ctx, request.Repo, request.Branch)
+		if err != nil {
+			return db.Task{}, err
+		}
+		if existingLock.Owner != request.Owner {
+			return db.Task{}, BlockedError{Reason: "branch lock rejected action for " + request.Branch}
+		}
+	}
+	if task.Branch == request.Branch && task.WorktreePath == path {
+		task.State = string(TaskImplementing)
+		if err := e.Store.UpsertTask(ctx, task); err != nil {
+			if createdLock {
+				_, _ = e.Store.ReleaseLock(ctx, lock)
+			}
+			return db.Task{}, err
+		}
+		return task, nil
+	}
 	releaseCheckoutLock, _, err := acquireCheckoutMutationLock(ctx, e.Store, request.Checkout, "worktree:"+request.TaskID, time.Now().UTC())
 	if err != nil {
+		if createdLock {
+			_, _ = e.Store.ReleaseLock(ctx, lock)
+		}
 		return db.Task{}, err
 	}
 	defer func() {
@@ -69,17 +102,32 @@ func (e Engine) AllocateTaskWorktree(ctx context.Context, request TaskWorktreeRe
 		}
 	}()
 	if err := manager.AddWorktree(ctx, request.Branch, path, request.BaseBranch); err != nil {
+		if createdLock {
+			_, _ = e.Store.ReleaseLock(ctx, lock)
+		}
 		return db.Task{}, err
 	}
-	if strings.TrimSpace(task.RepoFullName) == "" {
-		task.RepoFullName = request.Repo
+	taskGoalID := task.GoalID
+	if taskGoalID == "" {
+		taskGoalID = request.GoalID
 	}
-	task.Branch = request.Branch
-	task.WorktreePath = path
-	if strings.TrimSpace(task.State) == "" {
-		task.State = string(TaskPlanned)
+	taskTitle := task.Title
+	if taskTitle == "" {
+		taskTitle = request.TaskTitle
+	}
+	task = db.Task{
+		ID:           request.TaskID,
+		RepoFullName: request.Repo,
+		GoalID:       taskGoalID,
+		Title:        taskTitle,
+		State:        string(TaskImplementing),
+		Branch:       request.Branch,
+		WorktreePath: path,
 	}
 	if err := e.Store.UpsertTask(ctx, task); err != nil {
+		if createdLock {
+			_, _ = e.Store.ReleaseLock(ctx, lock)
+		}
 		return db.Task{}, err
 	}
 	return task, nil

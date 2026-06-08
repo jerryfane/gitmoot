@@ -18,6 +18,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/daemon"
 	"github.com/jerryfane/gitmoot/internal/db"
 	gitutil "github.com/jerryfane/gitmoot/internal/git"
@@ -342,7 +343,7 @@ func runTaskRun(args []string, stdout, stderr io.Writer) int {
 	repo := fs.String("repo", "", "repo scope as owner/repo")
 	owner := fs.String("owner", "", "agent that will hold the branch lock")
 	branch := fs.String("branch", "", "task branch name")
-	base := fs.String("base", "", "base branch for git switch -c")
+	base := fs.String("base", "", "base branch for git worktree add")
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fs.Usage()
 		if len(args) == 0 {
@@ -368,7 +369,7 @@ func runTaskRun(args []string, stdout, stderr io.Writer) int {
 	}
 
 	var started db.Task
-	if err := withStore(*home, func(store *db.Store) error {
+	if err := withStoreAndPaths(*home, func(paths config.Paths, store *db.Store) error {
 		task, err := store.GetTask(context.Background(), taskID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -397,7 +398,8 @@ func runTaskRun(args []string, stdout, stderr io.Writer) int {
 		checkout := repoRecord.CheckoutPath
 		requestBranch := firstNonEmpty(*branch, task.Branch, task.ID)
 		engine := workflow.Engine{Store: store}
-		started, err = engine.StartTaskBranch(context.Background(), workflow.TaskBranchRequest{
+		started, err = engine.AllocateTaskWorktree(context.Background(), workflow.TaskWorktreeRequest{
+			Home:       paths.Home,
 			Repo:       requestRepo,
 			GoalID:     task.GoalID,
 			TaskID:     task.ID,
@@ -413,6 +415,9 @@ func runTaskRun(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "started %s on %s\n", started.ID, started.Branch)
+	if strings.TrimSpace(started.WorktreePath) != "" {
+		fmt.Fprintf(stdout, "worktree: %s\n", started.WorktreePath)
+	}
 	return 0
 }
 

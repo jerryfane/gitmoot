@@ -441,6 +441,9 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 	runGit(t, repoDir, "init")
 	runGit(t, repoDir, "branch", "-m", "main")
 	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/jerryfane/gitmoot.git")
+	writeFile(t, filepath.Join(repoDir, "README.md"), "smoke\n")
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "-c", "user.name=Gitmoot Test", "-c", "user.email=gitmoot@example.com", "commit", "-m", "initial")
 	withWorkingDirectory(t, repoDir)
 
 	stdout.Reset()
@@ -448,6 +451,9 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "jerryfane/gitmoot", "--owner", "lead"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("task run exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "worktree: ") {
+		t.Fatalf("stdout missing worktree path: %q", stdout.String())
 	}
 
 	store, err := db.Open(filepath.Join(home, ".gitmoot", "gitmoot.db"))
@@ -461,6 +467,30 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 	}
 	if repo.CheckoutPath != repoDir || repo.RemoteURL != "https://github.com/jerryfane/gitmoot.git" {
 		t.Fatalf("repo = %+v", repo)
+	}
+	task, err := store.GetTask(context.Background(), "task-001")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	wantWorktree := filepath.Join(home, ".gitmoot", "worktrees", "jerryfane--gitmoot", "task-001")
+	if task.State != "implementing" || task.Branch != "task-001-bootstrap" || task.WorktreePath != wantWorktree {
+		t.Fatalf("task = %+v, want implementing task-001-bootstrap at %s", task, wantWorktree)
+	}
+	lock, err := store.GetBranchLock(context.Background(), "jerryfane/gitmoot", "task-001-bootstrap")
+	if err != nil {
+		t.Fatalf("GetBranchLock returned error: %v", err)
+	}
+	if lock.Owner != "lead" {
+		t.Fatalf("branch lock owner = %q, want lead", lock.Owner)
+	}
+	if _, err := os.Stat(wantWorktree); err != nil {
+		t.Fatalf("worktree path was not created: %v", err)
+	}
+	if currentBranch := strings.TrimSpace(runGitOutput(t, repoDir, "branch", "--show-current")); currentBranch != "main" {
+		t.Fatalf("main checkout branch = %q, want main", currentBranch)
+	}
+	if worktreeBranch := strings.TrimSpace(runGitOutput(t, wantWorktree, "branch", "--show-current")); worktreeBranch != "task-001-bootstrap" {
+		t.Fatalf("task worktree branch = %q, want task-001-bootstrap", worktreeBranch)
 	}
 }
 
@@ -479,6 +509,9 @@ func TestRunTaskRunBlocksWhenCheckoutMutationLocked(t *testing.T) {
 	runGit(t, repoDir, "init")
 	runGit(t, repoDir, "branch", "-m", "main")
 	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/jerryfane/gitmoot.git")
+	writeFile(t, filepath.Join(repoDir, "README.md"), "smoke\n")
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "-c", "user.name=Gitmoot Test", "-c", "user.email=gitmoot@example.com", "commit", "-m", "initial")
 	withWorkingDirectory(t, repoDir)
 
 	store, err := db.Open(filepath.Join(home, ".gitmoot", "gitmoot.db"))
@@ -514,6 +547,10 @@ func TestRunTaskRunBlocksWhenCheckoutMutationLocked(t *testing.T) {
 	branches := runGitOutput(t, repoDir, "branch", "--list", "task-001")
 	if strings.TrimSpace(branches) != "" {
 		t.Fatalf("task branch was created despite checkout lock: %q", branches)
+	}
+	worktreePath := filepath.Join(home, ".gitmoot", "worktrees", "jerryfane--gitmoot", "task-001")
+	if _, err := os.Stat(worktreePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree path after checkout lock error = %v, want os.ErrNotExist", err)
 	}
 }
 

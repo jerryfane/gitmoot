@@ -64,9 +64,12 @@ func TestEngineAllocateTaskWorktreeAddsGitWorktreeAndStoresPath(t *testing.T) {
 	task, err := engine.AllocateTaskWorktree(ctx, TaskWorktreeRequest{
 		Home:       home,
 		Repo:       "owner/repo",
+		GoalID:     "goal-fallback",
 		TaskID:     "task-1",
+		TaskTitle:  "Fallback",
 		Branch:     "task-1",
 		BaseBranch: "main",
+		Owner:      "lead",
 		Checkout:   checkout,
 	}, manager)
 
@@ -76,6 +79,16 @@ func TestEngineAllocateTaskWorktreeAddsGitWorktreeAndStoresPath(t *testing.T) {
 	wantPath := filepath.Join(home, "worktrees", "owner--repo", "task-1")
 	if task.WorktreePath != wantPath || task.Branch != "task-1" {
 		t.Fatalf("task = %+v, want worktree path %q and branch task-1", task, wantPath)
+	}
+	if task.State != string(TaskImplementing) || task.GoalID != "goal-1" || task.Title != "First" {
+		t.Fatalf("task metadata = %+v", task)
+	}
+	lock, err := store.GetBranchLock(ctx, "owner/repo", "task-1")
+	if err != nil {
+		t.Fatalf("GetBranchLock returned error: %v", err)
+	}
+	if lock.Owner != "lead" {
+		t.Fatalf("lock owner = %q, want lead", lock.Owner)
 	}
 	if len(manager.calls) != 1 || manager.calls[0].branch != "task-1" || manager.calls[0].path != wantPath || manager.calls[0].base != "main" {
 		t.Fatalf("worktree calls = %+v", manager.calls)
@@ -117,6 +130,7 @@ func TestEngineAllocateTaskWorktreeBlocksWhenCheckoutMutationLocked(t *testing.T
 		Repo:     "owner/repo",
 		TaskID:   "task-1",
 		Branch:   "task-1",
+		Owner:    "lead",
 		Checkout: checkout,
 	}, manager)
 
@@ -143,6 +157,7 @@ func TestEngineAllocateTaskWorktreeRejectsBranchAssignedToOtherTask(t *testing.T
 		Repo:     "owner/repo",
 		TaskID:   "task-2",
 		Branch:   "task-1",
+		Owner:    "lead",
 		Checkout: t.TempDir(),
 	}, manager)
 
@@ -168,6 +183,7 @@ func TestEngineAllocateTaskWorktreeRejectsTaskInAnotherRepo(t *testing.T) {
 		Repo:     "owner/repo",
 		TaskID:   "task-1",
 		Branch:   "task-1",
+		Owner:    "lead",
 		Checkout: t.TempDir(),
 	}, manager)
 
@@ -176,6 +192,101 @@ func TestEngineAllocateTaskWorktreeRejectsTaskInAnotherRepo(t *testing.T) {
 	}
 	if len(manager.calls) != 0 {
 		t.Fatalf("AddWorktree ran despite repo mismatch: %+v", manager.calls)
+	}
+}
+
+func TestEngineAllocateTaskWorktreeBlocksWhenBranchLocked(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	engine := testEngine(store)
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "owner/repo", Branch: "task-1", Owner: "other"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	manager := &fakeWorktreeManager{}
+
+	_, err := engine.AllocateTaskWorktree(ctx, TaskWorktreeRequest{
+		Home:     t.TempDir(),
+		Repo:     "owner/repo",
+		TaskID:   "task-1",
+		Branch:   "task-1",
+		Owner:    "lead",
+		Checkout: t.TempDir(),
+	}, manager)
+
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("error = %v, want BlockedError", err)
+	}
+	if len(manager.calls) != 0 {
+		t.Fatalf("AddWorktree ran despite branch lock: %+v", manager.calls)
+	}
+}
+
+func TestEngineAllocateTaskWorktreeReleasesCreatedBranchLockOnFailure(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	engine := testEngine(store)
+	manager := &fakeWorktreeManager{err: errors.New("git failed")}
+
+	_, err := engine.AllocateTaskWorktree(ctx, TaskWorktreeRequest{
+		Home:     t.TempDir(),
+		Repo:     "owner/repo",
+		TaskID:   "task-1",
+		Branch:   "task-1",
+		Owner:    "lead",
+		Checkout: t.TempDir(),
+	}, manager)
+
+	if err == nil {
+		t.Fatal("AllocateTaskWorktree succeeded despite worktree failure")
+	}
+	if _, lockErr := store.GetBranchLock(ctx, "owner/repo", "task-1"); !errors.Is(lockErr, sql.ErrNoRows) {
+		t.Fatalf("branch lock after failure error = %v, want sql.ErrNoRows", lockErr)
+	}
+}
+
+func TestEngineAllocateTaskWorktreeReusesExistingTaskWorktree(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	engine := testEngine(store)
+	home := t.TempDir()
+	path, err := TaskWorktreePath(home, "owner/repo", "task-1")
+	if err != nil {
+		t.Fatalf("TaskWorktreePath returned error: %v", err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{
+		ID:           "task-1",
+		RepoFullName: "owner/repo",
+		GoalID:       "goal-1",
+		Title:        "First",
+		State:        string(TaskPlanned),
+		Branch:       "task-1",
+		WorktreePath: path,
+	}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "owner/repo", Branch: "task-1", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	manager := &fakeWorktreeManager{}
+
+	task, err := engine.AllocateTaskWorktree(ctx, TaskWorktreeRequest{
+		Home:     home,
+		Repo:     "owner/repo",
+		TaskID:   "task-1",
+		Branch:   "task-1",
+		Owner:    "lead",
+		Checkout: t.TempDir(),
+	}, manager)
+
+	if err != nil {
+		t.Fatalf("AllocateTaskWorktree returned error: %v", err)
+	}
+	if task.State != string(TaskImplementing) || task.WorktreePath != path {
+		t.Fatalf("task = %+v, want implementing with existing path %q", task, path)
+	}
+	if len(manager.calls) != 0 {
+		t.Fatalf("AddWorktree ran despite existing task worktree: %+v", manager.calls)
 	}
 }
 
