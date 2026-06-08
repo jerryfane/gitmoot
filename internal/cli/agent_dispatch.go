@@ -28,6 +28,7 @@ type localAgentDispatchRequest struct {
 	Type             string
 	Home             string
 	AllowManagedSync bool
+	JobTimeout       time.Duration
 }
 
 type localAgentJobOutput struct {
@@ -101,8 +102,12 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		return localAgentJobOutput{}, err
 	}
 	lockTTL := daemonRunningJobStaleAfter
+	jobTimeout := request.JobTimeout
 	if managed.OK {
 		lockTTL = managed.JobTimeout
+		jobTimeout = managed.JobTimeout
+	} else if jobTimeout > 0 {
+		lockTTL = jobTimeout
 	}
 	releaseLock, acquired, lockKey, err := acquireRuntimeSessionLock(ctx, store, job.ID, runtimeAgent(agent), time.Now().UTC(), lockTTL)
 	if err != nil {
@@ -134,8 +139,10 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		defer func() {
 			_ = store.TouchAgentInstance(context.Background(), agent.Name, time.Now().UTC(), managed.IdleTimeout)
 		}()
+	}
+	if jobTimeout > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, managed.JobTimeout)
+		runCtx, cancel = context.WithTimeout(ctx, jobTimeout)
 		defer cancel()
 	}
 	if _, err := (workflow.Mailbox{Store: store}).Run(runCtx, job.ID, runtimeAgent(agent), adapter); err != nil {
