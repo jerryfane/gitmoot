@@ -2155,6 +2155,66 @@ func TestRunAgentDoctorClaudeFailsWhenAuthEnvMissing(t *testing.T) {
 	}
 }
 
+func TestRunAgentDoctorClaudeLiveRunsSmoke(t *testing.T) {
+	withClaudeAuthEnv(t, nil)
+	home := t.TempDir()
+	subscribeClaudeAgent(t, home, "claude-live")
+	runner := &agentStartRunner{results: []subprocess.Result{{Stdout: `{"result":"OK"}`}}}
+	restoreRunner := replaceAgentDoctorRunner(runner)
+	defer restoreRunner()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"agent", "doctor", "claude-live", "--home", home, "--live"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("doctor exit code = %d, stderr=%s\nstdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "claude-auth-env warn") || !strings.Contains(stdout.String(), "claude-live ok") {
+		t.Fatalf("stdout missing live smoke result:\n%s", stdout.String())
+	}
+	runner.want(t, 0, "", "claude", "-p", "--output-format", "json", "--", runtime.ClaudeLiveCheckPrompt)
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	agent, err := store.GetAgent(context.Background(), "claude-live")
+	if err != nil {
+		t.Fatalf("GetAgent returned error: %v", err)
+	}
+	if agent.HealthStatus != "ok" {
+		t.Fatalf("health status = %q, want ok", agent.HealthStatus)
+	}
+}
+
+func TestRunAgentDoctorClaudeLiveClassifiesAuthFailure(t *testing.T) {
+	withClaudeAuthEnv(t, map[string]string{runtime.ClaudeOAuthTokenEnv: "secret-token"})
+	home := t.TempDir()
+	subscribeClaudeAgent(t, home, "claude-live-fail")
+	runner := &agentStartRunner{
+		results: []subprocess.Result{{Stderr: "401 Invalid authentication credentials"}},
+		errs:    []error{errors.New("exit 1")},
+	}
+	restoreRunner := replaceAgentDoctorRunner(runner)
+	defer restoreRunner()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"agent", "doctor", "claude-live-fail", "--home", home, "--live"}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; stderr=%s\nstdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "claude-live fail") || !strings.Contains(stderr.String(), "claude setup-token") {
+		t.Fatalf("doctor output missing classified live failure:\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	agent, err := store.GetAgent(context.Background(), "claude-live-fail")
+	if err != nil {
+		t.Fatalf("GetAgent returned error: %v", err)
+	}
+	if agent.HealthStatus != "failed" {
+		t.Fatalf("health status = %q, want failed", agent.HealthStatus)
+	}
+}
+
 func subscribeClaudeAgent(t *testing.T, home string, name string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
@@ -2361,4 +2421,12 @@ func withClaudeAuthEnv(t *testing.T, values map[string]string) {
 			}
 		}
 	})
+}
+
+func replaceAgentDoctorRunner(runner subprocess.Runner) func() {
+	original := agentDoctorRunner
+	agentDoctorRunner = runner
+	return func() {
+		agentDoctorRunner = original
+	}
 }

@@ -17,11 +17,14 @@ import (
 	"github.com/jerryfane/gitmoot/internal/daemon"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/jerryfane/gitmoot/internal/subprocess"
 )
 
 var newRuntimeFactory = func() runtime.Factory {
 	return runtime.Factory{}
 }
+
+var agentDoctorRunner subprocess.Runner = subprocess.ExecRunner{}
 
 func runAgent(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
@@ -1207,6 +1210,7 @@ func runAgentDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("agent doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	live := fs.Bool("live", false, "run an explicit live Claude print-mode smoke check")
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fs.Usage()
 		if len(args) == 0 {
@@ -1259,10 +1263,19 @@ func runAgentDoctor(args []string, stdout, stderr io.Writer) int {
 			detail += "; " + warning
 		}
 		fmt.Fprintf(stdout, "claude-auth-env %s %s\n", status, detail)
-		if !auth.Ready() {
+		if !auth.Ready() && !*live {
 			_ = persistAgentHealth(*home, name, "failed")
 			fmt.Fprintf(stderr, "agent %s health failed: %s\n", rtAgent.Name, runtime.ClaudeAuthSetupMessage)
 			return 1
+		}
+		if *live {
+			if err := runtime.ClaudeLiveCheck(context.Background(), agentDoctorRunner, ""); err != nil {
+				_ = persistAgentHealth(*home, name, "failed")
+				fmt.Fprintf(stdout, "claude-live fail %s\n", err)
+				fmt.Fprintf(stderr, "agent %s health failed: %v\n", rtAgent.Name, err)
+				return 1
+			}
+			fmt.Fprintln(stdout, "claude-live ok live Claude print-mode check succeeded")
 		}
 		if err := persistAgentHealth(*home, name, "ok"); err != nil {
 			fmt.Fprintf(stderr, "update agent health: %v\n", err)

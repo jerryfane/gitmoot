@@ -11,6 +11,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/pluginpack"
 	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/jerryfane/gitmoot/internal/subprocess"
 )
 
 func TestRunPluginPathPrintsPackagePath(t *testing.T) {
@@ -210,6 +211,75 @@ func TestRunPluginDoctorClaudeWarnsWhenAuthEnvMissing(t *testing.T) {
 	}
 }
 
+func TestRunPluginDoctorClaudeLiveRunsSmoke(t *testing.T) {
+	withClaudeAuthEnv(t, map[string]string{runtime.ClaudeOAuthTokenEnv: "secret-token"})
+	home := t.TempDir()
+	if _, err := pluginpack.Build(pluginpack.BuildOptions{
+		Provider: pluginpack.ProviderClaude,
+		Home:     filepath.Join(home, ".gitmoot"),
+	}); err != nil {
+		t.Fatalf("build claude package: %v", err)
+	}
+	restorePath := stubPluginLookPath(map[string]string{"claude": "/tmp/bin/claude"})
+	defer restorePath()
+	runner := &agentStartRunner{results: []subprocess.Result{{Stdout: `{"result":"OK"}`}}}
+	restoreRunner := replacePluginDoctorRunner(runner)
+	defer restoreRunner()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"plugin", "doctor", "claude", "--home", home, "--live", "--json"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("plugin doctor exit code = %d, stderr=%s\nstdout=%s", code, stderr.String(), stdout.String())
+	}
+	var output pluginDoctorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("doctor JSON did not parse: %v\n%s", err, stdout.String())
+	}
+	check := findDoctorCheck(t, output.Runtimes[0].Checks, "runtime-live")
+	if check.Status != "ok" {
+		t.Fatalf("runtime-live status = %q, want ok; checks=%+v", check.Status, output.Runtimes[0].Checks)
+	}
+	runner.want(t, 0, "", "claude", "-p", "--output-format", "json", "--", runtime.ClaudeLiveCheckPrompt)
+}
+
+func TestRunPluginDoctorClaudeLiveClassifiesAuthFailure(t *testing.T) {
+	withClaudeAuthEnv(t, nil)
+	home := t.TempDir()
+	if _, err := pluginpack.Build(pluginpack.BuildOptions{
+		Provider: pluginpack.ProviderClaude,
+		Home:     filepath.Join(home, ".gitmoot"),
+	}); err != nil {
+		t.Fatalf("build claude package: %v", err)
+	}
+	restorePath := stubPluginLookPath(map[string]string{"claude": "/tmp/bin/claude"})
+	defer restorePath()
+	runner := &agentStartRunner{
+		results: []subprocess.Result{{Stderr: "401 Invalid authentication credentials"}},
+		errs:    []error{errors.New("exit 1")},
+	}
+	restoreRunner := replacePluginDoctorRunner(runner)
+	defer restoreRunner()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"plugin", "doctor", "claude", "--home", home, "--live", "--json"}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("plugin doctor exit code = %d, want 1; stderr=%s\nstdout=%s", code, stderr.String(), stdout.String())
+	}
+	var output pluginDoctorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("doctor JSON did not parse: %v\n%s", err, stdout.String())
+	}
+	check := findDoctorCheck(t, output.Runtimes[0].Checks, "runtime-live")
+	if check.Status != "fail" {
+		t.Fatalf("runtime-live status = %q, want fail; checks=%+v", check.Status, output.Runtimes[0].Checks)
+	}
+	if !strings.Contains(check.Detail, "claude setup-token") || !strings.Contains(check.Detail, "restart the Gitmoot daemon") {
+		t.Fatalf("runtime-live detail = %q, want classified auth guidance", check.Detail)
+	}
+}
+
 func TestRunPluginDoctorFailsExplicitUnhealthyRuntime(t *testing.T) {
 	restore := stubPluginLookPath(map[string]string{})
 	defer restore()
@@ -264,6 +334,14 @@ func stubPluginLookPath(paths map[string]string) func() {
 	}
 	return func() {
 		pluginLookPath = original
+	}
+}
+
+func replacePluginDoctorRunner(runner subprocess.Runner) func() {
+	original := pluginDoctorRunner
+	pluginDoctorRunner = runner
+	return func() {
+		pluginDoctorRunner = original
 	}
 }
 
