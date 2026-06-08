@@ -306,6 +306,36 @@ func TestClaudeStartDoesNotStoreSessionIDWhenCommandFails(t *testing.T) {
 	runner.want(t, 0, "claude", "--session-id", "550e8400-e29b-41d4-a716-446655440010", "-p", "--output-format", "json", "--", "initialize")
 }
 
+func TestClaudeStartClassifiesAuthFailure(t *testing.T) {
+	raw := `{"error":{"type":"authentication_error","message":"401 Invalid authentication credentials"}}`
+	runner := &fakeRunner{
+		results: []subprocess.Result{{Stderr: raw}},
+		errs:    []error{errors.New("exit 1")},
+	}
+	adapter := ClaudeAdapter{
+		Runner: runner,
+		NewRuntimeRef: func() (string, error) {
+			return "550e8400-e29b-41d4-a716-446655440010", nil
+		},
+	}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "jerryfane/gitmoot"}
+
+	result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"})
+
+	if err == nil {
+		t.Fatal("Start accepted auth failure")
+	}
+	errText := err.Error()
+	for _, want := range []string{"Claude Code authentication failed", "claude setup-token", "restart the Gitmoot daemon", "401 Invalid authentication credentials"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("error missing %q:\n%s", want, errText)
+		}
+	}
+	if result.Raw != raw {
+		t.Fatalf("raw = %q, want %q", result.Raw, raw)
+	}
+}
+
 func TestClaudeDeliverLastSessionCommand(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
 	adapter := ClaudeAdapter{Runner: runner}
@@ -363,6 +393,31 @@ func TestClaudeDeliverFallsBackToText(t *testing.T) {
 	runner.want(t, 1, "claude", "--resume", "550e8400-e29b-41d4-a716-446655440002", "-p", "--", "review")
 }
 
+func TestClaudeDeliverClassifiesAuthFailure(t *testing.T) {
+	raw := "401 Invalid authentication credentials"
+	runner := &fakeRunner{
+		results: []subprocess.Result{{Stdout: raw}},
+		errs:    []error{errors.New("exit 1")},
+	}
+	adapter := ClaudeAdapter{Runner: runner}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+
+	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
+
+	if err == nil {
+		t.Fatal("Deliver accepted auth failure")
+	}
+	errText := err.Error()
+	for _, want := range []string{"Claude Code authentication failed", "claude setup-token", "restart the Gitmoot daemon", raw} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("error missing %q:\n%s", want, errText)
+		}
+	}
+	if result.Raw != raw {
+		t.Fatalf("raw = %q, want %q", result.Raw, raw)
+	}
+}
+
 func TestClaudeHealthUsesRegisteredSession(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"OK"}`}}}
 	adapter := ClaudeAdapter{Runner: runner}
@@ -372,6 +427,27 @@ func TestClaudeHealthUsesRegisteredSession(t *testing.T) {
 		t.Fatalf("Health returned error: %v", err)
 	}
 	runner.want(t, 0, "claude", "--resume", "550e8400-e29b-41d4-a716-446655440002", "-p", "--output-format", "json", "--", healthPrompt)
+}
+
+func TestClaudeHealthClassifiesAuthFailure(t *testing.T) {
+	runner := &fakeRunner{
+		results: []subprocess.Result{{Stderr: "401 Invalid authentication credentials"}},
+		errs:    []error{errors.New("exit 1")},
+	}
+	adapter := ClaudeAdapter{Runner: runner}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+
+	err := adapter.Health(context.Background(), agent)
+
+	if err == nil {
+		t.Fatal("Health accepted auth failure")
+	}
+	errText := err.Error()
+	for _, want := range []string{"Claude Code authentication failed", "claude setup-token", "restart the Gitmoot daemon"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("error missing %q:\n%s", want, errText)
+		}
+	}
 }
 
 func TestClaudeHealthRejectsBrokenSession(t *testing.T) {

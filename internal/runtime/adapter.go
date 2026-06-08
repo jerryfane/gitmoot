@@ -302,7 +302,7 @@ func (a ClaudeAdapter) Start(ctx context.Context, request StartRequest) (StartRe
 	args := append(claudePermissionArgs(request.Agent), "--session-id", runtimeRef, "-p", "--output-format", "json", "--", request.Prompt)
 	result, err := a.runner().Run(ctx, a.Dir, "claude", args...)
 	if err != nil {
-		return StartResult{Raw: result.Stdout + result.Stderr}, commandError(result, err)
+		return StartResult{Raw: result.Stdout + result.Stderr}, claudeCommandError(result, err)
 	}
 	return StartResult{RuntimeRef: runtimeRef, Raw: result.Stdout}, nil
 }
@@ -321,7 +321,7 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 		result, err = a.runner().Run(ctx, a.Dir, "claude", claudeArgs(agent, job.Prompt, false)...)
 	}
 	if err != nil {
-		return Result{Raw: result.Stdout + result.Stderr}, commandError(result, err)
+		return Result{Raw: result.Stdout + result.Stderr}, claudeCommandError(result, err)
 	}
 	parsed := Result{Raw: result.Stdout}
 	var payload struct {
@@ -421,6 +421,31 @@ func commandError(result subprocess.Result, err error) error {
 		return err
 	}
 	return fmt.Errorf("%s: %w", detail, err)
+}
+
+func claudeCommandError(result subprocess.Result, err error) error {
+	base := commandError(result, err)
+	if !isClaudeAuthFailure(result) {
+		return base
+	}
+	return fmt.Errorf("Claude Code authentication failed. %s: %w", ClaudeAuthSetupMessage, base)
+}
+
+func isClaudeAuthFailure(result subprocess.Result) bool {
+	text := strings.ToLower(strings.Join([]string{
+		result.Stdout,
+		result.Stderr,
+	}, "\n"))
+	if strings.Contains(text, "authentication_error") {
+		return true
+	}
+	if strings.Contains(text, "invalid authentication credentials") {
+		return true
+	}
+	if strings.Contains(text, "invalid x-api-key") {
+		return true
+	}
+	return strings.Contains(text, "401") && strings.Contains(text, "authentication")
 }
 
 func parseCodexStartedThreadID(output string) (string, error) {
