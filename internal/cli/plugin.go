@@ -23,6 +23,7 @@ import (
 
 var pluginLookPath = exec.LookPath
 var pluginInstallRunner subprocess.Runner = subprocess.ExecRunner{}
+var pluginDoctorRunner subprocess.Runner = subprocess.ExecRunner{}
 
 type pluginCheck struct {
 	Name     string `json:"name"`
@@ -69,7 +70,7 @@ func printPluginUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot plugin build codex|claude")
 	fmt.Fprintln(w, "  gitmoot plugin install codex|claude")
 	fmt.Fprintln(w, "  gitmoot plugin path codex|claude")
-	fmt.Fprintln(w, "  gitmoot plugin doctor [codex|claude]")
+	fmt.Fprintln(w, "  gitmoot plugin doctor [codex|claude] [--live]")
 }
 
 func runPluginInstall(args []string, stdout, stderr io.Writer) int {
@@ -203,6 +204,7 @@ func runPluginDoctor(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	jsonOutput := fs.Bool("json", false, "print doctor output as JSON")
+	live := fs.Bool("live", false, "run an explicit live Claude print-mode smoke check")
 	selected, explicitRuntime, help, ok := parsePluginDoctorArgs(args, fs, stderr)
 	if help {
 		return 0
@@ -223,7 +225,7 @@ func runPluginDoctor(args []string, stdout, stderr io.Writer) int {
 
 	output := pluginDoctorOutput{Home: paths.Home}
 	for _, provider := range providers {
-		output.Runtimes = append(output.Runtimes, doctorRuntime(paths.Home, provider, explicitRuntime))
+		output.Runtimes = append(output.Runtimes, doctorRuntime(paths.Home, provider, explicitRuntime, *live))
 	}
 	if *jsonOutput {
 		if err := writeJSON(stdout, output); err != nil {
@@ -318,7 +320,7 @@ func parsePluginDoctorArgs(args []string, fs *flag.FlagSet, stderr io.Writer) (p
 	return provider, true, false, true
 }
 
-func doctorRuntime(home string, provider pluginpack.Provider, explicitRuntime bool) pluginDoctorRuntime {
+func doctorRuntime(home string, provider pluginpack.Provider, explicitRuntime bool, live bool) pluginDoctorRuntime {
 	packagePath := pluginpack.DefaultPackageDir(home, provider)
 	runtime := pluginDoctorRuntime{
 		Runtime: string(provider),
@@ -334,10 +336,20 @@ func doctorRuntime(home string, provider pluginpack.Provider, explicitRuntime bo
 	runtime.Checks = append(runtime.Checks, checkRuntimeCLI(provider, explicitRuntime))
 	if provider == pluginpack.ProviderClaude {
 		runtime.Checks = append(runtime.Checks, checkClaudeAuthEnv())
+		if live {
+			runtime.Checks = append(runtime.Checks, checkClaudeLive())
+		}
 	}
 	runtime.Checks = append(runtime.Checks, checkValidationCommand(provider, explicitRuntime))
 	runtime.Healthy = runtimeChecksHealthy(runtime.Checks)
 	return runtime
+}
+
+func checkClaudeLive() pluginCheck {
+	if err := runtime.ClaudeLiveCheck(context.Background(), pluginDoctorRunner, ""); err != nil {
+		return failCheck("runtime-live", err.Error(), true)
+	}
+	return okCheck("runtime-live", "live Claude print-mode check succeeded", true)
 }
 
 func checkHome(home string) pluginCheck {

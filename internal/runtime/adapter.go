@@ -424,6 +424,10 @@ func commandError(result subprocess.Result, err error) error {
 }
 
 func claudeCommandError(result subprocess.Result, err error) error {
+	return ClassifyClaudeCommandError(result, err)
+}
+
+func ClassifyClaudeCommandError(result subprocess.Result, err error) error {
 	base := commandError(result, err)
 	if !isClaudeAuthFailure(result) {
 		return base
