@@ -354,9 +354,13 @@ Background jobs are scheduled against three distinct resources:
 - branch locks for implementation ownership and merge safety.
 
 The daemon default is `--workers 1`. Users can raise it when jobs target
-different runtime sessions or managed agent types with `max_background` greater
-than one. Gitmoot still serializes jobs for the same runtime session or checkout
-even when more workers are configured.
+different runtime sessions, managed agent types with `max_background` greater
+than one, or forkable temporary workers. By default `[parallel_sessions]` uses
+`same_session = "fork_temp_session"`, `merge_back = "summary"`,
+`max_temp_sessions_per_agent = 4`, and
+`eligible_actions = ["ask", "review", "implement"]`. Same-checkout work remains
+serialized; same-runtime Codex/Claude jobs can fork only when the action is
+eligible and implementation jobs have a safe task worktree.
 
 ## Multi-Repo Work
 
