@@ -281,8 +281,7 @@ Symptoms:
 
 - `gitmoot agent ask` fails with `runtime session ... is busy`.
 - A background job remains queued and its events include `runtime_lock_wait`.
-- Increasing `--workers` does not make two jobs run against the same Codex or
-  Claude session.
+- Increasing `--workers` does not start a temp worker for the job.
 
 Checks:
 
@@ -295,11 +294,16 @@ gitmoot agent list
 
 Fixes:
 
-- Wait for the active job using the same runtime session to finish.
-- Use a different registered agent or managed background instance when the work
-  is independent.
-- Keep `gitmoot daemon start --workers 1` unless you have multiple independent
-  runtime sessions or an agent type with `max_background` greater than one.
+- Check `[parallel_sessions]`. The default is `same_session = "fork_temp_session"`,
+  `merge_back = "summary"`, `max_temp_sessions_per_agent = 4`, and
+  `eligible_actions = ["ask", "review", "implement"]`.
+- If the job still waits, inspect the job events for the ineligibility reason:
+  unsupported runtime, action not eligible, temp-worker cap reached, read-only
+  implementation agent, missing task worktree, or summary merge-back waiting for
+  the original session.
+- Wait for the active job using the same runtime session to finish, or use a
+  different registered agent or managed background instance when the work is
+  independent.
 - Use `gitmoot agent gc` to remove expired managed background instances.
 
 ## Parallel Implementation And Worktrees
@@ -326,12 +330,12 @@ Fixes:
   worktree path on the task and routes task-tied jobs there.
 - Keep the registered checkout clean. Gitmoot still uses it for base branch
   updates and merge-gate cleanup.
-- Use separate runtime sessions or managed background instances for jobs that
-  should truly run concurrently. Worktrees isolate files; runtime session locks
-  still serialize reuse of the same Codex or Claude session.
-- Temporary forkable workers, such as the future #177 flow, should remain gated
-  on task worktree isolation. Forking sessions without checkout isolation only
-  moves the contention from runtime memory to local git state.
+- Use separate runtime sessions, managed background instances, or forkable temp
+  workers for jobs that should truly run concurrently. Worktrees isolate files;
+  temp workers isolate busy Codex/Claude runtime sessions when eligible.
+- Forked implementation sessions remain gated on task worktree isolation.
+  Forking sessions without checkout isolation only moves the contention from
+  runtime memory to local git state.
 - For the full Claude implementation-worker smoke checklist, see
   [Claude Runtime Validation](claude-runtime-validation.md).
 

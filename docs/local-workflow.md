@@ -103,10 +103,22 @@ Background execution uses separate resource categories:
 - **Branch locks**: workflow ownership records used for implementation and
   merge safety.
 
-The daemon defaults to `--workers 1`. Raise `--workers` only when the Gitmoot
-home has independent runtime sessions or managed agent types with
-`max_background` greater than one. Jobs that target the same runtime session or
-same checkout remain serialized even when the worker count is higher.
+The daemon defaults to `--workers 1`. Raise `--workers` when the Gitmoot home
+has independent runtime sessions, managed agent types with `max_background`
+greater than one, or forkable temporary workers enabled. By default,
+`[parallel_sessions]` uses:
+
+```toml
+same_session = "fork_temp_session"
+merge_back = "summary"
+max_temp_sessions_per_agent = 4
+eligible_actions = ["ask", "review", "implement"]
+```
+
+When a Codex or Claude runtime session is busy, Gitmoot can start a bounded
+temporary worker with the same template and repo scope. Implementation jobs only
+fork when the task has a recorded worktree and the original agent is writable.
+If a job is not eligible, Gitmoot keeps the old queue/wait behavior.
 
 ## End-To-End Demo Path
 
@@ -355,10 +367,11 @@ same checkout remain serialized even when the worker count is higher.
 
 - The machine running `gitmoot daemon start` must stay online.
 - Polling is the V1 mechanism; there is no webhook receiver yet.
-- Parallel implementation needs separate task worktrees and separate runtime
-  sessions or managed background instances. Checkout mutation operations are
-  serialized per checkout path; runtime session locks still serialize jobs that
-  reuse the same Codex or Claude session.
+- Parallel implementation needs separate task worktrees. Checkout mutation
+  operations are serialized per checkout path. If a Codex or Claude session is
+  busy and `[parallel_sessions].same_session` is `fork_temp_session`, Gitmoot
+  can use a bounded temp worker and queue a summary merge-back to the original
+  agent; otherwise same-session jobs wait.
 - GitHub Checks are best implemented later through GitHub App mode. V1 uses
   commit statuses and `gh pr checks`.
 - Use explicit session ids for long workflows. `last` is convenient but can

@@ -1753,7 +1753,7 @@ func TestSkillOptTrainContinueRetriesInvalidRequiredVuePreviewOption(t *testing.
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "preview-retry-train"}, &stdout, &stderr)
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "preview-retry-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("train continue exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -1886,7 +1886,7 @@ func TestSkillOptTrainContinueAllowsOptionalVuePreviewFallback(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optional-preview-train"}, &stdout, &stderr)
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optional-preview-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("train continue exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -1950,7 +1950,7 @@ func TestSkillOptTrainContinueAllowsOptionalVuePreviewFallback(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optional-preview-train"}, &stdout, &stderr)
+	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "optional-preview-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("second train continue exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -2032,7 +2032,7 @@ func TestSkillOptTrainContinueFailsRequiredVuePreviewForProseOutput(t *testing.T
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "preview-train"}, &stdout, &stderr)
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "preview-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("train continue exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -2134,7 +2134,7 @@ func TestSkillOptTrainContinueRejectsNonImplementedGenerationResult(t *testing.T
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("train continue exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -2224,7 +2224,7 @@ func TestSkillOptTrainContinueRefusesConcurrentGeneration(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("train continue exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -2500,7 +2500,7 @@ func TestSkillOptTrainContinueUsesManagedGeneratorConcurrency(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("train continue exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -2599,7 +2599,7 @@ func TestSkillOptTrainContinueUsesRegisteredWorkspaceRepoCheckout(t *testing.T) 
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
+	code = Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("train continue with workspace checkout exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -2700,7 +2700,7 @@ func TestSkillOptTrainContinueGeneratesValidateArtifacts(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "validate-train"}, &stdout, &stderr)
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "validate-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("train continue exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -2798,7 +2798,7 @@ func TestSkillOptTrainContinueRecordsGenerationFailureWithoutOptions(t *testing.
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr)
+	code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train", "--generator-type", "skillopt-generator"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("train continue without generator exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
