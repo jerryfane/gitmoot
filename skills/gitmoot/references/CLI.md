@@ -277,6 +277,11 @@ gitmoot lock list --repo owner/repo
 gitmoot lock show owner/repo <branch>
 ```
 
+Merge-gate retries are automatic while the daemon is running. Retryable states,
+such as a busy base-branch merge queue or a GitHub branch update in progress,
+are retried on the next daemon poll tick. The default poll interval is `30s`
+unless the daemon was started with a different `--poll`.
+
 ## SkillOpt Exchange
 
 ```sh

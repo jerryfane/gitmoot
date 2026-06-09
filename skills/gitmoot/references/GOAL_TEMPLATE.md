@@ -124,8 +124,9 @@ main systems touched, and any explicit exclusions.
 - Use a separate branch per task.
 - Clearly assign each branch a task number and file ownership.
 - Do not duplicate work across branches.
-- If parallel branches conflict after one PR merges, rebase or update the
-  remaining branch on the latest target base and re-run its checks/review.
+- For Gitmoot-owned task PRs, let the merge gate update stale branches and
+  retry. If a real content conflict remains, resolve it in an explicit fix task
+  and re-run checks/review.
 - If a task becomes dependent on another task, stop treating it as parallel and
   merge the dependency first.
 

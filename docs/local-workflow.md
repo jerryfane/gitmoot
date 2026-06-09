@@ -363,7 +363,11 @@ If a job is not eligible, Gitmoot keeps the old queue/wait behavior.
    Agents review, request fixes, and rerun work through comments and job output.
    When required reviews are approved and the branch is ready, the merge gate
    checks the current PR head, local worktree cleanliness, branch freshness,
-   Gitmoot statuses, external CI if present, and mergeability.
+   Gitmoot statuses, external CI if present, and mergeability. Final merge work
+   is serialized per repository base branch. If a parallel PR became behind the
+   base branch because another PR merged first, Gitmoot asks GitHub to update
+   the PR branch with the expected head SHA and leaves the merge gate pending so
+   the daemon can reload the new head and checks on a later poll tick.
 
 9. Merge and continue.
 
@@ -378,6 +382,9 @@ If a job is not eligible, Gitmoot keeps the old queue/wait behavior.
 
 - The machine running `gitmoot daemon start` must stay online.
 - Polling is the V1 mechanism; there is no webhook receiver yet.
+- Retryable merge-gate states are automatic only while the daemon is running.
+  The normal retry latency is the daemon poll interval, `30s` by default unless
+  `--poll` is configured differently.
 - Parallel implementation needs separate task worktrees. Checkout mutation
   operations are serialized per checkout path. If a Codex or Claude session is
   busy and `[parallel_sessions].same_session` is `fork_temp_session`, Gitmoot

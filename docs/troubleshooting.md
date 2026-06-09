@@ -401,7 +401,15 @@ git status --short
 Fixes:
 
 - Clean the local worktree before the daemon attempts the merge.
-- Update the PR branch if it is behind or diverged from base.
+- If the PR branch is merely behind or diverged from base, keep the daemon
+  running. Gitmoot serializes the base-branch merge gate, asks GitHub to update
+  the PR branch safely, then retries on a later daemon poll tick. The default
+  poll interval is `30s` unless `--poll` was configured differently.
+- If GitHub reports a branch update conflict, Gitmoot stops retrying, posts a
+  PR comment, marks `gitmoot/merge-gate` as failed, records `advance_blocked`
+  when the block came from job advancement, and shows the reason in
+  `gitmoot task list` / `gitmoot job events <job-id>`. Resolve the conflict
+  manually or run an explicit implement/fix job, then rerun review/merge.
 - Fix failing external CI or Gitmoot statuses.
 - Rerun reviews after the PR head SHA changes.
 - If a merged task reports a worktree cleanup warning, inspect the stored task
