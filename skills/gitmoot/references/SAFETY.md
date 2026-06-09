@@ -14,6 +14,13 @@ by the assigned agent.
 Review and ask jobs should inspect and report without mutating branches unless
 the task explicitly instructs otherwise.
 
+Do not ask child agents to run PR lifecycle commands such as `git pull`,
+`git merge`, `git push`, or `gh pr merge` to make parallel task PRs mergeable.
+Gitmoot owns the final merge gate. It serializes merge attempts per base branch,
+updates stale PR branches through GitHub when possible, retries pending states
+through the daemon, and blocks clearly when GitHub reports a real merge
+conflict.
+
 Useful commands:
 
 ```sh

@@ -17,6 +17,7 @@ const (
 	gitmootMergeGateContext         = "gitmoot/merge-gate"
 	gitmootNoCIContext              = "gitmoot/ci"
 	commitStatusDescriptionMaxRunes = 140
+	mergeQueueLockTTL               = 30 * time.Minute
 )
 
 type MergeGateGitHub interface {
@@ -25,6 +26,8 @@ type MergeGateGitHub interface {
 	CompareCommits(ctx context.Context, repo github.Repository, base string, head string) (github.CompareResult, error)
 	ListPullRequestChecks(ctx context.Context, repo github.Repository, number int64) ([]github.PullRequestCheck, error)
 	CreateCommitStatus(ctx context.Context, input github.CommitStatusInput) (github.CommitStatus, error)
+	PostIssueComment(ctx context.Context, repo github.Repository, issueNumber int64, body string) (github.IssueComment, error)
+	UpdatePullRequestBranch(ctx context.Context, input github.UpdatePullRequestBranchInput) (github.UpdatePullRequestBranchResult, error)
 	MergePullRequest(ctx context.Context, input github.MergePullRequestInput) (github.MergeResult, error)
 }
 
@@ -99,16 +102,29 @@ func (g PolicyMergeGate) Evaluate(ctx context.Context, request MergeRequest) (Me
 			return g.block(ctx, request, headSHA, "local worktree is not clean")
 		}
 	}
-	if pr.Mergeable != nil && !*pr.Mergeable {
-		return g.block(ctx, request, headSHA, "pull request is not mergeable; rebase or update the branch")
-	}
-	if err := g.ensureBranchFresh(ctx, repo, pr, headSHA); err != nil {
-		return g.block(ctx, request, headSHA, err.Error())
-	}
 	if !request.ReviewOptional {
 		if err := g.ensureFinalReviewCaptured(ctx, request, headSHA); err != nil {
 			return g.block(ctx, request, headSHA, err.Error())
 		}
+	}
+	releaseMergeQueueLock, err := g.acquireMergeQueueLock(ctx, request, pr)
+	if err != nil {
+		var pending mergePending
+		if errors.As(err, &pending) {
+			return g.pending(ctx, request, headSHA, pending.reason)
+		}
+		return MergeDecision{}, err
+	}
+	defer func() {
+		_ = releaseMergeQueueLock(context.Background())
+	}()
+	if decision, handled, err := g.ensureBranchFresh(ctx, repo, request, pr, headSHA); err != nil {
+		return MergeDecision{}, err
+	} else if handled {
+		return decision, nil
+	}
+	if pr.Mergeable != nil && !*pr.Mergeable {
+		return g.block(ctx, request, headSHA, "pull request is not mergeable; rebase or update the branch")
 	}
 	if err := g.ensureStatuses(ctx, repo, int64(request.PullRequest), headSHA); err != nil {
 		var pending mergePending
@@ -229,6 +245,43 @@ func (g PolicyMergeGate) acquireLocalCheckoutMutationLock(ctx context.Context, r
 	return releaseCheckoutLock, nil
 }
 
+func (g PolicyMergeGate) acquireMergeQueueLock(ctx context.Context, request MergeRequest, pr github.PullRequest) (func(context.Context) error, error) {
+	base := strings.TrimSpace(pr.BaseRef)
+	if base == "" {
+		base = strings.TrimSpace(pr.BaseSHA)
+	}
+	if base == "" {
+		return nil, errors.New("pull request base ref is missing")
+	}
+	key := mergeQueueLockKey(request.Repo, base)
+	ownerID := "merge-queue:" + request.Repo + "#" + strconv.Itoa(request.PullRequest)
+	token, err := newCheckoutMutationOwnerToken()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	acquired, err := g.Store.AcquireResourceLock(ctx, db.ResourceLock{
+		ResourceKey: key,
+		OwnerJobID:  ownerID,
+		OwnerToken:  token,
+		ExpiresAt:   now.Add(mergeQueueLockTTL).Format(time.RFC3339Nano),
+	}, now)
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, mergePending{reason: fmt.Sprintf("merge queue for %s/%s is busy; daemon will retry", request.Repo, base)}
+	}
+	return func(releaseCtx context.Context) error {
+		_, err := g.Store.ReleaseResourceLock(releaseCtx, key, ownerID, token)
+		return err
+	}, nil
+}
+
+func mergeQueueLockKey(repoFullName string, base string) string {
+	return "merge-queue:" + strings.TrimSpace(repoFullName) + ":" + strings.TrimSpace(base)
+}
+
 func (g PolicyMergeGate) validate() error {
 	if g.Store == nil {
 		return errors.New("merge gate store is required")
@@ -300,26 +353,73 @@ func (g PolicyMergeGate) ensureFinalReviewCaptured(ctx context.Context, request 
 	return nil
 }
 
-func (g PolicyMergeGate) ensureBranchFresh(ctx context.Context, repo github.Repository, pr github.PullRequest, headSHA string) error {
+func (g PolicyMergeGate) ensureBranchFresh(ctx context.Context, repo github.Repository, request MergeRequest, pr github.PullRequest, headSHA string) (MergeDecision, bool, error) {
 	base := strings.TrimSpace(pr.BaseRef)
 	if base == "" {
 		base = strings.TrimSpace(pr.BaseSHA)
 	}
 	if base == "" {
-		return errors.New("pull request base ref is missing")
+		decision, err := g.block(ctx, request, headSHA, "pull request base ref is missing")
+		return decision, true, err
 	}
 	compare, err := g.GitHub.CompareCommits(ctx, repo, base, headSHA)
 	if err != nil {
-		return err
+		return MergeDecision{}, false, err
 	}
 	status := strings.ToLower(strings.TrimSpace(compare.Status))
 	if compare.BehindBy > 0 || status == "behind" || status == "diverged" {
-		return fmt.Errorf("pull request branch is behind base %s; update the branch before merging", base)
+		_, err := g.GitHub.UpdatePullRequestBranch(ctx, github.UpdatePullRequestBranchInput{
+			Repo:            repo,
+			Number:          int64(request.PullRequest),
+			ExpectedHeadSHA: headSHA,
+		})
+		if err == nil {
+			decision, pendingErr := g.pending(ctx, request, headSHA, fmt.Sprintf("pull request branch update from %s requested; daemon will retry after GitHub refreshes the head SHA and checks", base))
+			return decision, true, pendingErr
+		}
+		switch {
+		case github.IsUpdatePullRequestBranchError(err, github.UpdatePullRequestBranchErrorStaleHead):
+			decision, pendingErr := g.pending(ctx, request, headSHA, "pull request head changed while updating branch; daemon will retry with the latest head SHA")
+			return decision, true, pendingErr
+		case github.IsUpdatePullRequestBranchError(err, github.UpdatePullRequestBranchErrorConflict):
+			reason := fmt.Sprintf("branch update conflicts with %s; manual or agent fix required", base)
+			_ = g.postMergeConflictComment(ctx, repo, request, pr, reason)
+			decision, blockErr := g.block(ctx, request, headSHA, reason)
+			return decision, true, blockErr
+		case github.IsUpdatePullRequestBranchError(err, github.UpdatePullRequestBranchErrorUnsupported):
+			decision, blockErr := g.block(ctx, request, headSHA, fmt.Sprintf("GitHub cannot update this pull request branch automatically: %s", err))
+			return decision, true, blockErr
+		default:
+			decision, pendingErr := g.pending(ctx, request, headSHA, fmt.Sprintf("GitHub branch update failed transiently: %s; daemon will retry", err))
+			return decision, true, pendingErr
+		}
 	}
 	if status != "" && status != "ahead" && status != "identical" {
-		return fmt.Errorf("pull request branch freshness is unknown: compare status %q", compare.Status)
+		decision, err := g.block(ctx, request, headSHA, fmt.Sprintf("pull request branch freshness is unknown: compare status %q", compare.Status))
+		return decision, true, err
 	}
-	return nil
+	return MergeDecision{}, false, nil
+}
+
+func (g PolicyMergeGate) postMergeConflictComment(ctx context.Context, repo github.Repository, request MergeRequest, pr github.PullRequest, reason string) error {
+	if request.PullRequest <= 0 {
+		return nil
+	}
+	base := strings.TrimSpace(pr.BaseRef)
+	if base == "" {
+		base = strings.TrimSpace(pr.BaseSHA)
+	}
+	body := strings.Join([]string{
+		"Gitmoot merge gate is blocked.",
+		"",
+		"Gitmoot could not update this pull request branch before merge because it conflicts with `" + base + "`.",
+		"",
+		"- reason: " + reason,
+		"- retry: stopped; this is not retryable until the branch is fixed",
+		"- next action: resolve the conflict manually or run an explicit implement/fix job, then rerun review/merge",
+	}, "\n")
+	_, err := g.GitHub.PostIssueComment(ctx, repo, int64(request.PullRequest), body)
+	return err
 }
 
 func (g PolicyMergeGate) ensureReviewMatchesHead(payload JobPayload, headSHA string, agent string) error {
