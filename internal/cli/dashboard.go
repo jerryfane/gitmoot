@@ -42,6 +42,11 @@ type dashboardSnapshot struct {
 	TrainSessions   []dashboardTrainSession `json:"train_sessions"`
 	ResourceLocks   []dashboardResourceLock `json:"resource_locks"`
 	PendingPrompts  []dashboardPrompt       `json:"pending_prompts"`
+
+	// promptDetails carries the full pending interactive-prompt records for the
+	// TUI's inline answer flow. Unexported so it never appears in --json output
+	// or the plain renderer, keeping those contracts byte-stable.
+	promptDetails []db.InteractivePrompt
 }
 
 type dashboardResourceLock struct {
@@ -114,6 +119,7 @@ func runDashboard(args []string, stdout, stderr io.Writer) int {
 	answerValue := fs.String("value", "", "answer value to use with --answer")
 	answerSource := fs.String("source", "dashboard", "answer source recorded with --answer")
 	dismissID := fs.String("dismiss", "", "prompt id to delete before showing the snapshot")
+	plain := fs.Bool("plain", false, "print a one-shot snapshot instead of launching the interactive TUI")
 	watch := fs.Bool("watch", false, "refresh the snapshot on an interval until interrupted (terminal only)")
 	interval := fs.Duration("interval", 5*time.Second, "refresh interval for --watch")
 	if err := fs.Parse(args); err != nil {
@@ -140,6 +146,22 @@ func runDashboard(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return runDashboardWatch(stdout, *home, *all, *interval)
+	}
+
+	// On a real terminal with no machine-output or mutation flags, launch the
+	// interactive TUI. Every other case (pipes, --json/--all/--plain/--answer/
+	// --dismiss, non-terminal stdin) falls through to the one-shot snapshot, so
+	// scripts, tests, and CI are unaffected.
+	flags := dashboardFlags{
+		plain:      *plain,
+		jsonOutput: *jsonOutput,
+		all:        *all,
+		watch:      *watch,
+		answerID:   *answerID,
+		dismissID:  *dismissID,
+	}
+	if shouldLaunchTUI(flags, style.IsTerminal(stdout), stdinIsCharDevice()) {
+		return runDashboardTUI(*home, *interval, stdout, stderr)
 	}
 
 	paths, err := initializedPaths(*home)
@@ -350,6 +372,7 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 		for _, prompt := range prompts {
 			snapshot.PendingPrompts = append(snapshot.PendingPrompts, dashboardPrompt{ID: prompt.ID, Question: prompt.Question})
 		}
+		snapshot.promptDetails = prompts
 		return nil
 	})
 	if err != nil {
