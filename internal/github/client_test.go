@@ -11,6 +11,84 @@ import (
 	"github.com/jerryfane/gitmoot/internal/subprocess"
 )
 
+func TestRepositoryExists(t *testing.T) {
+	repo := Repository{Owner: "o", Name: "r"}
+
+	t.Run("exists", func(t *testing.T) {
+		runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"nameWithOwner":"o/r"}`}}}
+		client := GhClient{Runner: runner}
+		ok, err := client.RepositoryExists(context.Background(), repo)
+		if err != nil || !ok {
+			t.Fatalf("RepositoryExists = (%v, %v), want (true, nil)", ok, err)
+		}
+		runner.wantArgs(t, 0, "repo", "view", "o/r", "--json", "nameWithOwner")
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		runner := &fakeRunner{
+			results: []subprocess.Result{{Stderr: "HTTP 404: Not Found (https://api.github.com/repos/o/r)"}},
+			errs:    []error{errors.New("exit status 1")},
+		}
+		client := GhClient{Runner: runner}
+		ok, err := client.RepositoryExists(context.Background(), repo)
+		if err != nil || ok {
+			t.Fatalf("RepositoryExists = (%v, %v), want (false, nil)", ok, err)
+		}
+	})
+
+	t.Run("auth error propagates", func(t *testing.T) {
+		runner := &fakeRunner{
+			results: []subprocess.Result{{Stderr: "gh: To get started with GitHub CLI, please run: gh auth login"}},
+			errs:    []error{errors.New("exit status 4")},
+		}
+		client := GhClient{Runner: runner}
+		ok, err := client.RepositoryExists(context.Background(), repo)
+		if err == nil || ok {
+			t.Fatalf("RepositoryExists = (%v, %v), want (false, non-nil) on auth error", ok, err)
+		}
+	})
+
+	t.Run("empty repo", func(t *testing.T) {
+		client := GhClient{Runner: &fakeRunner{}}
+		if _, err := client.RepositoryExists(context.Background(), Repository{}); err == nil {
+			t.Fatal("expected error for empty repo")
+		}
+	})
+}
+
+func TestCreateRepository(t *testing.T) {
+	repo := Repository{Owner: "o", Name: "r"}
+
+	t.Run("private", func(t *testing.T) {
+		runner := &fakeRunner{results: []subprocess.Result{{}}}
+		client := GhClient{Runner: runner}
+		if err := client.CreateRepository(context.Background(), repo, true); err != nil {
+			t.Fatalf("CreateRepository: %v", err)
+		}
+		runner.wantArgs(t, 0, "repo", "create", "o/r", "--private")
+	})
+
+	t.Run("public", func(t *testing.T) {
+		runner := &fakeRunner{results: []subprocess.Result{{}}}
+		client := GhClient{Runner: runner}
+		if err := client.CreateRepository(context.Background(), repo, false); err != nil {
+			t.Fatalf("CreateRepository: %v", err)
+		}
+		runner.wantArgs(t, 0, "repo", "create", "o/r", "--public")
+	})
+
+	t.Run("error propagates", func(t *testing.T) {
+		runner := &fakeRunner{
+			results: []subprocess.Result{{Stderr: "name already exists"}},
+			errs:    []error{errors.New("exit status 1")},
+		}
+		client := GhClient{Runner: runner}
+		if err := client.CreateRepository(context.Background(), repo, true); err == nil {
+			t.Fatal("expected error to propagate")
+		}
+	})
+}
+
 func TestListIssueCommentsDedupesByID(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{

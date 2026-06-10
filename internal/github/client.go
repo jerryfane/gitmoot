@@ -19,6 +19,8 @@ import (
 type Client interface {
 	Ping(ctx context.Context) error
 	Preflight(ctx context.Context, repo Repository) error
+	RepositoryExists(ctx context.Context, repo Repository) (bool, error)
+	CreateRepository(ctx context.Context, repo Repository, private bool) error
 	ListPullRequests(ctx context.Context, repo Repository, state string) ([]PullRequest, error)
 	GetPullRequest(ctx context.Context, repo Repository, number int64) (PullRequest, error)
 	CreatePullRequest(ctx context.Context, input CreatePullRequestInput) (PullRequest, error)
@@ -316,6 +318,38 @@ func (c *GhClient) Preflight(ctx context.Context, repo Repository) error {
 		}
 	}
 	return nil
+}
+
+// RepositoryExists reports whether the repo is visible to the authenticated gh
+// user. A 404 (or "not found") maps to (false, nil); any other error (auth,
+// network, rate limit) propagates so callers never offer to create a repo on an
+// ambiguous failure.
+func (c *GhClient) RepositoryExists(ctx context.Context, repo Repository) (bool, error) {
+	if strings.TrimSpace(repo.FullName()) == "" {
+		return false, fmt.Errorf("repository owner/name is required")
+	}
+	result, err := c.run(ctx, false, "repo", "view", repo.FullName(), "--json", "nameWithOwner")
+	if err != nil {
+		if isNotFound(result) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// CreateRepository creates the repo via `gh repo create`. It rides the mutate
+// lock like other write operations.
+func (c *GhClient) CreateRepository(ctx context.Context, repo Repository, private bool) error {
+	if strings.TrimSpace(repo.FullName()) == "" {
+		return fmt.Errorf("repository owner/name is required")
+	}
+	visibility := "--public"
+	if private {
+		visibility = "--private"
+	}
+	_, err := c.run(ctx, true, "repo", "create", repo.FullName(), visibility)
+	return err
 }
 
 func (c *GhClient) ListPullRequests(ctx context.Context, repo Repository, state string) ([]PullRequest, error) {
@@ -843,6 +877,14 @@ func firstNonEmpty(values ...string) string {
 type NoopClient struct{}
 
 func (NoopClient) Ping(context.Context) error {
+	return nil
+}
+
+func (NoopClient) RepositoryExists(context.Context, Repository) (bool, error) {
+	return true, nil
+}
+
+func (NoopClient) CreateRepository(context.Context, Repository, bool) error {
 	return nil
 }
 
