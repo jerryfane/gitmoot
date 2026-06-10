@@ -197,6 +197,18 @@ template-learning loop. Use low-level `skillopt review`, `feedback`, `export`,
 `import`, and `candidate` commands only for advanced/debug work, custom
 research runs, or one-step recovery.
 
+To scaffold a reusable train config, run `gitmoot skillopt train init`. On an
+interactive terminal it runs a line-oriented wizard (numbered template choices
+with a "Custom file" option, and the preview style); each question is also a
+prompt record an agent can answer with `gitmoot interactive answer`, or pass
+`--prompts` to emit them all at once. It prints the next `train start --config
+... --workspace-repo <owner/repo>` command. See
+[../../../docs/skillopt-train-workflow.md](../../../docs/skillopt-train-workflow.md)
+and the optional Herdr-pane flow in
+[../../../docs/herdr-composable-train-init.md](../../../docs/herdr-composable-train-init.md).
+Use `gitmoot dashboard` (add `--json`) to watch train phase, pending prompts,
+jobs, and daemon health.
+
 ```sh
 gitmoot skillopt train start \
   --template planner \
