@@ -422,6 +422,7 @@ func toTrainRunSnapshot(s skillOptTrainStatusSnapshot) tui.TrainRunSnapshot {
 		ReviewRepo:        strings.TrimSpace(s.TargetRepo),
 		WorkspaceRepo:     strings.TrimSpace(s.WorkspaceRepo),
 		Phase:             s.StatusPhase,
+		ActionPhase:       s.CurrentPhase,
 		NextAction:        s.NextAction,
 		IssueURL:          skillOptTrainContinueFromGitHubURL(s.CurrentPhase, s.IssueURL),
 		CandidateVersion:  s.CandidateVersion,

@@ -84,7 +84,7 @@ func (m TrainRunModel) footer() string {
 		return "working…  q quit"
 	}
 	action := ""
-	switch m.snap.Phase {
+	switch m.actionPhase() {
 	case "items_ready", "feedback_synced", "training_package_created":
 		action = "enter generate  "
 	case "options_generated":
