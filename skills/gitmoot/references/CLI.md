@@ -65,12 +65,46 @@ and pending interactive prompts.
 
 On a real terminal (stdin and stdout both a TTY) and with no other output/mutation
 flag, `gitmoot dashboard` launches an **interactive TUI**: a sidebar of pages
-(Attention, Trains, Agents, Sessions, Jobs, Locks) that auto-refreshes. Navigate
-with `tab`/`shift+tab` or `←/→`; on the Attention page select a pending prompt
-with `↑/↓` and `a` to answer it inline (a choice list or a text field) or `d` to
-dismiss it; on the Trains page `enter` opens a per-session detail with its locks;
-`r` refreshes, `q` quits. Inline answers/dismissals use the same store APIs as
-`gitmoot interactive answer` / `clear`.
+(Attention, Trains, Agents, Runtime sessions, Jobs, Locks) that auto-refreshes.
+Navigate with `tab`/`shift+tab` or `←/→`; `↑/↓` selects a row; `?` opens a
+per-page key reference; `r` refreshes, `q` quits. The TUI is the cockpit — every
+page can act, and each action runs the same store/workflow code as its CLI
+equivalent:
+
+- **Attention** lists pending prompts (`a` answer inline, `d` dismiss) and the
+  actual blocked/failed jobs with their latest event message (`enter` detail,
+  `R` retry). A red banner appears when the daemon is stopped; `s` restarts it
+  with its previously persisted flags.
+- **Trains** lists every train session: `enter` opens ANY session's live phase
+  view (not just the newest), `s` stops a live session (a reason is required;
+  same path as `skillopt train stop`), `d` deletes a finished session and its
+  history — and, if gitmoot created GitHub repos for that session, a second
+  confirm offers to delete those too (never offered for repos gitmoot did not
+  create; a missing `delete_repo` token scope shows its `gh auth refresh`
+  remedy and can be retried in place).
+- **Agents** lists registered agents: `enter` opens a detail with the template,
+  recent jobs, and the template's version history; `n` registers a new agent
+  (name, codex/claude runtime, installed template); `o` starts a training
+  session for the agent's template via a pre-filled form (review/workspace
+  repos, request, codex/claude backend, optional model — the backend/model are
+  stored in the session's optimizer defaults so `train continue` inherits
+  them), then drops into the live phase view; `D` deletes the agent (refused
+  while jobs reference it); `v` in the detail reverts the template to a
+  previous version (same as `gitmoot agent template revert`).
+- **Jobs** lists every job with a state summary: `enter` shows the event
+  history, `R` retries failed/blocked/cancelled jobs (same path as
+  `gitmoot job retry`), `c` cancels queued AND running jobs (same as
+  `gitmoot job cancel`; running ones show `cancelling…` until the daemon
+  settles them).
+- **Locks** explains and lists locks, stale resource locks first in red (the
+  owning process died; a running daemon reclaims them automatically); active
+  locks collapse to a count. Branch locks are released with
+  `gitmoot lock release owner/repo <branch> --owner <agent>`.
+
+Form questions are also published as interactive prompt records, so an agent can
+answer them with `gitmoot interactive answer` while the form is open. Inline
+answers/dismissals use the same store APIs as `gitmoot interactive answer` /
+`clear`.
 
 Everywhere else — pipes, redirects, CI, `--plain`, `--json`, `--all`, `--watch`,
 `--answer`, `--dismiss` — it prints the one-shot snapshot instead, unchanged. Set
@@ -246,6 +280,10 @@ Template updates are versioned locally. `gitmoot agent template show <id>`
 prints the current version, content hash, source commit, and promotion state.
 Agents use the current promoted version by default, or a pinned version when
 configured with a reference such as `--template frontend-reviewer@v1`.
+
+A bad promotion can be undone: `gitmoot agent template revert <template-id>
+--version <version-id>` makes a superseded version current again (the dashboard's
+Agents page does the same with `v` in the agent detail).
 Queued jobs keep the exact template content snapshot they were created with.
 
 Discover templates by metadata:

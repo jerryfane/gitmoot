@@ -268,6 +268,22 @@ gitmoot agent prompt release-planner
 Installed custom templates are snapshots. After editing the source file, run
 `gitmoot agent template diff <id>` and `gitmoot agent template update <id>`.
 
+### Dashboard Cockpit
+
+On a terminal, `gitmoot dashboard` opens an interactive TUI that can act on
+everything it shows: answer prompts and retry blocked/failed jobs from the
+Attention page (plus `s` to restart a stopped daemon), open/stop/delete train
+sessions (with optional cleanup of GitHub repos gitmoot created for them),
+create/delete agents, revert a template to a previous version, start a training
+run for an agent with a codex/claude backend pick (`o`), and cancel queued or
+running jobs. Press `?` on any page for its keys. Piped/`--plain`/`--json`
+output is unchanged and script-stable.
+
+```sh
+gitmoot dashboard           # interactive cockpit
+gitmoot dashboard --json    # one-shot snapshot for scripts
+```
+
 ### Jobs, Locks, And Recovery
 
 ```sh
@@ -275,6 +291,8 @@ gitmoot status --repo owner/repo
 gitmoot events --repo owner/repo
 gitmoot job list --repo owner/repo
 gitmoot job show <job-id>
+gitmoot job retry <job-id>
+gitmoot job cancel <job-id>
 gitmoot daemon logs
 gitmoot lock list --repo owner/repo
 gitmoot lock release owner/repo <branch> --owner <agent>

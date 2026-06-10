@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -63,7 +64,7 @@ func (m Model) content() string {
 		return m.helpContent()
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(pages[m.selected].label))
+	b.WriteString(titleStyle.Render(pages[m.selected].title))
 	if !m.loadedAt.IsZero() {
 		b.WriteString("  ")
 		b.WriteString(mutedStyle.Render("updated " + m.loadedAt.Format("15:04:05")))
@@ -119,7 +120,7 @@ func (m Model) content() string {
 // helpContent is the '?' overlay: every key for the current page plus globals.
 func (m Model) helpContent() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Help — " + pages[m.selected].label))
+	b.WriteString(titleStyle.Render("Help — " + pages[m.selected].title))
 	b.WriteString("\n\n")
 	switch pages[m.selected].page {
 	case pageAttention:
@@ -209,10 +210,13 @@ func (m Model) loadingOr(empty string, loaded bool) string {
 }
 
 func (m Model) sessionsContent() string {
-	if len(m.snap.Sessions) == 0 {
-		return m.loadingOr("No runtime sessions.", !m.loadedAt.IsZero())
-	}
 	var b strings.Builder
+	b.WriteString(mutedStyle.Render("Long-lived codex/claude processes gitmoot keeps warm to run jobs; idle ones expire on their own."))
+	b.WriteString("\n\n")
+	if len(m.snap.Sessions) == 0 {
+		b.WriteString(m.loadingOr("No runtime sessions.", !m.loadedAt.IsZero()))
+		return b.String()
+	}
 	for _, line := range groupedSessions(m.snap.Sessions) {
 		b.WriteString(line)
 		b.WriteByte('\n')
@@ -221,10 +225,37 @@ func (m Model) sessionsContent() string {
 }
 
 func (m Model) locksContent() string {
-	if len(m.snap.BranchLocks) == 0 && len(m.snap.ResourceLocks) == 0 {
-		return m.loadingOr("No active locks.", !m.loadedAt.IsZero())
-	}
 	var b strings.Builder
+	b.WriteString(mutedStyle.Render("Locks serialize work: branch locks guard implementation branches, resource locks guard checkouts/sessions/train steps."))
+	b.WriteString("\n\n")
+	if len(m.snap.BranchLocks) == 0 && len(m.snap.ResourceLocks) == 0 {
+		b.WriteString(m.loadingOr("No active locks.", !m.loadedAt.IsZero()))
+		return b.String()
+	}
+
+	// Stale resource locks first — they explain stalled work.
+	stale := staleLocks(m.snap.ResourceLocks)
+	active := len(m.snap.ResourceLocks) - len(stale)
+	b.WriteString(headerStyle.Render("resource locks"))
+	b.WriteByte('\n')
+	if len(stale) > 0 {
+		for _, l := range stale {
+			b.WriteString(redStyle.Render("stale  "+l.Key) + "  " + mutedStyle.Render(dash(l.Owner)))
+			b.WriteByte('\n')
+		}
+		b.WriteString(mutedStyle.Render("stale = the owning process died; the daemon reclaims these on its own once it runs"))
+		b.WriteByte('\n')
+	}
+	switch {
+	case active == 0 && len(stale) == 0:
+		b.WriteString(mutedStyle.Render("none"))
+		b.WriteByte('\n')
+	case active > 0:
+		b.WriteString(mutedStyle.Render(strconv.Itoa(active) + " active (held by running work; they release on their own)"))
+		b.WriteByte('\n')
+	}
+
+	b.WriteByte('\n')
 	b.WriteString(headerStyle.Render("branch locks"))
 	b.WriteByte('\n')
 	if len(m.snap.BranchLocks) == 0 {
@@ -234,23 +265,6 @@ func (m Model) locksContent() string {
 		rows := [][]string{{"REPO", "BRANCH", "OWNER"}}
 		for _, l := range m.snap.BranchLocks {
 			rows = append(rows, []string{l.Repo, l.Branch, dash(l.Owner)})
-		}
-		b.WriteString(renderRows(rows))
-	}
-	b.WriteByte('\n')
-	b.WriteString(headerStyle.Render("resource locks"))
-	b.WriteByte('\n')
-	if len(m.snap.ResourceLocks) == 0 {
-		b.WriteString(mutedStyle.Render("none"))
-		b.WriteByte('\n')
-	} else {
-		rows := [][]string{{"KEY", "OWNER", "STATE"}}
-		for _, l := range m.snap.ResourceLocks {
-			state := "active"
-			if l.Stale {
-				state = redStyle.Render("stale")
-			}
-			rows = append(rows, []string{l.Key, dash(l.Owner), state})
 		}
 		b.WriteString(renderRows(rows))
 	}

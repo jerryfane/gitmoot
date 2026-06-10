@@ -23,16 +23,19 @@ const (
 	pageLocks
 )
 
+// label is the (short) sidebar entry; title is the page heading. The sidebar
+// is 10-14 columns wide, so labels must stay short or they wrap.
 var pages = []struct {
 	page  page
 	label string
+	title string
 }{
-	{pageAttention, "Attention"},
-	{pageTrains, "Trains"},
-	{pageAgents, "Agents"},
-	{pageSessions, "Sessions"},
-	{pageJobs, "Jobs"},
-	{pageLocks, "Locks"},
+	{pageAttention, "Attention", "Attention"},
+	{pageTrains, "Trains", "Trains"},
+	{pageAgents, "Agents", "Agents"},
+	{pageSessions, "Sessions", "Runtime sessions"},
+	{pageJobs, "Jobs", "Jobs"},
+	{pageLocks, "Locks", "Locks"},
 }
 
 // mode is the interaction mode; modeNormal navigates pages, the others are
