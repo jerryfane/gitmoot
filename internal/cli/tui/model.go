@@ -51,6 +51,10 @@ const (
 	modeTrainStopReason
 	modeConfirmTrainDelete
 	modeConfirmTrainRepoCleanup
+	modeAgentDetail
+	modeAgentRevertPick
+	modeConfirmAgentRevert
+	modeConfirmAgentDelete
 )
 
 const defaultInterval = 5 * time.Second
@@ -94,6 +98,16 @@ type Model struct {
 
 	// Trains page action state.
 	pendingRepos []string // gitmoot-created repos offered for cleanup after a delete
+
+	// Agents page interaction state.
+	agentCursor         int               // selected row in snap.Agents
+	activeAgent         Agent             // agent shown in detail / being confirmed
+	agentVersions       []TemplateVersion // lazy-loaded template version history
+	agentVersionsLoaded bool              // the version load has returned (possibly empty)
+	agentVersionsErr    string            // error from the version load
+	versionCursor       int               // selected row in the revert pick list
+	revertVersion       TemplateVersion   // version being confirmed for revert
+	agentErr            string            // inline error on the Agents page (e.g. create failed)
 }
 
 // New returns a Model ready for tea.NewProgram. It starts in the loading state;
@@ -147,6 +161,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			return m.updateTrainOverlay(msg)
+		case modeAgentDetail, modeAgentRevertPick, modeConfirmAgentRevert, modeConfirmAgentDelete:
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			return m.updateAgentOverlay(msg)
 		}
 		if m.mode != modeNormal {
 			return m.updateOverlay(msg)
@@ -221,6 +240,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.SetContent(m.content())
 				return m, tea.Batch(cmds...)
 			}
+			if agent, ok := m.agentUnderCursor(); ok {
+				cmd := m.openAgentDetail(agent)
+				m.viewport.SetContent(m.content())
+				return m, cmd
+			}
 			if job, ok := m.jobUnderCursor(); ok {
 				cmd := m.openJobDetail(job)
 				m.viewport.SetContent(m.content())
@@ -254,6 +278,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd := m.openTrainStop(t)
 				m.viewport.SetContent(m.content())
 				return m, cmd
+			}
+		case "n":
+			// Form construction touches the database, so it runs as a command
+			// (a synchronous call here would freeze the UI on a busy store).
+			if pages[m.selected].page == pageAgents && m.deps.OpenAgentCreate != nil {
+				m.agentErr = ""
+				return m, openAgentFormCmd(m.deps)
+			}
+		case "D":
+			if agent, ok := m.agentUnderCursor(); ok {
+				m.openAgentDelete(agent)
+				m.viewport.SetContent(m.content())
+				return m, tea.Batch(cmds...)
 			}
 		case "?":
 			m.showHelp = !m.showHelp
@@ -368,6 +405,65 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.queueLoad(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case agentVersionsMsg:
+		if m.activeAgent.TemplateID == msg.templateID {
+			m.agentVersionsLoaded = true
+			if msg.err != nil {
+				m.agentVersionsErr = msg.err.Error()
+			} else {
+				m.agentVersionsErr = ""
+				m.agentVersions = msg.versions
+			}
+		}
+	case agentFormResultMsg:
+		// The pushed create form popped itself; run the registration unless it
+		// was aborted.
+		if !msg.result.Aborted {
+			m.agentErr = ""
+			cmds = append(cmds, agentCreateCmd(m.deps, msg.result.Values))
+		}
+	case agentActionMsg:
+		switch msg.verb {
+		case "create", "form":
+			// No overlay is open by the time a create (or a failed form
+			// construction) settles; surface errors inline on the Agents page.
+			if msg.err != nil {
+				m.agentErr = msg.err.Error()
+			} else {
+				m.agentErr = ""
+			}
+		case "delete":
+			if m.mode == modeConfirmAgentDelete {
+				m.actionBusy = false
+				if msg.err != nil {
+					m.actionErr = msg.err.Error()
+				} else {
+					m.mode = modeNormal
+					m.actionErr = ""
+				}
+			}
+		case "revert":
+			if m.mode == modeConfirmAgentRevert {
+				m.actionBusy = false
+				if msg.err != nil {
+					m.actionErr = msg.err.Error()
+				} else {
+					// Back to the detail with a fresh version history.
+					m.mode = modeAgentDetail
+					m.actionErr = ""
+					m.agentVersionsLoaded = false
+					m.agentVersions = nil
+					if m.activeAgent.TemplateID != "" {
+						cmds = append(cmds, agentVersionsCmd(m.deps, m.activeAgent.TemplateID))
+					}
+				}
+			}
+		}
+		if msg.err == nil {
+			if cmd := m.queueLoad(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	case daemonStartMsg:
 		// Daemon start has its own busy/error state so its result cannot close
 		// or pollute an unrelated job confirm that opened in the meantime.
@@ -409,6 +505,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampPromptCursor()
 			m.clampTrainCursor()
 			m.clampJobCursor()
+			m.agentCursor = clampCursor(m.agentCursor, len(m.snap.Agents))
 			// A cancel-requested job that has settled no longer needs the
 			// transitional "cancelling…" label.
 			for id := range m.cancelling {
@@ -483,6 +580,8 @@ func (m *Model) pageCursor() (*int, int) {
 		return &m.promptCursor, len(m.attentionItems())
 	case pageTrains:
 		return &m.trainCursor, len(m.snap.Trains)
+	case pageAgents:
+		return &m.agentCursor, len(m.snap.Agents)
 	case pageJobs:
 		return &m.jobCursor, len(m.snap.JobRows)
 	}

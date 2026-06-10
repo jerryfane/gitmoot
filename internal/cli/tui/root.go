@@ -9,7 +9,11 @@ type PushModelMsg struct {
 }
 
 // PopModelMsg asks the Root to pop the top model and return to the one below.
-type PopModelMsg struct{}
+// Deliver, when set, is forwarded to the resumed model right after the pop —
+// how a pushed form hands its result back to the model that pushed it.
+type PopModelMsg struct {
+	Deliver tea.Msg
+}
 
 // Push returns a command that pushes model onto the Root's stack.
 func Push(model tea.Model) tea.Cmd {
@@ -19,6 +23,12 @@ func Push(model tea.Model) tea.Cmd {
 // Pop returns a command that pops the Root's top model.
 func Pop() tea.Cmd {
 	return func() tea.Msg { return PopModelMsg{} }
+}
+
+// PopWith returns a command that pops the Root's top model and delivers msg
+// to the model below.
+func PopWith(msg tea.Msg) tea.Cmd {
+	return func() tea.Msg { return PopModelMsg{Deliver: msg} }
 }
 
 // Root is the navigation shell: a message router and screen compositor over a
@@ -76,7 +86,13 @@ func (r Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// re-arm the tick, so pops cannot accumulate tick loops).
 			next, cmd := r.top().Update(refreshNudgeMsg{})
 			r.stack[len(r.stack)-1] = next
-			return r, cmd
+			cmds := []tea.Cmd{cmd}
+			if msg.Deliver != nil {
+				next, cmd = r.top().Update(msg.Deliver)
+				r.stack[len(r.stack)-1] = next
+				cmds = append(cmds, cmd)
+			}
+			return r, tea.Batch(cmds...)
 		}
 		return r, tea.Quit
 	}

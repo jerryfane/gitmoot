@@ -52,6 +52,11 @@ type TrainInitModel struct {
 	// pendingValue holds a validated free-text answer awaiting a repo
 	// existence check / creation decision (tiRepoCheck / tiRepoMissing).
 	pendingValue string
+
+	// Done, when set, replaces tea.Quit on completion/abort so the form can
+	// run embedded under the Root router (the cmd typically pops the form and
+	// delivers the Result to the model below).
+	Done func(Result) tea.Cmd
 }
 
 // NewTrainInit builds the form. summary renders the confirm-screen rows from the
@@ -196,6 +201,9 @@ func (m TrainInitModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "y", "Y", "enter":
 			m.state = tiDone
+			if m.Done != nil {
+				return m, m.Done(m.Result())
+			}
 			return m, tea.Quit
 		case "n", "N", "esc":
 			return m.abort()
@@ -297,7 +305,11 @@ func (m TrainInitModel) commit(value string) (tea.Model, tea.Cmd) {
 	m.pendingPromptID = ""
 	if m.external {
 		m.state = tiDone
-		cmds = append(cmds, tea.Quit)
+		exit := tea.Quit
+		if m.Done != nil {
+			exit = m.Done(m.Result())
+		}
+		cmds = append(cmds, exit)
 		return m, tea.Batch(cmds...)
 	}
 	m.state = tiConfirm
@@ -336,7 +348,11 @@ func (m *TrainInitModel) enterField(i int) tea.Cmd {
 func (m TrainInitModel) abort() (tea.Model, tea.Cmd) {
 	m.aborted = true
 	m.state = tiDone
-	cmds := []tea.Cmd{tea.Quit}
+	exit := tea.Quit
+	if m.Done != nil {
+		exit = m.Done(m.Result())
+	}
+	cmds := []tea.Cmd{exit}
 	if m.pendingPromptID != "" {
 		cmds = append(cmds, deletePromptCmd(m.store, m.pendingPromptID))
 	}
