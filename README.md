@@ -312,7 +312,12 @@ template/version, writes `config.toml`, `task.md`, and starter
 `review-items.yml`, and prints the exact `train start --config` command. Agents
 can list template choices with `train init templates --json`; when an
 interactive setup needs missing values, they can answer the stored prompts with
-`gitmoot interactive list/show/answer`.
+`gitmoot interactive list/show/answer`. On a real terminal, missing fields are
+collected through an interactive form (arrow-key template/preview pickers, inline
+validation); each field is still published as a prompt record, so another
+terminal can answer it with `gitmoot interactive answer` and the form advances
+automatically. Set `GITMOOT_NO_TUI=1` (or pipe stdin) to use the line-based
+wizard instead.
 
 For lower-level debugging, create a review run, add saved baseline/candidate outputs as review items,
 export a Markdown or GitHub feedback packet, import the completed feedback, then

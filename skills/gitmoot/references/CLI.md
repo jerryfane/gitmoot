@@ -59,28 +59,38 @@ user explicitly wants a foreground process. Keep the default `--workers 1`
 unless the Gitmoot home has multiple independent runtime sessions or managed
 agent types with `max_background` greater than one.
 
-`gitmoot dashboard` prints a read-only snapshot of local state — daemon health,
-repos, agents and runtime sessions, jobs by state, worktrees, branch locks,
-SkillOpt train phase/candidate, and pending interactive prompts. Add `--json`
-for a machine-readable snapshot. The pending prompts it lists are the same
-records as `gitmoot interactive list`, and a prompt can be answered in place
-with `gitmoot dashboard --answer <prompt-id> --value <value>` (the same
-mechanism as `gitmoot interactive answer`). Without `--answer` it never mutates
-state.
+`gitmoot dashboard` shows local state — daemon health, repos, agents and runtime
+sessions, jobs by state, worktrees, branch locks, SkillOpt train phase/candidate,
+and pending interactive prompts.
+
+On a real terminal (stdin and stdout both a TTY) and with no other output/mutation
+flag, `gitmoot dashboard` launches an **interactive TUI**: a sidebar of pages
+(Attention, Trains, Agents, Sessions, Jobs, Locks) that auto-refreshes. Navigate
+with `tab`/`shift+tab` or `←/→`; on the Attention page select a pending prompt
+with `↑/↓` and `a` to answer it inline (a choice list or a text field) or `d` to
+dismiss it; on the Trains page `enter` opens a per-session detail with its locks;
+`r` refreshes, `q` quits. Inline answers/dismissals use the same store APIs as
+`gitmoot interactive answer` / `clear`.
+
+Everywhere else — pipes, redirects, CI, `--plain`, `--json`, `--all`, `--watch`,
+`--answer`, `--dismiss` — it prints the one-shot snapshot instead, unchanged. Set
+`GITMOOT_NO_TUI=1` or `TERM=dumb` to force the non-interactive path globally.
 
 ```sh
-gitmoot dashboard
+gitmoot dashboard                  # interactive TUI on a terminal
+gitmoot dashboard --plain          # one-shot snapshot on a terminal
 gitmoot dashboard --json
 gitmoot dashboard --all
 gitmoot dashboard --answer <prompt-id> --value <value>
-gitmoot dashboard --watch          # refresh until Ctrl-C (terminal only)
+gitmoot dashboard --dismiss <prompt-id>
+gitmoot dashboard --watch          # plain redraw until Ctrl-C (terminal only)
 gitmoot dashboard --watch --interval 2s
 ```
 
-In styled (terminal) output the dashboard leads with a "needs attention" block,
+In the one-shot styled output the dashboard leads with a "needs attention" block,
 colors and truncates long lists, and groups near-identical runtime sessions;
-`--all` shows everything. `--watch` redraws on an interval (default 5s) and
-cannot be combined with `--json` or `--answer`.
+`--all` shows everything. `--watch` redraws on an interval (default 5s) and cannot
+be combined with `--json`, `--answer`, or `--dismiss`.
 
 ## Agent Setup
 
