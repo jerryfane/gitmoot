@@ -47,10 +47,11 @@ type Repo struct {
 
 // Agent mirrors cli.dashboardAgent.
 type Agent struct {
-	Name    string
-	Runtime string
-	Role    string
-	Health  string
+	Name       string
+	Runtime    string
+	Role       string
+	Health     string
+	TemplateID string
 }
 
 // Session mirrors cli.dashboardSession.
@@ -142,6 +143,26 @@ type Deps struct {
 	StopTrain       func(id, reason string) error
 	DeleteTrain     func(id string) ([]string, error)
 	DeleteTrainRepo func(repo string) error
+
+	// Agent actions. TemplateVersions lazily loads a template's version history
+	// for the agent detail view. OpenAgentCreate builds the create-agent form
+	// pushed onto the Root stack; the dashboard then runs CreateAgent with the
+	// collected answers. DeleteAgent refuses while jobs reference the agent.
+	// RevertTemplate makes a superseded template version current again.
+	TemplateVersions func(templateID string) ([]TemplateVersion, error)
+	OpenAgentCreate  func() (tea.Model, error)
+	CreateAgent      func(name, runtime, template string) error
+	DeleteAgent      func(name string) error
+	RevertTemplate   func(templateID, versionID string) error
+}
+
+// TemplateVersion is one row of a template's version history.
+type TemplateVersion struct {
+	ID      string
+	Number  int
+	State   string // pending | current | superseded | rejected
+	Name    string
+	Created string
 }
 
 // snapshotMsg carries the result of a Deps.Load call.
@@ -214,4 +235,23 @@ type trainDeleteMsg struct {
 type trainRepoCleanupMsg struct {
 	failed []string
 	errs   []string
+}
+
+// agentVersionsMsg carries a template's version history for the agent detail.
+type agentVersionsMsg struct {
+	templateID string
+	versions   []TemplateVersion
+	err        error
+}
+
+// agentActionMsg carries the outcome of an agent mutation.
+type agentActionMsg struct {
+	verb string // "create", "delete", "revert"
+	err  error
+}
+
+// agentFormResultMsg is delivered to the dashboard when the pushed
+// create-agent form pops (its Done callback is wired in NewAgentCreateForm).
+type agentFormResultMsg struct {
+	result Result
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/cli/tui"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/skillopt"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
@@ -66,7 +67,17 @@ func runDashboardTUI(home string, interval time.Duration, stdout, stderr io.Writ
 		tea.WithAltScreen(),
 		tea.WithOutput(stdout),
 	)
-	if _, err := program.Run(); err != nil {
+	_, err := program.Run()
+	// Best-effort: a hard quit mid create-form leaves its prompt records
+	// pending; sweep them so they do not haunt the attention list (mirrors
+	// the standalone wizard's deferred cleanup).
+	_ = withStore(home, func(store *db.Store) error {
+		for _, id := range tui.AgentCreatePromptIDs() {
+			_ = store.DeleteInteractivePrompt(context.Background(), id)
+		}
+		return nil
+	})
+	if err != nil {
 		fmt.Fprintf(stderr, "dashboard: %v\n", err)
 		return 1
 	}
@@ -150,6 +161,81 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 				return cleanupCreatedTrainRepo(context.Background(), store, repo)
 			})
 		},
+		TemplateVersions: func(templateID string) ([]tui.TemplateVersion, error) {
+			var views []tui.TemplateVersion
+			err := withStore(home, func(store *db.Store) error {
+				versions, err := store.ListAgentTemplateVersions(context.Background(), templateID)
+				if err != nil {
+					return err
+				}
+				for _, v := range versions {
+					views = append(views, tui.TemplateVersion{
+						ID:      v.ID,
+						Number:  v.VersionNumber,
+						State:   v.State,
+						Name:    v.Name,
+						Created: v.CreatedAt,
+					})
+				}
+				return nil
+			})
+			return views, err
+		},
+		OpenAgentCreate: func() (tea.Model, error) {
+			// One store for the form's lifetime: its 200ms external-answer poll
+			// would otherwise open/migrate/close the database five times a
+			// second. Closed from the Done hook; on a hard quit the process
+			// exit releases it.
+			paths, err := initializedPaths(home)
+			if err != nil {
+				return nil, err
+			}
+			store, err := db.Open(paths.Database)
+			if err != nil {
+				return nil, err
+			}
+			templates, err := skillopt.ListTrainInitTemplateChoices(context.Background(), store)
+			if err != nil {
+				store.Close()
+				return nil, err
+			}
+			var choices []tui.Choice
+			for _, t := range templates {
+				// Only installed templates: registerAgentOnly persists the id
+				// verbatim, and an uninstalled one yields an agent whose jobs
+				// fail at delivery (the CLI register path gates the same way).
+				if t.Installed {
+					choices = append(choices, tui.Choice{Value: t.ID, Label: skillOptTrainInitTemplateChoiceLabel(t)})
+				}
+			}
+			if len(choices) == 0 {
+				store.Close()
+				return nil, fmt.Errorf("no agent templates installed; add one with `gitmoot agent template add`")
+			}
+			form := tui.NewAgentCreateForm(store, choices)
+			done := form.Done
+			form.Done = func(res tui.Result) tea.Cmd {
+				store.Close()
+				return done(res)
+			}
+			return form, nil
+		},
+		CreateAgent: func(name, runtimeName, templateID string) error {
+			return withStore(home, func(store *db.Store) error {
+				return registerAgentOnly(context.Background(), store, name, runtimeName, templateID, "")
+			})
+		},
+		DeleteAgent: func(name string) error {
+			return withStore(home, func(store *db.Store) error {
+				return store.DeleteAgentChecked(context.Background(), name)
+			})
+		},
+		RevertTemplate: func(templateID, versionID string) error {
+			return withStore(home, func(store *db.Store) error {
+				_, err := store.RevertAgentTemplateVersion(context.Background(), templateID, versionID)
+				return err
+			})
+		},
 		StartDaemon: func() error {
 			// Restart rather than start: it tolerates a stopped daemon and
 			// restores the previously persisted flags (workers, poll, watch)
@@ -176,7 +262,7 @@ func toTUISnapshot(s dashboardSnapshot) tui.Snapshot {
 		out.Repos = append(out.Repos, tui.Repo{Name: r.Name, Enabled: r.Enabled})
 	}
 	for _, a := range s.Agents {
-		out.Agents = append(out.Agents, tui.Agent{Name: a.Name, Runtime: a.Runtime, Role: a.Role, Health: a.Health})
+		out.Agents = append(out.Agents, tui.Agent{Name: a.Name, Runtime: a.Runtime, Role: a.Role, Health: a.Health, TemplateID: a.templateID})
 	}
 	for _, sess := range s.RuntimeSessions {
 		out.Sessions = append(out.Sessions, tui.Session{Name: sess.Name, Runtime: sess.Runtime, Repo: sess.Repo, State: sess.State})

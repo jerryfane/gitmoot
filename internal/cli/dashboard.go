@@ -80,6 +80,9 @@ type dashboardAgent struct {
 	Runtime string `json:"runtime"`
 	Role    string `json:"role,omitempty"`
 	Health  string `json:"health,omitempty"`
+	// templateID feeds the TUI's agent detail; unexported so the --json output
+	// stays byte-identical.
+	templateID string
 }
 
 type dashboardSession struct {
@@ -298,7 +301,7 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 			return err
 		}
 		for _, agent := range agents {
-			snapshot.Agents = append(snapshot.Agents, dashboardAgent{Name: agent.Name, Runtime: agent.Runtime, Role: agent.Role, Health: agent.HealthStatus})
+			snapshot.Agents = append(snapshot.Agents, dashboardAgent{Name: agent.Name, Runtime: agent.Runtime, Role: agent.Role, Health: agent.HealthStatus, templateID: agent.TemplateID})
 		}
 		instances, err := store.ListAgentInstances(ctx)
 		if err != nil {

@@ -87,6 +87,14 @@ func (m Model) content() string {
 		b.WriteString(m.trainDeleteConfirmView())
 	case modeConfirmTrainRepoCleanup:
 		b.WriteString(m.trainRepoCleanupView())
+	case modeAgentDetail:
+		b.WriteString(m.agentDetailView())
+	case modeAgentRevertPick:
+		b.WriteString(m.agentRevertPickView())
+	case modeConfirmAgentRevert:
+		b.WriteString(m.agentRevertConfirmView())
+	case modeConfirmAgentDelete:
+		b.WriteString(m.agentDeleteConfirmView())
 	default:
 		switch pages[m.selected].page {
 		case pageAttention:
@@ -94,7 +102,7 @@ func (m Model) content() string {
 		case pageTrains:
 			b.WriteString(m.trainsContent())
 		case pageAgents:
-			b.WriteString(m.agentsContent())
+			b.WriteString(m.agentsContentInteractive())
 		case pageSessions:
 			b.WriteString(m.sessionsContent())
 		case pageJobs:
@@ -127,6 +135,12 @@ func (m Model) helpContent() string {
 		b.WriteString("s    stop a live session (asks for a reason)\n")
 		b.WriteString("d    delete a finished session and its history;\n")
 		b.WriteString("     repos gitmoot created for it can be deleted too\n")
+	case pageAgents:
+		b.WriteString("↑/↓  select an agent\n")
+		b.WriteString("enter open the agent (template, recent jobs, versions)\n")
+		b.WriteString("n    register a new agent (name, runtime, template)\n")
+		b.WriteString("D    delete the selected agent (refused while jobs reference it)\n")
+		b.WriteString("v    in the detail: revert the template to a previous version\n")
 	case pageJobs:
 		b.WriteString("↑/↓  select a job\n")
 		b.WriteString("enter open the job's detail (events)\n")
@@ -165,12 +179,20 @@ func (m Model) footerHelp() string {
 		return "y delete  n/esc cancel"
 	case modeConfirmTrainRepoCleanup:
 		return "y delete repos  n/esc keep them"
+	case modeAgentDetail:
+		return "v revert  D delete  esc back"
+	case modeAgentRevertPick:
+		return "↑/↓ pick  enter confirm  esc back"
+	case modeConfirmAgentRevert, modeConfirmAgentDelete:
+		return "y confirm  n/esc cancel"
 	}
 	switch pages[m.selected].page {
 	case pageAttention:
 		return "tab/←→ page  ↑/↓ select  a answer  d dismiss  enter/R jobs  ? help  q quit"
 	case pageTrains:
 		return "tab/←→ page  ↑/↓ select  enter open  s stop  d delete  ? help  q quit"
+	case pageAgents:
+		return "tab/←→ page  ↑/↓ select  enter detail  n new  D delete  ? help  q quit"
 	case pageJobs:
 		return "tab/←→ page  ↑/↓ select  enter detail  R retry  c cancel  ? help  q quit"
 	}
@@ -182,17 +204,6 @@ func (m Model) loadingOr(empty string, loaded bool) string {
 		return empty
 	}
 	return mutedStyle.Render("Loading…")
-}
-
-func (m Model) agentsContent() string {
-	if len(m.snap.Agents) == 0 {
-		return m.loadingOr("No registered agents.", !m.loadedAt.IsZero())
-	}
-	rows := [][]string{{"NAME", "RUNTIME", "ROLE", "HEALTH"}}
-	for _, a := range m.snap.Agents {
-		rows = append(rows, []string{a.Name, a.Runtime, dash(a.Role), dash(a.Health)})
-	}
-	return renderRows(rows)
 }
 
 func (m Model) sessionsContent() string {
