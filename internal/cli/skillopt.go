@@ -93,7 +93,7 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt train start --config .gitmoot/skillopt/<name>/config.toml [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
-	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--backend codex] [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--optimizer-backend name] [--target-backend name] [--evaluator-id id] [--evaluator-model name] [--evaluator-backend name] [--skill-update-mode mode] [--num-epochs N] [--batch-size N] [--optimizer-views N] [--retry-optimizer-views auto|inherit|N] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
+	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--backend codex] [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--optimizer-backend name] [--target-backend name] [--evaluator-id id] [--evaluator-model name] [--evaluator-backend name] [--skill-update-mode mode] [--num-epochs N] [--batch-size N] [--optimizer-views N] [--retry-optimizer-views auto|inherit|N] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--export-only] [--promote version|--reject version --reason text] [--start-next]")
 	fmt.Fprintln(w, "  gitmoot skillopt train recover --session <id> [--out-root path]")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
 }
@@ -130,7 +130,7 @@ func printSkillOptTrainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt train start --config .gitmoot/skillopt/<name>/config.toml [--session <id>] [--items-file path] [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file path [--session <id>] [--workspace-repo owner/repo] [--preview-repo owner/repo] [--preview-mode none|optional|required] [--preview-renderer none|vue-vite] [--preview-publisher none|github-pages] [--preview-route-template template] [--request-file path] [--task-kind kind] [--mode explore|refine|distill|validate] [--exploration-level high|medium|low] [--options N] [--min-items N] [--preferred-gate hard|soft|hard_then_soft] [--dry-run] [--yes]")
 	fmt.Fprintln(w, "  gitmoot skillopt train status --session <id>")
-	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--backend codex] [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--optimizer-backend name] [--target-backend name] [--evaluator-id id] [--evaluator-model name] [--evaluator-backend name] [--skill-update-mode mode] [--num-epochs N] [--batch-size N] [--optimizer-views N] [--retry-optimizer-views auto|inherit|N] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--promote version|--reject version --reason text] [--start-next]")
+	fmt.Fprintln(w, "  gitmoot skillopt train continue --session <id> [--backend codex] [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--model name] [--optimizer-model name] [--target-model name] [--optimizer-backend name] [--target-backend name] [--evaluator-id id] [--evaluator-model name] [--evaluator-backend name] [--skill-update-mode mode] [--num-epochs N] [--batch-size N] [--optimizer-views N] [--retry-optimizer-views auto|inherit|N] [--gate hard|soft|mixed] [--out-root path] [--timeout duration] [--dry-run] [--rerun-optimizer] [--export-only] [--promote version|--reject version --reason text] [--start-next]")
 	fmt.Fprintln(w, "  gitmoot skillopt train recover --session <id> [--out-root path]")
 	fmt.Fprintln(w, "  gitmoot skillopt train stop --session <id> --reason <text>")
 }
@@ -291,7 +291,7 @@ func runSkillOptTrainInitCreate(args []string, stdout, stderr io.Writer) int {
 	writeLine(stdout, "created train init scaffold %s", relativeOrAbsolutePath(cwd, paths.Root))
 	writeLine(stdout, "config: %s", relativeOrAbsolutePath(cwd, paths.ConfigPath))
 	writeLine(stdout, "task: %s", relativeOrAbsolutePath(cwd, paths.TaskPath))
-	writeLine(stdout, "next: gitmoot skillopt train start --config %s", filepath.ToSlash(filepath.Join(".gitmoot", skillopt.TrainInitScaffoldDirName, values.Name, skillopt.TrainInitConfigFileName)))
+	writeLine(stdout, "next: gitmoot skillopt train start --config %s --workspace-repo <owner/repo>", filepath.ToSlash(filepath.Join(".gitmoot", skillopt.TrainInitScaffoldDirName, values.Name, skillopt.TrainInitConfigFileName)))
 	return 0
 }
 
@@ -770,6 +770,10 @@ func runSkillOptTrainStart(args []string, stdout, stderr io.Writer) int {
 	workspaceRepo, err := parseOptionalSkillOptTrainRepo("workspace-repo", *workspaceRepoFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "skillopt train start: %v\n", err)
+		return 2
+	}
+	if workspaceRepo == "" {
+		fmt.Fprintln(stderr, "skillopt train start requires --workspace-repo owner/repo; without it the session stays at request_confirmed and train continue cannot reach option generation")
 		return 2
 	}
 	previewRepo, err := parseOptionalSkillOptTrainRepo("preview-repo", *previewRepoFlag)
@@ -1446,6 +1450,7 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 	timeout := fs.String("timeout", "", "optimizer timeout duration")
 	dryRun := fs.Bool("dry-run", false, "ask gitmoot-skillopt to avoid model calls while still producing a candidate package")
 	rerunOptimizer := fs.Bool("rerun-optimizer", false, "rerun gitmoot-skillopt after optimizer completion instead of retrying the existing candidate import")
+	exportOnly := fs.Bool("export-only", false, "export the training package and stop before launching the optimizer")
 	promote := fs.String("promote", "", "candidate version to promote after candidate review")
 	reject := fs.String("reject", "", "candidate version to reject after candidate review")
 	reason := fs.String("reason", "", "decision reason required with --reject")
@@ -1467,6 +1472,14 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 	if strings.TrimSpace(*sessionID) == "" {
 		fmt.Fprintln(stderr, "skillopt train continue requires --session")
 		return 2
+	}
+	if *exportOnly {
+		for _, conflicting := range []string{"rerun-optimizer", "dry-run", "promote", "reject", "start-next"} {
+			if setFlags[conflicting] {
+				fmt.Fprintf(stderr, "skillopt train continue: --export-only cannot be combined with --%s\n", conflicting)
+				return 2
+			}
+		}
 	}
 	if *numEpochs < 0 {
 		fmt.Fprintln(stderr, "skillopt train continue: --num-epochs must be zero or greater")
@@ -1563,7 +1576,9 @@ func runSkillOptTrainContinue(args []string, stdout, stderr io.Writer) int {
 				Timeout:                      *timeout,
 				DryRun:                       *dryRun,
 				RerunOptimizer:               *rerunOptimizer,
+				ExportOnly:                   *exportOnly,
 			},
+			Progress:         stderr,
 			PromoteCandidate: *promote,
 			RejectCandidate:  *reject,
 			DecisionReason:   *reason,
@@ -1625,6 +1640,10 @@ type skillOptTrainContinueRequest struct {
 	RejectCandidate   string
 	DecisionReason    string
 	StartNext         bool
+	// Progress receives human-facing notices emitted while a continue step runs,
+	// such as announcing a long-lived optimizer launch. It is nil for automated
+	// callers (the review watcher) that have no attached terminal.
+	Progress io.Writer
 }
 
 type skillOptTrainOptimizerRequest struct {
@@ -1663,6 +1682,7 @@ type skillOptTrainOptimizerRequest struct {
 	Timeout                      string
 	DryRun                       bool
 	RerunOptimizer               bool
+	ExportOnly                   bool
 	OptimizerLockState           string
 }
 
@@ -1966,7 +1986,7 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 			output.Lines = []string{fmt.Sprintf("next: %s", summary.NextAction)}
 			return output, nil
 		}
-		result, err := continueSkillOptTrainOptimizer(ctx, paths, store, session, *iteration, request.Optimizer)
+		result, err := continueSkillOptTrainOptimizer(ctx, paths, store, session, *iteration, request.Optimizer, request.Progress)
 		if err != nil {
 			if skillOptTrainOptimizerResultHasReport(result) {
 				output.Lines = skillOptTrainOptimizerReportLines(result)
@@ -1979,6 +1999,18 @@ func continueSkillOptTrain(ctx context.Context, paths config.Paths, store *db.St
 		}
 		updatedSummary := skillopt.BuildTrainStatusSummary(updatedSession, updatedIteration, updatedCounts)
 		lines := skillOptTrainOptimizerReportLines(result)
+		if result.ExportedOnly {
+			lines = append(lines,
+				fmt.Sprintf("training_package: %s", result.TrainingPackagePath),
+				"next: run train continue without --export-only to launch the optimizer",
+			)
+			return skillOptTrainContinueOutput{
+				Summary:       updatedSummary,
+				Counts:        updatedCounts,
+				ContinueReady: true,
+				Lines:         lines,
+			}, nil
+		}
 		if result.NoCandidateReason != "" {
 			lines = append(lines,
 				fmt.Sprintf("no_candidate_reason: %s", result.NoCandidateReason),
@@ -2194,6 +2226,7 @@ type skillOptTrainOptimizerResult struct {
 	CandidateVersionID    string
 	NoCandidateReason     string
 	NoCandidateNextAction string
+	ExportedOnly          bool
 }
 
 type skillOptTrainRecoverResult struct {
@@ -3918,7 +3951,7 @@ func skillOptTrainNextIterationMode(previousMode string, recommendedMode string)
 	}
 }
 
-func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, request skillOptTrainOptimizerRequest) (skillOptTrainOptimizerResult, error) {
+func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, request skillOptTrainOptimizerRequest, progress io.Writer) (skillOptTrainOptimizerResult, error) {
 	if strings.TrimSpace(iteration.EvalRunID) == "" {
 		return skillOptTrainOptimizerResult{}, fmt.Errorf("train iteration %s has no eval run id", iteration.ID)
 	}
@@ -3970,6 +4003,15 @@ func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, sto
 		}
 		state = skillopt.TrainStateTrainingPackageCreated
 	}
+	if request.ExportOnly && state == skillopt.TrainStateTrainingPackageCreated {
+		// The training package now exists (exported above or already created)
+		// and the optimizer has not run yet. Stop here so the caller can inspect
+		// it before paying for a real optimizer run. For later states (the
+		// optimizer already ran) export-only is a no-op and the normal
+		// candidate-import path below proceeds.
+		result.ExportedOnly = true
+		return result, nil
+	}
 	if state == skillopt.TrainStateTrainingPackageCreated {
 		if !rerunFromCompletedOptimizer {
 			if err := skillopt.CanTransitionTrainIteration(iteration.State, skillopt.TrainStateOptimizerCompleted); err != nil {
@@ -4007,6 +4049,7 @@ func continueSkillOptTrainOptimizer(ctx context.Context, paths config.Paths, sto
 		}
 		result.Command = command
 		result.Args = args
+		announceSkillOptTrainOptimizerLaunch(progress, request)
 		runResult, err := runSkillOptTrainOptimizer(ctx, optimizerPaths, request, command, args)
 		result.RecoveryAvailable = skillOptTrainOptimizerRecoveryAvailable(optimizerPaths)
 		if err != nil {
@@ -8103,6 +8146,22 @@ func skillOptTrainOptimizerGate(iteration db.SkillOptTrainIteration, request ski
 	default:
 		return "", fmt.Errorf("optimizer gate %q is not supported; use hard, soft, or mixed", gate)
 	}
+}
+
+// announceSkillOptTrainOptimizerLaunch notifies the operator that a long-lived
+// optimizer run is about to start, since the run blocks with no streamed output
+// until it completes. It is a notice only and never blocks for confirmation, so
+// automated continue flows are unaffected. progress is nil for callers without a
+// terminal.
+func announceSkillOptTrainOptimizerLaunch(progress io.Writer, request skillOptTrainOptimizerRequest) {
+	if progress == nil {
+		return
+	}
+	if request.DryRun {
+		fmt.Fprintln(progress, "skillopt train continue: launching optimizer dry run; this skips model calls but may still take a while")
+		return
+	}
+	fmt.Fprintln(progress, "skillopt train continue: launching optimizer; this runs long-lived model calls and will not stream output until it finishes")
 }
 
 func runSkillOptTrainOptimizer(ctx context.Context, paths skillOptTrainOptimizerPaths, request skillOptTrainOptimizerRequest, command string, args []string) (subprocess.Result, error) {

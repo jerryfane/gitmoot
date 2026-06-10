@@ -288,7 +288,7 @@ gitmoot skillopt train init templates --json
 gitmoot interactive list --state pending --json
 gitmoot interactive show <prompt-id> --json
 gitmoot interactive answer <prompt-id> <value> --source agent
-gitmoot skillopt train start --config .gitmoot/skillopt/<name>/config.toml --yes
+gitmoot skillopt train start --config .gitmoot/skillopt/<name>/config.toml --workspace-repo <owner/repo> --yes
 gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id>
 gitmoot skillopt review item add --run <run-id> --item <item-id> --baseline baseline.md --candidate candidate.md [--title text]
 gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id> --mode explore --options 4

@@ -58,6 +58,50 @@ func TestRunRepoAddListDoctorRemove(t *testing.T) {
 	}
 }
 
+func TestRunRepoAddAcceptsFlagsBeforeOrAfterPositional(t *testing.T) {
+	cases := []struct {
+		name string
+		args func(home, repoDir string) []string
+	}{
+		{
+			name: "flags after positional",
+			args: func(home, repoDir string) []string {
+				return []string{"repo", "add", "jerryfane/gitmoot", "--home", home, "--path", repoDir}
+			},
+		},
+		{
+			name: "flags before positional",
+			args: func(home, repoDir string) []string {
+				return []string{"repo", "add", "--home", home, "--path", repoDir, "jerryfane/gitmoot"}
+			},
+		},
+		{
+			name: "positional between flags",
+			args: func(home, repoDir string) []string {
+				return []string{"repo", "add", "--home", home, "jerryfane/gitmoot", "--path", repoDir}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			repoDir := t.TempDir()
+			runGit(t, repoDir, "init")
+			runGit(t, repoDir, "branch", "-m", "main")
+			runGit(t, repoDir, "remote", "add", "origin", "https://github.com/jerryfane/gitmoot.git")
+
+			var stdout, stderr bytes.Buffer
+			code := Run(tc.args(home, repoDir), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("repo add exit code = %d, stderr=%s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "registered jerryfane/gitmoot") {
+				t.Fatalf("repo add output = %q", stdout.String())
+			}
+		})
+	}
+}
+
 func TestRunRepoAddRejectsWrongOrigin(t *testing.T) {
 	home := t.TempDir()
 	repoDir := t.TempDir()

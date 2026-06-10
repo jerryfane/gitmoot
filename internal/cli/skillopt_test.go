@@ -396,6 +396,59 @@ func TestSkillOptExportIncludesRankedFields(t *testing.T) {
 	}
 }
 
+func TestSkillOptTrainStartRequiresWorkspaceRepo(t *testing.T) {
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if err := store.UpsertAgentTemplate(context.Background(), cliSkillOptTemplate("planner", "Plan the work.")); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	itemsPath := filepath.Join(t.TempDir(), "items.yml")
+	if err := os.WriteFile(itemsPath, []byte(`items:
+  - item_id: hero
+    title: Hero
+    brief: Design a hero section.
+  - item_id: proof
+    title: Proof
+    brief: Design a social proof section.
+`), 0o644); err != nil {
+		t.Fatalf("write items file: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"skillopt", "train", "start",
+		"--home", home,
+		"--template", "planner",
+		"--repo", "owner/product",
+		"--request", "Train landing page plans.",
+		"--items-file", itemsPath,
+		"--yes",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("train start without workspace-repo exit code = %d, want 2; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires --workspace-repo") {
+		t.Fatalf("missing workspace-repo error = %q", stderr.String())
+	}
+	store, err = db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open after failed start returned error: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.GetSkillOptTrainSession(context.Background(), "owner-product"); err == nil {
+		t.Fatalf("failed start created a train session")
+	}
+}
+
 func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 	home := t.TempDir()
 	paths := config.PathsForHome(home)
@@ -491,6 +544,7 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 		"--home", home,
 		"--template", "planner",
 		"--repo", "owner/product",
+		"--workspace-repo", "owner/workspace",
 		"--request", "Train landing page plans.",
 		"--options", "1",
 	}, &stdout, &stderr)
@@ -508,6 +562,7 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 		"--home", home,
 		"--template", "planner",
 		"--repo", "owner/product",
+		"--workspace-repo", "owner/workspace",
 		"--request", "Train landing page plans.",
 		"--items-file", itemsPath,
 		"--preview-mode", "required",
@@ -529,6 +584,7 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 		"--template", "planner",
 		"--repo", "owner/product",
 		"--session", "landing-train",
+		"--workspace-repo", "owner/workspace",
 		"--request", "Train landing page plans.",
 		"--items-file", itemsPath,
 	}, &stdout, &stderr)
@@ -622,6 +678,7 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 	stderr.Reset()
 	code = Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--template", "planner",
 		"--repo", "owner/product",
@@ -696,6 +753,7 @@ func TestSkillOptTrainStartStatusAndStop(t *testing.T) {
 	stderr.Reset()
 	code = Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--template", "planner",
 		"--repo", "owner/product",
@@ -1389,6 +1447,7 @@ func TestSkillOptTrainStartLoadsInitConfig(t *testing.T) {
 	stderr.Reset()
 	code = Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--config", filepath.Join(scaffoldDir, "config.toml"),
 		"--session", "config-start-session",
@@ -1463,6 +1522,7 @@ func TestSkillOptTrainStartConfigPreviewModeOverrideDisablesVue(t *testing.T) {
 	stderr.Reset()
 	code = Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--config", filepath.Join(scaffoldDir, "config.toml"),
 		"--preview-mode", "none",
@@ -1516,6 +1576,7 @@ func TestSkillOptTrainStartConfigPreviewFlagsOverrideNone(t *testing.T) {
 	stderr.Reset()
 	code = Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--config", filepath.Join(scaffoldDir, "config.toml"),
 		"--preview-repo", "jerryfane/gitmoot-previews",
@@ -1601,6 +1662,7 @@ func TestSkillOptTrainStartConfigRepoOverrideDrivesVuePreviewRepo(t *testing.T) 
 	stderr.Reset()
 	code = Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--config", filepath.Join(scaffoldDir, "config.toml"),
 		"--repo", "jerryfane/gitmoot",
@@ -3797,6 +3859,9 @@ func TestSkillOptTrainContinueRunsOptimizerAndImportsCandidate(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("train continue optimizer exit code = %d, stderr=%s", code, stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "launching optimizer dry run") {
+		t.Fatalf("missing optimizer launch announcement: %q", stderr.String())
+	}
 	attemptRoot := filepath.Join(outRoot, "attempts", "attempt-001")
 	for _, want := range []string{
 		"current_phase: candidate_created",
@@ -3886,6 +3951,71 @@ func TestSkillOptTrainContinueRunsOptimizerAndImportsCandidate(t *testing.T) {
 	}
 	if version.State != "pending" {
 		t.Fatalf("candidate version = %+v", version)
+	}
+}
+
+func TestSkillOptTrainContinueExportOnlyStopsBeforeOptimizer(t *testing.T) {
+	home, _ := seedSkillOptTrainFeedbackSynced(t)
+	outRoot := filepath.Join(t.TempDir(), "optimizer")
+	runner := &skillOptTrainFakeOptimizerRunner{}
+	previousRunner := skillOptTrainOptimizerRunner
+	skillOptTrainOptimizerRunner = runner
+	defer func() {
+		skillOptTrainOptimizerRunner = previousRunner
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"skillopt", "train", "continue",
+		"--home", home,
+		"--session", "optimizer-train",
+		"--out-root", outRoot,
+		"--export-only",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("export-only continue exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("optimizer ran during export-only: %+v", runner.calls)
+	}
+	if strings.Contains(stderr.String(), "launching optimizer") {
+		t.Fatalf("export-only should not announce an optimizer launch: %q", stderr.String())
+	}
+	for _, want := range []string{
+		"current_phase: training_package_created",
+		"training_package: ",
+		"next: run train continue without --export-only to launch the optimizer",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("export-only stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	iteration, err := store.GetLatestSkillOptTrainIteration(context.Background(), "optimizer-train")
+	if err != nil {
+		t.Fatalf("GetLatestSkillOptTrainIteration returned error: %v", err)
+	}
+	if iteration.State != skillopt.TrainStateTrainingPackageCreated {
+		t.Fatalf("iteration state = %q, want training_package_created", iteration.State)
+	}
+}
+
+func TestSkillOptTrainContinueExportOnlyRejectsConflicts(t *testing.T) {
+	home, _ := seedSkillOptTrainFeedbackSynced(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"skillopt", "train", "continue",
+		"--home", home,
+		"--session", "optimizer-train",
+		"--export-only",
+		"--rerun-optimizer",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("export-only with rerun-optimizer exit code = %d, want 2; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--export-only cannot be combined with --rerun-optimizer") {
+		t.Fatalf("conflict stderr = %q", stderr.String())
 	}
 }
 
@@ -4020,7 +4150,7 @@ func TestSkillOptTrainRerunFromPackageCreatedExportsFreshPackage(t *testing.T) {
 		RerunOptimizer: true,
 		EvaluatorID:    "landing_page_v1",
 		EvaluatorModel: "rerun-evaluator",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("continueSkillOptTrainOptimizer rerun returned error: %v", err)
 	}
@@ -7711,6 +7841,7 @@ func TestSkillOptTrainStartDryRunDoesNotInitializeFreshHome(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--template", "planner",
 		"--repo", "owner/product",
@@ -7757,6 +7888,7 @@ func TestSkillOptTrainStartRejectsTooFewItemsAndWarnsOnHomogeneousItems(t *testi
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--template", "designer",
 		"--repo", "owner/product",
@@ -7789,6 +7921,7 @@ func TestSkillOptTrainStartRejectsTooFewItemsAndWarnsOnHomogeneousItems(t *testi
 	stderr.Reset()
 	code = Run([]string{
 		"skillopt", "train", "start",
+		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--template", "designer",
 		"--repo", "owner/product",
