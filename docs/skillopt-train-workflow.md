@@ -72,6 +72,11 @@ gitmoot interactive list --state pending --json
 gitmoot interactive answer <prompt-id> <value> --source agent
 ```
 
+To run the wizard in a visible terminal pane that a human can watch while the
+agent answers from its own session, see
+[herdr-composable-train-init.md](./herdr-composable-train-init.md); Herdr is an
+optional frontend, not a Gitmoot dependency.
+
 For agents that prefer answering everything asynchronously in one pass, pass
 `--prompts` to store all the prompt requests at once and exit instead of running
 the wizard, then answer them and rerun:
