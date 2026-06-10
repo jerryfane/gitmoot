@@ -37,6 +37,7 @@ var rootCommands = []command{
 	{name: "job", summary: "inspect and recover jobs", run: runJob},
 	{name: "lock", summary: "inspect and release branch locks", run: runLock},
 	{name: "interactive", summary: "inspect and answer interactive prompts", run: runInteractive},
+	{name: "dashboard", summary: "show a snapshot of local Gitmoot state", run: runDashboard},
 	{name: "skillopt", summary: "export and import SkillOpt packages", run: runSkillOpt},
 }
 

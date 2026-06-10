@@ -2192,6 +2192,27 @@ func (s *Store) GetSkillOptTrainSession(ctx context.Context, id string) (SkillOp
 	return scanSkillOptTrainSession(row)
 }
 
+// ListSkillOptTrainSessions returns all SkillOpt train sessions, most recently
+// updated first.
+func (s *Store) ListSkillOptTrainSessions(ctx context.Context) ([]SkillOptTrainSession, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, template_id, template_version_id, target_repo, workspace_repo, preview_repo,
+			request_summary, task_kind, state, metadata_json, created_at, updated_at
+		FROM skillopt_train_sessions ORDER BY updated_at DESC, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []SkillOptTrainSession
+	for rows.Next() {
+		session, err := scanSkillOptTrainSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
 func (s *Store) UpsertSkillOptTrainIteration(ctx context.Context, iteration SkillOptTrainIteration) error {
 	iteration, err := normalizeSkillOptTrainIteration(iteration)
 	if err != nil {

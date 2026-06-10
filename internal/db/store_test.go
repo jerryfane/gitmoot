@@ -160,6 +160,42 @@ func TestInteractivePromptStorageAndAnswerValidation(t *testing.T) {
 	}
 }
 
+func TestListSkillOptTrainSessions(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	empty, err := store.ListSkillOptTrainSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSkillOptTrainSessions empty returned error: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected no sessions, got %d", len(empty))
+	}
+	for _, id := range []string{"session-a", "session-b"} {
+		if err := store.UpsertSkillOptTrainSession(ctx, SkillOptTrainSession{ID: id, TemplateID: "planner", State: "items_ready"}); err != nil {
+			t.Fatalf("UpsertSkillOptTrainSession(%s) returned error: %v", id, err)
+		}
+	}
+	sessions, err := store.ListSkillOptTrainSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSkillOptTrainSessions returned error: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions))
+	}
+	seen := map[string]bool{}
+	for _, session := range sessions {
+		seen[session.ID] = true
+	}
+	if !seen["session-a"] || !seen["session-b"] {
+		t.Fatalf("missing sessions: %+v", sessions)
+	}
+}
+
 func TestSkillOptTrainSessionAndIterationStorage(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))

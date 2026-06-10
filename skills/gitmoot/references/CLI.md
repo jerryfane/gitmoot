@@ -59,6 +59,21 @@ user explicitly wants a foreground process. Keep the default `--workers 1`
 unless the Gitmoot home has multiple independent runtime sessions or managed
 agent types with `max_background` greater than one.
 
+`gitmoot dashboard` prints a read-only snapshot of local state — daemon health,
+repos, agents and runtime sessions, jobs by state, worktrees, branch locks,
+SkillOpt train phase/candidate, and pending interactive prompts. Add `--json`
+for a machine-readable snapshot. The pending prompts it lists are the same
+records as `gitmoot interactive list`, and a prompt can be answered in place
+with `gitmoot dashboard --answer <prompt-id> --value <value>` (the same
+mechanism as `gitmoot interactive answer`). Without `--answer` it never mutates
+state.
+
+```sh
+gitmoot dashboard
+gitmoot dashboard --json
+gitmoot dashboard --answer <prompt-id> --value <value>
+```
+
 ## Agent Setup
 
 Start a new runtime session managed by Gitmoot:
