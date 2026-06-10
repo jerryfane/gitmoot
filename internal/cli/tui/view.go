@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/jerryfane/gitmoot/internal/cli/style"
 )
 
@@ -238,24 +239,10 @@ func renderRows(rows [][]string) string {
 	return b.String()
 }
 
-// displayWidth counts runes excluding ANSI escape sequences so colored cells
-// align with plain ones.
+// displayWidth is the printable cell width, ignoring ANSI escapes (so colored
+// cells align with plain ones) and accounting for wide runes.
 func displayWidth(s string) int {
-	count := 0
-	inEscape := false
-	for _, r := range s {
-		switch {
-		case inEscape:
-			if r == 'm' {
-				inEscape = false
-			}
-		case r == '\x1b':
-			inEscape = true
-		default:
-			count++
-		}
-	}
-	return count
+	return ansi.StringWidth(s)
 }
 
 func padRight(value string, width int) string {
@@ -283,7 +270,7 @@ func sidebarWidth(total int) int {
 }
 
 func dash(value string) string {
-	if value == "" {
+	if strings.TrimSpace(value) == "" {
 		return "-"
 	}
 	return value
