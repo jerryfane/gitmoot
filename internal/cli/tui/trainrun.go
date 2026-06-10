@@ -16,7 +16,8 @@ type TrainRunSnapshot struct {
 	Template          string // "<id>@<version>"
 	ReviewRepo        string
 	WorkspaceRepo     string
-	Phase             string // lock-aware stable status phase
+	Phase             string // lock-aware stable status phase (display)
+	ActionPhase       string // iteration phase gating the action keys; falls back to Phase when empty
 	NextAction        string
 	IssueURL          string // review issue (or candidate review issue) URL
 	CandidateVersion  string
@@ -350,7 +351,7 @@ func (m TrainRunModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "enter":
-		switch m.snap.Phase {
+		switch m.actionPhase() {
 		case "items_ready", "feedback_synced", "training_package_created":
 			m.actionBusy, m.actionErr = true, ""
 			return m, spawnCmd(m.deps)
@@ -359,12 +360,12 @@ func (m TrainRunModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, continueCmd(m.deps)
 		}
 	case "p":
-		if m.snap.Phase == "candidate_review_published" {
+		if m.actionPhase() == "candidate_review_published" {
 			m.actionBusy, m.actionErr = true, ""
 			return m, decideCmd(m.deps, true, m.snap.CandidateVersion, "")
 		}
 	case "x":
-		if m.snap.Phase == "candidate_review_published" {
+		if m.actionPhase() == "candidate_review_published" {
 			m.mode = trainModeReject
 			m.actionErr = ""
 			ti := textinput.New()
@@ -379,6 +380,17 @@ func (m TrainRunModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// actionPhase is the phase the action keys gate on: the iteration phase when
+// the snapshot carries it, else the display phase (they coincide outside the
+// post-optimizer stretch, where the display phase stays
+// "optimizer_completed_candidate" while the iteration advances).
+func (m TrainRunModel) actionPhase() string {
+	if strings.TrimSpace(m.snap.ActionPhase) != "" {
+		return m.snap.ActionPhase
+	}
+	return m.snap.Phase
 }
 
 func continueCmd(d TrainRunDeps) tea.Cmd {

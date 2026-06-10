@@ -192,6 +192,39 @@ func TestTrainRunPromote(t *testing.T) {
 	}
 }
 
+func TestTrainRunActionsGateOnIterationPhase(t *testing.T) {
+	// Post-optimizer, the display phase stays "optimizer_completed_candidate"
+	// while the iteration phase advances; the action keys must follow the
+	// iteration phase or p/x/enter go dead exactly when a human is needed.
+	snap := TrainRunSnapshot{
+		SessionID:        "s",
+		Phase:            "optimizer_completed_candidate",
+		ActionPhase:      "candidate_review_published",
+		CandidateVersion: "c@v2",
+	}
+	var gotPromote bool
+	deps := TrainRunDeps{
+		Load: func() (TrainRunSnapshot, error) { return snap, nil },
+		Decide: func(promote bool, candidate, reason string) (TrainRunActionResult, error) {
+			gotPromote = promote
+			return TrainRunActionResult{}, nil
+		},
+	}
+	m := trainRunModelWithDeps(t, deps, snap)
+	if !strings.Contains(m.View(), "p promote") {
+		t.Fatalf("footer should offer promote/reject:\n%s", m.View())
+	}
+	next, cmd := m.Update(key("p"))
+	m = next.(TrainRunModel)
+	if cmd == nil {
+		t.Fatal("p should promote when the iteration phase is candidate_review_published")
+	}
+	cmd()
+	if !gotPromote {
+		t.Fatal("Decide(promote) should have been called")
+	}
+}
+
 func TestTrainRunRejectRequiresReason(t *testing.T) {
 	var gotReason string
 	decided := false
