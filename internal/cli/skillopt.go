@@ -790,6 +790,14 @@ func skillOptTrainInitWizardReadLine(lines <-chan skillOptTrainInitWizardLine, s
 // returns status "ok" (use value), "custom" (template custom-file selected, the
 // caller must read the path), or "reask".
 func skillOptTrainInitWizardInterpret(field, text string, prompt db.InteractivePrompt, templateChoices []skillopt.TrainInitTemplateChoice) (string, string) {
+	return skillOptTrainInitInterpretCore(field, text, prompt, templateChoices)
+}
+
+// skillOptTrainInitInterpretCore is the shared validation core for a train-init
+// field answer, used by both the line wizard and the bubbletea TUI form. It
+// returns status "ok" (use value), "custom" (template custom-file selected), or
+// "reask".
+func skillOptTrainInitInterpretCore(field, text string, prompt db.InteractivePrompt, templateChoices []skillopt.TrainInitTemplateChoice) (string, string) {
 	value := strings.TrimSpace(text)
 	if field == "template" {
 		if value == "" {
