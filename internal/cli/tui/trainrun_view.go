@@ -59,6 +59,13 @@ func (m TrainRunModel) View() string {
 		b.WriteString("\n\n")
 	}
 
+	if m.mode == trainModeSkillView {
+		b.WriteString(m.skillViewBody())
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render("↑/↓ scroll  esc back"))
+		return b.String()
+	}
+
 	b.WriteString(m.body())
 
 	if m.mode == trainModeReject {
@@ -99,6 +106,9 @@ func (m TrainRunModel) footer() string {
 	}
 	if m.snap.Terminal {
 		action = "n start next iteration  "
+	}
+	if m.snap.CandidateVersion != "" && (m.snap.Terminal || m.actionPhase() == "candidate_review_published") {
+		action += "v view skill  "
 	}
 	return action + "r refresh  q quit"
 }
@@ -231,6 +241,23 @@ func (m TrainRunModel) body() string {
 
 	if s.NextAction != "" {
 		b.WriteString(mutedStyle.Render("next: " + s.NextAction))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// skillViewBody renders the candidate skill content in a scrollable pager.
+func (m TrainRunModel) skillViewBody() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("skill — " + dash(m.snap.CandidateVersion)))
+	b.WriteString("\n\n")
+	switch {
+	case m.skillErr != "":
+		b.WriteString(errorStyle.Render(m.skillErr) + "\n")
+	case !m.skillLoaded:
+		b.WriteString(mutedStyle.Render("loading…") + "\n")
+	default:
+		b.WriteString(m.skillView.View())
 		b.WriteByte('\n')
 	}
 	return b.String()

@@ -257,6 +257,18 @@ func skillOptTrainRunDeps(home string, sessionID func() string) tui.TrainRunDeps
 		TailLog: func(offset int64) ([]string, int64, error) {
 			return tailSkillOptTrainLog(home, sessionID(), offset)
 		},
+		TemplateVersionContent: func(versionRef string) (string, error) {
+			var content string
+			err := withStore(home, func(store *db.Store) error {
+				template, err := store.GetAgentTemplateReference(context.Background(), versionRef)
+				if err != nil {
+					return err
+				}
+				content = template.Content
+				return nil
+			})
+			return content, err
+		},
 	}
 }
 

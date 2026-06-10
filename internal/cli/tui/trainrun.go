@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -80,6 +81,10 @@ type TrainRunDeps struct {
 	// during the long generate/optimizer phases.
 	TailLog func(offset int64) (lines []string, next int64, err error)
 
+	// TemplateVersionContent loads a template version's content (e.g. the
+	// promoted candidate) for the v preview pager.
+	TemplateVersionContent func(versionRef string) (string, error)
+
 	// Embedded marks the model as a child of the Root router: q/esc pop back to
 	// the dashboard instead of quitting the program.
 	Embedded bool
@@ -90,7 +95,14 @@ type trainRunMode int
 const (
 	trainModeNormal trainRunMode = iota
 	trainModeReject
+	trainModeSkillView
 )
+
+type trainSkillContentMsg struct {
+	versionRef string
+	content    string
+	err        error
+}
 
 type trainSnapshotMsg struct {
 	snap TrainRunSnapshot
@@ -153,6 +165,13 @@ type TrainRunModel struct {
 	// also redraw the live elapsed time. Armed only while a long phase shows.
 	spin     spinner.Model
 	spinning bool
+
+	// v skill preview pager state, keyed by the version it holds so a new
+	// candidate (start-next) invalidates the cache.
+	skillView    viewport.Model
+	skillVersion string // version the pager content belongs to / was requested for
+	skillErr     string
+	skillLoaded  bool
 }
 
 const trainLogTailLines = 8
@@ -212,9 +231,26 @@ func (m TrainRunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 && msg.Height > 0 {
 			m.width, m.height = msg.Width, msg.Height
+			if m.skillLoaded {
+				m.skillView.Width = max(20, m.width-4)
+				m.skillView.Height = max(5, m.height-6)
+			}
 		}
 	case tea.KeyMsg:
 		return m.updateKey(msg)
+	case trainSkillContentMsg:
+		// Match the version that was REQUESTED (not the live snapshot, which a
+		// refresh may have advanced) so the pager cannot wedge on loading.
+		if msg.versionRef == m.skillVersion {
+			m.skillLoaded = true
+			if msg.err != nil {
+				m.skillErr = msg.err.Error()
+			} else {
+				m.skillErr = ""
+				m.skillView = viewport.New(max(20, m.width-4), max(5, m.height-6))
+				m.skillView.SetContent(msg.content)
+			}
+		}
 	case trainActionMsg:
 		m.actionBusy = false
 		if msg.err != nil {
@@ -342,6 +378,16 @@ func (m TrainRunModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.mode == trainModeSkillView {
+		switch msg.String() {
+		case "esc", "q", "v":
+			m.mode = trainModeNormal
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.skillView, cmd = m.skillView.Update(msg)
+		return m, cmd
+	}
 	if m.mode == trainModeReject {
 		switch msg.String() {
 		case "esc":
@@ -405,8 +451,28 @@ func (m TrainRunModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.actionBusy, m.actionErr = true, ""
 			return m, startNextCmd(m.deps)
 		}
+	case "v":
+		if m.snap.CandidateVersion != "" && m.deps.TemplateVersionContent != nil &&
+			(m.snap.Terminal || m.actionPhase() == "candidate_review_published") {
+			m.mode = trainModeSkillView
+			// Reuse only content cached for THIS candidate version.
+			if m.skillLoaded && m.skillErr == "" && m.skillVersion == m.snap.CandidateVersion {
+				return m, nil
+			}
+			m.skillVersion = m.snap.CandidateVersion
+			m.skillLoaded = false
+			m.skillErr = ""
+			return m, skillContentCmd(m.deps, m.snap.CandidateVersion)
+		}
 	}
 	return m, nil
+}
+
+func skillContentCmd(d TrainRunDeps, versionRef string) tea.Cmd {
+	return func() tea.Msg {
+		content, err := d.TemplateVersionContent(versionRef)
+		return trainSkillContentMsg{versionRef: versionRef, content: content, err: err}
+	}
 }
 
 // actionPhase is the phase the action keys gate on: the iteration phase when
