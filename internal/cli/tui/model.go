@@ -566,8 +566,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Resumed after a pop: the old tick chain died unhandled under the child
 		// view, so refresh now and start a NEW chain. Bumping the generation also
 		// kills a stale pre-push tick that would otherwise re-arm a second chain.
-		// A pop also means any pushed form is gone.
+		// A pop also means any pushed form is gone — and any snapshot load that
+		// was in flight when the push happened had its result routed to the
+		// covering view and dropped, so the in-flight latch must reset or
+		// queueLoad would suppress every future refresh.
 		m.formPending = false
+		m.inFlight = false
 		m.tickGen++
 		if cmd := m.queueLoad(); cmd != nil {
 			cmds = append(cmds, cmd)

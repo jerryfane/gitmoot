@@ -161,6 +161,23 @@ func TestTickRearmsAndRefreshes(t *testing.T) {
 	}
 }
 
+func TestPopNudgeResetsInFlightLoad(t *testing.T) {
+	m := loadedModel(t)
+	// A load dispatched just before a push has its snapshotMsg routed to the
+	// covering view and dropped; the latch must not survive the pop.
+	if cmd := m.queueLoad(); cmd == nil {
+		t.Fatal("first queueLoad should start a load")
+	}
+	next, cmd := m.Update(refreshNudgeMsg{})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("the pop nudge should refresh despite the swallowed in-flight load")
+	}
+	if m.inFlight != true {
+		t.Fatal("the nudge's own load should now be in flight")
+	}
+}
+
 func TestStaleTickGenerationDropped(t *testing.T) {
 	m := loadedModel(t)
 	// A pop-nudge starts a new tick generation…
