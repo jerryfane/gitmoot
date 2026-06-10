@@ -78,6 +78,7 @@ item plan directly:
 ```sh
 gitmoot skillopt train start \
   --config .gitmoot/skillopt/planner-train/config.toml \
+  --workspace-repo owner/product-workspace \
   --yes
 
 gitmoot skillopt train start \
@@ -356,9 +357,13 @@ deterministic and stores imported events as canonical feedback for export.
 After feedback sync, `train continue` exports the training package, invokes the
 configured `gitmoot-skillopt optimize` command, imports the returned candidate
 package through the shared candidate validator, and leaves the candidate
-pending. Use `--dry-run` only on a disposable or reset train session to validate
-the package and optimizer command shape without model calls. If the dry-run
-returns unchanged baseline content, Gitmoot records
+pending. Because the optimizer launches long-lived model calls, `train continue`
+announces the launch before starting it. To export the training package and stop
+before that launch, pass `--export-only`; the session lands at
+`training_package_created` and a later `train continue` (without `--export-only`)
+runs the optimizer. Use `--dry-run` only on a disposable or reset train session
+to validate the package and optimizer command shape without model calls. If the
+dry-run returns unchanged baseline content, Gitmoot records
 `optimizer_completed_no_candidate` instead of publishing a candidate review.
 
 ```sh

@@ -39,12 +39,38 @@ func runRepo(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// parseRepoPositional reorders args so the owner/repo positional may appear
+// before or after flags, parses them into fs, and returns the single
+// positional. The returned code is -1 when parsing succeeded (use repoArg) or a
+// process exit code the caller should return immediately (0 for --help, 2 for a
+// parse or arity error). stringFlags lists fs flags that consume a value.
+func parseRepoPositional(fs *flag.FlagSet, command string, args []string, stringFlags map[string]struct{}, stderr io.Writer) (string, int) {
+	parsedArgs, err := reorderFlagArgs(args, stringFlags, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return "", 2
+	}
+	if err := fs.Parse(parsedArgs); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return "", 0
+		}
+		return "", 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "%s requires exactly one owner/repo\n", command)
+		return "", 2
+	}
+	return fs.Arg(0), -1
+}
+
 func printRepoUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot repo add owner/repo --path <path> [--poll 30s]")
 	fmt.Fprintln(w, "  gitmoot repo list")
 	fmt.Fprintln(w, "  gitmoot repo remove owner/repo")
 	fmt.Fprintln(w, "  gitmoot repo doctor owner/repo")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "owner/repo may be given before or after the flags.")
 }
 
 func runRepoAdd(args []string, stdout, stderr io.Writer) int {
@@ -61,16 +87,9 @@ func runRepoAdd(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg := args[0]
-	if err := fs.Parse(args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "repo add requires exactly one owner/repo")
-		return 2
+	repoArg, code := parseRepoPositional(fs, "repo add", args, map[string]struct{}{"home": {}, "path": {}, "poll": {}}, stderr)
+	if code >= 0 {
+		return code
 	}
 	if *poll <= 0 {
 		fmt.Fprintln(stderr, "poll interval must be positive")
@@ -142,16 +161,9 @@ func runRepoRemove(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg := args[0]
-	if err := fs.Parse(args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "repo remove requires exactly one owner/repo")
-		return 2
+	repoArg, code := parseRepoPositional(fs, "repo remove", args, map[string]struct{}{"home": {}}, stderr)
+	if code >= 0 {
+		return code
 	}
 	repo, err := daemon.ParseRepository(repoArg)
 	if err != nil {
@@ -187,16 +199,9 @@ func runRepoDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg := args[0]
-	if err := fs.Parse(args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "repo doctor requires exactly one owner/repo")
-		return 2
+	repoArg, code := parseRepoPositional(fs, "repo doctor", args, map[string]struct{}{"home": {}}, stderr)
+	if code >= 0 {
+		return code
 	}
 	repo, err := daemon.ParseRepository(repoArg)
 	if err != nil {

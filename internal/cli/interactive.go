@@ -85,7 +85,7 @@ func runInteractiveShow(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	jsonOutput := fs.Bool("json", false, "write prompt as JSON")
-	parsedArgs, err := reorderInteractiveFlags(args, map[string]struct{}{"home": {}}, map[string]struct{}{"json": {}})
+	parsedArgs, err := reorderFlagArgs(args, map[string]struct{}{"home": {}}, map[string]struct{}{"json": {}})
 	if err != nil {
 		fmt.Fprintf(stderr, "interactive show: %v\n", err)
 		return 2
@@ -125,7 +125,7 @@ func runInteractiveAnswer(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	source := fs.String("source", "cli", "answer source")
-	parsedArgs, err := reorderInteractiveFlags(args, map[string]struct{}{"home": {}, "source": {}}, nil)
+	parsedArgs, err := reorderFlagArgs(args, map[string]struct{}{"home": {}, "source": {}}, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "interactive answer: %v\n", err)
 		return 2
@@ -165,7 +165,11 @@ func normalizeInteractivePromptState(state string) (string, error) {
 	}
 }
 
-func reorderInteractiveFlags(args []string, stringFlags map[string]struct{}, boolFlags map[string]struct{}) ([]string, error) {
+// reorderFlagArgs moves recognized flags ahead of positional arguments so the
+// standard library flag parser, which stops at the first positional, accepts
+// flags written before or after the positionals. stringFlags are flags that
+// consume a following value when not given inline; boolFlags stand alone.
+func reorderFlagArgs(args []string, stringFlags map[string]struct{}, boolFlags map[string]struct{}) ([]string, error) {
 	flags := []string{}
 	positionals := []string{}
 	for index := 0; index < len(args); index++ {
@@ -178,7 +182,7 @@ func reorderInteractiveFlags(args []string, stringFlags map[string]struct{}, boo
 			positionals = append(positionals, arg)
 			continue
 		}
-		name, hasInlineValue := splitInteractiveFlagName(arg)
+		name, hasInlineValue := splitFlagName(arg)
 		if _, ok := boolFlags[name]; ok {
 			flags = append(flags, arg)
 			continue
@@ -199,7 +203,7 @@ func reorderInteractiveFlags(args []string, stringFlags map[string]struct{}, boo
 	return append(flags, positionals...), nil
 }
 
-func splitInteractiveFlagName(arg string) (string, bool) {
+func splitFlagName(arg string) (string, bool) {
 	arg = strings.TrimLeft(arg, "-")
 	name, value, hasInlineValue := strings.Cut(arg, "=")
 	_ = value
