@@ -115,3 +115,37 @@ func TestDashboardTUIDepsActions(t *testing.T) {
 		t.Fatalf("dismiss should remove act.dismiss only: %+v", remaining)
 	}
 }
+
+// TestDashboardCreateAgentWithPrompt exercises the custom-prompt create dep: it
+// stores the prompt as a new template and registers the agent against it.
+func TestDashboardCreateAgentWithPrompt(t *testing.T) {
+	home := dashboardTestHome(t)
+	deps := dashboardTUIDeps(home, 0)
+
+	const content = "You are scout.\nReturn a gitmoot_result."
+	if err := deps.CreateAgentWithPrompt("scout", "claude", content); err != nil {
+		t.Fatalf("CreateAgentWithPrompt: %v", err)
+	}
+
+	store, err := db.Open(config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	agent, err := store.GetAgent(ctx, "scout")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if agent.Runtime != "claude" || agent.TemplateID != "scout" {
+		t.Fatalf("agent = %+v, want runtime=claude template=scout", agent)
+	}
+	tpl, err := store.GetAgentTemplate(ctx, "scout")
+	if err != nil {
+		t.Fatalf("get template: %v", err)
+	}
+	if tpl.Content != content {
+		t.Fatalf("template content = %q, want the edited prompt", tpl.Content)
+	}
+}

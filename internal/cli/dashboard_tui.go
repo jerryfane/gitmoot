@@ -279,6 +279,35 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 				return store.UpdateAgentRuntime(context.Background(), name, runtimeName)
 			})
 		},
+		EditAgentPrompt: func(seedTemplateID string) tea.Cmd {
+			seed := agentPromptScaffold
+			if strings.TrimSpace(seedTemplateID) != "" {
+				_ = withStore(home, func(store *db.Store) error {
+					tpl, err := store.GetAgentTemplate(context.Background(), seedTemplateID)
+					if err == nil && strings.TrimSpace(tpl.Content) != "" {
+						seed = tpl.Content
+					}
+					return nil
+				})
+			}
+			return editAgentPromptCmd(seed)
+		},
+		CreateAgentWithPrompt: func(name, runtimeName, content string) error {
+			return withStore(home, func(store *db.Store) error {
+				templateID := slug(name)
+				if templateID == "" {
+					return fmt.Errorf("agent name %q has no usable characters for a template id", name)
+				}
+				if err := store.UpsertAgentTemplate(context.Background(), db.AgentTemplate{
+					ID:      templateID,
+					Name:    strings.TrimSpace(name),
+					Content: content,
+				}); err != nil {
+					return err
+				}
+				return registerAgentOnly(context.Background(), store, name, runtimeName, templateID, "")
+			})
+		},
 		OpenAgentOptimize: func(agent tui.Agent) (tea.Model, error) {
 			// Same lifetime pattern as the create form: one store for the
 			// form's 200ms poll, closed from the Done hook.

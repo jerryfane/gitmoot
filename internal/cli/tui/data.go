@@ -87,6 +87,13 @@ type ConfigEditedMsg struct {
 	Err error
 }
 
+// AgentPromptEditedMsg is delivered when the external editor (Deps.EditAgentPrompt)
+// exits, carrying the saved prompt content (or the launch/read error).
+type AgentPromptEditedMsg struct {
+	Content string
+	Err     error
+}
+
 // configWriteMsg carries the outcome of an inline Deps.SetConfigScalar write.
 type configWriteMsg struct {
 	err error
@@ -240,6 +247,14 @@ type Deps struct {
 	// SetAgentRuntime switches a registered agent's runtime (codex/claude),
 	// preserving its role/capabilities/repos and clearing the warm session.
 	SetAgentRuntime func(name, runtime string) error
+
+	// EditAgentPrompt opens $EDITOR seeded from the given base template (empty =
+	// a minimal scaffold) and returns a command whose completion delivers an
+	// AgentPromptEditedMsg with the saved content (it is a tea.ExecProcess that
+	// suspends the program for the editor). CreateAgentWithPrompt then creates a
+	// template from that content and registers the agent against it.
+	EditAgentPrompt       func(seedTemplateID string) tea.Cmd
+	CreateAgentWithPrompt func(name, runtime, content string) error
 
 	// Optimize an agent: OpenAgentOptimize builds the pre-filled training form
 	// for the agent's template; StartOptimize scaffolds and starts the train

@@ -93,7 +93,7 @@ func (m TrainInitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = tiConfirm
 			return m, nil
 		}
-		return m, m.enterField(0)
+		return m, m.enterField(m.nextFieldIdx(0))
 	case tea.KeyMsg:
 		return m.updateKey(msg)
 	case promptReadyMsg:
@@ -355,8 +355,8 @@ func (m TrainInitModel) commit(value string) (tea.Model, tea.Cmd) {
 	field := m.fields[m.idx]
 	m.answers[field.Name] = value
 	cmds := []tea.Cmd{deletePromptCmd(m.store, field.Prompt.ID)}
-	if m.idx+1 < len(m.fields) {
-		cmds = append(cmds, m.enterField(m.idx+1))
+	if next := m.nextFieldIdx(m.idx + 1); next < len(m.fields) {
+		cmds = append(cmds, m.enterField(next))
 		return m, tea.Batch(cmds...)
 	}
 	// All fields answered → confirm (auto-accept when an agent drove the form).
@@ -375,10 +375,25 @@ func (m TrainInitModel) commit(value string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// nextFieldIdx returns the index of the next field at or after `from` whose
+// Skip predicate (if any) does not skip it given the answers so far, or
+// len(fields) when none remain.
+func (m TrainInitModel) nextFieldIdx(from int) int {
+	for i := from; i < len(m.fields); i++ {
+		if m.fields[i].Skip == nil || !m.fields[i].Skip(m.answers) {
+			return i
+		}
+	}
+	return len(m.fields)
+}
+
 // enterField sets up the widget for field i, publishes its prompt record, and
 // starts the external-answer poll. It mutates m through the pointer receiver and
 // returns the batched commands.
 func (m *TrainInitModel) enterField(i int) tea.Cmd {
+	if i < 0 || i >= len(m.fields) {
+		return nil // defensive: all fields skipped (unreachable with a real form)
+	}
 	m.state = tiField
 	m.idx = i
 	m.gen++

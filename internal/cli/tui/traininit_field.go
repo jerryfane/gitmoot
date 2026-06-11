@@ -40,6 +40,10 @@ type Field struct {
 	// answer being an existing GitHub repo; a missing repo offers creation.
 	CheckRepo  func(value string) (missing bool, err error)
 	CreateRepo func(value string) error
+
+	// Skip, when set and returning true for the answers collected so far, omits
+	// this field from the walk (a conditional follow-up question).
+	Skip func(answers map[string]string) bool
 }
 
 // PromptStore is the subset of *db.Store the form needs to publish a prompt
