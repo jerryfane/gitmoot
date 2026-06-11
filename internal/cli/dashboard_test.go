@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -333,5 +335,57 @@ func TestDashboardWatchFrame(t *testing.T) {
 	}
 	if !bytes.HasPrefix(next, []byte("\x1b[H\x1b[0J")) || !bytes.Contains(next, body) {
 		t.Fatalf("next frame = %q", next)
+	}
+}
+
+func TestTailDaemonLogErrors(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "daemon.log")
+	lines := []string{
+		"info: started",
+		"ERROR: first failure",
+		"info: working",
+		"job failed: db locked",
+		"info: idle",
+		"panic: boom",
+	}
+	if err := os.WriteFile(logFile, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	got := tailDaemonLogErrors(logFile, 2)
+	if len(got) != 2 || got[0] != "job failed: db locked" || got[1] != "panic: boom" {
+		t.Fatalf("tail = %v, want the last 2 error-ish lines", got)
+	}
+
+	// A large log is read from the END only (bounded), and a partial leading
+	// line from the seek is dropped without crashing.
+	var big strings.Builder
+	big.WriteString(strings.Repeat("info: filler line padding the head\n", 5000)) // > 64KB
+	big.WriteString("ERROR: tail failure near the end\n")
+	if err := os.WriteFile(logFile, []byte(big.String()), 0o600); err != nil {
+		t.Fatalf("write big log: %v", err)
+	}
+	if got := tailDaemonLogErrors(logFile, 5); len(got) != 1 || got[0] != "ERROR: tail failure near the end" {
+		t.Fatalf("bounded tail = %v, want only the trailing error", got)
+	}
+	// Missing file → nil, no error.
+	if got := tailDaemonLogErrors(filepath.Join(dir, "absent.log"), 5); got != nil {
+		t.Fatalf("missing log should yield nil, got %v", got)
+	}
+	if got := tailDaemonLogErrors("", 5); got != nil {
+		t.Fatalf("empty path should yield nil, got %v", got)
+	}
+}
+
+func TestBuildDashboardDaemonDetailNoMeta(t *testing.T) {
+	dir := t.TempDir()
+	state := daemonState{
+		MetaFile: filepath.Join(dir, "daemon.json"),
+		LogFile:  filepath.Join(dir, "daemon.log"),
+	}
+	// No meta file, no log → all zero, no panic.
+	detail := buildDashboardDaemonDetail(state)
+	if detail.Flags != nil || detail.WorkDir != "" || detail.StartedAt != "" || detail.LogErrors != nil {
+		t.Fatalf("detail without files should be zero: %+v", detail)
 	}
 }

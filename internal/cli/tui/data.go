@@ -37,6 +37,22 @@ type Daemon struct {
 	Running bool
 	PID     int
 	LogFile string
+
+	// Persisted detail from daemon.json, shown on the Health page. Populated
+	// from cheap file reads on each snapshot build (never serialized — the
+	// --json output uses the cli dashboardDaemon, so these stay byte-stable).
+	Flags     []string // start flags (workers/poll/watch…)
+	WorkDir   string
+	StartedAt string
+	LogErrors []string // tail of recent error-ish lines from the daemon log
+}
+
+// HealthCheck is one environment/runtime diagnostic for the Health page.
+type HealthCheck struct {
+	Name     string
+	Status   string // "ok", "warn", or "fail"
+	Detail   string
+	Required bool
 }
 
 // Repo mirrors cli.dashboardRepo.
@@ -161,6 +177,11 @@ type Deps struct {
 	// dashboard opens via OpenTrain.
 	OpenAgentOptimize func(agent Agent) (tea.Model, error)
 	StartOptimize     func(templateID string, values map[string]string) (string, error)
+
+	// HealthChecks runs the environment/runtime diagnostics for the Health
+	// page. It shells out (gh/codex/claude version calls), so it is dispatched
+	// lazily on first open and on r, never on the refresh tick.
+	HealthChecks func() ([]HealthCheck, error)
 }
 
 // TemplateVersion is one row of a template's version history.
@@ -269,6 +290,12 @@ type agentFormResultMsg struct {
 type agentOptimizeFormResultMsg struct {
 	templateID string
 	result     Result
+}
+
+// healthChecksMsg carries the result of a Deps.HealthChecks dispatch.
+type healthChecksMsg struct {
+	checks []HealthCheck
+	err    error
 }
 
 // optimizeStartedMsg carries the outcome of Deps.StartOptimize.

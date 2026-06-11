@@ -50,6 +50,19 @@ type dashboardSnapshot struct {
 	// jobRows carries per-job rows (and, for blocked/failed jobs, the latest
 	// event message) for the TUI's Jobs page. Unexported for the same reason.
 	jobRows []dashboardJobRow
+	// daemonDetail carries the persisted daemon flags/workdir and a tail of
+	// recent log errors for the TUI's Health page. Unexported so --json and
+	// the plain renderer stay byte-stable.
+	daemonDetail dashboardDaemonDetail
+}
+
+// dashboardDaemonDetail is the extra daemon info the Health page shows beyond
+// running/pid (read from daemon.json + the log file; never serialized).
+type dashboardDaemonDetail struct {
+	Flags     []string
+	WorkDir   string
+	StartedAt string
+	LogErrors []string
 }
 
 // dashboardJobRow is one job with the context the TUI needs to act on it.
@@ -261,6 +274,69 @@ func dashboardWatchFrame(body []byte, first bool) []byte {
 	return frame.Bytes()
 }
 
+// buildDashboardDaemonDetail reads the persisted daemon meta (flags, workdir,
+// start time) and a tail of recent error-ish log lines for the Health page.
+// Both are cheap file reads with no side effects; absent files yield zero
+// values (the daemon may never have run).
+func buildDashboardDaemonDetail(state daemonState) dashboardDaemonDetail {
+	detail := dashboardDaemonDetail{}
+	if meta, err := readDaemonMeta(state); err == nil {
+		detail.Flags = daemonStartArgsFromRunArgs(meta.Args)
+		detail.WorkDir = meta.WorkingDir
+		detail.StartedAt = meta.StartedAt
+	}
+	detail.LogErrors = tailDaemonLogErrors(state.LogFile, 8)
+	return detail
+}
+
+// daemonLogTailBytes bounds the tail read so the Health-page log scan costs
+// the same on a fresh log and a multi-GB one (this runs on the snapshot tick).
+const daemonLogTailBytes = 64 * 1024
+
+// tailDaemonLogErrors returns up to limit of the most recent error-shaped
+// lines from the END of the daemon log (best effort; missing/unreadable log →
+// nil). It reads only the last daemonLogTailBytes, so cost is independent of
+// log size — the plan requires this stay off the unbounded path.
+func tailDaemonLogErrors(logFile string, limit int) []string {
+	if strings.TrimSpace(logFile) == "" {
+		return nil
+	}
+	file, err := os.Open(logFile)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil
+	}
+	size := info.Size()
+	start := int64(0)
+	if size > daemonLogTailBytes {
+		start = size - daemonLogTailBytes
+	}
+	buf := make([]byte, size-start)
+	if _, err := file.ReadAt(buf, start); err != nil && err != io.EOF {
+		return nil
+	}
+	lines := strings.Split(string(buf), "\n")
+	// Drop a leading partial line when we seeked into the middle of the file.
+	if start > 0 && len(lines) > 0 {
+		lines = lines[1:]
+	}
+	var matches []string
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "error") || strings.Contains(lower, "panic") || strings.Contains(lower, "failed") {
+			matches = append(matches, strings.TrimSpace(line))
+			if len(matches) > limit {
+				matches = matches[1:]
+			}
+		}
+	}
+	return matches
+}
+
 func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot, error) {
 	snapshot := dashboardSnapshot{
 		Home:            paths.Home,
@@ -286,6 +362,7 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 	} else {
 		snapshot.Daemon = dashboardDaemon{Running: false, LogFile: state.LogFile}
 	}
+	snapshot.daemonDetail = buildDashboardDaemonDetail(state)
 
 	err := withStore(home, func(store *db.Store) error {
 		ctx := context.Background()

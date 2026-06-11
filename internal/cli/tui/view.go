@@ -110,6 +110,8 @@ func (m Model) content() string {
 			b.WriteString(m.jobsContentInteractive())
 		case pageLocks:
 			b.WriteString(m.locksContent())
+		case pageHealth:
+			b.WriteString(m.healthContent())
 		}
 	}
 	b.WriteString("\n\n")
@@ -150,6 +152,10 @@ func (m Model) helpContent() string {
 		b.WriteString("R    retry the selected job (failed/blocked/cancelled)\n")
 		b.WriteString("c    cancel the selected job (queued/running)\n")
 		b.WriteString("pgup/pgdn  scroll a long list\n")
+	case pageHealth:
+		b.WriteString("daemon state + flags, then environment checks\n")
+		b.WriteString("r    re-run the environment checks\n")
+		b.WriteString("s    start the daemon when it is stopped\n")
 	default:
 		b.WriteString("j/k or wheel  scroll\n")
 	}
@@ -198,6 +204,8 @@ func (m Model) footerHelp() string {
 		return "tab/←→ page  ↑/↓ select  enter detail  n new  o optimize  D delete  ? help  q quit"
 	case pageJobs:
 		return "tab/←→ page  ↑/↓ select  enter detail  R retry  c cancel  ? help  q quit"
+	case pageHealth:
+		return "tab/←→ page  r re-run checks  s start daemon  ? help  q quit"
 	}
 	return "tab/←→ page  j/k or wheel scroll  r refresh  q quit"
 }

@@ -21,6 +21,7 @@ const (
 	pageSessions
 	pageJobs
 	pageLocks
+	pageHealth
 )
 
 // label is the (short) sidebar entry; title is the page heading. The sidebar
@@ -36,6 +37,7 @@ var pages = []struct {
 	{pageSessions, "Sessions", "Runtime sessions"},
 	{pageJobs, "Jobs", "Jobs"},
 	{pageLocks, "Locks", "Locks"},
+	{pageHealth, "Health", "Health"},
 }
 
 // mode is the interaction mode; modeNormal navigates pages, the others are
@@ -98,6 +100,13 @@ type Model struct {
 	cancelling      map[string]struct{} // jobs with a cancel requested, until settled
 	daemonBusy      bool                // a daemon start is in flight; suppress re-submit
 	daemonErr       string              // error from the last daemon start attempt
+
+	// Health page state (lazy: the checks shell out, so they load on first
+	// open and on r, not on the refresh tick).
+	healthChecks  []HealthCheck
+	healthLoaded  bool
+	healthLoading bool
+	healthErr     string
 
 	// Trains page action state.
 	pendingRepos []string // gitmoot-created repos offered for cleanup after a delete
@@ -181,6 +190,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab", "right":
 			m.selected = (m.selected + 1) % len(pages)
 			m.viewport.GotoTop()
+			if cmd := m.maybeLoadHealth(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 			m.viewport.SetContent(m.content())
 			return m, tea.Batch(cmds...)
 		case "shift+tab", "left":
@@ -189,9 +201,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selected = len(pages) - 1
 			}
 			m.viewport.GotoTop()
+			if cmd := m.maybeLoadHealth(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 			m.viewport.SetContent(m.content())
 			return m, tea.Batch(cmds...)
 		case "r":
+			if pages[m.selected].page == pageHealth {
+				// Force a re-run of the checks (they shell out, so they are not
+				// on the snapshot tick).
+				if cmd := m.loadHealth(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
 			if cmd := m.queueLoad(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -273,8 +295,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Only once the first snapshot confirmed the daemon is down (the
 			// zero-value snapshot also reads as not-running), and never while a
 			// start is already in flight.
-			if pages[m.selected].page == pageAttention && !m.snap.Daemon.Running &&
-				!m.loadedAt.IsZero() && !m.daemonBusy {
+			if (pages[m.selected].page == pageAttention || pages[m.selected].page == pageHealth) &&
+				!m.snap.Daemon.Running && !m.loadedAt.IsZero() && !m.daemonBusy {
 				m.daemonBusy = true
 				m.daemonErr = ""
 				cmds = append(cmds, daemonStartCmd(m.deps))
@@ -366,6 +388,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.jobEventsErr = ""
 				m.jobEvents = msg.events
 			}
+		}
+	case healthChecksMsg:
+		m.healthLoading = false
+		m.healthLoaded = true
+		if msg.err != nil {
+			m.healthErr = msg.err.Error()
+		} else {
+			m.healthErr = ""
+			m.healthChecks = msg.checks
 		}
 	case trainStopMsg:
 		if m.mode == modeTrainStopReason {
@@ -617,6 +648,43 @@ func (m *Model) queueLoad() tea.Cmd {
 	}
 	m.inFlight = true
 	return loadSnapshot(m.deps)
+}
+
+// maybeLoadHealth dispatches the health checks the first time the Health page
+// is shown; subsequent visits reuse the cache until r forces a reload.
+func (m *Model) maybeLoadHealth() tea.Cmd {
+	if pages[m.selected].page != pageHealth || m.healthLoaded || m.healthLoading {
+		return nil
+	}
+	return m.loadHealth()
+}
+
+// loadHealth (re)dispatches the health checks.
+func (m *Model) loadHealth() tea.Cmd {
+	if m.deps.HealthChecks == nil || m.healthLoading {
+		return nil
+	}
+	m.healthLoading = true
+	m.healthErr = ""
+	deps := m.deps
+	return func() tea.Msg {
+		checks, err := deps.HealthChecks()
+		return healthChecksMsg{checks: checks, err: err}
+	}
+}
+
+// healthRequiredFailed reports whether any loaded required check failed; the
+// Attention page surfaces a cross-link when it does.
+func (m Model) healthRequiredFailed() bool {
+	if !m.healthLoaded {
+		return false
+	}
+	for _, check := range m.healthChecks {
+		if check.Required && check.Status == "fail" {
+			return true
+		}
+	}
+	return false
 }
 
 // pageCursor returns the selected page's cursor and list length, or nil for

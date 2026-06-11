@@ -205,6 +205,11 @@ func (m Model) attentionContent() string {
 		wrote = true
 	}
 
+	if m.healthRequiredFailed() {
+		b.WriteString(redStyle.Render("environment problem — see the Health page") + "\n\n")
+		wrote = true
+	}
+
 	items := m.attentionItems()
 	b.WriteString(headerStyle.Render("needs attention"))
 	b.WriteByte('\n')

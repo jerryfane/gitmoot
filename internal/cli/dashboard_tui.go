@@ -13,6 +13,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/cli/tui"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/doctor"
 	"github.com/jerryfane/gitmoot/internal/skillopt"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
@@ -272,6 +273,22 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 			}
 			return nil
 		},
+		HealthChecks: func() ([]tui.HealthCheck, error) {
+			checks := doctor.Checker{Dir: "."}.Run(context.Background())
+			out := make([]tui.HealthCheck, 0, len(checks))
+			for _, c := range checks {
+				status := "ok"
+				if !c.OK {
+					if c.Required {
+						status = "fail"
+					} else {
+						status = "warn"
+					}
+				}
+				out = append(out, tui.HealthCheck{Name: c.Name, Status: status, Detail: c.Detail, Required: c.Required})
+			}
+			return out, nil
+		},
 	}
 }
 
@@ -305,9 +322,17 @@ func toTUISnapshot(s dashboardSnapshot) tui.Snapshot {
 	out := tui.Snapshot{
 		Home:           s.Home,
 		DatabaseExists: s.DatabaseExists,
-		Daemon:         tui.Daemon{Running: s.Daemon.Running, PID: s.Daemon.PID, LogFile: s.Daemon.LogFile},
-		Jobs:           tui.Jobs{Total: s.Jobs.Total, ByState: s.Jobs.ByState},
-		Prompts:        s.promptDetails,
+		Daemon: tui.Daemon{
+			Running:   s.Daemon.Running,
+			PID:       s.Daemon.PID,
+			LogFile:   s.Daemon.LogFile,
+			Flags:     s.daemonDetail.Flags,
+			WorkDir:   s.daemonDetail.WorkDir,
+			StartedAt: s.daemonDetail.StartedAt,
+			LogErrors: s.daemonDetail.LogErrors,
+		},
+		Jobs:    tui.Jobs{Total: s.Jobs.Total, ByState: s.Jobs.ByState},
+		Prompts: s.promptDetails,
 	}
 	for _, r := range s.Repos {
 		out.Repos = append(out.Repos, tui.Repo{Name: r.Name, Enabled: r.Enabled})
