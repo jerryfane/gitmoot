@@ -23,6 +23,88 @@ func pickerField(checkRepo func(string) (bool, error), createRepo func(string) e
 	}
 }
 
+// repoFieldNamed is pickerField with a chosen name (for multi-field forms).
+func repoFieldNamed(name string, checkRepo func(string) (bool, error), createRepo func(string) error) Field {
+	f := pickerField(checkRepo, createRepo)
+	f.Name = name
+	f.Prompt = db.InteractivePrompt{ID: "picker-" + name}
+	return f
+}
+
+func TestRepoPickerCreatedRepoAutoSelectedAcrossFields(t *testing.T) {
+	createOne := func(string) error { return nil }
+	missing := func(string) (bool, error) { return true, nil }
+	interpret := func(_, text string) (string, string) {
+		if !strings.Contains(text, "/") {
+			return "", "reask"
+		}
+		return strings.TrimSpace(text), "ok"
+	}
+	review := repoFieldNamed("review_repo", missing, createOne)
+	workspace := repoFieldNamed("workspace_repo", missing, createOne)
+	// A non-repo field (no CreateRepo) must be left untouched.
+	plain := Field{Name: "items", Label: "Items", Kind: FieldChoice,
+		Choices: []Choice{{Value: "2", Label: "2"}}, Prompt: db.InteractivePrompt{ID: "items"}}
+
+	form := NewTrainInit(newFakeStore(), []Field{review, workspace, plain}, nil, interpret, 0)
+	var model tea.Model = form
+	var lastCmd tea.Cmd
+	step := func(msg tea.Msg) { next, cmd := model.Update(msg); model, lastCmd = next, cmd }
+
+	step(initMsg{})
+	step(tea.KeyMsg{Type: tea.KeyDown})  // → custom entry on review_repo
+	step(tea.KeyMsg{Type: tea.KeyEnter}) // open text sub-state
+	for _, r := range "o/fresh" {
+		step(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	step(tea.KeyMsg{Type: tea.KeyEnter}) // repo check
+	step(lastCmd())                      // repoCheckMsg → missing
+	step(key("c"))                       // create
+	step(lastCmd())                      // repoCreatedMsg → registerCreatedRepo + commit → enters workspace_repo
+
+	m := model.(TrainInitModel)
+	if m.answers["review_repo"] != "o/fresh" {
+		t.Fatalf("review_repo answer = %q, want o/fresh", m.answers["review_repo"])
+	}
+	// Both repo fields now carry the created repo as a choice and as their default.
+	for _, name := range []string{"review_repo", "workspace_repo"} {
+		f := fieldByName(m.fields, name)
+		if f.Default != "o/fresh" {
+			t.Fatalf("%s default = %q, want o/fresh", name, f.Default)
+		}
+		if countChoice(f.Choices, "o/fresh") != 1 {
+			t.Fatalf("%s should list o/fresh exactly once: %+v", name, f.Choices)
+		}
+	}
+	// The non-repo field is untouched.
+	if plain := fieldByName(m.fields, "items"); plain.Default == "o/fresh" || countChoice(plain.Choices, "o/fresh") != 0 {
+		t.Fatalf("non-repo field was polluted: %+v", plain)
+	}
+	// The form advanced to workspace_repo with the created repo pre-selected.
+	if m.idx != 1 || m.choiceIdx != choiceIndex(m.fields[1].Choices, "o/fresh") {
+		t.Fatalf("workspace_repo not pre-selected: idx=%d choiceIdx=%d", m.idx, m.choiceIdx)
+	}
+}
+
+func fieldByName(fields []Field, name string) Field {
+	for _, f := range fields {
+		if f.Name == name {
+			return f
+		}
+	}
+	return Field{}
+}
+
+func countChoice(choices []Choice, value string) int {
+	n := 0
+	for _, c := range choices {
+		if c.Value == value {
+			n++
+		}
+	}
+	return n
+}
+
 func TestRepoPickerSelectsKnownRepoDirectly(t *testing.T) {
 	form := NewTrainInit(newFakeStore(), []Field{pickerField(nil, nil)}, nil, nil, 0)
 	var model tea.Model = form
