@@ -3,6 +3,7 @@ package tui
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -186,7 +187,30 @@ func (m Model) jobsContentInteractive() string {
 	}
 	b.WriteString(mutedStyle.Render(strconv.Itoa(m.snap.Jobs.Total)+" total") + "  " + strings.Join(summary, "  "))
 	b.WriteString("\n\n")
-	for i, job := range m.snap.JobRows {
+	// Window the list so the cursor stays on-screen even with hundreds of jobs;
+	// the cursor is kept roughly centered (stateless — derived from jobCursor).
+	rows := m.snap.JobRows
+	n := len(rows)
+	capacity := jobsWindowCap(m.height)
+	start := 0
+	if n > capacity {
+		start = m.jobCursor - capacity/2
+		if start < 0 {
+			start = 0
+		}
+		if start > n-capacity {
+			start = n - capacity
+		}
+	}
+	end := start + capacity
+	if end > n {
+		end = n
+	}
+	if start > 0 {
+		b.WriteString(mutedStyle.Render("↑ "+strconv.Itoa(start)+" earlier") + "\n")
+	}
+	for i := start; i < end; i++ {
+		job := rows[i]
 		cursor, id := "  ", job.ID
 		state := job.State
 		if _, pending := m.cancelling[job.ID]; pending && jobCancelable(job.State) {
@@ -195,11 +219,43 @@ func (m Model) jobsContentInteractive() string {
 		if i == m.jobCursor {
 			cursor, id = "▸ ", selectedRowStyle.Render(job.ID)
 		}
-		b.WriteString(cursor + id + "  " + job.Agent + "  " + job.Type + "  " + jobStateColor(state) + "\n")
+		b.WriteString(cursor + id + "  " + job.Agent + "  " + job.Type + "  " + jobStateColor(state) +
+			"  " + mutedStyle.Render(formatJobTime(job.UpdatedAt)) + "\n")
+	}
+	if end < n {
+		b.WriteString(mutedStyle.Render("↓ "+strconv.Itoa(n-end)+" more") + "\n")
 	}
 	b.WriteString(mutedStyle.Render("enter detail  R retry  c cancel"))
 	b.WriteByte('\n')
 	return b.String()
+}
+
+// jobsWindowCap is how many job rows fit the Jobs page, leaving room for the
+// title, summary, more/earlier markers, and footer.
+func jobsWindowCap(height int) int {
+	if height-9 < 3 {
+		return 3
+	}
+	return height - 9
+}
+
+// formatJobTime renders a stored ISO timestamp ("2006-01-02 15:04:05", UTC from
+// SQLite) as a compact "MM-DD HH:MM". A value it can't parse is trimmed to its
+// first 16 chars so the column never balloons.
+func formatJobTime(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05Z07:00", "2006-01-02 15:04:05.999999999"} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t.Format("01-02 15:04")
+		}
+	}
+	if r := []rune(value); len(r) > 16 {
+		return string(r[:16])
+	}
+	return value
 }
 
 func (m Model) jobDetailView() string {
@@ -210,7 +266,7 @@ func (m Model) jobDetailView() string {
 		{"agent", dash(m.activeJob.Agent)},
 		{"type", dash(m.activeJob.Type)},
 		{"state", m.activeJob.State},
-		{"updated", dash(m.activeJob.UpdatedAt)},
+		{"updated", formatJobTime(m.activeJob.UpdatedAt)},
 	}
 	d := m.activeJobDetail
 	if d.Repo != "" {

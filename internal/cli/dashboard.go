@@ -434,6 +434,16 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 			}
 			snapshot.jobRows = append(snapshot.jobRows, row)
 		}
+		// Newest-first for the interactive Jobs list (ISO timestamps sort
+		// lexically; id breaks ties deterministically). jobRows is unexported and
+		// feeds only the TUI, so the --json/--plain aggregate stays byte-stable.
+		sort.SliceStable(snapshot.jobRows, func(i, j int) bool {
+			a, b := snapshot.jobRows[i], snapshot.jobRows[j]
+			if a.UpdatedAt != b.UpdatedAt {
+				return a.UpdatedAt > b.UpdatedAt
+			}
+			return a.ID > b.ID
+		})
 		tasks, err := store.ListTasks(ctx)
 		if err != nil {
 			return err
