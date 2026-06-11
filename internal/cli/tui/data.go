@@ -140,6 +140,17 @@ type JobRow struct {
 	LatestEvent string
 }
 
+// JobDetail is the job's parsed payload, loaded lazily when its detail opens
+// (the request/result is only ever shown for one job, so it is not parsed for
+// the whole list on every refresh tick).
+type JobDetail struct {
+	Repo           string
+	PullRequest    int
+	Request        string // the human instructions that drove the job
+	ResultDecision string // gitmoot_result.decision, when the job has settled
+	ResultSummary  string // gitmoot_result.summary
+}
+
 // JobEventView is one entry of a job's event history shown in the detail view.
 type JobEventView struct {
 	Kind    string
@@ -187,9 +198,11 @@ type Deps struct {
 	// detail view.
 	OpenTrain func(sessionID string) tea.Model
 
-	// Job actions: event history (detail view), retry a failed/blocked job,
-	// cancel a queued/running one (cooperative — the daemon settles it).
+	// Job actions: event history + parsed payload (detail view), retry a
+	// failed/blocked job, cancel a queued/running one (cooperative — the
+	// daemon settles it).
 	JobEvents func(id string) ([]JobEventView, error)
+	JobDetail func(id string) (JobDetail, error)
 	RetryJob  func(id string) error
 	CancelJob func(id string) error
 
@@ -287,6 +300,13 @@ type dismissResultMsg struct {
 type jobEventsMsg struct {
 	id     string
 	events []JobEventView
+	err    error
+}
+
+// jobDetailMsg carries a job's parsed payload for the detail view.
+type jobDetailMsg struct {
+	id     string
+	detail JobDetail
 	err    error
 }
 

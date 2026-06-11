@@ -8,16 +8,18 @@ import (
 )
 
 // openJobDetail enters the job detail view for the job under the Jobs cursor
-// and lazily loads its event history.
+// and lazily loads its event history and parsed payload (request/result).
 func (m *Model) openJobDetail(job JobRow) tea.Cmd {
 	m.activeJob = job
 	m.jobEvents = nil
 	m.jobEventsLoaded = false
 	m.jobEventsErr = ""
+	m.activeJobDetail = JobDetail{}
+	m.jobDetailLoaded = false
 	m.actionErr = ""
 	m.actionBusy = false
 	m.mode = modeJobDetail
-	return jobEventsCmd(m.deps, job.ID)
+	return tea.Batch(jobEventsCmd(m.deps, job.ID), jobDetailCmd(m.deps, job.ID))
 }
 
 // openJobConfirm enters the retry or cancel confirmation for the given job.
@@ -119,6 +121,16 @@ func jobEventsCmd(deps Deps, id string) tea.Cmd {
 	}
 }
 
+func jobDetailCmd(deps Deps, id string) tea.Cmd {
+	return func() tea.Msg {
+		if deps.JobDetail == nil {
+			return jobDetailMsg{id: id}
+		}
+		detail, err := deps.JobDetail(id)
+		return jobDetailMsg{id: id, detail: detail, err: err}
+	}
+}
+
 func jobActionCmd(action func(string) error, verb, id string) tea.Cmd {
 	return func() tea.Msg {
 		if action == nil {
@@ -134,6 +146,30 @@ func daemonStartCmd(deps Deps) tea.Cmd {
 			return daemonStartMsg{}
 		}
 		return daemonStartMsg{err: deps.StartDaemon()}
+	}
+}
+
+// clampLines preserves newlines (unlike truncate, which collapses whitespace)
+// but caps the block to maxLines, appending an elision marker when it overflows.
+func clampLines(value string, maxLines int) string {
+	lines := strings.Split(strings.TrimRight(value, "\n"), "\n")
+	if len(lines) <= maxLines {
+		return strings.Join(lines, "\n")
+	}
+	kept := lines[:maxLines]
+	return strings.Join(kept, "\n") + "\n" + mutedStyle.Render("… "+strconv.Itoa(len(lines)-maxLines)+" more lines")
+}
+
+// jobDecisionColor colors a gitmoot_result decision: blocked/failed red,
+// changes_requested neutral, everything else (approved/implemented) green.
+func jobDecisionColor(decision string) string {
+	switch decision {
+	case "blocked", "failed":
+		return redStyle.Render(decision)
+	case "approved", "implemented":
+		return greenStyle.Render(decision)
+	default:
+		return decision
 	}
 }
 
@@ -176,8 +212,36 @@ func (m Model) jobDetailView() string {
 		{"state", m.activeJob.State},
 		{"updated", dash(m.activeJob.UpdatedAt)},
 	}
+	d := m.activeJobDetail
+	if d.Repo != "" {
+		repo := d.Repo
+		if d.PullRequest > 0 {
+			repo += "  #" + strconv.Itoa(d.PullRequest)
+		}
+		rows = append(rows, []string{"repo", repo})
+	}
 	b.WriteString(renderRows(rows))
 	b.WriteByte('\n')
+
+	// What was asked (newlines preserved, capped to a few lines).
+	if d.Request != "" {
+		b.WriteString(headerStyle.Render("request"))
+		b.WriteByte('\n')
+		b.WriteString(clampLines(d.Request, 8) + "\n\n")
+	}
+	// What came back (settled jobs).
+	if d.ResultDecision != "" || d.ResultSummary != "" {
+		b.WriteString(headerStyle.Render("result"))
+		b.WriteByte('\n')
+		if d.ResultDecision != "" {
+			b.WriteString("decision  " + jobDecisionColor(d.ResultDecision) + "\n")
+		}
+		if d.ResultSummary != "" {
+			b.WriteString(clampLines(d.ResultSummary, 8) + "\n")
+		}
+		b.WriteByte('\n')
+	}
+
 	b.WriteString(headerStyle.Render("events"))
 	b.WriteByte('\n')
 	switch {

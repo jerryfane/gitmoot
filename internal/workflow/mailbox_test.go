@@ -468,3 +468,21 @@ func (f *fakeDelivery) Deliver(_ context.Context, _ runtime.Agent, job runtime.J
 	}
 	return result, nil
 }
+
+func TestParseJobPayloadExported(t *testing.T) {
+	encoded, err := marshalPayload(JobPayload{Repo: "o/r", PullRequest: 7, Instructions: "do it", Result: &AgentResult{Decision: "approved", Summary: "done"}})
+	if err != nil {
+		t.Fatalf("marshalPayload: %v", err)
+	}
+	got, err := ParseJobPayload(encoded)
+	if err != nil {
+		t.Fatalf("ParseJobPayload: %v", err)
+	}
+	if got.Repo != "o/r" || got.PullRequest != 7 || got.Result == nil || got.Result.Decision != "approved" {
+		t.Fatalf("round-trip wrong: %+v", got)
+	}
+	// Empty/malformed input errors (caller treats as no detail).
+	if _, err := ParseJobPayload(""); err == nil {
+		t.Fatal("empty payload should error")
+	}
+}

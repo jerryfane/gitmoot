@@ -51,8 +51,7 @@ func TestJobsPageDetailLoadsEvents(t *testing.T) {
 	if m.mode != modeJobDetail || cmd == nil {
 		t.Fatalf("enter should open the job detail, mode=%v", m.mode)
 	}
-	next, _ = m.Update(cmd()) // jobEventsMsg
-	m = next.(Model)
+	m = drainBatch(t, m, cmd) // events + detail load
 	if asked != "j-failed" {
 		t.Fatalf("JobEvents asked for %q", asked)
 	}
@@ -245,8 +244,7 @@ func TestJobDetailZeroEventsShowsNoEvents(t *testing.T) {
 	if !strings.Contains(m.View(), "loading…") {
 		t.Fatalf("detail should show loading before the events arrive:\n%s", m.View())
 	}
-	next, _ = m.Update(cmd())
-	m = next.(Model)
+	m = drainBatch(t, m, cmd)
 	if !strings.Contains(m.View(), "no events") {
 		t.Fatalf("an empty (loaded) history should say so, not keep loading:\n%s", m.View())
 	}
@@ -287,5 +285,74 @@ func TestJobActionErrorKeepsConfirm(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "db locked") {
 		t.Fatalf("error should render:\n%s", m.View())
+	}
+}
+
+func drainBatch(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range batch {
+			if sub != nil {
+				next, _ := m.Update(sub())
+				m = next.(Model)
+			}
+		}
+		return m
+	}
+	next, _ := m.Update(msg)
+	return next.(Model)
+}
+
+func TestJobDetailShowsRequestAndResult(t *testing.T) {
+	deps := Deps{
+		JobEvents: func(id string) ([]JobEventView, error) {
+			return []JobEventView{{Kind: "failed", Message: "boom"}}, nil
+		},
+		JobDetail: func(id string) (JobDetail, error) {
+			return JobDetail{Repo: "o/r", PullRequest: 7, Request: "Plan the auth refactor.",
+				ResultDecision: "failed", ResultSummary: "the checkout is read-only"}, nil
+		},
+	}
+	m := jobsModel(t, deps, jobsSnapshot())
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	m = drainBatch(t, m, cmd)
+	view := m.View()
+	for _, want := range []string{"repo", "o/r", "#7", "request", "Plan the auth refactor", "result", "decision", "failed", "read-only", "events"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("job detail missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestJobDetailOmitsBlocksWhenAbsent(t *testing.T) {
+	deps := Deps{
+		JobEvents: func(id string) ([]JobEventView, error) { return nil, nil },
+		JobDetail: func(id string) (JobDetail, error) { return JobDetail{}, nil },
+	}
+	m := jobsModel(t, deps, jobsSnapshot())
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	m = drainBatch(t, m, cmd)
+	view := m.View()
+	if strings.Contains(view, "request") || strings.Contains(view, "result") {
+		t.Fatalf("a job without payload content should omit request/result blocks:\n%s", view)
+	}
+}
+
+func TestJobDetailClampLines(t *testing.T) {
+	got := clampLines("a\nb\nc\nd\ne", 3)
+	if !strings.Contains(got, "a\nb\nc") || !strings.Contains(got, "2 more lines") {
+		t.Fatalf("clampLines = %q", got)
+	}
+	// Within the cap, newlines are preserved verbatim (not collapsed).
+	if clampLines("one\ntwo", 5) != "one\ntwo" {
+		t.Fatalf("clampLines should preserve newlines under the cap")
 	}
 }

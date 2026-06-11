@@ -100,6 +100,8 @@ type Model struct {
 	jobEvents       []JobEventView      // lazy-loaded event history for the detail view
 	jobEventsLoaded bool                // the detail's event load has returned (possibly empty)
 	jobEventsErr    string              // error from the detail's event load
+	activeJobDetail JobDetail           // lazy-loaded parsed payload (request/result)
+	jobDetailLoaded bool                // the detail's payload load has returned
 	cancelling      map[string]struct{} // jobs with a cancel requested, until settled
 	daemonBusy      bool                // a daemon start is in flight; suppress re-submit
 	daemonErr       string              // error from the last daemon start attempt
@@ -420,6 +422,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.jobEventsErr = ""
 				m.jobEvents = msg.events
 			}
+		}
+	case jobDetailMsg:
+		// A malformed/absent payload yields a zero JobDetail and no error; the
+		// detail simply omits the request/result blocks.
+		if msg.id == m.activeJob.ID {
+			m.jobDetailLoaded = true
+			m.activeJobDetail = msg.detail
 		}
 	case healthChecksMsg:
 		m.healthLoading = false

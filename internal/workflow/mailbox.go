@@ -366,6 +366,13 @@ func marshalPayload(payload JobPayload) (string, error) {
 	return string(encoded), nil
 }
 
+// ParseJobPayload decodes a stored job payload (the same form the mailbox
+// writes), tolerating the legacy preset_* keys. Read-only callers — e.g. the
+// dashboard's job detail — use this to surface the request and result.
+func ParseJobPayload(value string) (JobPayload, error) {
+	return unmarshalPayload(value)
+}
+
 func unmarshalPayload(value string) (JobPayload, error) {
 	var payload JobPayload
 	if err := json.Unmarshal([]byte(value), &payload); err != nil {

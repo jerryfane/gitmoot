@@ -129,6 +129,29 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 			})
 			return views, err
 		},
+		JobDetail: func(id string) (tui.JobDetail, error) {
+			// Lazy: parse the one opened job's payload, not every job per tick.
+			var detail tui.JobDetail
+			err := withStore(home, func(store *db.Store) error {
+				job, err := store.GetJob(context.Background(), id)
+				if err != nil {
+					return err
+				}
+				payload, err := workflow.ParseJobPayload(job.Payload)
+				if err != nil {
+					return nil // malformed/absent payload → empty detail, no error
+				}
+				detail.Repo = payload.Repo
+				detail.PullRequest = payload.PullRequest
+				detail.Request = payload.Instructions
+				if payload.Result != nil {
+					detail.ResultDecision = payload.Result.Decision
+					detail.ResultSummary = payload.Result.Summary
+				}
+				return nil
+			})
+			return detail, err
+		},
 		RetryJob: func(id string) error {
 			// workflow.RetryJob is the same path `gitmoot job retry` takes: it
 			// clears the stale payload.Result and emits the retry_queued event
