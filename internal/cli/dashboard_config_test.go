@@ -109,3 +109,27 @@ func TestEditConfigCmdHonorsEditorEnv(t *testing.T) {
 	// cmd must be non-nil and the env path is exercised in the hand test.
 	_ = tea.Cmd(cmd)
 }
+
+func TestConfigScalarForKind(t *testing.T) {
+	intVal := configScalarForKind(tui.ConfigInt, "8")
+	strVal := configScalarForKind(tui.ConfigDuration, "15m")
+	repoVal := configScalarForKind(tui.ConfigText, "owner/x")
+	// Apply each to a fixture and confirm the stored TOML type round-trips.
+	paths := writeConfig(t, sampleConfigTOML)
+	if err := config.SetConfigScalar(paths, []string{"agents", "planner", "max_background"}, intVal); err != nil {
+		t.Fatalf("int write: %v", err)
+	}
+	if err := config.SetConfigScalar(paths, []string{"agents", "planner", "idle_timeout"}, strVal); err != nil {
+		t.Fatalf("duration write: %v", err)
+	}
+	if err := config.SetConfigScalar(paths, []string{"feedback", "repo"}, repoVal); err != nil {
+		t.Fatalf("repo write: %v", err)
+	}
+	types, err := config.LoadAgentTypes(paths)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if types["planner"].MaxBackground != 8 || types["planner"].IdleTimeout != "15m" {
+		t.Fatalf("typed writes wrong: %+v", types["planner"])
+	}
+}

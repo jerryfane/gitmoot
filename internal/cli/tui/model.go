@@ -62,6 +62,7 @@ const (
 	modeAgentRevertPick
 	modeConfirmAgentRevert
 	modeConfirmAgentDelete
+	modeConfigEdit
 )
 
 const defaultInterval = 5 * time.Second
@@ -111,8 +112,11 @@ type Model struct {
 	healthErr     string
 
 	// Config page state.
-	configProblems []string // validation problems after an edit (empty = valid)
-	configEditErr  string   // the editor itself failed to launch/run
+	configProblems  []string    // validation problems after an $EDITOR edit (empty = valid)
+	configEditErr   string      // the editor itself failed to launch/run
+	configCursor    int         // selected editable field on the Config page
+	configField     ConfigField // field being edited inline
+	configActionErr string      // inline write error in the edit overlay
 
 	// Trains page action state.
 	pendingRepos []string // gitmoot-created repos offered for cleanup after a delete
@@ -186,6 +190,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			return m.updateAgentOverlay(msg)
+		case modeConfigEdit:
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			return m.updateConfigOverlay(msg)
 		}
 		if m.mode != modeNormal {
 			return m.updateOverlay(msg)
@@ -261,6 +270,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmds...)
 			}
 		case "enter":
+			if pages[m.selected].page == pageConfig {
+				fields := m.configEditableFields()
+				if m.deps.SetConfigScalar != nil && m.configCursor < len(fields) {
+					cmd := m.openConfigEdit(fields[m.configCursor])
+					m.viewport.SetContent(m.content())
+					return m, cmd
+				}
+				return m, tea.Batch(cmds...)
+			}
 			if pages[m.selected].page == pageTrains {
 				// With a Root router, open the full train-run view; otherwise the
 				// inline detail (keeps the model usable standalone and old tests
@@ -411,6 +429,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.healthErr = ""
 			m.healthChecks = msg.checks
+		}
+	case configWriteMsg:
+		if m.mode == modeConfigEdit {
+			m.actionBusy = false
+			if msg.err != nil {
+				m.configActionErr = msg.err.Error()
+			} else {
+				m.mode = modeNormal
+				m.configActionErr = ""
+				if cmd := m.queueLoad(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
 		}
 	case ConfigEditedMsg:
 		if msg.Err != nil {
@@ -606,6 +637,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampTrainCursor()
 			m.clampJobCursor()
 			m.agentCursor = clampCursor(m.agentCursor, len(m.snap.Agents))
+			m.configCursor = clampCursor(m.configCursor, len(m.configEditableFields()))
 			// A cancel-requested job that has settled no longer needs the
 			// transitional "cancelling…" label.
 			for id := range m.cancelling {
@@ -727,6 +759,8 @@ func (m *Model) pageCursor() (*int, int) {
 		return &m.agentCursor, len(m.snap.Agents)
 	case pageJobs:
 		return &m.jobCursor, len(m.snap.JobRows)
+	case pageConfig:
+		return &m.configCursor, len(m.configEditableFields())
 	}
 	return nil, 0
 }

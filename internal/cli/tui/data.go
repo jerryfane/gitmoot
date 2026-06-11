@@ -57,12 +57,39 @@ type ConfigView struct {
 // ConfigSection is one titled group of key/value rows on the Config page.
 type ConfigSection struct {
 	Title string
-	Rows  [][]string // each row is {key, value}
+	Rows  [][]string // each row is {key, value}; for tables, the first row is a header
+
+	// Editable lists the inline-editable scalar fields in this section, in the
+	// order they should be cycled. Sections without editable fields (paths,
+	// daemon) omit it; structural edits stay in $EDITOR.
+	Editable []ConfigField
+}
+
+// ConfigKind classifies how an inline config edit is validated.
+type ConfigKind int
+
+const (
+	ConfigText     ConfigKind = iota // free text (e.g. owner/repo, checked by Validate)
+	ConfigInt                        // integer ≥ 1
+	ConfigDuration                   // Go duration string (10m, 45m)
+)
+
+// ConfigField is one inline-editable scalar on the Config page.
+type ConfigField struct {
+	Label   string     // human label, e.g. "planner · max_background"
+	KeyPath []string   // full dotted path for the writer, e.g. {agents, planner, max_background}
+	Kind    ConfigKind //
+	Value   string     // current value (prefilled in the editor)
 }
 
 // ConfigEditedMsg is delivered when the external editor (Deps.EditConfig) exits.
 type ConfigEditedMsg struct {
 	Err error
+}
+
+// configWriteMsg carries the outcome of an inline Deps.SetConfigScalar write.
+type configWriteMsg struct {
+	err error
 }
 
 // HealthCheck is one environment/runtime diagnostic for the Health page.
@@ -207,6 +234,12 @@ type Deps struct {
 	// and returns human-readable problems (empty when valid).
 	EditConfig     func() tea.Cmd
 	ValidateConfig func() []string
+
+	// SetConfigScalar writes one scalar config field (comment-preserving) and
+	// returns an error on an invalid value or a write that fails to re-parse.
+	// The kind tells the writer how to type the TOML value (int vs string),
+	// so the field's classification is the single source of truth.
+	SetConfigScalar func(keyPath []string, value string, kind ConfigKind) error
 }
 
 // TemplateVersion is one row of a template's version history.

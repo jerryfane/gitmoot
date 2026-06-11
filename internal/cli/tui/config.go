@@ -1,6 +1,117 @@
 package tui
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// configEditableFields flattens the inline-editable fields across all config
+// sections, in render order — the Config page's cursor indexes into this.
+func (m Model) configEditableFields() []ConfigField {
+	var fields []ConfigField
+	for _, section := range m.snap.Config.Sections {
+		fields = append(fields, section.Editable...)
+	}
+	return fields
+}
+
+// openConfigEdit enters the inline edit overlay for a scalar field.
+func (m *Model) openConfigEdit(field ConfigField) tea.Cmd {
+	m.configField = field
+	m.configActionErr = ""
+	m.mode = modeConfigEdit
+	ti := textinput.New()
+	ti.SetValue(field.Value)
+	ti.CursorEnd()
+	m.input = ti
+	return m.input.Focus()
+}
+
+// updateConfigOverlay handles keys while editing a scalar config field.
+func (m Model) updateConfigOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.actionBusy {
+			return m, nil
+		}
+		m.mode = modeNormal
+		m.configActionErr = ""
+		m.viewport.SetContent(m.content())
+		return m, nil
+	case "enter":
+		if m.actionBusy {
+			return m, nil
+		}
+		value := strings.TrimSpace(m.input.Value())
+		if problem := validateConfigValue(m.configField.Kind, value); problem != "" {
+			m.configActionErr = problem
+			m.viewport.SetContent(m.content())
+			return m, nil
+		}
+		m.actionBusy = true
+		m.configActionErr = ""
+		m.viewport.SetContent(m.content())
+		return m, configWriteCmd(m.deps, m.configField.KeyPath, value, m.configField.Kind)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	m.viewport.SetContent(m.content())
+	return m, cmd
+}
+
+// validateConfigValue checks a value's shape before the write attempt, so a
+// typo re-asks in the overlay instead of round-tripping through the writer.
+func validateConfigValue(kind ConfigKind, value string) string {
+	switch kind {
+	case ConfigInt:
+		if n, err := strconv.Atoi(value); err != nil || n < 1 {
+			return "must be an integer ≥ 1"
+		}
+	case ConfigDuration:
+		d, err := time.ParseDuration(value)
+		if err != nil || d <= 0 {
+			return "must be a positive duration like 10m or 45m"
+		}
+	case ConfigText:
+		if value == "" {
+			return "value is required"
+		}
+	}
+	return ""
+}
+
+func configWriteCmd(deps Deps, keyPath []string, value string, kind ConfigKind) tea.Cmd {
+	return func() tea.Msg {
+		if deps.SetConfigScalar == nil {
+			return configWriteMsg{}
+		}
+		return configWriteMsg{err: deps.SetConfigScalar(keyPath, value, kind)}
+	}
+}
+
+// configEditView renders the inline edit overlay.
+func (m Model) configEditView() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("edit " + m.configField.Label))
+	b.WriteString("\n\n")
+	b.WriteString(strings.Join(m.configField.KeyPath, ".") + "\n\n")
+	b.WriteString(m.input.View())
+	b.WriteByte('\n')
+	if m.configActionErr != "" {
+		b.WriteString("\n" + errorStyle.Render(m.configActionErr) + "\n")
+	}
+	b.WriteString("\n")
+	if m.actionBusy {
+		b.WriteString(mutedStyle.Render("writing…"))
+	} else {
+		b.WriteString(mutedStyle.Render("enter save  esc cancel"))
+	}
+	return b.String()
+}
 
 // configContent renders the Config page: each parsed section as a key/value
 // table, the config file path, and any validation problems from the last edit.
@@ -26,6 +137,21 @@ func (m Model) configContent() string {
 		b.WriteByte('\n')
 	}
 
+	// Inline-editable scalars as a cursor list (enter to change one).
+	fields := m.configEditableFields()
+	if len(fields) > 0 {
+		b.WriteString(headerStyle.Render("editable settings"))
+		b.WriteByte('\n')
+		for i, field := range fields {
+			cursor, label := "  ", field.Label
+			if i == m.configCursor {
+				cursor, label = "▸ ", selectedRowStyle.Render(field.Label)
+			}
+			b.WriteString(cursor + label + "  " + mutedStyle.Render(dash(field.Value)) + "\n")
+		}
+		b.WriteByte('\n')
+	}
+
 	if m.configEditErr != "" {
 		b.WriteString(errorStyle.Render("editor: "+m.configEditErr) + "\n")
 	}
@@ -37,7 +163,11 @@ func (m Model) configContent() string {
 		b.WriteString(mutedStyle.Render("e to fix") + "\n")
 	}
 
-	b.WriteString("\n" + mutedStyle.Render("e edit in $EDITOR · structural edits stay in the editor"))
+	hint := "e edit in $EDITOR · structural edits stay in the editor"
+	if len(fields) > 0 {
+		hint = "↑/↓ select · enter change · " + hint
+	}
+	b.WriteString("\n" + mutedStyle.Render(hint))
 	b.WriteByte('\n')
 	return b.String()
 }

@@ -96,6 +96,8 @@ func (m Model) content() string {
 		b.WriteString(m.agentRevertConfirmView())
 	case modeConfirmAgentDelete:
 		b.WriteString(m.agentDeleteConfirmView())
+	case modeConfigEdit:
+		b.WriteString(m.configEditView())
 	default:
 		switch pages[m.selected].page {
 		case pageAttention:
@@ -159,7 +161,9 @@ func (m Model) helpContent() string {
 		b.WriteString("r    re-run the environment checks\n")
 		b.WriteString("s    start the daemon when it is stopped\n")
 	case pageConfig:
-		b.WriteString("the parsed config sections (read-only here)\n")
+		b.WriteString("the parsed config sections + inline-editable settings\n")
+		b.WriteString("↑/↓  select an editable setting\n")
+		b.WriteString("enter change the selected setting (validated, comment-preserving)\n")
 		b.WriteString("e    edit config.toml in $EDITOR; re-validated on return\n")
 		b.WriteString("     structural edits (add/remove agent types) stay in the editor\n")
 	default:
@@ -200,6 +204,8 @@ func (m Model) footerHelp() string {
 		return "↑/↓ pick  enter confirm  esc back"
 	case modeConfirmAgentRevert, modeConfirmAgentDelete:
 		return "y confirm  n/esc cancel"
+	case modeConfigEdit:
+		return "type value  enter save  esc cancel"
 	}
 	switch pages[m.selected].page {
 	case pageAttention:
@@ -213,7 +219,7 @@ func (m Model) footerHelp() string {
 	case pageHealth:
 		return "tab/←→ page  r re-run checks  s start daemon  ? help  q quit"
 	case pageConfig:
-		return "tab/←→ page  e edit in $EDITOR  ? help  q quit"
+		return "tab/←→ page  ↑/↓ select  enter change  e editor  ? help  q quit"
 	}
 	return "tab/←→ page  j/k or wheel scroll  r refresh  q quit"
 }

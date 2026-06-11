@@ -35,14 +35,26 @@ func buildDashboardConfigView(paths config.Paths, daemon dashboardDaemonDetail) 
 		}
 		sort.Strings(names)
 		rows := [][]string{{"NAME", "RUNTIME", "TEMPLATE", "ROLE", "MAX_BG", "IDLE", "JOB"}}
+		var editable []tui.ConfigField
 		for _, name := range names {
 			t := types[name]
 			rows = append(rows, []string{
 				name, t.Runtime, t.Template, dashConfig(t.Role),
 				strconv.Itoa(t.MaxBackground), dashConfig(t.IdleTimeout), dashConfig(t.JobTimeout),
 			})
+			// Scalar fields safe to edit inline; the rest (runtime, template,
+			// capabilities, adding/removing types) stay an $EDITOR job.
+			editable = append(editable,
+				tui.ConfigField{Label: name + " · max_background", KeyPath: []string{"agents", name, "max_background"}, Kind: tui.ConfigInt, Value: strconv.Itoa(t.MaxBackground)},
+			)
+			if strings.TrimSpace(t.IdleTimeout) != "" {
+				editable = append(editable, tui.ConfigField{Label: name + " · idle_timeout", KeyPath: []string{"agents", name, "idle_timeout"}, Kind: tui.ConfigDuration, Value: t.IdleTimeout})
+			}
+			if strings.TrimSpace(t.JobTimeout) != "" {
+				editable = append(editable, tui.ConfigField{Label: name + " · job_timeout", KeyPath: []string{"agents", name, "job_timeout"}, Kind: tui.ConfigDuration, Value: t.JobTimeout})
+			}
 		}
-		view.Sections = append(view.Sections, tui.ConfigSection{Title: "agent types", Rows: rows})
+		view.Sections = append(view.Sections, tui.ConfigSection{Title: "agent types", Rows: rows, Editable: editable})
 	}
 
 	if policy, err := config.LoadParallelSessionPolicy(paths); err == nil {
@@ -57,10 +69,13 @@ func buildDashboardConfigView(paths config.Paths, daemon dashboardDaemonDetail) 
 		})
 	}
 
-	if repo, err := config.LoadDefaultFeedbackRepo(paths); err == nil {
+	if repo, err := config.LoadDefaultFeedbackRepo(paths); err == nil && strings.TrimSpace(repo) != "" {
 		view.Sections = append(view.Sections, tui.ConfigSection{
 			Title: "feedback",
 			Rows:  [][]string{{"repo", dashConfig(repo)}},
+			Editable: []tui.ConfigField{
+				{Label: "feedback · repo", KeyPath: []string{"feedback", "repo"}, Kind: tui.ConfigText, Value: repo},
+			},
 		})
 	}
 
@@ -76,6 +91,18 @@ func buildDashboardConfigView(paths config.Paths, daemon dashboardDaemonDetail) 
 	}
 
 	return view
+}
+
+// configScalarForKind types the value for the writer from the field's own
+// classification (the single source of truth), so a new int field cannot be
+// mis-written as a string. Durations and repos are stored as TOML strings.
+func configScalarForKind(kind tui.ConfigKind, value string) config.ConfigScalar {
+	if kind == tui.ConfigInt {
+		if n, err := strconv.Atoi(value); err == nil {
+			return config.IntScalar(n)
+		}
+	}
+	return config.StringScalar(value)
 }
 
 func dashConfig(value string) string {

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jerryfane/gitmoot/internal/cli/tui"
+	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/doctor"
 	"github.com/jerryfane/gitmoot/internal/skillopt"
@@ -286,6 +287,13 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 				return []string{err.Error()}
 			}
 			return validateDashboardConfig(paths)
+		},
+		SetConfigScalar: func(keyPath []string, value string, kind tui.ConfigKind) error {
+			paths, err := initializedPaths(home)
+			if err != nil {
+				return err
+			}
+			return config.SetConfigScalar(paths, keyPath, configScalarForKind(kind, value))
 		},
 		HealthChecks: func() ([]tui.HealthCheck, error) {
 			checks := doctor.Checker{Dir: "."}.Run(context.Background())

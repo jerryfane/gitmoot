@@ -117,3 +117,125 @@ func TestConfigEditNoOpWithoutDep(t *testing.T) {
 		t.Fatal("e without an EditConfig dep must be a no-op")
 	}
 }
+
+func configEditSnapshot() Snapshot {
+	return Snapshot{
+		Daemon: Daemon{Running: true},
+		Config: ConfigView{
+			Path: "/home/.gitmoot/config.toml",
+			Sections: []ConfigSection{
+				{Title: "agent types", Rows: [][]string{{"NAME"}, {"planner"}}, Editable: []ConfigField{
+					{Label: "planner · max_background", KeyPath: []string{"agents", "planner", "max_background"}, Kind: ConfigInt, Value: "4"},
+					{Label: "planner · idle_timeout", KeyPath: []string{"agents", "planner", "idle_timeout"}, Kind: ConfigDuration, Value: "10m"},
+				}},
+				{Title: "feedback", Rows: [][]string{{"repo", "owner/feedback"}}, Editable: []ConfigField{
+					{Label: "feedback · repo", KeyPath: []string{"feedback", "repo"}, Kind: ConfigText, Value: "owner/feedback"},
+				}},
+			},
+		},
+	}
+}
+
+func configEditModel(t *testing.T, deps Deps) Model {
+	t.Helper()
+	snap := configEditSnapshot()
+	if deps.Load == nil {
+		deps.Load = func() (Snapshot, error) { return snap, nil }
+	}
+	m := sizedModel(deps)
+	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
+	m = next.(Model)
+	for pages[m.selected].page != pageConfig {
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = next.(Model)
+		if cmd != nil {
+			cmd()
+		}
+	}
+	return m
+}
+
+func TestConfigInlineEditWritesScalar(t *testing.T) {
+	var gotPath []string
+	var gotValue string
+	deps := Deps{SetConfigScalar: func(keyPath []string, value string, kind ConfigKind) error {
+		gotPath, gotValue = keyPath, value
+		return nil
+	}}
+	m := configEditModel(t, deps)
+	// Cursor on the first editable field (planner · max_background).
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.mode != modeConfigEdit || cmd == nil {
+		t.Fatalf("enter should open the inline editor, mode=%v", m.mode)
+	}
+	// Clear "4", type "8".
+	for range "4" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		m = next.(Model)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("8")})
+	m = next.(Model)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(gotPath) != 3 || gotPath[2] != "max_background" || gotValue != "8" {
+		t.Fatalf("SetConfigScalar called with (%v, %q)", gotPath, gotValue)
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("a successful write should close the editor, mode=%v", m.mode)
+	}
+}
+
+func TestConfigInlineEditValidatesBeforeWrite(t *testing.T) {
+	deps := Deps{SetConfigScalar: func(keyPath []string, value string, kind ConfigKind) error {
+		t.Fatal("must not write an invalid value")
+		return nil
+	}}
+	m := configEditModel(t, deps)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open editor on max_background (int)
+	m = next.(Model)
+	for range "4" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		m = next.(Model)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("abc")})
+	m = next.(Model)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd != nil {
+		t.Fatal("an invalid int must not dispatch a write")
+	}
+	if m.mode != modeConfigEdit || !strings.Contains(m.View(), "integer ≥ 1") {
+		t.Fatalf("invalid value should re-ask in the overlay:\n%s", m.View())
+	}
+}
+
+func TestConfigInlineEditWriteErrorKeepsOverlay(t *testing.T) {
+	deps := Deps{SetConfigScalar: func(keyPath []string, value string, kind ConfigKind) error {
+		return errors.New("config invalid after edit (reverted)")
+	}}
+	m := configEditModel(t, deps)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // submit unchanged value
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.mode != modeConfigEdit || !strings.Contains(m.View(), "reverted") {
+		t.Fatalf("a write error should keep the overlay with the message:\n%s", m.View())
+	}
+}
+
+func TestConfigDurationFieldValidation(t *testing.T) {
+	if validateConfigValue(ConfigDuration, "10m") != "" {
+		t.Fatal("10m should be a valid duration")
+	}
+	if validateConfigValue(ConfigDuration, "nope") == "" {
+		t.Fatal("nope should be rejected as a duration")
+	}
+	if validateConfigValue(ConfigInt, "0") == "" {
+		t.Fatal("0 should be rejected (must be >= 1)")
+	}
+}
