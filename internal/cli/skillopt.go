@@ -2652,7 +2652,69 @@ func continueSkillOptTrainCandidateDecision(ctx context.Context, store *db.Store
 		output.Lines = lines
 		return output, nil
 	}
-	return continueSkillOptTrainAfterCandidateDecision(ctx, store, session.ID, request, result)
+	// Reflect the decision on the candidate-review issue so it doesn't sit open
+	// with no record of the choice (works for a TUI p/x or the --promote/--reject
+	// flags). Best-effort: a GitHub failure never undoes the recorded decision.
+	decisionNotice := postSkillOptTrainCandidateDecisionComment(ctx, iteration, result, request)
+	out, err := continueSkillOptTrainAfterCandidateDecision(ctx, store, session.ID, request, result)
+	// Surface the GitHub notice whether or not the follow-up (e.g. --start-next)
+	// succeeded — the decision was made and posted regardless.
+	if decisionNotice != "" {
+		out.Lines = append(out.Lines, decisionNotice)
+	}
+	return out, err
+}
+
+// postSkillOptTrainCandidateDecisionComment posts a promote/reject decision to the
+// candidate-review issue (or PR) and closes the issue. It is best-effort and
+// returns a one-line notice (or a warning) for the continue output; the recorded
+// decision stands regardless. The comment carries a gitmoot marker so the review
+// watcher skips it.
+func postSkillOptTrainCandidateDecisionComment(ctx context.Context, iteration db.SkillOptTrainIteration, result skillOptTrainCandidateDecisionResult, request skillOptTrainContinueRequest) string {
+	repoName := strings.TrimSpace(iteration.IssueRepo)
+	number := iteration.IssueNumber
+	onIssue := repoName != "" && number > 0
+	if !onIssue {
+		repoName = strings.TrimSpace(iteration.PullRequestRepo)
+		number = iteration.PullRequestNumber
+	}
+	if repoName == "" || number <= 0 {
+		return ""
+	}
+	repo, err := daemon.ParseRepository(repoName)
+	if err != nil {
+		return fmt.Sprintf("warning: candidate-review repo %q is unparseable; decision not posted: %v", repoName, err)
+	}
+	version := strings.TrimSpace(result.CandidateVersionID)
+	if version == "" {
+		version = strings.TrimSpace(firstNonEmpty(request.PromoteCandidate, request.RejectCandidate))
+	}
+	var body strings.Builder
+	body.WriteString(skillOptTrainDecisionMarker + "\n")
+	switch {
+	case strings.Contains(result.Decision, "promot"):
+		fmt.Fprintf(&body, "✅ Promoted `%s` from gitmoot.", version)
+	case strings.Contains(result.Decision, "reject"):
+		fmt.Fprintf(&body, "❌ Rejected `%s` from gitmoot.", version)
+		if reason := strings.TrimSpace(request.DecisionReason); reason != "" {
+			fmt.Fprintf(&body, "\n\nReason: %s", reason)
+		}
+	default:
+		fmt.Fprintf(&body, "Decision recorded for `%s`: %s", version, result.Decision)
+	}
+	client := newSkillOptGitHubClient()
+	if _, err := client.PostIssueComment(ctx, repo, number, body.String()); err != nil {
+		return fmt.Sprintf("warning: could not post the decision to %s#%d: %v", repo.FullName(), number, err)
+	}
+	notice := fmt.Sprintf("candidate_review: posted the decision to %s#%d", repo.FullName(), number)
+	// Only close a dedicated review issue; never close a user's pull request.
+	if onIssue {
+		if _, err := client.CloseIssue(ctx, repo, number); err != nil {
+			return notice + fmt.Sprintf(" (could not close it: %v)", err)
+		}
+		notice += " and closed it"
+	}
+	return notice
 }
 
 func continueSkillOptTrainAfterCandidateDecision(ctx context.Context, store *db.Store, sessionID string, request skillOptTrainContinueRequest, result skillOptTrainCandidateDecisionResult) (skillOptTrainContinueOutput, error) {

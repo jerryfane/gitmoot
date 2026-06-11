@@ -6854,8 +6854,16 @@ func TestSkillOptTrainContinueRecoversCandidateReviewFromSidecar(t *testing.T) {
 	if !strings.Contains(stdout.String(), "current_phase: candidate_promoted") || !strings.Contains(stdout.String(), "promoted_candidate: planner@v2") {
 		t.Fatalf("sidecar recovery stdout = %s", stdout.String())
 	}
-	if fakeGitHub.createdIssue.Repo.FullName() != "" || len(fakeGitHub.postedComments) != 0 {
-		t.Fatalf("sidecar recovery reposted github state: issue=%+v comments=%+v", fakeGitHub.createdIssue, fakeGitHub.postedComments)
+	// The recovery must not re-create the issue, but the promote now posts the
+	// decision to the recovered issue (#8) so it reflects the choice.
+	if fakeGitHub.createdIssue.Repo.FullName() != "" {
+		t.Fatalf("sidecar recovery must not re-create the issue: %+v", fakeGitHub.createdIssue)
+	}
+	if len(fakeGitHub.postedComments) != 1 {
+		t.Fatalf("expected one decision comment on the recovered issue, got %+v", fakeGitHub.postedComments)
+	}
+	if c := fakeGitHub.postedComments[0]; c.IssueNumber != 8 || !strings.Contains(c.Body, skillOptTrainDecisionMarker) || !strings.Contains(c.Body, "Promoted") {
+		t.Fatalf("decision comment = %+v", fakeGitHub.postedComments[0])
 	}
 	if _, err := os.Stat(sidecarPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("sidecar still exists err=%v", err)

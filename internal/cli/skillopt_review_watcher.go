@@ -24,6 +24,7 @@ import (
 const skillOptReviewWatchErrorMarker = "<!-- gitmoot:skillopt-review-watch-error -->"
 const skillOptReviewWatchSuccessMarker = "<!-- gitmoot:skillopt-review-watch-success -->"
 const skillOptReviewWatchStaleMarker = "<!-- gitmoot:skillopt-review-watch-stale -->"
+const skillOptTrainDecisionMarker = "<!-- gitmoot:skillopt-candidate-decision -->"
 
 func pollSkillOptReviewWatches(ctx context.Context, paths config.Paths, store *db.Store, blobStore artifact.Store, gh github.Client, stdout io.Writer, dryRun bool, home string) (int, error) {
 	if store == nil {
@@ -242,6 +243,7 @@ func isGitmootSkillOptReviewWatchComment(body string) bool {
 	return strings.Contains(body, skillOptReviewWatchErrorMarker) ||
 		strings.Contains(body, skillOptReviewWatchSuccessMarker) ||
 		strings.Contains(body, skillOptReviewWatchStaleMarker) ||
+		strings.Contains(body, skillOptTrainDecisionMarker) ||
 		strings.Contains(body, "<!-- gitmoot:skillopt-feedback-packet -->") ||
 		strings.HasPrefix(body, "# Gitmoot SkillOpt Feedback:")
 }
