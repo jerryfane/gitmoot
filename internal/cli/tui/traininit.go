@@ -144,6 +144,9 @@ func (m TrainInitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inlineErr = "create failed: " + msg.err.Error()
 			return m, nil
 		}
+		// Make the just-created repo a selectable, pre-selected choice on every
+		// repo field so it is auto-selected here and reusable for the other one.
+		m.registerCreatedRepo(msg.value)
 		return m.commit(msg.value)
 	}
 	return m, nil
@@ -420,6 +423,45 @@ func newPathInput() textinput.Model {
 	ti := textinput.New()
 	ti.Placeholder = "template id, version, or file path"
 	return ti
+}
+
+// registerCreatedRepo records a newly-created repo on every repo field (those
+// with a CreateRepo callback): it inserts the repo as a selectable choice and
+// makes it the field's default, so the field it was created on shows it selected
+// on re-entry and the other repo field pre-selects it too.
+func (m *TrainInitModel) registerCreatedRepo(repo string) {
+	for i := range m.fields {
+		if m.fields[i].CreateRepo == nil {
+			continue
+		}
+		if m.fields[i].Kind == FieldChoice || m.fields[i].Kind == FieldTemplate {
+			m.fields[i].Choices = ensureRepoChoice(m.fields[i].Choices, repo)
+		}
+		m.fields[i].Default = repo
+	}
+}
+
+// ensureRepoChoice returns choices with repo present as a normal entry, inserted
+// before the first Custom ("another repo…") entry so it stays last. A repo
+// already in the list is left untouched (no duplicate).
+func ensureRepoChoice(choices []Choice, repo string) []Choice {
+	for _, c := range choices {
+		if c.Value == repo {
+			return choices
+		}
+	}
+	insertAt := len(choices)
+	for i, c := range choices {
+		if c.Custom {
+			insertAt = i
+			break
+		}
+	}
+	out := make([]Choice, 0, len(choices)+1)
+	out = append(out, choices[:insertAt]...)
+	out = append(out, Choice{Value: repo, Label: repo})
+	out = append(out, choices[insertAt:]...)
+	return out
 }
 
 func choiceIndex(choices []Choice, value string) int {
