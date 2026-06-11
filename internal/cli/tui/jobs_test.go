@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,67 @@ func jobsModel(t *testing.T, deps Deps, snap Snapshot) Model {
 		t.Fatalf("expected Jobs page, got %v", pages[m.selected].page)
 	}
 	return m
+}
+
+func TestFormatJobTime(t *testing.T) {
+	cases := map[string]string{
+		"2026-06-11 14:30:05":  "06-11 14:30",
+		"2026-01-02T15:04:05Z": "01-02 15:04",
+		"":                     "-",
+		"not a date":           "not a date",
+	}
+	for in, want := range cases {
+		if got := formatJobTime(in); got != want {
+			t.Fatalf("formatJobTime(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// An unparseable but long value is trimmed, not echoed whole.
+	if got := formatJobTime("2026-06-11-garbage-tail-xxxxxxxx"); len(got) != 16 {
+		t.Fatalf("long unparseable value should trim to 16 chars, got %q", got)
+	}
+}
+
+func TestJobsRowShowsTime(t *testing.T) {
+	snap := jobsSnapshot()
+	snap.JobRows[0].UpdatedAt = "2026-06-11 14:30:05"
+	m := jobsModel(t, Deps{}, snap)
+	if !strings.Contains(m.View(), "06-11 14:30") {
+		t.Fatalf("jobs row should show the formatted time:\n%s", m.View())
+	}
+}
+
+func TestJobsListWindowsLongList(t *testing.T) {
+	snap := Snapshot{Daemon: Daemon{Running: true}}
+	for i := 0; i < 100; i++ {
+		snap.JobRows = append(snap.JobRows, JobRow{
+			ID: "job-" + strconv.Itoa(i), Agent: "planner", Type: "ask", State: "succeeded",
+		})
+	}
+	m := jobsModel(t, Deps{}, snap)
+	cap := jobsWindowCap(m.height)
+	if cap >= 100 {
+		t.Fatalf("test needs a window smaller than the list; cap=%d", cap)
+	}
+	// Cursor at top: a "more" marker, no "earlier", and the last row is hidden.
+	view := m.View()
+	if !strings.Contains(view, "more") || strings.Contains(view, "earlier") {
+		t.Fatalf("top of a long list should show only a 'more' marker:\n%s", view)
+	}
+	if strings.Contains(view, "job-99 ") {
+		t.Fatalf("the far end should not render while the cursor is at the top")
+	}
+	// Drive the cursor to the last job; it must stay visible (window follows).
+	for i := 0; i < 99; i++ {
+		next, _ := m.Update(key("j"))
+		m = next.(Model)
+	}
+	view = m.View()
+	if !strings.Contains(view, "job-99") {
+		t.Fatalf("the selected last job must be visible after scrolling:\n%s", view)
+	}
+	if !strings.Contains(view, "earlier") {
+		t.Fatalf("the bottom of a long list should show an 'earlier' marker:\n%s", view)
+	}
 }
 
 func TestJobsPageDetailLoadsEvents(t *testing.T) {
