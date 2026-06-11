@@ -19,9 +19,13 @@ func trainPhaseSegment(phase string) int {
 	case "review_published", "feedback_synced":
 		return 1
 	case "training_package_created", "optimizer_running", "optimizer_heartbeat_stale",
-		"optimizer_completed", "optimizer_completed_no_candidate", "candidate_created":
+		"optimizer_completed", "optimizer_completed_no_candidate", "candidate_created",
+		// Stable optimizer-stage phases the CLI emits (no candidate yet).
+		"preflight_running", "blocked_config", "recovery_available", "failed_unrecoverable":
 		return 2
-	case "candidate_review_published", "candidate_promoted", "candidate_rejected":
+	case "candidate_review_published", "candidate_promoted", "candidate_rejected",
+		// The CLI collapses the candidate states into this stable display phase.
+		"optimizer_completed_candidate":
 		return 3
 	default:
 		return 0

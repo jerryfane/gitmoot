@@ -29,7 +29,13 @@ func TestTrainPhaseSegment(t *testing.T) {
 		"candidate_created":          2,
 		"candidate_review_published": 3,
 		"candidate_promoted":         3,
-		"something_unknown":          0,
+		// Stable display phases the view actually receives from the CLI.
+		"preflight_running":             2,
+		"blocked_config":                2,
+		"recovery_available":            2,
+		"failed_unrecoverable":          2,
+		"optimizer_completed_candidate": 3,
+		"something_unknown":             0,
 	}
 	for phase, want := range cases {
 		if got := trainPhaseSegment(phase); got != want {
