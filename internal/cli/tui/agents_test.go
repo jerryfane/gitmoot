@@ -252,6 +252,120 @@ func TestAgentSwitchRuntimeErrorStaysOpen(t *testing.T) {
 	}
 }
 
+func TestAgentCustomPromptRoutesToEditor(t *testing.T) {
+	var seededWith string
+	var createdPlain bool
+	deps := Deps{
+		CreateAgent: func(string, string, string) error { createdPlain = true; return nil },
+		EditAgentPrompt: func(seed string) tea.Cmd {
+			seededWith = seed
+			return func() tea.Msg { return AgentPromptEditedMsg{Content: "prompt with gitmoot_result"} }
+		},
+	}
+	m := agentsModel(t, deps, agentsSnapshot())
+	next, cmd := m.Update(agentFormResultMsg{result: Result{Values: map[string]string{
+		"name": "scout", "runtime": "claude", "template": agentCustomPromptValue, "seed": "planner-tpl",
+	}}})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("custom prompt should dispatch the editor command")
+	}
+	if createdPlain {
+		t.Fatal("custom prompt must not run the plain CreateAgent path")
+	}
+	// Run the editor command → AgentPromptEditedMsg.
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if seededWith != "planner-tpl" {
+		t.Fatalf("EditAgentPrompt seed = %q, want planner-tpl", seededWith)
+	}
+	if m.pendingAgentName != "" || m.pendingAgentRuntime != "" {
+		t.Fatalf("pending agent state should be cleared after the edit, got %q/%q", m.pendingAgentName, m.pendingAgentRuntime)
+	}
+}
+
+func TestAgentCustomPromptCreatesFromContent(t *testing.T) {
+	var got []string
+	deps := Deps{
+		EditAgentPrompt: func(string) tea.Cmd {
+			return func() tea.Msg { return AgentPromptEditedMsg{Content: "You are X.\nReturn gitmoot_result."} }
+		},
+		CreateAgentWithPrompt: func(name, runtime, content string) error {
+			got = []string{name, runtime, content}
+			return nil
+		},
+	}
+	m := agentsModel(t, deps, agentsSnapshot())
+	next, cmd := m.Update(agentFormResultMsg{result: Result{Values: map[string]string{
+		"name": "scout", "runtime": "claude", "template": agentCustomPromptValue, "seed": "",
+	}}})
+	m = next.(Model)
+	next, cmd = m.Update(cmd()) // editor msg → create cmd
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("a non-empty edit should dispatch the create")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(got) != 3 || got[0] != "scout" || got[1] != "claude" || got[2] != "You are X.\nReturn gitmoot_result." {
+		t.Fatalf("CreateAgentWithPrompt called with %v", got)
+	}
+	if m.agentNotice != "" {
+		t.Fatalf("a contract-bearing prompt should not warn: %q", m.agentNotice)
+	}
+}
+
+func TestAgentCustomPromptWarnsWithoutContract(t *testing.T) {
+	created := false
+	deps := Deps{
+		EditAgentPrompt: func(string) tea.Cmd {
+			return func() tea.Msg { return AgentPromptEditedMsg{Content: "just do stuff, no contract"} }
+		},
+		CreateAgentWithPrompt: func(string, string, string) error { created = true; return nil },
+	}
+	m := agentsModel(t, deps, agentsSnapshot())
+	next, cmd := m.Update(agentFormResultMsg{result: Result{Values: map[string]string{
+		"name": "scout", "runtime": "claude", "template": agentCustomPromptValue,
+	}}})
+	m = next.(Model)
+	next, cmd = m.Update(cmd()) // editor msg
+	m = next.(Model)
+	if m.agentNotice == "" || !strings.Contains(m.agentNotice, "gitmoot_result") {
+		t.Fatalf("missing-contract prompt should set a notice, got %q", m.agentNotice)
+	}
+	next, _ = m.Update(cmd()) // run create
+	m = next.(Model)
+	if !created {
+		t.Fatal("a missing-contract prompt should still create the agent")
+	}
+	// The notice must survive the create-success handler's agentErr reset.
+	if m.agentNotice == "" {
+		t.Fatal("the notice should persist after a successful create")
+	}
+}
+
+func TestAgentCustomPromptEditorErrorSurfaces(t *testing.T) {
+	deps := Deps{
+		EditAgentPrompt: func(string) tea.Cmd {
+			return func() tea.Msg { return AgentPromptEditedMsg{Err: errors.New("editor blew up")} }
+		},
+		CreateAgentWithPrompt: func(string, string, string) error {
+			t.Fatal("a failed edit must not create")
+			return nil
+		},
+	}
+	m := agentsModel(t, deps, agentsSnapshot())
+	next, cmd := m.Update(agentFormResultMsg{result: Result{Values: map[string]string{
+		"name": "scout", "runtime": "claude", "template": agentCustomPromptValue,
+	}}})
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if !strings.Contains(m.agentErr, "editor blew up") {
+		t.Fatalf("editor error should surface inline, got %q", m.agentErr)
+	}
+}
+
 func TestAgentCreateFlowRunsCreateAgent(t *testing.T) {
 	var created []string
 	form := NewAgentCreateForm(newFakeStore(), []Choice{{Value: "planner-tpl", Label: "planner"}})

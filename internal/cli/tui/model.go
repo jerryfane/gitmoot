@@ -147,8 +147,14 @@ type Model struct {
 	versionViewErr      string            //
 	versionViewLoaded   bool              //
 	agentErr            string            // inline error on the Agents page (e.g. create failed)
+	agentNotice         string            // non-blocking note on the Agents page (e.g. prompt missing contract)
 	optimizeBusy        bool              // a train session is being scaffolded/started
 	formPending         bool              // a form push is in flight; suppress re-dispatch
+
+	// Pending custom-prompt agent creation: the create form collected these,
+	// then handed off to $EDITOR; the edited content completes the create.
+	pendingAgentName    string
+	pendingAgentRuntime string
 }
 
 // New returns a Model ready for tea.NewProgram. It starts in the loading state;
@@ -495,6 +501,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		}
+	case AgentPromptEditedMsg:
+		// The custom-prompt editor exited; create the agent from the saved text.
+		name, runtime := m.pendingAgentName, m.pendingAgentRuntime
+		m.pendingAgentName, m.pendingAgentRuntime = "", ""
+		m.agentNotice = ""
+		switch {
+		case msg.Err != nil:
+			m.agentErr = msg.Err.Error()
+		case strings.TrimSpace(msg.Content) == "":
+			m.agentErr = "custom prompt was empty; agent not created"
+		default:
+			m.agentErr = ""
+			if !strings.Contains(msg.Content, "gitmoot_result") {
+				// Non-blocking: the prompt omits the result contract. A dedicated
+				// notice survives the create-success handler's agentErr reset.
+				m.agentNotice = "note: prompt has no gitmoot_result contract; created anyway"
+			}
+			cmds = append(cmds, agentCreateWithPromptCmd(m.deps, name, runtime, msg.Content))
+		}
 	case trainStopMsg:
 		if m.mode == modeTrainStopReason {
 			m.actionBusy = false
@@ -581,7 +606,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// was aborted.
 		if !msg.result.Aborted {
 			m.agentErr = ""
-			cmds = append(cmds, agentCreateCmd(m.deps, msg.result.Values))
+			m.agentNotice = ""
+			if msg.result.Values["template"] == agentCustomPromptValue && m.deps.EditAgentPrompt != nil {
+				// Custom prompt: stash the answers and hand off to $EDITOR; the
+				// edited content completes the create (AgentPromptEditedMsg).
+				m.pendingAgentName = msg.result.Values["name"]
+				m.pendingAgentRuntime = msg.result.Values["runtime"]
+				cmds = append(cmds, m.deps.EditAgentPrompt(msg.result.Values["seed"]))
+			} else {
+				cmds = append(cmds, agentCreateCmd(m.deps, msg.result.Values))
+			}
 		}
 	case agentOptimizeFormResultMsg:
 		m.formPending = false

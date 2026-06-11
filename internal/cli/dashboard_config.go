@@ -132,6 +132,55 @@ func validateDashboardConfig(paths config.Paths) []string {
 // editConfigCmd opens the config file in $EDITOR (fallback vi) via
 // tea.ExecProcess, which suspends the program for the editor and resumes on
 // exit, delivering a tui.ConfigEditedMsg.
+// agentPromptScaffold seeds the custom-prompt editor when no base template is
+// chosen. It includes the gitmoot_result contract reminder so the default does
+// not trip the "missing contract" notice.
+const agentPromptScaffold = `You are a Gitmoot-managed agent.
+
+Describe this agent's role and how it should approach jobs here.
+
+Always end every job with a concise, truthful gitmoot_result JSON object, e.g.:
+  {"decision": "implemented", "summary": "what you did"}
+Decisions: approved | changes_requested | blocked | implemented | failed.
+Use "blocked" when you need human input or external state, and "failed" when an
+attempted action errored.
+`
+
+// editAgentPromptCmd writes seed to a temp file, opens it in $EDITOR, and on
+// close reads the saved content back into an AgentPromptEditedMsg. Mirrors
+// editConfigCmd but round-trips a throwaway file rather than the config.
+func editAgentPromptCmd(seed string) tea.Cmd {
+	f, err := os.CreateTemp("", "gitmoot-agent-prompt-*.md")
+	if err != nil {
+		return func() tea.Msg { return tui.AgentPromptEditedMsg{Err: err} }
+	}
+	path := f.Name()
+	_, writeErr := f.WriteString(seed)
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		os.Remove(path)
+		if writeErr == nil {
+			writeErr = closeErr
+		}
+		return func() tea.Msg { return tui.AgentPromptEditedMsg{Err: writeErr} }
+	}
+	editor := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editor == "" {
+		editor = "vi"
+	}
+	parts := strings.Fields(editor)
+	args := append(parts[1:], path)
+	cmd := exec.Command(parts[0], args...)
+	return tea.ExecProcess(cmd, func(runErr error) tea.Msg {
+		defer os.Remove(path)
+		if runErr != nil {
+			return tui.AgentPromptEditedMsg{Err: runErr}
+		}
+		content, readErr := os.ReadFile(path)
+		return tui.AgentPromptEditedMsg{Content: string(content), Err: readErr}
+	})
+}
+
 func editConfigCmd(configFile string) tea.Cmd {
 	editor := strings.TrimSpace(os.Getenv("EDITOR"))
 	if editor == "" {

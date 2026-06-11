@@ -67,6 +67,29 @@ func startTI(t *testing.T, store PromptStore, fields []Field) TrainInitModel {
 	return tm
 }
 
+func TestTrainInitSkipsConditionalField(t *testing.T) {
+	skipFields := func() []Field {
+		return []Field{
+			{Name: "first", Label: "First", Kind: FieldText, Prompt: db.InteractivePrompt{ID: "first"}},
+			{Name: "maybe", Label: "Maybe", Kind: FieldText, Prompt: db.InteractivePrompt{ID: "maybe"},
+				Skip: func(a map[string]string) bool { return a["first"] != "ask" }},
+			{Name: "last", Label: "Last", Kind: FieldText, Prompt: db.InteractivePrompt{ID: "last"}},
+		}
+	}
+	// first == "skip" → the conditional "maybe" field is skipped → land on "last".
+	m := startTI(t, newFakeStore(), skipFields())
+	m = advanceText(t, m, "skip")
+	if m.fields[m.idx].Name != "last" {
+		t.Fatalf("conditional field should be skipped, landed on %q", m.fields[m.idx].Name)
+	}
+	// first == "ask" → the conditional field is asked.
+	m = startTI(t, newFakeStore(), skipFields())
+	m = advanceText(t, m, "ask")
+	if m.fields[m.idx].Name != "maybe" {
+		t.Fatalf("conditional field should be asked, landed on %q", m.fields[m.idx].Name)
+	}
+}
+
 func TestTrainInitTextSubmitAdvances(t *testing.T) {
 	m := startTI(t, newFakeStore(), tiFields())
 	next, _ := m.Update(key("smithyx"))

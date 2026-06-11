@@ -9,6 +9,11 @@ import (
 	"github.com/jerryfane/gitmoot/internal/db"
 )
 
+// agentCustomPromptValue is the sentinel template choice that routes agent
+// creation through the $EDITOR custom-prompt flow instead of an existing
+// template. The leading sentinel form keeps it from colliding with a real id.
+const agentCustomPromptValue = "__custom_prompt__"
+
 // agentUnderCursor returns the agent under the Agents cursor, if any.
 func (m Model) agentUnderCursor() (Agent, bool) {
 	if pages[m.selected].page != pageAgents || len(m.snap.Agents) == 0 {
@@ -385,6 +390,15 @@ func agentCreateCmd(deps Deps, values map[string]string) tea.Cmd {
 	}
 }
 
+func agentCreateWithPromptCmd(deps Deps, name, runtime, content string) tea.Cmd {
+	return func() tea.Msg {
+		if deps.CreateAgentWithPrompt == nil {
+			return agentActionMsg{verb: "create"}
+		}
+		return agentActionMsg{verb: "create", err: deps.CreateAgentWithPrompt(name, runtime, content)}
+	}
+}
+
 // NewAgentCreateForm builds the create-agent form on the train-init field
 // widgets. On completion it pops itself off the Root stack and delivers the
 // answers to the dashboard, which runs Deps.CreateAgent.
@@ -424,12 +438,29 @@ func NewAgentCreateForm(store PromptStore, templates []Choice) TrainInitModel {
 			Name:    "template",
 			Label:   "Template",
 			Kind:    FieldChoice,
-			Choices: templates,
+			Choices: append(append([]Choice{}, templates...), Choice{Value: agentCustomPromptValue, Label: "✎ write a custom prompt…"}),
 			Prompt: db.InteractivePrompt{
 				ID:            "agent-create-template",
 				Question:      "Template for the new agent?",
-				Choices:       choiceValues(templates),
+				Choices:       append(choiceValues(templates), agentCustomPromptValue),
 				Required:      true,
+				AnswerFormat:  "choice",
+				SourceCommand: "dashboard agent create",
+				State:         db.InteractivePromptStatePending,
+			},
+		},
+		{
+			Name:  "seed",
+			Label: "Seed the prompt from",
+			Kind:  FieldChoice,
+			// Blank first (default) → minimal scaffold; then each base template.
+			Choices: append([]Choice{{Value: "", Label: "blank (minimal scaffold)"}}, templates...),
+			// Only asked when the custom-prompt sentinel was chosen.
+			Skip: func(answers map[string]string) bool { return answers["template"] != agentCustomPromptValue },
+			Prompt: db.InteractivePrompt{
+				ID:            "agent-create-seed",
+				Question:      "Seed the custom prompt from which template? (blank = minimal scaffold)",
+				Choices:       append([]string{""}, choiceValues(templates)...),
 				AnswerFormat:  "choice",
 				SourceCommand: "dashboard agent create",
 				State:         db.InteractivePromptStatePending,
@@ -437,11 +468,20 @@ func NewAgentCreateForm(store PromptStore, templates []Choice) TrainInitModel {
 		},
 	}
 	summary := func(answers map[string]string) [][]string {
-		return [][]string{
+		rows := [][]string{
 			{"name", answers["name"]},
 			{"runtime", answers["runtime"]},
-			{"template", answers["template"]},
 		}
+		if answers["template"] == agentCustomPromptValue {
+			seed := answers["seed"]
+			if seed == "" {
+				seed = "blank scaffold"
+			}
+			rows = append(rows, []string{"prompt", "custom (seed: " + seed + ")"})
+		} else {
+			rows = append(rows, []string{"template", answers["template"]})
+		}
+		return rows
 	}
 	form := NewTrainInit(store, fields, summary, nil, 0)
 	form.Done = func(res Result) tea.Cmd {
@@ -468,6 +508,9 @@ func (m Model) agentsContentInteractive() string {
 		if m.agentErr != "" {
 			b.WriteString("\n" + errorStyle.Render(m.agentErr) + "\n")
 		}
+		if m.agentNotice != "" {
+			b.WriteString("\n" + mutedStyle.Render(m.agentNotice) + "\n")
+		}
 		b.WriteString("\n" + mutedStyle.Render("n new agent"))
 		return b.String()
 	}
@@ -483,6 +526,9 @@ func (m Model) agentsContentInteractive() string {
 	b.WriteString(renderRows(rows))
 	if m.agentErr != "" {
 		b.WriteString("\n" + errorStyle.Render(m.agentErr) + "\n")
+	}
+	if m.agentNotice != "" {
+		b.WriteString("\n" + mutedStyle.Render(m.agentNotice) + "\n")
 	}
 	if m.optimizeBusy {
 		b.WriteString("\n" + mutedStyle.Render("starting optimization…") + "\n")
