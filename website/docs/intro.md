@@ -19,18 +19,40 @@ hosted control plane in the current beta.
 - Import a cached agent prompt into the current chat with
   `gitmoot agent prompt <agent-or-template>`.
 - Track jobs, branch locks, goals, tasks, reviews, and merges locally.
+- Open a local dashboard/TUI for daemon health, agents, jobs, locks, prompts,
+  and SkillOpt train sessions.
+- Run SkillOpt training loops that collect human feedback, call the external
+  optimizer, and keep promotion decisions explicit.
 
 ## How It Works
 
-```text
-GitHub PR comments
-  -> gitmoot daemon
-  -> local SQLite state and job mailbox
-  -> runtime adapter
-  -> Codex, Claude Code, shell, or another runtime
-  -> attributed PR reply and local job status
+```mermaid
+flowchart TD
+  User[User or PR comment] --> CLI[gitmoot CLI]
+  CLI --> Daemon[Local daemon]
+  CLI --> Dashboard[Dashboard / TUI]
+  Daemon --> DB[Local SQLite state]
+  Daemon --> Runtime[Runtime adapter]
+  Runtime --> Codex[Codex]
+  Runtime --> Claude[Claude Code]
+  Runtime --> Shell[Shell]
+  Daemon --> GitHub[GitHub issues and PRs]
+  CLI --> SkillOpt[SkillOpt train workflow]
+  SkillOpt --> Optimizer[gitmoot-skillopt]
 ```
 
 Use the docs here for the human workflow. Agents should also read
 [`SKILL.md`](https://gitmoot.io/SKILL.md) and
 [`llms.txt`](https://gitmoot.io/llms.txt).
+
+## Docs Map
+
+```mermaid
+flowchart LR
+  Start[Getting Started] --> Workflows[Workflows]
+  Workflows --> Reference[Reference]
+  Reference --> Operations[Operations]
+  Start --> Plugins[Codex and Claude plugins]
+  Workflows --> SkillOpt[SkillOpt train]
+  Reference --> CLI[CLI and dashboard]
+```

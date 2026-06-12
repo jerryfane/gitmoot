@@ -106,17 +106,27 @@ Use the Gitmoot planner here. Write the implementation plan.
 That uses the same `planner` template as the background agent, but imports the
 prompt into the current chat instead of creating a Gitmoot job.
 
-Ask the registered background planner when you want a queued Gitmoot job:
+Ask the registered background planner when you want a queued analysis or
+planning job:
 
 ```sh
 gitmoot agent ask project-planner --repo owner/repo --background "Write the implementation plan and goal file."
 gitmoot job watch <job-id>
 ```
 
-Background jobs are conservative by default. The daemon starts with one worker,
-runtime session locks serialize jobs for the same Codex or Claude session, repo
-checkout locks protect local checkouts, and branch locks protect implementation
-ownership.
+For coordinator delegation where the request may require review or file edits,
+use `agent run` and let Gitmoot select the safe workflow path:
+
+```sh
+gitmoot agent run lead --repo owner/repo --task task-001 --background "Implement this task."
+gitmoot agent run reviewer --repo owner/repo --pr 12 --background "Review this PR."
+```
+
+Background jobs are safe by default. The daemon starts with one worker, repo
+checkout locks protect local checkouts, branch locks protect implementation
+ownership, and busy Codex/Claude runtime sessions can fork bounded temporary
+workers when `[parallel_sessions]` allows it. Temp workers still require
+checkout/worktree safety and write-capable agents for implementation jobs.
 
 Route work through PR comments:
 
@@ -268,6 +278,22 @@ gitmoot agent prompt release-planner
 Installed custom templates are snapshots. After editing the source file, run
 `gitmoot agent template diff <id>` and `gitmoot agent template update <id>`.
 
+### Dashboard Cockpit
+
+On a terminal, `gitmoot dashboard` opens an interactive TUI that can act on
+everything it shows: answer prompts and retry blocked/failed jobs from the
+Attention page (plus `s` to restart a stopped daemon), open/stop/delete train
+sessions (with optional cleanup of GitHub repos gitmoot created for them),
+create/delete agents, revert a template to a previous version, start a training
+run for an agent with a codex/claude backend pick (`o`), and cancel queued or
+running jobs. Press `?` on any page for its keys. Piped/`--plain`/`--json`
+output is unchanged and script-stable.
+
+```sh
+gitmoot dashboard           # interactive cockpit
+gitmoot dashboard --json    # one-shot snapshot for scripts
+```
+
 ### Jobs, Locks, And Recovery
 
 ```sh
@@ -275,6 +301,8 @@ gitmoot status --repo owner/repo
 gitmoot events --repo owner/repo
 gitmoot job list --repo owner/repo
 gitmoot job show <job-id>
+gitmoot job retry <job-id>
+gitmoot job cancel <job-id>
 gitmoot daemon logs
 gitmoot lock list --repo owner/repo
 gitmoot lock release owner/repo <branch> --owner <agent>
@@ -283,6 +311,12 @@ gitmoot lock release owner/repo <branch> --owner <agent>
 ### SkillOpt Exchange
 
 ```sh
+gitmoot skillopt train init --name <name> --template <id> --review-repo owner/repo --artifact-kind kind --preview kind (--request text|--request-file path)
+gitmoot skillopt train init templates --json
+gitmoot interactive list --state pending --json
+gitmoot interactive show <prompt-id> --json
+gitmoot interactive answer <prompt-id> <value> --source agent
+gitmoot skillopt train start --config .gitmoot/skillopt/<name>/config.toml --workspace-repo <owner/repo> --yes
 gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id>
 gitmoot skillopt review item add --run <run-id> --item <item-id> --baseline baseline.md --candidate candidate.md [--title text]
 gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id> --mode explore --options 4
@@ -300,7 +334,32 @@ gitmoot skillopt feedback github publish --run <run-id> [--repo owner/repo] [--p
 gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issue <number>|--pr <number>)
 ```
 
-Create a review run, add saved baseline/candidate outputs as review items,
+Use `skillopt train init` to create a local scaffold under
+`.gitmoot/skillopt/<name>/` without starting model work. The scaffold pins the
+template/version, writes `config.toml`, `task.md`, and starter
+`review-items.yml`, and prints the exact `train start --config` command. Agents
+can list template choices with `train init templates --json`; when an
+interactive setup needs missing values, they can answer the stored prompts with
+`gitmoot interactive list/show/answer`. On a real terminal, missing fields are
+collected through an interactive form (arrow-key template/preview pickers, inline
+validation); each field is still published as a prompt record, so another
+terminal can answer it with `gitmoot interactive answer` and the form advances
+automatically. Set `GITMOOT_NO_TUI=1` (or pipe stdin) to use the line-based
+wizard instead.
+
+On a real terminal, `gitmoot skillopt train run [--config path | --session <id>]`
+opens an interactive view of one train session: a phase bar
+(generate → review → optimize → promote) and a single keypress per step — `enter`
+generates options / publishes the review / syncs feedback / runs the optimizer
+(the long generate and optimizer steps run in a detached background process, so
+quitting the TUI with `q` leaves the run going), `p`/`x` promote or reject a
+candidate, `n` starts the next iteration. At a review-blocked phase it shows the
+GitHub issue link so you can instead comment on the issue and let the
+review-watcher continue. Piped/`--plain`/`GITMOOT_NO_TUI` print a one-shot status
+snapshot. Pass `--create-repos` to `train start` (or accept the in-form prompt
+during `train init`) to create a missing target/workspace/review repo on GitHub.
+
+For lower-level debugging, create a review run, add saved baseline/candidate outputs as review items,
 export a Markdown or GitHub feedback packet, import the completed feedback, then
 export `training.json` for a future external `gitmoot-skillopt` optimizer.
 Use ranked exploration when the template needs broad search: start with
@@ -499,6 +558,21 @@ gitmoot update --check
 gh auth status
 ```
 
+Install the separate Python optimizer before optimizer-backed SkillOpt train
+continues:
+
+```sh
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+pipx install https://github.com/jerryfane/gitmoot-skillopt/releases/download/v0.2.0b1/gitmoot_skillopt-0.2.0b1-py3-none-any.whl
+gitmoot-skillopt --version
+gitmoot-skillopt optimize --help
+```
+
+If `pipx` is unavailable, install `gitmoot-skillopt` in a venv and pass
+`--skillopt-bin /path/to/venv/bin/gitmoot-skillopt` to `gitmoot skillopt train
+continue`.
+
 Install runtime plugin guidance when the user wants Codex or Claude Code to
 discover Gitmoot from its plugin system:
 
@@ -519,6 +593,9 @@ gitmoot plugin doctor
 gitmoot agent list
 gitmoot agent doctor <agent>
 gitmoot agent prompt <agent-or-template>
+gitmoot agent run <agent> --repo owner/repo "question, review, or implementation request"
+gitmoot agent review <agent> --repo owner/repo --pr <number> "review request"
+gitmoot agent implement <agent> --repo owner/repo --task <task-id> "implementation request"
 gitmoot agent ask <agent> --repo owner/repo "question or instructions"
 gitmoot job list --repo owner/repo
 gitmoot job show <job-id>
@@ -541,12 +618,14 @@ Use `gitmoot daemon start` for the background daemon. Use `gitmoot daemon run`
 only when the user explicitly wants a foreground process.
 
 Use `gitmoot agent prompt <agent-or-template>` when the user wants to reuse a
-Gitmoot agent prompt in the current chat. Use `gitmoot agent ask` when the user
-wants to invoke a registered Gitmoot agent through the Gitmoot runtime path. Add
-`--background` only when the user wants a queued background job. This is the
-same agent registry and runtime adapter path used by PR-comment ask jobs; the
-plugin only helps the runtime discover this skill and does not replace the
-`gitmoot` CLI.
+Gitmoot agent prompt in the current chat. Use `gitmoot agent run` for
+coordinator delegation through a registered Gitmoot agent; Gitmoot will route to
+ask, review, or implement and own worktrees, branch locks, commits, pushes, PRs,
+and workflow advancement. Use `gitmoot agent ask` only for analysis, planning,
+or questions. Add `--background` only when the user wants a queued background
+job. This is the same agent registry and runtime adapter path used by PR-comment
+jobs; the plugin only helps the runtime discover this skill and does not replace
+the `gitmoot` CLI.
 
 ## PR Comment Commands
 
@@ -681,7 +760,7 @@ statuses, and merges only after the merge gate passes.
 ## What Exists Today
 
 The current CLI supports local setup, multi-repo daemon management, agent
-registration, plan import, task branch startup, status, recovery, and updates:
+registration, plan import, task worktree startup, status, recovery, and updates:
 
 ```sh
 gitmoot setup --repo owner/repo --path . --agent lead --runtime codex --session <session-ref> --role lead
@@ -694,6 +773,9 @@ gitmoot agent template add frontend-reviewer --file agents/frontend-reviewer.md
 gitmoot agent template update thermo-nuclear-code-quality-review
 gitmoot agent start <name> --runtime codex|claude --repo owner/repo --path . --template thermo-nuclear-code-quality-review --start-daemon
 gitmoot agent subscribe <name> --runtime codex|claude|shell --session <id|name|last|command> --role <role> --repo owner/repo --capability <capability>
+gitmoot agent run <name> "message" --repo owner/repo [--task task-id] [--pr number] [--background]
+gitmoot agent review <name> "message" --repo owner/repo --pr number [--background]
+gitmoot agent implement <name> "message" --repo owner/repo [--task task-id] [--background]
 gitmoot agent ask <name> "message" --repo owner/repo
 gitmoot agent ask <name> --background --repo owner/repo "message"
 gitmoot agent type list
@@ -703,9 +785,11 @@ gitmoot agent start thermo-review --runtime codex --repo owner/repo --template t
 gitmoot agent allow <name> --repo owner/repo
 gitmoot agent repos <name>
 gitmoot agent list
+gitmoot agent show <name>
 gitmoot agent doctor <name>
 gitmoot goal import --file GOAL.md --repo owner/repo
 gitmoot task run task-001 --repo owner/repo --owner lead --base main
+gitmoot task list --repo owner/repo
 gitmoot job list
 gitmoot job show <job-id>
 gitmoot job watch <job-id>
@@ -720,7 +804,8 @@ gitmoot daemon status
 ```
 
 Goal import turns Markdown headings shaped like `### Task N: Title` into local
-planned tasks. `task run` starts one task branch and records its branch lock.
+planned tasks. `task run` starts one task branch in a dedicated worktree,
+records its branch lock, and stores the worktree path on the task.
 
 ## Runtime Plugin Setup
 
@@ -745,10 +830,12 @@ planner job.
 
 If a Codex or Claude chat wants to reuse a registered Gitmoot agent prompt in
 the current chat, it should run `gitmoot agent prompt <agent-or-template>` and
-apply the returned prompt content locally. If it wants to invoke a registered
-Gitmoot agent through the runtime adapter path, it should run
-`gitmoot agent ask <agent> --repo owner/repo "..."`. That uses the same local
-agent registry and runtime adapter path as PR-comment ask jobs.
+apply the returned prompt content locally. If it wants to delegate work through
+the runtime adapter path, it should prefer `gitmoot agent run <agent> --repo
+owner/repo "..."`. `agent run` routes to `ask`, `review`, or `implement` from
+explicit flags and message intent. Use `agent ask` only for analysis, planning,
+or questions; use `agent review` for a PR review decision; use `agent implement`
+for code, docs, tests, or file edits.
 
 ## Execution Model
 
@@ -772,10 +859,28 @@ Background execution uses separate resource categories:
 - **Branch locks**: workflow ownership records used for implementation and
   merge safety.
 
-The daemon defaults to `--workers 1`. Raise `--workers` only when the Gitmoot
-home has independent runtime sessions or managed agent types with
-`max_background` greater than one. Jobs that target the same runtime session or
-same checkout remain serialized even when the worker count is higher.
+Gitmoot owns repository orchestration for implementation jobs. Child agents
+should not be asked to create branches, commit, push, or open PRs through
+`agent ask`; use `agent run`, `agent implement`, or `task run` so Gitmoot can
+allocate worktrees, hold branch locks, commit changes, push branches, open PRs,
+and advance review state.
+
+The daemon defaults to `--workers 1`. Raise `--workers` when the Gitmoot home
+has independent runtime sessions, managed agent types with `max_background`
+greater than one, or forkable temporary workers enabled. By default,
+`[parallel_sessions]` uses:
+
+```toml
+same_session = "fork_temp_session"
+merge_back = "summary"
+max_temp_sessions_per_agent = 4
+eligible_actions = ["ask", "review", "implement"]
+```
+
+When a Codex or Claude runtime session is busy, Gitmoot can start a bounded
+temporary worker with the same template and repo scope. Implementation jobs only
+fork when the task has a recorded worktree and the original agent is writable.
+If a job is not eligible, Gitmoot keeps the old queue/wait behavior.
 
 ## End-To-End Demo Path
 
@@ -946,6 +1051,14 @@ same checkout remain serialized even when the worker count is higher.
    registering all intended repos if one daemon should supervise the whole
    Gitmoot home.
 
+   Gitmoot records agent autonomy policy as `read-only`, `workspace-write`,
+   `danger-full-access`, or `auto`. For Codex these map to Codex sandbox
+   policies; for Claude Code they map to Claude permission modes. Implementation
+   jobs require a writable policy. If an implementation worker is read-only or
+   its runtime asks for write permission, Gitmoot blocks the job before treating
+   it as implementation work and tells the user to restart or subscribe a
+   writable worker.
+
 6. Start and open the first task PR.
 
    ```sh
@@ -953,9 +1066,11 @@ same checkout remain serialized even when the worker count is higher.
    ```
 
    The lead agent or the human creates the task branch, implements the task,
-   pushes it, and opens a PR. The PR comments become the public audit trail.
-   The local Gitmoot database tracks the task, jobs, branch locks, PR head SHA,
-   and merge gate state.
+   pushes it, and opens a PR. When Gitmoot allocates a task worktree, writable
+   jobs for that task run from `$GITMOOT_HOME/worktrees/<owner>--<repo>/<task-id>/`
+   instead of moving the registered checkout. The PR comments become the public
+   audit trail. The local Gitmoot database tracks the task, jobs, branch locks,
+   worktree path, PR head SHA, and merge gate state.
 
 7. Route other agents through PR comments.
 
@@ -972,7 +1087,8 @@ same checkout remain serialized even when the worker count is higher.
 
    Implement jobs require the agent to hold the branch lock. Review and ask jobs
    are routed through the runtime adapter and must return the `gitmoot_result`
-   JSON contract.
+   JSON contract. Jobs tied to a task worktree use that worktree for validation;
+   jobs without a task worktree use the registered checkout.
 
    For a local chat ask that should not go through a PR comment, call the same
    registered agent directly:
@@ -998,19 +1114,33 @@ same checkout remain serialized even when the worker count is higher.
    Agents review, request fixes, and rerun work through comments and job output.
    When required reviews are approved and the branch is ready, the merge gate
    checks the current PR head, local worktree cleanliness, branch freshness,
-   Gitmoot statuses, external CI if present, and mergeability.
+   Gitmoot statuses, external CI if present, and mergeability. Final merge work
+   is serialized per repository base branch. If a parallel PR became behind the
+   base branch because another PR merged first, Gitmoot asks GitHub to update
+   the PR branch with the expected head SHA and leaves the merge gate pending so
+   the daemon can reload the new head and checks on a later poll tick.
 
 9. Merge and continue.
 
    By default Gitmoot merges with a squash merge guarded by the current head SHA.
-   After merge it records the merged commit, releases the branch lock, updates
-   the local base branch, and can enqueue the next task once the task queueing
-   policy selects it.
+   After merge it records the merged commit, releases the branch lock, removes
+   the task worktree when one is recorded, updates the local base branch, and can
+   enqueue the next task once the task queueing policy selects it. If worktree
+   cleanup fails, the merge remains recorded and Gitmoot keeps the worktree path
+   on the task so it can be cleaned manually.
 
 ## Local-Only Limits
 
 - The machine running `gitmoot daemon start` must stay online.
 - Polling is the V1 mechanism; there is no webhook receiver yet.
+- Retryable merge-gate states are automatic only while the daemon is running.
+  The normal retry latency is the daemon poll interval, `30s` by default unless
+  `--poll` is configured differently.
+- Parallel implementation needs separate task worktrees. Checkout mutation
+  operations are serialized per checkout path. If a Codex or Claude session is
+  busy and `[parallel_sessions].same_session` is `fork_temp_session`, Gitmoot
+  can use a bounded temp worker and queue a summary merge-back to the original
+  agent; otherwise same-session jobs wait.
 - GitHub Checks are best implemented later through GitHub App mode. V1 uses
   commit statuses and `gh pr checks`.
 - Use explicit session ids for long workflows. `last` is convenient but can
@@ -1023,6 +1153,9 @@ same checkout remain serialized even when the worker count is higher.
   written in the comment body.
 - Template content is not fetched at job runtime. Run `gitmoot agent template update`
   intentionally when you want to refresh a cached template.
+- For Claude implementation worker validation, including the explicit live
+  doctor check and mixed Codex + Claude parallel smoke, see
+  [Claude Runtime Validation](claude-runtime-validation.md).
 
 ## Multi-Repo Supervision
 
@@ -1587,6 +1720,34 @@ Fixes:
 - Confirm `CODEX_HOME` if sessions are stored outside `~/.codex`.
 - Re-subscribe the agent with the correct session reference.
 
+## Read-Only Or Permission-Blocked Workers
+
+Symptoms:
+
+- An implementation job is blocked before the agent starts.
+- A job comment says the worker is read-only or cannot make changes.
+- Runtime output asks for permission or reports that writes are blocked.
+
+Checks:
+
+```sh
+gitmoot agent list
+gitmoot agent show <agent>
+gitmoot job show <job-id>
+gitmoot job events <job-id>
+```
+
+Fixes:
+
+- If read-only was intentional, do not rerun the implementation job with that
+  worker. Restart the agent in write mode or subscribe a writable worker, then
+  rerun the task.
+- For Codex agents, use an autonomy policy that permits writes for implementation
+  jobs. For Claude Code agents, use a permission mode that accepts edits for
+  implementation jobs.
+- Review and ask jobs can still run with read-only workers when they do not need
+  to modify files.
+
 ## Agent Templates
 
 Symptoms:
@@ -1747,8 +1908,7 @@ Symptoms:
 
 - `gitmoot agent ask` fails with `runtime session ... is busy`.
 - A background job remains queued and its events include `runtime_lock_wait`.
-- Increasing `--workers` does not make two jobs run against the same Codex or
-  Claude session.
+- Increasing `--workers` does not start a temp worker for the job.
 
 Checks:
 
@@ -1761,12 +1921,50 @@ gitmoot agent list
 
 Fixes:
 
-- Wait for the active job using the same runtime session to finish.
-- Use a different registered agent or managed background instance when the work
-  is independent.
-- Keep `gitmoot daemon start --workers 1` unless you have multiple independent
-  runtime sessions or an agent type with `max_background` greater than one.
+- Check `[parallel_sessions]`. The default is `same_session = "fork_temp_session"`,
+  `merge_back = "summary"`, `max_temp_sessions_per_agent = 4`, and
+  `eligible_actions = ["ask", "review", "implement"]`.
+- If the job still waits, inspect the job events for the ineligibility reason:
+  unsupported runtime, action not eligible, temp-worker cap reached, read-only
+  implementation agent, missing task worktree, or summary merge-back waiting for
+  the original session.
+- Wait for the active job using the same runtime session to finish, or use a
+  different registered agent or managed background instance when the work is
+  independent.
 - Use `gitmoot agent gc` to remove expired managed background instances.
+
+## Parallel Implementation And Worktrees
+
+Symptoms:
+
+- Parallel tasks contend on one checkout.
+- A job reports that the checkout is already being mutated.
+- Two jobs using different branches still block each other because they share one
+  registered checkout.
+
+Checks:
+
+```sh
+gitmoot task list --repo owner/repo
+gitmoot job list --repo owner/repo
+gitmoot job events <job-id>
+gitmoot lock list --repo owner/repo
+```
+
+Fixes:
+
+- Use task worktrees for parallel implementation. Gitmoot stores each task
+  worktree path on the task and routes task-tied jobs there.
+- Keep the registered checkout clean. Gitmoot still uses it for base branch
+  updates and merge-gate cleanup.
+- Use separate runtime sessions, managed background instances, or forkable temp
+  workers for jobs that should truly run concurrently. Worktrees isolate files;
+  temp workers isolate busy Codex/Claude runtime sessions when eligible.
+- Forked implementation sessions remain gated on task worktree isolation.
+  Forking sessions without checkout isolation only moves the contention from
+  runtime memory to local git state.
+- For the full Claude implementation-worker smoke checklist, see
+  [Claude Runtime Validation](claude-runtime-validation.md).
 
 ## Malformed Agent Output
 
@@ -1830,9 +2028,1362 @@ git status --short
 Fixes:
 
 - Clean the local worktree before the daemon attempts the merge.
-- Update the PR branch if it is behind or diverged from base.
+- If the PR branch is merely behind or diverged from base, keep the daemon
+  running. Gitmoot serializes the base-branch merge gate, asks GitHub to update
+  the PR branch safely, then retries on a later daemon poll tick. The default
+  poll interval is `30s` unless `--poll` was configured differently.
+- If GitHub reports a branch update conflict, Gitmoot stops retrying, posts a
+  PR comment, marks `gitmoot/merge-gate` as failed, records `advance_blocked`
+  when the block came from job advancement, and shows the reason in
+  `gitmoot task list` / `gitmoot job events <job-id>`. Resolve the conflict
+  manually or run an explicit implement/fix job, then rerun review/merge.
 - Fix failing external CI or Gitmoot statuses.
 - Rerun reviews after the PR head SHA changes.
+- If a merged task reports a worktree cleanup warning, inspect the stored task
+  worktree path, clean or remove that worktree manually, then clear stale local
+  state only after confirming the path is no longer needed.
+
+---
+
+# Source: docs/skillopt-train-workflow.md
+
+# SkillOpt Train Workflow
+
+Use `gitmoot skillopt train` when a user wants Gitmoot to enforce the full
+human-feedback optimization loop for an agent template. Use the lower-level
+`gitmoot skillopt review`, `feedback`, `export`, `import`, and `candidate`
+commands only for advanced debugging, custom research runs, or recovering one
+step of an existing train session.
+
+Train mode keeps Gitmoot as the product/control layer. The external
+`gitmoot-skillopt` optimizer remains outside the Go binary and is invoked only
+after Gitmoot has collected review items and feedback.
+
+## Session Shape
+
+A train session is the long-lived workflow for one template and request. Each
+session has one or more iterations. An iteration has:
+
+- a pinned base template version;
+- an eval review run and review items;
+- workspace and optional preview repos;
+- preferred evaluation gate metadata;
+- generated option artifacts;
+- imported human feedback;
+- an optimizer package and candidate package;
+- an optional candidate review issue or PR link;
+- a terminal decision: promoted, rejected with a reason, or abandoned.
+
+The next iteration can start only after the prior iteration is promoted,
+rejected with a reason, or abandoned. If the prior candidate was promoted, the
+promoted candidate version becomes the next base template snapshot. Rejected
+candidates never become current silently.
+
+## High-Level Commands
+
+Initialize a reusable training scaffold before expensive training work:
+
+```sh
+gitmoot skillopt train init \
+  --name planner-train \
+  --template planner \
+  --review-repo owner/product \
+  --task-kind writing \
+  --artifact-kind text \
+  --preview text-table \
+  --mode explore \
+  --request "Improve release planning answers from reviewer feedback"
+```
+
+`train init` writes `.gitmoot/skillopt/<name>/config.toml`, `task.md`, and a
+starter `review-items.yml`. It pins the selected template/version, records the
+review repository, applies default generation/evaluator/optimizer settings, and
+prints the next `gitmoot skillopt train start --config ...` command. It does not
+start optimization, create review items, call models, or publish GitHub issues.
+
+List machine-readable template choices for agents before initializing:
+
+```sh
+gitmoot skillopt train init templates --json
+```
+
+If required fields are missing in an interactive terminal, `train init` runs a
+line-oriented wizard that asks for them one at a time (numbered choices for the
+template, with a "Custom file" option, and for the preview style). Each question
+is also published as an interactive prompt record, so an agent driving the
+wizard in a PTY can answer the current question with `gitmoot interactive answer`
+instead of stdin; the wizard blocks on each question until it is answered either
+way and then resumes with the next one:
+
+```sh
+# in another terminal, while the wizard waits on a question:
+gitmoot interactive list --state pending --json
+gitmoot interactive answer <prompt-id> <value> --source agent
+```
+
+To run the wizard in a visible terminal pane that a human can watch while the
+agent answers from its own session, see
+[herdr-composable-train-init.md](./herdr-composable-train-init.md); Herdr is an
+optional frontend, not a Gitmoot dependency.
+
+For agents that prefer answering everything asynchronously in one pass, pass
+`--prompts` to store all the prompt requests at once and exit instead of running
+the wizard, then answer them and rerun:
+
+```sh
+gitmoot skillopt train init --prompts
+gitmoot interactive list --state pending --json
+gitmoot interactive show <prompt-id> --json
+gitmoot interactive answer <prompt-id> <value> --source agent
+gitmoot skillopt train init
+```
+
+If required fields are missing in non-interactive mode (and `--prompts` is not
+set), `train init` exits before creating a scaffold or train session and prints
+the missing fields plus a fully flagged example command. Pass `--yes` to force
+that fail-fast behavior even on an interactive terminal.
+
+Start from the scaffold, or pass the request, target repo, pinned template, and
+item plan directly:
+
+```sh
+gitmoot skillopt train start \
+  --config .gitmoot/skillopt/planner-train/config.toml \
+  --workspace-repo owner/product-workspace \
+  --yes
+
+gitmoot skillopt train start \
+  --template planner \
+  --session planner-train \
+  --repo owner/product \
+  --workspace-repo owner/product-workspace \
+  --preview-repo owner/product-previews \
+  --request "Improve release planning answers from reviewer feedback" \
+  --items-file train-items.yml \
+  --mode explore \
+  --exploration-level high \
+  --options 4 \
+  --preferred-gate hard_then_soft \
+  --yes
+```
+
+Use `--dry-run` first to inspect the inferred session id, request summary,
+task kind, preferred gate, item warnings, and next action without writing state.
+Without `--yes`, non-interactive runs print the exact confirmation command.
+
+Inspect progress at any point:
+
+```sh
+gitmoot skillopt train status --session planner-train
+gitmoot skillopt train status --session planner-train --verbose
+gitmoot skillopt train status --session planner-train --json --verbose
+gitmoot skillopt train status --session planner-train --watch --poll 5s
+```
+
+Verbose status separates the current phase, current step, review issue,
+candidate state, active generation/review/optimizer locks, item progress, and
+next action. JSON output is for automation. Watch mode is text-only and exits
+when the session is waiting for human input or terminal.
+
+Automation should read `status_phase` as the stable operational phase and keep
+`current_phase` as the lower-level state-machine checkpoint. During normal
+waiting states, `status_phase` can pass through the current train state, such
+as `request_confirmed`, `workspace_ready`, `items_ready`, `options_generated`,
+`review_published`, `feedback_synced`, `training_package_created`,
+`optimizer_completed`, or `run_abandoned`. During optimizer operation,
+candidate, and blocker states, it can report
+`preflight_running`, `optimizer_running`, `optimizer_heartbeat_stale`,
+`optimizer_completed_candidate`, `optimizer_completed_no_candidate`,
+`recovery_available`, `blocked_config`, `blocked_stale_lock`, or
+`failed_unrecoverable`. Verbose JSON also reports `recovery_available`,
+`no_candidate_reason` when applicable, and `active_locks[]` with lock owner,
+process, host, heartbeat, expiry, elapsed time, and content hash.
+
+Advance the next required step:
+
+```sh
+gitmoot skillopt train continue --session planner-train
+```
+
+Stop instead of continuing:
+
+```sh
+gitmoot skillopt train stop --session planner-train --reason "Request changed"
+```
+
+## Items, Workspace, And Preview Repos
+
+The item file is YAML or JSON. Each item should describe a distinct task or
+audience so feedback is not overfit to one prompt.
+
+```yaml
+items:
+  - id: release-plan
+    title: Release planning answer
+    brief: Plan a small release with risk and verification steps.
+    target_audience: maintainer
+    output_type: markdown plan
+  - id: review-followup
+    title: Review follow-up answer
+    brief: Turn reviewer feedback into a concise fix plan.
+    target_audience: contributor
+    output_type: markdown checklist
+```
+
+Starting with too few items fails. Homogeneous item sets warn and require
+explicit acceptance. `workspace-repo` is where managed agents can work on
+generated outputs.
+
+`preview-repo` enables review previews. Without it, train sessions use
+`preview.mode=none`, `preview.renderer=none`, `preview.publisher=none`, and the
+review repo defaults to the target repo. With `--preview-repo owner/previews`,
+Gitmoot defaults to `preview.mode=required`, `preview.renderer=vue-vite`,
+`preview.publisher=github-pages`, and `review.expected_repo=owner/previews`.
+Register the preview checkout before publishing previews:
+
+```sh
+gitmoot repo add owner/previews --path /path/to/previews
+```
+
+GitHub-backed review operations require the GitHub CLI to be installed and
+authenticated for the expected review repository. Check `gh` before starting
+review publication or watching:
+
+```sh
+gh auth status --hostname github.com
+gh repo view owner/previews --json nameWithOwner
+```
+
+Gitmoot preflights GitHub issue/comment operations such as feedback publish,
+feedback sync, candidate review publication, and review watching. Preview
+publication itself still commits and pushes the Pages route before the review
+issue is created, so a later `gh` auth failure can leave preview commits in the
+preview repo even though the review issue was not posted.
+
+The currently implemented renderer/publisher pairs are `none/none` and
+`vue-vite/github-pages`. Vue/Vite generation is a constrained file-bundle
+contract; Gitmoot supplies the trusted Vite scaffold, builds the bundle in a
+temporary work directory, publishes only `dist/` into the preview repo under
+`runs/{run_id}/{item_id}/{option_label}/`, pushes that route, and stores
+`preview_url` on the generated option. The publication result also records the
+pushed `preview_commit`, `preview_status`, and optional
+`preview_status_reason`.
+
+Required previews block inline fallback: Gitmoot will not publish the human
+review issue until every generated option has a preview URL. Optional previews
+prefer URLs but can fall back to inline Markdown if preview publishing is not
+available. LaTeX/PDF, image, notebook, Storybook, and other preview types are
+future adapters and are not implemented in this workflow.
+
+For required Vue/Vite previews, each generated option is validated before the
+review item is accepted. If an option returns invalid preview-bundle JSON or a
+bundle that fails the current contract, Gitmoot retries that option once with
+the validation error appended to the generation prompt. Other valid options are
+kept. If the retry still fails, the iteration stops with a structured error that
+names the item, option, validation class, and retry count. Non-actionable
+backend failures do not loop.
+
+For GitHub Pages publication, Gitmoot observes the latest Pages build after the
+preview route is pushed. It waits briefly for the pushed commit to appear and
+for matching `queued` or `building` builds to become `built` or `errored`.
+Review links are rendered as ready `open` links only when status is ready; they
+are labeled `pending deployment`, `failed deployment`, or `stale deployment`
+when GitHub Pages has not completed, failed, or is still reporting an older
+commit.
+
+Use previews only when the artifact has to be inspected as a rendered surface:
+
+| Output type | Preview policy | Evaluator |
+| --- | --- | --- |
+| Vue landing page or UI | `preview.mode=required`, `vue-vite/github-pages` | `landing_page_v1` |
+| Markdown, text plans, X/social post copy | `preview.mode=none` unless reviewers need a rendered page | text/LLM judge or fixture evaluator |
+| LaTeX/PDF, image, notebook, Storybook | future preview adapter | future evaluator-specific contract |
+
+GitHub review text is feedback for the optimizer. It is not a score. Optimizer
+scores come from the evaluator result artifacts produced by
+`gitmoot-skillopt`; if the evaluator is missing, fails, or returns invalid
+JSON, the gate is blocked instead of treating the result as a numeric loss.
+
+Evaluator profiles describe the artifact contract and evaluation stages for a
+task. The landing-page profile uses cheap-first checks: validate the Vue/Vite
+bundle contract, optionally run a render smoke adapter, and call the LLM judge
+only after those checks pass. Failed checks produce structured failure packets
+with `primary_reason`, `optimizer_hint`, failed checks, evidence, and stage
+status so the optimizer can update the skill from the failure class instead of
+only seeing a zero score.
+
+## Review And Feedback
+
+`train continue` generates options through Gitmoot-managed temporary agents,
+stores artifact-backed review items/options, and publishes a concise GitHub
+review packet when the review step is ready. For required Vue previews, run
+`continue` once to generate bundles and a second time to build/publish previews
+and create the review issue in the expected preview repo:
+
+```sh
+gitmoot skillopt train start \
+  --template planner \
+  --repo owner/product \
+  --workspace-repo owner/product-workspace \
+  --preview-repo owner/product-previews \
+  --session landing-page-train \
+  --request "Train landing-page review options" \
+  --items-file train-items.yml \
+  --yes
+
+gitmoot skillopt train continue --session landing-page-train
+gitmoot skillopt train continue --session landing-page-train
+```
+
+Low-level `skillopt feedback github publish` and `sync` enforce
+`review.expected_repo` for train runs. If a preview train expects
+`owner/previews`, publishing or syncing against `owner/product` fails instead of
+posting to the wrong repository.
+
+Review issues include a fenced `yaml` block so reviewers can copy, edit, and
+submit parseable feedback. Text reply skills render each review item as an
+`Option | Reply` table; JSON option artifacts show the human-facing text field
+such as `reply`, `tweet`, `text`, `post`, `content`, `message`, or `summary`
+instead of raw JSON metadata. Vue/Vite review items keep using preview links
+and missing-preview errors. `train continue` automatically syncs GitHub comments
+when the iteration is waiting in `review_published` and no feedback has been
+imported yet. Raw YAML and fenced YAML are both supported.
+
+For local-first automatic review watching, run the daemon with the watcher flag:
+
+```sh
+gitmoot daemon run --watch-skillopt-reviews
+```
+
+The watcher uses the same `gh`/GitHub API credentials as the rest of Gitmoot. It
+does not require a GitHub App, webhook server, centralized service, or extra
+credential model. Gitmoot only polls locally registered SkillOpt review issues
+that it created during train review publication; it does not scan arbitrary
+repository issues.
+
+The watcher behavior is:
+
+- valid plain YAML or fenced `yaml` feedback is imported idempotently;
+- invalid feedback receives one precise GitHub comment per distinct parse or
+  import error hash and the issue stays open;
+- after valid feedback imports, Gitmoot posts a success comment, closes the
+  review issue, and continues the train loop under the existing train lease;
+- if the train loop is already active, the issue remains open or queued for the
+  active run instead of starting a competing optimizer process;
+- stale issues receive one reminder after the configured stale time, currently
+  `24h` by default, with the review issue, run id, expected item ids, a
+  copy-paste agent prompt, and an equivalent `gitmoot skillopt train continue
+  --session <id>` fallback command.
+
+Stale reminders do not close the issue. If a reviewer posts feedback after the
+reminder, the watcher can still import it. If the watcher is not running, post
+the feedback YAML and use the prompt from the stale notice or run the CLI
+fallback manually.
+
+Reviewers can provide ranked feedback with optional quality and phase hints.
+Use `>` for ordered preferences and `=` for ties. Gitmoot preserves tie groups
+when deriving pairwise preferences, so `A = B = C = D` imports as all tied and
+creates no pairwise winner, while `A > B = C > D` creates preferences across
+groups but not between `B` and `C`.
+
+```yaml
+run_id: planner-train-review-001
+reviewer: alice
+items:
+  - item_id: release-plan
+    ranking:
+      - C > A = D > B
+    quality: acceptable
+    continue_mode: refine
+    useful_traits:
+      C:
+        - clearer verification sequencing
+    rejected_traits:
+      B:
+        - too vague about rollback
+    required_improvements:
+      - clearer owner handoff
+      - stronger rollout checks
+    reasoning: C is strongest, but A has a better risk summary.
+```
+
+Field meanings:
+
+- `quality`: reviewer confidence in the option set. Use `poor` when the whole
+  set is weak, `acceptable` when there is a usable direction, and `strong` when
+  the winner is strong enough to refine directly.
+- `continue_mode`: requested next search phase. Use `explore` to widen the
+  search, `refine` to improve the ranked winner, `distill` to simplify a strong
+  direction, and `validate` when the output should mostly be checked.
+- `promote`: human decision hint only. `yes` means the reviewer believes the
+  candidate should become current after candidate review; `no` keeps it as
+  optimizer feedback. Promotion still requires the explicit promote command.
+
+Use `quality: poor` or `continue_mode: explore` when all options are weak and a
+stable winner should not narrow the search yet. Gitmoot keeps feedback parsing
+deterministic and stores imported events as canonical feedback for export.
+
+## Optimizer And Candidate Gate
+
+After feedback sync, `train continue` exports the training package, invokes the
+configured `gitmoot-skillopt optimize` command, imports the returned candidate
+package through the shared candidate validator, and leaves the candidate
+pending. Because the optimizer launches long-lived model calls, `train continue`
+announces the launch before starting it. To export the training package and stop
+before that launch, pass `--export-only`; the session lands at
+`training_package_created` and a later `train continue` (without `--export-only`)
+runs the optimizer. Use `--dry-run` only on a disposable or reset train session
+to validate the package and optimizer command shape without model calls. If the
+dry-run returns unchanged baseline content, Gitmoot records
+`optimizer_completed_no_candidate` instead of publishing a candidate review.
+
+Before Gitmoot launches the optimizer, it checks the resolved
+`gitmoot-skillopt` executable with `--version` and `optimize --help`. If the
+binary is missing or its Python environment is broken, `train continue` stops
+without launching the optimizer, records the optimizer metadata as failed,
+reports `status_phase: blocked_config`, and prints the install hint. The
+recommended install path is:
+
+```sh
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+pipx install https://github.com/jerryfane/gitmoot-skillopt/releases/download/v0.2.0b1/gitmoot_skillopt-0.2.0b1-py3-none-any.whl
+gitmoot-skillopt --version
+gitmoot-skillopt optimize --help
+```
+
+If `pipx` is unavailable, install the wheel in a venv and pass that executable
+with `--skillopt-bin /path/to/venv/bin/gitmoot-skillopt`.
+
+```sh
+gitmoot skillopt train continue \
+  --session planner-train \
+  --skillopt-bin /path/to/gitmoot-skillopt \
+  --backend codex \
+  --out-root .gitmoot/skillopt/planner-train \
+  --dry-run
+```
+
+For the real landing-page optimizer pass on the production train session, do not
+include `--dry-run`; request the Vue preview evaluator explicitly:
+
+```sh
+gitmoot skillopt train continue \
+  --session landing-page-train \
+  --skillopt-bin /path/to/gitmoot-skillopt \
+  --out-root .gitmoot/skillopt/landing-page-train \
+  --backend codex \
+  --evaluator-id landing_page_v1 \
+  --optimizer-model gpt-5.5 \
+  --target-model gpt-5.5 \
+  --evaluator-model gpt-5.5 \
+  --skill-update-mode full_rewrite_minibatch \
+  --num-epochs 1 \
+  --batch-size 2 \
+  --optimizer-views 4 \
+  --retry-optimizer-views auto \
+  --gate mixed
+```
+
+`--backend codex` resolves the user-facing optimizer, evaluator, and target
+provider to `codex`; Gitmoot passes the internal SkillOpt target adapter as
+`codex_exec`, so users do not need to remember that implementation detail.
+Before training starts, `train continue` prints the resolved backend report,
+config status, optimizer lock state, and recovery availability. Then
+`gitmoot-skillopt` preflights the optimizer, target, and evaluator. The
+canaries must prove the target can return the exact requested text and that the
+evaluator can return structured hard/soft JSON. Optimizer failures record
+blocked status and do not promote or partially install candidate templates. If
+the optimizer selects the unchanged baseline, accepts no prompt edit, or returns
+content with the same hash as the base template, Gitmoot records
+`optimizer_completed_no_candidate` with `no_candidate_reason` and does not
+create or publish a pending candidate review.
+
+When a changed candidate loses the selection gate against the baseline, the
+optimizer result is treated as a gate rejection, not as an accepted candidate.
+The candidate package carries a structured `gate_rejection` packet with
+baseline and candidate hard/soft/gate scores, `primary_reason`,
+`human_reason`, `optimizer_hint`, failed dimensions, evidence, attempted patch,
+retry attempts, and `next_action`. By default `gitmoot-skillopt` skips the
+expensive final test eval after this selection rejection, records
+`final_test_skipped_reason: selection_gate_rejected_candidate`, and returns a
+no-candidate package instead of asking Gitmoot to publish a candidate review.
+
+Gate-rejection retry is bounded separately from no-op retry:
+
+- `noop_retry_budget`: defaults to `1` and is used when the optimizer produced
+  no meaningful skill change.
+- `gate_reject_retry_budget`: defaults to `3` and is used only when a changed
+  candidate loses selection eval and the rejection packet contains actionable
+  new information.
+- `wrong_artifact_retry_budget`: defaults to `1` and is used when the
+  evaluator says the target produced the wrong artifact type or otherwise
+  failed the artifact contract.
+
+The retry budgets can be changed when continuing training:
+
+```sh
+gitmoot skillopt train continue \
+  --session planner-train \
+  --gate-reject-retry-budget 3 \
+  --retry-optimizer-views auto \
+  --noop-retry-budget 1 \
+  --wrong-artifact-retry-budget 1
+```
+
+A gate rejection is retryable when the evaluator supplied actionable
+information, the candidate actually changed, the rejection is not just repeated
+noise, and budget remains. In imported human-review mode, the optimizer context
+includes all reviewed feedback items; it does not optimize from only the sampled
+item that happened to be in the current minibatch. Use `--optimizer-views N`
+when the same small feedback set should be analyzed by multiple independent
+optimizer perspectives before merge. Each view receives the full feedback set,
+but Gitmoot forces the view reflection minibatch size to one so views do not
+collapse into one analyst prompt. For exploratory human-feedback iterations,
+combine `--skill-update-mode full_rewrite_minibatch`, `--optimizer-views 4`,
+and `--retry-optimizer-views auto` as the recommended compact-skill path; patch
+mode still prefers `replace`/`delete` edits over append-only prompt growth.
+Retry optimizer views accept `auto`, `inherit`, or a positive integer. `auto`
+inherits the initial view count for full-rewrite minibatch retries and keeps
+patch-mode retries cheap; `inherit` always reuses the initial view count.
+Explicit retry view counts cannot exceed the initial optimizer view count.
+
+The retry prompt includes the previous patch summary, baseline-vs-candidate
+score deltas, failed dimensions, why the candidate lost, all reviewed feedback
+themes, and guidance not to repeat the same patch direction.
+
+Large score gaps and `hard=0` candidate scores are not automatic retry blockers
+when the rejection packet is actionable. They are recorded as retry metadata,
+for example `score_gap_handling: retry_context` or
+`hard_score_handling: retryable_if_actionable`, so the next optimizer attempt
+can use them as stronger context. Gitmoot stops retry only when budget is
+exhausted, the structured rejection is missing, actionable guidance is missing,
+the same candidate/reason repeats after duplicate handling, or an explicit
+external/config failure cannot be fixed by changing the skill.
+
+Duplicate retry candidates do not get silently accepted or loop forever. If a
+retry produces the same candidate hash, the next retry is forced to include
+stronger duplicate-specific context. If the optimizer repeats the duplicate,
+the run stops with duplicate retry metadata instead of creating a candidate.
+Wrong-artifact retries have their own budget and do not consume the generic
+gate-rejection retry budget.
+
+If the retry also loses, repeats the same reason, produces a no-op, repeats a
+duplicate, or exhausts the relevant budget, the run stops with
+`optimizer_completed_no_candidate` and a precise reason such as
+`gate_rejected_best_origin_initial_skill`.
+
+Use verbose status to see why the run stopped and what to do next:
+
+```sh
+gitmoot skillopt train status --session planner-train --verbose
+```
+
+For gate rejections, status includes the baseline/candidate score comparison,
+attempted patch, retry count such as `1/3`, optimizer context items, duplicate
+retry detection, score-gap handling, hard-score handling, evaluator reason, and
+concise `next_action_option` lines. The normal user choices are to collect more
+feedback, rerun after changing the retry/config inputs, or inspect the candidate
+package manually. Gitmoot does not create a pending candidate record when the
+best selected prompt is the unchanged baseline or the candidate content hash
+matches the base template.
+
+```mermaid
+flowchart TD
+  A[Import GitHub review feedback] --> B[Build optimizer context from all reviewed items]
+  B --> C[Optimizer creates candidate skill]
+  C --> D[Target generates outputs]
+  D --> E[Judge compares candidate vs baseline]
+  E -->|candidate wins| F[Publish candidate for human decision]
+  E -->|candidate loses| G[Structured rejection packet]
+  G --> H{Budget remains + actionable guidance?}
+  H -->|yes| I[Retry optimizer with full review + rejection]
+  I --> C
+  H -->|no| J[Stop with clear reason]
+```
+
+Every optimizer run writes into a numbered attempt directory:
+
+```text
+<out-root>/attempts/attempt-001/
+<out-root>/attempts/attempt-002/
+```
+
+Gitmoot records `optimizer_attempt` and `optimizer_attempt_path` in train
+metadata. Status and recovery use the active recorded attempt, so reruns do not
+reuse stale candidate packages from older attempts.
+
+If the optimizer wrapper fails after writing completed artifacts, status reports
+`status_phase: recovery_available`. Recover the artifacts through Gitmoot
+instead of re-running blindly:
+
+```sh
+gitmoot skillopt train recover --session planner-train --out-root .gitmoot/skillopt/planner-train
+```
+
+Recovery validates the package state, imports a completed candidate through the
+normal candidate gate, or records `optimizer_completed_no_candidate` with the
+stored rejection reason. Incomplete or corrupted artifacts fail without
+modifying the train state.
+
+## Candidate Review And Next Iteration
+
+The candidate review step publishes the candidate summary, preview/PR links
+when available, GitHub links to the candidate skill files, and copyable decision
+commands. The review repo file contract is:
+
+- `skillopt/runs/<session>/<iteration>/<candidate>/best_skill.md`
+- `skillopt/runs/<session>/<iteration>/<candidate>/base_skill.md`
+- `skillopt/runs/<session>/<iteration>/<candidate>/candidate.diff.md`
+
+These files let reviewers inspect the proposed skill, the baseline skill, and
+the candidate diff directly in GitHub. The review also separates selection
+score, evaluator/test scores, gate status, no-op status, and promotability so a
+candidate selected by the optimizer is not confused with a candidate that passed
+evaluator gates. If the selected candidate sample is text or JSON, the review
+shows the same human-facing text inline under `Candidate Sample Preview`;
+Vue/Vite samples keep using GitHub Pages preview URLs, and missing samples keep
+the explicit no-sample message. If stored metadata marks the candidate as no-op
+or not promotable, the review body says promotion is unavailable instead of
+showing a promote command.
+
+Choose explicitly:
+
+```sh
+gitmoot skillopt train continue --session planner-train --promote planner@v2
+gitmoot skillopt train continue --session planner-train --reject planner@v2 --reason "Too broad"
+```
+
+The supported decisions are:
+
+- promote: accept the candidate as the next base version;
+- reject with reason: keep the current base and record why the candidate is not
+  acceptable;
+- wait: take no action while a human is still reviewing, and `train status`
+  keeps reporting the candidate decision gate;
+- keep improving: reject with an actionable reason, then start the next
+  iteration after the rejection is recorded.
+
+```sh
+gitmoot skillopt train continue --session planner-train --start-next
+```
+
+Manual append-style next iterations are not supported. The train state machine
+creates the next iteration atomically from the resolved previous decision, its
+eval run, and copied item plan.
+
+## Deterministic Smoke
+
+Run the local train smoke script before shipping train-mode changes:
+
+```sh
+scripts/skillopt-train-smoke.sh
+```
+
+The script runs focused CLI smoke tests with fake managed generation, fake
+`gitmoot-skillopt`, fake preview publication, and fake GitHub publication. It
+covers local template creation, session setup, item/generation flow, required
+preview blocking, expected review repo enforcement, preview URL review packets,
+feedback-to-optimizer handoff, candidate import, candidate review publication,
+optimizer attempt directories, optimizer recovery, structured no-candidate
+status, active attempt status/import selection, stable status phases,
+promote/reject decisions, start-next gate enforcement, watched review feedback
+import, review issue close/continue behavior, invalid-feedback comments, and
+one-time stale notices without real model calls or real GitHub mutation.
+
+For optimizer-side gate retry and final-test-skip checks in the sibling
+`gitmoot-skillopt` checkout, run the focused pytest smoke:
+
+```sh
+cd /path/to/gitmoot-skillopt
+PYTHONDONTWRITEBYTECODE=1 python -m pytest \
+  tests/test_gate_fail_closed.py \
+  tests/test_gitmoot_optimize_cli.py \
+  tests/test_gitmoot_package.py
+```
+
+Those tests cover selection rejection creating a structured gate-rejection
+packet, default final test skipping after selection reject, actionable
+gate-rejection retry, configurable retry budget defaults, adaptive retry close
+gap, duplicate retry context and metadata, wrong-artifact retry separation,
+retry budget exhaustion, no-op retry separation, evaluator rationale, and the
+no-candidate package fields Gitmoot imports.
+
+Manual smoke scenarios for review operations:
+
+1. Candidate decision: run a fake or dry-run train flow until candidate review
+   is published. Confirm the review repo contains `best_skill.md`,
+   `base_skill.md`, and `candidate.diff.md` under
+   `skillopt/runs/<session>/<iteration>/<candidate>/`, plus either a Vue preview
+   URL or inline text sample under `Candidate Sample Preview`. Run
+   `gitmoot skillopt train status --session <id>` and confirm it is waiting for
+   a candidate decision. Then run either `--promote <version>` or
+   `--reject <version> --reason "<reason>"` and confirm status moves past the
+   candidate decision gate.
+2. Text review display: publish a text/JSON review item and confirm the GitHub
+   issue shows an `Option | Reply` table and that tied rankings such as
+   `A = B = C = D` and `A > B = C > D` sync successfully.
+3. Preview publication status: run a Vue/Vite preview session with
+   `--preview-repo owner/previews`, publish review items, and inspect the GitHub
+   issue option links. Ready links should render as `open`; builds that have not
+   completed should render as `pending deployment`; Pages failures should render
+   as `failed deployment` with the recorded reason; stale builds should show
+   the latest and expected commit in the reason.
+
+## Troubleshooting
+
+- Missing GitHub CLI or auth: install `gh`, run
+  `gh auth status --hostname github.com`, and confirm
+  `gh repo view owner/repo --json nameWithOwner` succeeds for the expected
+  review repo before starting review publication. GitHub issue/comment
+  operations fail preflight when auth does not pass, but preview publication can
+  already have pushed Pages files before the review issue step fails.
+- Wrong repo: all train review publish/sync commands must target
+  `review.expected_repo`. Use `gitmoot skillopt train status --session <id>` to
+  confirm the expected review repo before publishing.
+- Missing preview links: confirm the run has `--preview-repo`, the preview repo
+  checkout is registered with `gitmoot repo add`, and the generated option
+  output type is compatible with the current `vue-vite` renderer.
+- Pending or failed preview links: pending means GitHub Pages had not completed
+  for the pushed preview commit during the bounded observation window. Failed
+  links include the Pages error when GitHub reports one. Stale links mean the
+  latest Pages build still points at another commit after the wait. Existing
+  review links keep their recorded label; `train continue` skips options that
+  already have a preview URL and does not refresh old deployment status.
+- Invalid generated preview bundles: required Vue/Vite options are retried once
+  when the validation error is actionable. If the retry also fails, inspect the
+  structured error for item id, option label, validation class, retry count, and
+  the appended validation error.
+- Candidate waiting for decision: use `gitmoot skillopt train status --session
+  <id>` to find the pending version, inspect the candidate review files in the
+  review repo, then promote, reject with a reason, or keep waiting. To keep
+  improving, reject first and then run `--start-next`.
+- Missing feedback import: reply with the fenced YAML block from the review
+  issue or raw YAML. Then rerun `gitmoot skillopt train continue --session
+  <id>`; it will attempt GitHub sync and report parse/import failures. With
+  `gitmoot daemon run --watch-skillopt-reviews`, valid watched issue comments
+  import automatically.
+- Invalid YAML: status output names wrong `run_id`, missing item feedback,
+  invalid ranking, unknown option, invalid signal values, no parseable YAML, or
+  no comments. The watcher posts the exact parse/import error once per distinct
+  error hash.
+- Stale review issue: the watcher posts one reminder and leaves the issue open.
+  Post the complete feedback YAML, then either keep the watcher running or use
+  the agent prompt/CLI command from the stale notice to resume manually.
+- No candidate created: inspect `no_candidate_reason` in `train status
+  --verbose`; usually the optimizer kept the initial skill, accepted no update,
+  produced content with the same hash as the base version, or lost the
+  selection gate. Gate rejection details show baseline and candidate scores,
+  attempted patch, duplicate retry detection, evaluator reason, retry attempts,
+  and next action options.
+- Optimizer wrapper failed after artifacts: if `status_phase` is
+  `recovery_available`, run `gitmoot skillopt train recover --session <id>
+  --out-root <optimizer-output-root>`.
+- Stale optimizer lock: if `status_phase` is `blocked_stale_lock`, inspect
+  `active_lock` owner, pid, host, heartbeat, and expiry in verbose status before
+  clearing stale state or retrying the optimizer.
+- Config blocker: if `status_phase` is `blocked_config`, fix the reported
+  `gitmoot-skillopt` install, backend, credential, or model configuration and
+  rerun `train continue`.
+- Render adapter unavailable: install the profile's render dependency or run a
+  profile/config that does not require render smoke. Required render profiles
+  fail before the LLM judge so the optimizer receives a structured blocker.
+- Missing evaluator: pass `--evaluator-id landing_page_v1` for landing-page
+  runs. Text-only flows can rely on the package evaluator config or the default
+  LLM judge.
+- Evaluator skipped: check the evaluator profile and artifact contract. Cheap
+  checks can intentionally skip expensive render/LLM stages after a hard
+  contract failure.
+- Invalid evaluator JSON: fix the evaluator prompt/model/backend and rerun
+  `train continue`. Invalid hard/soft scores are blockers, not candidate
+  rejections.
+- Dry-run versus real optimizer: `--dry-run` checks package/candidate plumbing
+  without model calls or evaluator scoring, but it still advances train state.
+  Use a disposable/reset session for dry-runs; run the production session
+  without `--dry-run` and expect preflight to require working
+  credentials/backends.
+
+---
+
+# Source: docs/skillopt-exchange-contract.md
+
+# Gitmoot-SkillOpt Exchange Contract
+
+Gitmoot keeps the SkillOpt optimizer outside the main binary. The boundary is a
+pair of JSON package formats handled by `gitmoot skillopt export` and
+`gitmoot skillopt import`.
+
+For the guided product workflow, use `gitmoot skillopt train` instead of
+assembling every low-level command manually. Train mode creates sessions and
+iterations, manages review items, generates options, publishes review packets,
+syncs feedback, exports the package, runs the external optimizer, imports a
+pending candidate, publishes candidate review context, and starts follow-up
+iterations only after an explicit decision. The low-level commands documented
+here are still useful for advanced debugging, custom research runs, and
+recovering individual train steps.
+
+See [SkillOpt Train Workflow](skillopt-train-workflow.md) for the end-to-end
+train-mode sequence.
+
+## Training Package
+
+Export a local eval run:
+
+```sh
+gitmoot skillopt export --run run-2026-05-31 --output training.json
+```
+
+The exported package has:
+
+- `kind: gitmoot-skillopt-training-package`
+- `contract_version: 1`
+- `training_mode`: the Gitmoot training/review workflow mode, such as
+  `explore`, `refine`, `distill`, or `validate`
+- `template`: the logical template id, current or pinned version id, content
+  hash, metadata, source, and exact template content
+- `eval_run`: run id, target repo, state, mode, exploration level, option
+  count, metadata, and template version
+- `items`: review/eval items with artifact references for source, baseline,
+  candidate, preview, diff, and ranked option artifacts
+- `artifacts`: local artifact manifests with content hashes, media type, size,
+  and driver
+- `feedback_events`: canonical human feedback events when available
+- `ranked_feedback_events`: canonical N-way ranked feedback events when
+  available, including the ordered ranking, optional winner, trait notes, and
+  reasoning
+- `pairwise_preferences`: derived pairwise preferences expanded from ranked
+  feedback, for example `C > A > D > B` becomes six ordered preferences
+- `evaluator_config`: evaluator and run metadata used by the external
+  optimizer. Top-level workflow mode is exported as `training_mode`, not as
+  `evaluator_config.mode`; `evaluator_config.mode` is reserved for evaluator
+  implementation ids or drivers.
+
+Artifact package entries reference local SHA256 blobs stored under Gitmoot home.
+The export does not copy blobs into the repository by default.
+
+A/B validation runs keep the existing `feedback_events` shape. Ranked
+exploration data is additive: optimizers that only consume A/B validation can
+ignore `items[].options`, `ranked_feedback_events`, and
+`pairwise_preferences`.
+
+## Ranked Exploration Export
+
+Ranked runs use `mode` to tell the optimizer how broad the update should be:
+
+- `explore`: learn broad directions from four to six diverse options.
+- `refine`: combine winning traits into a smaller set of stronger candidates.
+- `distill`: update the template body from accumulated feedback.
+- `validate`: compare the current template against a candidate on fresh review
+  items.
+
+The `exploration_level` field describes how much variation the optimizer should
+try in the next candidate set:
+
+- `high`: prioritize wider exploration and visibly different outputs.
+- `medium`: combine promising traits while still testing alternatives.
+- `low`: make narrow refinements and prepare for validation.
+
+Each ranked item exports `options` with the blind option label, artifact id,
+role, and optional metadata such as preview URLs. Ranked feedback exports:
+
+- `ranking`: canonical option labels ordered best to worst
+- `winner`: optional first-place option
+- `useful_traits`: JSON object keyed by canonical option label
+- `rejected_traits`: JSON object keyed by canonical option label
+- `required_improvements`: JSON array of requested improvements not tied to one
+  option
+- `reasoning`: reviewer notes
+
+Derived `pairwise_preferences` are provided so an optimizer can use simple
+preference comparisons without reparsing every ranking. Each pairwise row
+includes `ranked_event_id`, which matches the corresponding
+`ranked_feedback_events[].id`. Trait notes remain attached to the ranked
+feedback event so a future optimizer can combine useful traits across multiple
+winning options rather than only copying the top option.
+
+## Ranked Exploration Workflow
+
+Use ranked exploration when the template is still ambiguous and humans need to
+compare meaningfully different directions. Use A/B validation when the question
+is whether a specific candidate should replace the current template.
+
+1. `explore`: generate four to six diverse options for each review item. Ask
+   reviewers to rank every option and name useful and rejected traits. Keep
+   `exploration_level` set to `high` while the best direction is still unclear.
+2. `refine`: use two to three candidates that combine the strongest traits
+   discovered during exploration. Keep asking for rankings and trait notes, but
+   focus the alternatives around the same product/workflow goal.
+3. `distill`: convert accumulated ranked feedback into a candidate template
+   update. This phase should not require broad new directions.
+4. `validate`: compare the current template against the candidate on fresh
+   review items. Use the A/B path by default for final promotion decisions.
+
+`gitmoot skillopt review status --run <run-id>` reports the current mode,
+feedback count, pairwise preference count, ranking stability, and recommended
+next mode. Recommendations are advisory only. Gitmoot does not change the run
+mode, import a candidate, or promote a template automatically.
+
+Phase recommendations intentionally wait until every review item has imported
+feedback. This prevents one heavily reviewed item from advancing a whole run
+while other items are untouched. Blind Markdown and GitHub packets hide
+outcome-bearing recommendation details after feedback exists so later reviewers
+do not see the current winner before responding.
+
+Do not run heavy SkillOpt optimization after every tiny feedback update unless
+the user explicitly wants that. A practical cadence is:
+
+- collect enough rankings to make the status recommendation stable;
+- export the training package;
+- run the external optimizer;
+- import the candidate;
+- review or validate the candidate with fresh items before promotion.
+
+## Candidate Package
+
+Import a candidate produced by an external optimizer:
+
+```sh
+gitmoot skillopt import --file candidate.json [--artifact-dir artifacts]
+```
+
+The imported package must have:
+
+- `kind: gitmoot-skillopt-candidate-package`
+- `contract_version: 1`
+- `template_id`: an installed Gitmoot agent template id
+- `base_version_id`: optional pinned version used by the optimizer
+- `candidate.content`: full agent-template Markdown with YAML frontmatter
+- `candidate.metadata`: metadata that exactly matches the candidate
+  frontmatter
+- `eval_report`: optional optimizer report
+- `summary`: optional diff, score, and preference summary
+- `artifacts`: optional candidate artifact manifest entries with `id`, relative
+  `path`, SHA256 `hash`, `media_type`, `driver`, and optional `size_bytes`
+
+Importing never promotes a candidate. Gitmoot stores it as a pending template
+version so later review and promotion commands can decide whether it becomes
+current.
+If `eval_report` or `summary.metadata` marks `promotable: false` with
+`no_candidate_reason`, or if the candidate content hash matches the base
+version, Gitmoot rejects the import as `optimizer produced no candidate` instead
+of creating a fake pending version.
+If `artifacts` is present, `--artifact-dir` is required. Gitmoot rejects
+absolute paths, path traversal, missing files, hash mismatches, duplicate
+artifact ids, and invalid `summary.diff_artifact_id` references before creating
+the pending candidate version. Verified blobs are stored in Gitmoot's
+content-addressed artifact store and registered in SQLite.
+
+Review pending candidates:
+
+```sh
+gitmoot skillopt candidate list --template planner
+gitmoot skillopt candidate show planner@v2
+```
+
+`candidate show` includes the candidate state, source, content hash, base
+version, optimizer score, preference summary, eval report JSON, and a content
+diff against the base/current template version. It does not expose hidden A/B
+assignment mappings while blind reviews are active.
+
+Promote or reject after human review:
+
+```sh
+gitmoot skillopt candidate promote planner@v2
+gitmoot skillopt candidate reject planner@v3 --reason "Too broad for the current workflow"
+```
+
+Promotion updates the template's current version. Rejection records an audit
+reason and prevents the rejected candidate from being selected by `@latest`.
+
+## Human Feedback Trial Happy Path
+
+Create an eval review run and add saved baseline/candidate outputs:
+
+```sh
+gitmoot skillopt review create \
+  --template planner \
+  --repo owner/repo \
+  --run run-2026-05-31
+
+gitmoot skillopt review item add \
+  --run run-2026-05-31 \
+  --item item-001 \
+  --title "README planning task" \
+  --baseline baseline.md \
+  --candidate candidate.md \
+  --metadata-json '{"path":"README.md"}'
+
+gitmoot skillopt review status --run run-2026-05-31
+```
+
+Then export a blind local packet, collect human feedback, and import it:
+
+```sh
+gitmoot skillopt feedback markdown export \
+  --run run-2026-05-31 \
+  --output .gitmoot/evals/run-2026-05-31
+
+# Human opens index.md, reviews items/*.md, sets reviewer, and edits feedback.yml.
+
+gitmoot skillopt feedback markdown import \
+  --packet .gitmoot/evals/run-2026-05-31
+```
+
+When every review item has imported feedback, export the training package for
+the external optimizer:
+
+```sh
+gitmoot skillopt review status --run run-2026-05-31
+gitmoot skillopt export --run run-2026-05-31 --output training.json
+```
+
+Use `--dry-run` first to validate the exchange contract without model calls:
+
+```sh
+gitmoot-skillopt optimize \
+  --training-package training.json \
+  --artifact-root ~/.gitmoot/evals/blobs \
+  --out-root .gitmoot/skillopt/run-2026-05-31 \
+  --candidate-output candidate.json \
+  --dry-run
+```
+
+For real model-backed optimization, verify the installed optimizer contract and
+environment before running it:
+
+```sh
+gitmoot-skillopt --help
+gitmoot-skillopt optimize --help
+for name in OPENAI_API_KEY ANTHROPIC_API_KEY GITMOOT_SKILLOPT_BACKEND; do
+  if [ -n "${!name:-}" ]; then
+    printf '%s=set\n' "$name"
+  else
+    printf '%s=missing\n' "$name"
+  fi
+done
+```
+
+Use the backend, model, and budget flags shown by your installed
+`gitmoot-skillopt optimize --help`. Do not assume flag names without checking
+the local optimizer version.
+
+Import and review the candidate. Importing never promotes automatically:
+
+```sh
+gitmoot skillopt import --file candidate.json [--artifact-dir artifacts]
+gitmoot skillopt candidate show <version-id>
+gitmoot skillopt candidate promote <version-id>
+gitmoot skillopt candidate reject <version-id> --reason "Needs narrower instructions"
+```
+
+## Markdown Feedback Packet
+
+Generate a local blind A/B review packet:
+
+```sh
+gitmoot skillopt feedback markdown export \
+  --run run-2026-05-31 \
+  --output .gitmoot/evals/run-2026-05-31
+```
+
+The packet contains:
+
+- `index.md`: review instructions and item links
+- `items/*.md`: one file per item with Option A and Option B
+- `feedback.yml`: the editable response file
+- `.assignments.json`: hidden A/B assignment metadata used by Gitmoot on import
+
+Humans fill `feedback.yml` with choices:
+
+```yaml
+run_id: run-2026-05-31
+reviewer: alice
+items:
+  - item_id: item-001
+    choice: b
+    reasoning: More concrete and easier to execute.
+  - item_id: item-002
+    choice: tie
+```
+
+Allowed choices are exactly `a`, `b`, `tie`, `neither`, and `skip`. Reasoning is
+optional.
+
+Import the completed feedback:
+
+```sh
+gitmoot skillopt feedback markdown import \
+  --packet .gitmoot/evals/run-2026-05-31
+```
+
+Gitmoot validates the full response before writing any events. On import, it
+uses `.assignments.json` to de-blind `a` and `b` so stored canonical feedback
+events use `choice: a` for the baseline artifact and `choice: b` for the
+candidate artifact. Each event includes `run_id`, `item_id`, `choice`, optional
+`reasoning`, `reviewer`, `source`, optional `source_url`, and `created_at`.
+
+Generate a local ranked exploration packet by creating a ranked run and adding
+repeated option artifacts:
+
+```sh
+gitmoot skillopt review create \
+  --template landing-page-designer \
+  --repo owner/gitmoot-web \
+  --run landing-page-explore-001 \
+  --mode explore \
+  --exploration-level high \
+  --options 4
+
+gitmoot skillopt review item add \
+  --run landing-page-explore-001 \
+  --item hero-001 \
+  --title "Gitmoot landing page hero" \
+  --option a=previews/hero-a.md \
+  --option b=previews/hero-b.md \
+  --option c=previews/hero-c.md \
+  --option d=previews/hero-d.md \
+  --metadata-json '{"task":"landing-page","preview_url":"https://owner.github.io/gitmoot-previews/hero-001/"}'
+
+gitmoot skillopt feedback markdown export \
+  --run landing-page-explore-001 \
+  --output .gitmoot/evals/landing-page-explore-001
+```
+
+Humans fill ranked feedback with ordered options and trait notes:
+
+```yaml
+run_id: landing-page-explore-001
+reviewer: alice
+items:
+  - item_id: hero-001
+    ranking:
+      - C > A > D > B
+    useful_traits:
+      C:
+        - explains what Gitmoot does before the fold
+      A:
+        - strongest mascot placement
+    rejected_traits:
+      B:
+        - too generic for a developer tool
+    required_improvements:
+      - better mobile layout
+      - stronger product visuals
+    reasoning: C is clearest overall, but A has the better visual identity.
+```
+
+A non-visual text task uses the same structure:
+
+```sh
+gitmoot skillopt review create \
+  --template x-post-writer \
+  --repo owner/content-workflows \
+  --run x-post-style-explore-001 \
+  --mode explore \
+  --options 5
+
+gitmoot skillopt review item add \
+  --run x-post-style-explore-001 \
+  --item thread-hook-001 \
+  --title "Launch-thread opening post" \
+  --option a=posts/hook-a.txt \
+  --option b=posts/hook-b.txt \
+  --option c=posts/hook-c.txt \
+  --option d=posts/hook-d.txt \
+  --option e=posts/hook-e.txt
+```
+
+Rank every option from best to worst and use trait notes for style signals such
+as pacing, specificity, voice, sentence length, and phrases to avoid.
+
+## GitHub Feedback Collector
+
+Publish a collaborative blind A/B review packet to a new GitHub issue:
+
+```sh
+gitmoot skillopt feedback github publish \
+  --run run-2026-05-31 \
+  --repo owner/reviews
+```
+
+To publish the packet as a comment on an existing PR instead:
+
+```sh
+gitmoot skillopt feedback github publish \
+  --run run-2026-05-31 \
+  --repo owner/repo \
+  --pr 123
+```
+
+If `--repo` is omitted, Gitmoot resolves the target in this order: eval run
+target repo, template source repo, configured `[feedback].repo`, then an error
+asking for `--repo`.
+
+Reviewers can reply with the issue body's YAML block or with short-form lines:
+
+```text
+run_id: run-2026-05-31
+item-001: b - More concrete and easier to execute.
+item-002: tie
+```
+
+Sync comments back into canonical feedback events:
+
+```sh
+gitmoot skillopt feedback github sync \
+  --run run-2026-05-31 \
+  --repo owner/reviews \
+  --issue 42
+```
+
+For PR comment mode, use `--pr 123` instead of `--issue 42`. Sync ignores
+unrelated comments and de-duplicates repeated imports by comment URL.
+
+Ranked GitHub review uses the same run and item setup as the Markdown ranked
+workflow, then publishes to a review issue or PR:
+
+```sh
+gitmoot skillopt feedback github publish \
+  --run landing-page-explore-001 \
+  --repo owner/gitmoot-previews
+
+gitmoot skillopt feedback github sync \
+  --run landing-page-explore-001 \
+  --repo owner/gitmoot-previews \
+  --issue 42
+```
+
+Reviewers can reply with the YAML ranked block or a short ranking form:
+
+```text
+run_id: landing-page-explore-001
+hero-001 ranking: C > A > D > B
+best traits:
+- C: clearest product explanation
+- A: best mascot placement
+reject:
+- B: too generic
+```
+
+Complete local review path:
+
+1. `gitmoot skillopt review create --template <id> --repo owner/repo --run <run-id>`
+2. `gitmoot skillopt review item add --run <run-id> --item <item-id> --baseline baseline.md --candidate candidate.md`
+3. `gitmoot skillopt feedback markdown export --run <run-id> --output .gitmoot/evals/<run-id>`
+4. Human opens `index.md`, reviews `items/*.md`, sets `reviewer`, and fills `feedback.yml`.
+5. `gitmoot skillopt feedback markdown import --packet .gitmoot/evals/<run-id>`
+6. `gitmoot skillopt export --run <run-id> --output training.json`
+7. `gitmoot-skillopt optimize --training-package training.json --artifact-root ~/.gitmoot/evals/blobs --out-root .gitmoot/skillopt/<run-id> --candidate-output candidate.json --dry-run`
+8. `gitmoot skillopt import --file candidate.json [--artifact-dir artifacts]`
+9. `gitmoot skillopt candidate show <version-id>`
+10. `gitmoot skillopt candidate promote <version-id>` or `gitmoot skillopt candidate reject <version-id>`
+
+Complete train-mode path:
+
+1. `gitmoot skillopt train start --template <id> --repo owner/repo --workspace-repo owner/workspace --request <text> --items-file items.yml --yes` (`--workspace-repo` is required; without it the session stays at `request_confirmed` and cannot reach option generation)
+2. `gitmoot skillopt train status --session <session-id> --json --verbose` or `--watch` to inspect `status_phase`, item progress, active locks with owner and heartbeat, review issue, candidate, recovery availability, no-candidate reason, and next action. `status_phase` is the stable automation field; it can pass through normal train states such as `items_ready` and can also report generation/optimizer/blocker phases such as `generating_options`, `generating_options_heartbeat_stale`, `preflight_running`, `optimizer_running`, `optimizer_heartbeat_stale`, `optimizer_completed_candidate`, `optimizer_completed_no_candidate`, `recovery_available`, `blocked_config`, `blocked_stale_lock`, or `failed_unrecoverable`. While option generation runs, `status_phase` reports `generating_options` (the dashboard shows the same live phase), so polling does not look frozen at `items_ready`.
+3. `gitmoot skillopt train continue --session <session-id>` to generate options and publish the review packet.
+4. Human feedback is imported from raw or fenced YAML comments; `train continue` auto-syncs GitHub comments when the review is published and feedback is missing.
+5. Evaluator profiles run cheap artifact checks first, optional render adapters second, and LLM judges last. Structured failures flow into optimizer input with reasons, hints, evidence, failed checks, and stage status.
+6. `gitmoot skillopt train continue --session <session-id> --backend codex` to export the package, print the resolved backend/preflight report, run `gitmoot-skillopt`, and import the pending candidate, or record `optimizer_completed_no_candidate` if the optimizer produced no promotable content.
+7. If the optimizer wrapper fails after writing completed artifacts and status reports `recovery_available`, run `gitmoot skillopt train recover --session <session-id> --out-root <optimizer-output-root>` to import a completed candidate or record the completed no-candidate result through the same gate.
+8. `gitmoot skillopt train continue --session <session-id>` to publish candidate review context with separate selection score, evaluator/test scores, gate status, no-op status, and promotability.
+9. `gitmoot skillopt train continue --session <session-id> --promote <version>` or `--reject <version> --reason <text>`.
+10. `gitmoot skillopt train continue --session <session-id> --start-next` only after the prior iteration is resolved.
+
+Complete GitHub review path:
+
+1. `gitmoot skillopt import --file candidate.json [--artifact-dir artifacts]`
+2. `gitmoot skillopt feedback github publish --run <run-id> --repo owner/reviews`
+3. Humans reply in GitHub comments using the run-scoped YAML or short-form block.
+4. `gitmoot skillopt feedback github sync --run <run-id> --repo owner/reviews --issue <number>`
+5. `gitmoot skillopt candidate show <version-id>`
+6. `gitmoot skillopt candidate promote <version-id>` or `gitmoot skillopt candidate reject <version-id>`
+
+## Future Live Pairwise Evaluation
+
+The MVP exchange contract compares candidates against saved baseline outputs.
+This keeps local review deterministic and avoids rerunning every baseline for
+each candidate import.
+
+Future live pairwise mode is tracked in
+[GitHub issue #77](https://github.com/jerryfane/gitmoot/issues/77). That mode
+would run the current promoted template and the pending candidate live for every
+validation item before collecting blind A/B feedback. The tradeoff is more
+faithful comparisons and better protection against stale baseline outputs, at
+the cost of higher latency, token spend, and runtime/session complexity.
+
+---
+
+# Source: docs/herdr-composable-train-init.md
+
+# Running the train-init wizard in a Herdr pane
+
+[Herdr](https://github.com/jerryfane/herdr) is a terminal workspace manager for
+AI coding agents. Gitmoot's `skillopt train init` wizard works well inside a
+visible Herdr pane, but **Herdr is an optional frontend, not a dependency**:
+Gitmoot imports no Herdr code and never calls Herdr. The integration is purely
+compositional — it uses Herdr's standard pane commands plus Gitmoot's existing
+process, stdin/stdout, and `gitmoot interactive ... --json` surfaces.
+
+## Why it composes
+
+The interactive wizard (see [skillopt-train-workflow.md](./skillopt-train-workflow.md))
+publishes each question as an interactive prompt record and blocks until that
+question is answered on the pane's stdin **or** resolved externally with
+`gitmoot interactive answer`. That second path is what makes Herdr optional: an
+agent can run the wizard in a pane for a human to watch, yet answer the current
+question from its own session without typing into the pane at all.
+
+## Pane-based flow
+
+Run the wizard in a new pane that the human can see, and drive it from the
+agent's session:
+
+```sh
+# 1. Split a visible pane next to the current one and start the wizard there.
+PANE=$(herdr pane split "$HERDR_PANE_ID" --direction right --cwd "$REPO" --no-focus)
+herdr pane send-text "$PANE" 'gitmoot skillopt train init'
+herdr pane send-keys "$PANE" Enter
+
+# 2. The wizard now waits on its first question. Inspect the pending prompt
+#    from the agent's own session (no pane scraping needed).
+gitmoot interactive list --state pending --json
+gitmoot interactive show <prompt-id> --json   # question + choices for the human
+
+# 3. Relay the question to the human, then answer on their behalf. The wizard,
+#    running in the pane, unblocks and renders the next question.
+gitmoot interactive answer <prompt-id> <value> --source agent
+
+# 4. Repeat list/show/answer until the wizard prints the scaffold summary, then
+#    optionally read the pane to confirm and close it.
+herdr pane read "$PANE" --source recent --lines 40
+herdr pane close "$PANE"
+```
+
+Notes:
+
+- The human can also type answers directly into the pane (`herdr pane send-text`
+  / `send-keys`); stdin and `interactive answer` are interchangeable for the
+  same question.
+- `herdr pane read` is only for relaying/confirming output to a human — answers
+  flow through `gitmoot interactive answer`, never by parsing pane text.
+
+## Pure CLI fallback (no Herdr)
+
+Nothing above needs Herdr. The same flow works in any terminal, and an agent
+that cannot open a pane can answer everything in one asynchronous pass:
+
+```sh
+gitmoot skillopt train init --prompts          # emit all prompt records, then exit
+gitmoot interactive list --state pending --json
+gitmoot interactive answer <prompt-id> <value> --source agent   # for each field
+gitmoot skillopt train init                     # rerun; applies the answers
+```
+
+An optional smoke script, [`scripts/herdr-train-init-smoke.sh`](../scripts/herdr-train-init-smoke.sh),
+exercises the pane flow when `herdr` is on `PATH` and skips cleanly otherwise, so
+it never fails a normal checkout that has no Herdr installed.
 
 ---
 
@@ -2655,6 +4206,260 @@ exact-owner stale lock; use `--force` only when the stored owner is stale.
 
 ---
 
+# Source: docs/release-notes/v0.1.0-beta.1.md
+
+# Gitmoot v0.1.0-beta.1
+
+Gitmoot v0.1.0-beta.1 is the first local-first beta for coordinating AI agent
+sessions through GitHub pull requests.
+
+## Features
+
+- Local SQLite workflow state for repos, agents, goals, tasks, jobs, PRs, and
+  branch locks.
+- Runtime-neutral agent registry with Codex, Claude Code, and shell adapters.
+- Multi-repo daemon mode for watching all enabled repositories from one
+  Gitmoot home.
+- Repo-scoped agent access so one global agent identity can work across
+  multiple allowed repos without cross-routing.
+- PR comment commands for help, status, agent ask/review/implement jobs, merge
+  requests, retries, and cancellation.
+- Background daemon management with start, run, stop, restart, status, and logs.
+- Worker loop that executes queued jobs, records raw output locally, advances
+  workflow state, and posts attributed PR result comments.
+- Branch lock commands for inspecting and releasing stale implementation locks.
+- Job recovery commands for listing, showing, retrying, cancelling, and
+  inspecting job events.
+- Version and update commands backed by GitHub Releases, with conservative
+  manual fallback commands when self-update is not safe.
+- Agent-facing `SKILL.md` covering Gitmoot commands, output contracts, and safe
+  behavior rules.
+- Live smoke-test documentation for one-repo and two-repo local workflows.
+
+## Known V1 Limits
+
+- Gitmoot runs locally; the daemon host must stay online.
+- GitHub is polled; there is no webhook receiver in this beta.
+- PR comments are authored by the authenticated GitHub user, with agent
+  attribution in the comment body.
+- There is no hosted dashboard, GitHub App bot identity, cloud runner, billing,
+  or remote control plane.
+- GitHub Checks are not used in V1; Gitmoot uses PR comments and commit
+  statuses where appropriate.
+
+---
+
+# Source: docs/release-notes/v0.1.0-beta.8.md
+
+# Gitmoot v0.1.0-beta.8
+
+Gitmoot v0.1.0-beta.8 adds ranked SkillOpt exploration as a beta workflow for
+improving agent templates with broader human preference feedback before final
+A/B validation.
+
+## Features
+
+- Ranked SkillOpt review runs with `explore`, `refine`, `distill`, and
+  `validate` modes.
+- N-way review item options through repeated `--option label=path` artifacts.
+- Markdown and GitHub feedback packets that let humans rank every option and
+  record useful or rejected traits.
+- Ranked feedback import that derives pairwise preferences for optimizer-ready
+  training packages.
+- `skillopt review status` phase recommendations with ranking stability,
+  pairwise preference counts, and advisory next-mode guidance.
+- Agent-facing Gitmoot skill guidance for ranked exploration cadence, including
+  the rule that heavy SkillOpt optimization should not run after every tiny
+  feedback round unless the user explicitly asks.
+- Beta smoke-test documentation for clean-temp-home ranked exploration runs,
+  Markdown packet import, pairwise expansion, training export inspection, and
+  optional GitHub issue or PR feedback sync.
+- High-level `gitmoot skillopt train` documentation for session/iteration
+  orchestration, optimizer handoff, candidate review, explicit
+  promote/reject decisions, and start-next gate enforcement.
+- Deterministic `scripts/skillopt-train-smoke.sh` coverage for fake managed
+  generation, fake optimizer handoff, fake GitHub candidate review, and
+  promote/reject/start-next paths.
+
+## Known Beta Limits
+
+- Ranked exploration is a beta workflow; final promotion should still use fresh
+  A/B validation items by default.
+- GitHub feedback collection still uses issues or PR comments authored by the
+  authenticated GitHub user.
+- Phase recommendations are advisory. Gitmoot does not automatically change
+  modes, run the external optimizer, import candidates, or promote templates.
+- The external optimizer remains outside the main Gitmoot binary.
+- Train-mode smoke coverage uses fake GitHub and fake optimizer seams; real
+  GitHub review publication still depends on the authenticated `gh` environment.
+
+---
+
+# Source: docs/release-notes/v0.2.0-beta.1.md
+
+# Gitmoot v0.2.0-beta.1
+
+Gitmoot v0.2.0-beta.1 promotes the recent worktree, permission, Claude
+readiness, and forkable temp-worker changes into the public beta line.
+
+## Highlights
+
+- Implementation jobs now run in task-owned worktrees instead of mutating the
+  registered checkout directly.
+- Read-only agents are blocked before implementation starts, with clear
+  user-facing guidance instead of write failures.
+- Claude Code readiness checks now classify missing OAuth/auth setup and tell
+  users to run `claude setup-token` when needed.
+- Busy Codex and Claude runtime sessions can fork bounded temporary workers for
+  parallel implementation tasks, then merge successful work back.
+- Task list/show output now exposes task worktree location and lifecycle state.
+
+## Features
+
+- Task worktree allocation for `gitmoot task run` implementation jobs.
+- Checkout mutation serialization for branch/worktree setup.
+- Daemon execution from stored task worktrees for implementation and review
+  jobs.
+- Post-delivery workflow advancement for task implementation jobs.
+- Autonomy policy validation for registered agents and managed agent types.
+- Runtime adapter policy propagation so Codex/Claude receive the intended
+  write/read behavior.
+- Permission failure classification for read-only and approval-blocked jobs.
+- Claude auth readiness reporting in `gitmoot agent doctor` and plugin checks.
+- Parallel session policy configuration with bounded temp-worker forks.
+- Temp-worker delegation, merge-back jobs, resource-lock cleanup, and tests.
+
+## Verification
+
+- `GOTOOLCHAIN=go1.26.0 go test ./...`
+- Local smoke validation for automatic task worktree routing.
+- Real GitHub PR smoke validation for comments, PR state refresh, merge gate,
+  and worktree cleanup.
+- Herdr-visible parallel worker smoke with same-agent Codex jobs where one job
+  used the original runtime session and another used a temporary worker.
+- Claude Code OAuth setup was validated with real `claude -p` background/ask
+  execution after token setup.
+
+## Known Beta Limits
+
+- Local coordinator delegation now has first-class `gitmoot agent run`,
+  `gitmoot agent review`, and `gitmoot agent implement` command paths. They are
+  intended to keep worktree, branch, commit, push, PR, and advancement lifecycle
+  inside Gitmoot rather than child-agent prompts.
+- SkillOpt live pairwise candidate-vs-current promotion validation is still a
+  future optional mode.
+- Preset prompt delivery for resumed agents can still be optimized further.
+- Release assets currently include `gitmoot_linux_amd64` only.
+
+---
+
+# Source: docs/release-notes/v0.2.0-beta.2.md
+
+# Gitmoot v0.2.0-beta.2
+
+Gitmoot v0.2.0-beta.2 stabilizes the parallel PR lifecycle work from the
+0.2.0 beta line and publishes the validated issue #50 fixes.
+
+## Highlights
+
+- Parallel `gitmoot task run` flows now create task-owned worktrees reliably
+  under checkout-lock contention.
+- The daemon now reconciles stale/current-head review state and can complete
+  post-delivery advancement retries automatically.
+- Merge-conflict comments now explain the concrete repair path: resolve
+  manually or queue a Gitmoot-owned implement/fix job, then rerun review/merge.
+- Local planning files now live under ignored `/GOALS/`, and release artifacts
+  under `/dist/` are ignored.
+
+## Validation
+
+- `GOTOOLCHAIN=local /tmp/go1.26.4/bin/go test ./internal/workflow ./internal/daemon ./internal/cli -timeout 420s`
+- `git diff --check`
+- Real disposable GitHub smoke with four parallel tasks:
+  - four task worktrees auto-created
+  - four daemon-consumed implementation jobs
+  - four PRs opened and merged by Gitmoot
+  - task worktrees removed after merge
+  - remote task branches deleted after merge
+  - disposable repo deleted after validation
+
+## Known Beta Limits
+
+- `gitmoot daemon start --repo owner/repo` still expects to be run from a
+  checkout whose origin matches the target repo. Issue #202 tracks making
+  `--repo` resolve the registered checkout directly or return a clearer
+  actionable error.
+- Release assets currently include `gitmoot_linux_amd64` only.
+
+---
+
+# Source: docs/release-notes/v0.3.0-beta.1.md
+
+# Gitmoot v0.3.0-beta.1
+
+Gitmoot v0.3.0-beta.1 adds a full interactive **dashboard cockpit** and an
+end-to-end **train-run TUI** for the SkillOpt optimization loop, on top of the
+0.2.0 parallel-PR foundation.
+
+## Highlights
+
+### Interactive dashboard (`gitmoot dashboard`)
+
+- A bubbletea cockpit with pages for Attention, Trains, Agents, Sessions, Jobs,
+  Locks, Health, and Config. It launches automatically on a terminal and falls
+  back to the byte-stable `--plain` / `--json` snapshot everywhere else.
+- **Attention**: answer interactive prompts inline; retry or cancel
+  blocked/failed jobs; start the daemon when it is down.
+- **Agents**: create (pick a template or write a custom prompt in `$EDITOR`),
+  delete, revert a template version, switch runtime (codex/claude), optimize, and
+  read a version's prompt in a pager. Internal training agents are hidden.
+- **Jobs**: a scrollable list with timestamps, request/result detail, and
+  retry/cancel.
+- **Sessions**: per-session detail and a stop action. **Locks**: a "what to do"
+  guidance line.
+- **Health**: environment/daemon doctor checks. **Config**: inline scalar edits
+  (comment-preserving) plus an `$EDITOR` handoff with validation.
+
+### Train-run + train-init TUI (SkillOpt)
+
+- `gitmoot skillopt train init` interactive wizard (line and TUI) with template
+  resolution, optional GitHub repo creation, and a confirm summary.
+- A train-run view that drives **generate → review → optimize → promote** with a
+  live phase bar, streaming generation/optimizer progress, candidate preview, and
+  promote/reject — which now also posts the decision to the candidate-review
+  issue and closes it.
+- A lazy, self-documenting review-reply template: ranking is the only required
+  field; everything else is optional with inline allowed-values hints.
+
+### Reliability
+
+- Creating a generation repo now provisions a usable checkout (initial commit +
+  clone + register), so the optimizer can run in it.
+- The codex optimizer and target backends default to the codex CLI's configured
+  model instead of an unsupported `gpt-4o`.
+- Failed generate/continue steps surface the real runtime error (e.g. a codex
+  usage limit) instead of a cryptic stdin line.
+
+## Validation
+
+- `GOTOOLCHAIN=go1.26.0 go test ./...` — green except the known daemon flake
+  `TestRunQueuedJobsSerializesSameRuntimeSessionAcrossRepos`.
+- `go vet`, `gofmt`, and `git diff --check` clean.
+- High-effort code review on every change; live exercise of the dashboard and a
+  full train run end-to-end (generate → optimize → candidate promote) on a
+  disposable GitHub repo.
+
+## Known Beta Limits
+
+- The dashboard runs against the current checkout's home; running it from
+  anywhere to track every repo is tracked in #267.
+- Per-agent model selection is not wired yet (#268), and the dashboard does not
+  yet surface optimizer / `blocked_config` errors in the TUI (only generation
+  errors) — check the session log if an optimizer step stalls.
+- Release assets include `gitmoot_linux_amd64` only.
+
+---
+
 # Source: skills/gitmoot/SKILL.md
 
 ---
@@ -2716,11 +4521,17 @@ sessions or managed agent types with `max_background` greater than one.
 ## Common Commands
 
 Use `gitmoot status --repo owner/repo` for repo status, `gitmoot daemon status`
-for daemon state, `gitmoot agent list` for registered agents, and
-`gitmoot agent prompt <agent-or-template>` to import an agent prompt into the
-current chat. Use `gitmoot agent ask <agent> --repo owner/repo "..."` to invoke
-a registered Gitmoot agent through the runtime adapter path. Add `--background`
-only when the user wants a queued background job. Use
+for daemon state, `gitmoot agent list` and `gitmoot agent show <agent>` for
+registered agents, `gitmoot task list --repo owner/repo` for imported task
+state, and `gitmoot agent prompt <agent-or-template>` to import an agent prompt
+into the current chat. Use `gitmoot agent run <agent> --repo owner/repo "..."`
+for coordinator delegation so Gitmoot can route to ask, review, or implement
+and own worktrees, branch locks, commits, pushes, PRs, and workflow
+advancement. Use `gitmoot agent ask <agent> --repo owner/repo "..."` only for
+analysis, planning, or questions. Use `gitmoot agent review <agent> --repo
+owner/repo --pr <number> "..."` for PR review decisions and `gitmoot agent
+implement <agent> --repo owner/repo --task <task-id> "..."` for file changes.
+Add `--background` only when the user wants a queued background job. Use
 `gitmoot job list --repo owner/repo` for queued or recent jobs. Use
 `gitmoot plugin doctor` when checking whether Codex or Claude Code can discover
 Gitmoot through an installed runtime plugin. Use `gitmoot goal template` when
@@ -2736,8 +4547,10 @@ Gitmoot to enforce the full feedback, optimizer, candidate-review, and
 promotion loop. Use low-level `gitmoot skillopt review`, `feedback`, `export`,
 `import`, and `candidate` commands for advanced/debug work or when recovering a
 specific step. In train mode, collect enough ranked feedback and trait notes
-before optimizer handoff, keep promotion decisions explicit, and start follow-up
-iterations only through `train continue --start-next`.
+before optimizer handoff, check `gitmoot-skillopt --version` and
+`gitmoot-skillopt optimize --help` when optimizer-backed continue is needed,
+keep promotion decisions explicit, and start follow-up iterations only through
+`train continue --start-next`.
 
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).
@@ -2926,6 +4739,73 @@ user explicitly wants a foreground process. Keep the default `--workers 1`
 unless the Gitmoot home has multiple independent runtime sessions or managed
 agent types with `max_background` greater than one.
 
+`gitmoot dashboard` shows local state — daemon health, repos, agents and runtime
+sessions, jobs by state, worktrees, branch locks, SkillOpt train phase/candidate,
+and pending interactive prompts.
+
+On a real terminal (stdin and stdout both a TTY) and with no other output/mutation
+flag, `gitmoot dashboard` launches an **interactive TUI**: a sidebar of pages
+(Attention, Trains, Agents, Runtime sessions, Jobs, Locks) that auto-refreshes.
+Navigate with `tab`/`shift+tab` or `←/→`; `↑/↓` selects a row; `?` opens a
+per-page key reference; `r` refreshes, `q` quits. The TUI is the cockpit — every
+page can act, and each action runs the same store/workflow code as its CLI
+equivalent:
+
+- **Attention** lists pending prompts (`a` answer inline, `d` dismiss) and the
+  actual blocked/failed jobs with their latest event message (`enter` detail,
+  `R` retry). A red banner appears when the daemon is stopped; `s` restarts it
+  with its previously persisted flags.
+- **Trains** lists every train session: `enter` opens ANY session's live phase
+  view (not just the newest), `s` stops a live session (a reason is required;
+  same path as `skillopt train stop`), `d` deletes a finished session and its
+  history — and, if gitmoot created GitHub repos for that session, a second
+  confirm offers to delete those too (never offered for repos gitmoot did not
+  create; a missing `delete_repo` token scope shows its `gh auth refresh`
+  remedy and can be retried in place).
+- **Agents** lists registered agents: `enter` opens a detail with the template,
+  recent jobs, and the template's version history; `n` registers a new agent
+  (name, codex/claude runtime, installed template); `o` starts a training
+  session for the agent's template via a pre-filled form (review/workspace
+  repos, request, codex/claude backend, optional model — the backend/model are
+  stored in the session's optimizer defaults so `train continue` inherits
+  them), then drops into the live phase view; `D` deletes the agent (refused
+  while jobs reference it); `v` in the detail reverts the template to a
+  previous version (same as `gitmoot agent template revert`).
+- **Jobs** lists every job with a state summary: `enter` shows the event
+  history, `R` retries failed/blocked/cancelled jobs (same path as
+  `gitmoot job retry`), `c` cancels queued AND running jobs (same as
+  `gitmoot job cancel`; running ones show `cancelling…` until the daemon
+  settles them).
+- **Locks** explains and lists locks, stale resource locks first in red (the
+  owning process died; a running daemon reclaims them automatically); active
+  locks collapse to a count. Branch locks are released with
+  `gitmoot lock release owner/repo <branch> --owner <agent>`.
+
+Form questions are also published as interactive prompt records, so an agent can
+answer them with `gitmoot interactive answer` while the form is open. Inline
+answers/dismissals use the same store APIs as `gitmoot interactive answer` /
+`clear`.
+
+Everywhere else — pipes, redirects, CI, `--plain`, `--json`, `--all`, `--watch`,
+`--answer`, `--dismiss` — it prints the one-shot snapshot instead, unchanged. Set
+`GITMOOT_NO_TUI=1` or `TERM=dumb` to force the non-interactive path globally.
+
+```sh
+gitmoot dashboard                  # interactive TUI on a terminal
+gitmoot dashboard --plain          # one-shot snapshot on a terminal
+gitmoot dashboard --json
+gitmoot dashboard --all
+gitmoot dashboard --answer <prompt-id> --value <value>
+gitmoot dashboard --dismiss <prompt-id>
+gitmoot dashboard --watch          # plain redraw until Ctrl-C (terminal only)
+gitmoot dashboard --watch --interval 2s
+```
+
+In the one-shot styled output the dashboard leads with a "needs attention" block,
+colors and truncates long lists, and groups near-identical runtime sessions;
+`--all` shows everything. `--watch` redraws on an interval (default 5s) and cannot
+be combined with `--json`, `--answer`, or `--dismiss`.
+
 ## Agent Setup
 
 Start a new runtime session managed by Gitmoot:
@@ -2957,22 +4837,34 @@ Inspect agents:
 
 ```sh
 gitmoot agent list
+gitmoot agent show reviewer
+gitmoot agent show reviewer --json
 gitmoot agent repos reviewer
 gitmoot agent doctor reviewer
 ```
 
-Ask a registered agent from the current local chat:
+Delegate to a registered agent from the current local chat:
 
 ```sh
+gitmoot agent run project-planner --repo owner/repo "Return the plan status."
+gitmoot agent run lead --repo owner/repo --task task-001 --background "Implement this task."
+gitmoot agent run reviewer --repo owner/repo --pr 12 --background "Review this PR."
+gitmoot agent review reviewer --repo owner/repo --pr 12 "Review this PR."
+gitmoot agent implement lead --repo owner/repo --task task-001 "Implement this task."
 gitmoot agent ask project-planner --repo owner/repo "Return the plan status."
 gitmoot agent ask project-planner --repo owner/repo --background "Write the implementation plan and goal file."
 gitmoot job watch <job-id>
 ```
 
 This uses the same agent registry, repo access grants, cached template snapshot,
-runtime adapter, and local job history as PR-comment ask jobs. The runtime
+runtime adapter, and local job history as PR-comment jobs. `agent run` is the
+default coordinator-safe entrypoint because it routes to `ask`, `review`, or
+`implement` and keeps branch, worktree, commit, push, PR, and workflow lifecycle
+inside Gitmoot. `agent ask` is for analysis, planning, and questions only; it
+blocks obvious branch/commit/push/PR orchestration unless `--force` is supplied.
+The runtime
 plugin helps Codex or Claude Code discover Gitmoot guidance, but it does not
-replace `gitmoot agent ask`. Synchronous asks and queued jobs both use the same
+replace the Gitmoot CLI. Synchronous jobs and queued jobs both use the same
 runtime session locks.
 
 Configure managed background agent types:
@@ -3068,6 +4960,10 @@ Template updates are versioned locally. `gitmoot agent template show <id>`
 prints the current version, content hash, source commit, and promotion state.
 Agents use the current promoted version by default, or a pinned version when
 configured with a reference such as `--template frontend-reviewer@v1`.
+
+A bad promotion can be undone: `gitmoot agent template revert <template-id>
+--version <version-id>` makes a superseded version current again (the dashboard's
+Agents page does the same with `v` in the agent detail).
 Queued jobs keep the exact template content snapshot they were created with.
 
 Discover templates by metadata:
@@ -3091,6 +4987,18 @@ Import a goal file into local Gitmoot state:
 ```sh
 gitmoot goal import --file GOAL-feature.md --repo owner/repo
 ```
+
+Start a task in its dedicated branch worktree and inspect task state:
+
+```sh
+gitmoot task run task-001 --repo owner/repo --owner lead --base main
+gitmoot task list --repo owner/repo
+gitmoot task list --repo owner/repo --state implementing --json
+```
+
+`task run` stores the deterministic task worktree path under
+`$GITMOOT_HOME/worktrees/<owner>--<repo>/<task-id>/` and leaves the registered
+checkout on its current branch.
 
 ## PR Comments
 
@@ -3120,6 +5028,11 @@ gitmoot lock list --repo owner/repo
 gitmoot lock show owner/repo <branch>
 ```
 
+Merge-gate retries are automatic while the daemon is running. Retryable states,
+such as a busy base-branch merge queue or a GitHub branch update in progress,
+are retried on the next daemon poll tick. The default poll interval is `30s`
+unless the daemon was started with a different `--poll`.
+
 ## SkillOpt Exchange
 
 ```sh
@@ -3138,11 +5051,23 @@ gitmoot skillopt feedback markdown export --run <run-id> --output .gitmoot/evals
 gitmoot skillopt feedback markdown import --packet .gitmoot/evals/<run-id> [--reviewer name]
 gitmoot skillopt feedback github publish --run <run-id> [--repo owner/repo] [--pr <number>]
 gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issue <number>|--pr <number>)
-gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file items.yml [--workspace-repo owner/workspace] [--preview-repo owner/previews] [--preview-mode none|optional|required] [--preview-renderer none|vue-vite] [--preview-publisher none|github-pages] [--preview-route-template template] [--yes]
+gitmoot skillopt train start --template <id> --repo owner/repo --request <text> --items-file items.yml [--workspace-repo owner/workspace] [--preview-repo owner/previews] [--preview-mode none|optional|required] [--preview-renderer none|vue-vite] [--preview-publisher none|github-pages] [--preview-route-template template] [--create-repos] [--yes]
 gitmoot skillopt train status --session <id>
+gitmoot skillopt train run [--config path | --session <id>] [--plain]
 gitmoot skillopt train continue --session <id> [--generator-type skillopt-generator | --generator-agent name] [--skillopt-bin path] [--dry-run] [--promote version|--reject version --reason text] [--start-next]
 gitmoot skillopt train stop --session <id> --reason <text>
 ```
+
+On a real terminal, `skillopt train run` opens an interactive view of one session
+(resolved from `--session` or the newest session of a `--config`): a phase bar
+plus a single keypress per step — `enter` advances the current phase (the long
+generate/optimizer steps run in a detached background process so `q` leaves the
+run going), `p`/`x` promote or reject a candidate, `n` starts the next iteration.
+Review-blocked phases show the GitHub issue link to continue from the browser.
+`--plain`, a piped stdin, or `GITMOOT_NO_TUI`/`TERM=dumb` print a one-shot status
+snapshot instead. `train status`/`continue` print a `continue_from_github:` line
+at review-blocked phases. `train start --create-repos` (or the prompt in the
+`train init` form) creates a missing target/workspace/review repo on GitHub.
 
 Use `skillopt train` for the product workflow. It pins the template version,
 tracks sessions and iterations, validates item diversity, generates temporary
@@ -3169,10 +5094,12 @@ evaluator config. Use `gitmoot-skillopt optimize --training-package
 training.json --artifact-root ~/.gitmoot/evals/blobs --out-root
 .gitmoot/skillopt/<run-id> --candidate-output candidate.json --dry-run` first
 to validate the contract without model calls.
-Before real model-backed optimization, check `gitmoot-skillopt optimize --help`
-and verify required model/backend environment variables for the installed
-optimizer version. `skillopt import` validates a candidate package and stores
-the candidate template as a pending version; it never promotes the candidate
+Before real model-backed optimization, check `gitmoot-skillopt --version` and
+`gitmoot-skillopt optimize --help`, or install it with
+`pipx install https://github.com/jerryfane/gitmoot-skillopt/releases/download/v0.2.0b1/gitmoot_skillopt-0.2.0b1-py3-none-any.whl`.
+Verify required model/backend environment variables for the installed optimizer
+version. `skillopt import` validates a candidate package and stores the
+candidate template as a pending version; it never promotes the candidate
 automatically. If the candidate package includes new artifact manifest entries,
 pass `--artifact-dir` so Gitmoot can verify relative paths and SHA256 hashes
 before storing blobs. `skillopt candidate show` displays candidate metadata, eval
@@ -3407,6 +5334,18 @@ template-learning loop. Use low-level `skillopt review`, `feedback`, `export`,
 `import`, and `candidate` commands only for advanced/debug work, custom
 research runs, or one-step recovery.
 
+To scaffold a reusable train config, run `gitmoot skillopt train init`. On an
+interactive terminal it runs a line-oriented wizard (numbered template choices
+with a "Custom file" option, and the preview style); each question is also a
+prompt record an agent can answer with `gitmoot interactive answer`, or pass
+`--prompts` to emit them all at once. It prints the next `train start --config
+... --workspace-repo <owner/repo>` command. See
+[../../../docs/skillopt-train-workflow.md](../../../docs/skillopt-train-workflow.md)
+and the optional Herdr-pane flow in
+[../../../docs/herdr-composable-train-init.md](../../../docs/herdr-composable-train-init.md).
+Use `gitmoot dashboard` (add `--json`) to watch train phase, pending prompts,
+jobs, and daemon health.
+
 ```sh
 gitmoot skillopt train start \
   --template planner \
@@ -3549,6 +5488,9 @@ gitmoot skillopt review status --run landing-page-explore-001
 Only run the external optimizer when the user wants a candidate update and the
 status recommendation is stable enough for the current phase. Do not run heavy
 SkillOpt optimization after every tiny feedback round by default.
+Before launching it, verify `gitmoot-skillopt --version` and
+`gitmoot-skillopt optimize --help`; missing or broken installs should be
+handled as configuration blockers.
 
 ## Execution Model
 
@@ -3564,9 +5506,13 @@ Background jobs are scheduled against three distinct resources:
 - branch locks for implementation ownership and merge safety.
 
 The daemon default is `--workers 1`. Users can raise it when jobs target
-different runtime sessions or managed agent types with `max_background` greater
-than one. Gitmoot still serializes jobs for the same runtime session or checkout
-even when more workers are configured.
+different runtime sessions, managed agent types with `max_background` greater
+than one, or forkable temporary workers. By default `[parallel_sessions]` uses
+`same_session = "fork_temp_session"`, `merge_back = "summary"`,
+`max_temp_sessions_per_agent = 4`, and
+`eligible_actions = ["ask", "review", "implement"]`. Same-checkout work remains
+serialized; same-runtime Codex/Claude jobs can fork only when the action is
+eligible and implementation jobs have a safe task worktree.
 
 ## Multi-Repo Work
 
@@ -3715,6 +5661,13 @@ by the assigned agent.
 Review and ask jobs should inspect and report without mutating branches unless
 the task explicitly instructs otherwise.
 
+Do not ask child agents to run PR lifecycle commands such as `git pull`,
+`git merge`, `git push`, or `gh pr merge` to make parallel task PRs mergeable.
+Gitmoot owns the final merge gate. It serializes merge attempts per base branch,
+updates stale PR branches through GitHub when possible, retries pending states
+through the daemon, and blocks clearly when GitHub reports a real merge
+conflict.
+
 Useful commands:
 
 ```sh
@@ -3813,6 +5766,10 @@ main systems touched, and any explicit exclusions.
 - Keep changes clean, scoped, and organized. Avoid broad rewrites.
 - Avoid code duplication. When repeated logic appears, extract small reusable
   helpers that match existing repo patterns.
+- When delegating to Gitmoot agents, use `gitmoot agent run`,
+  `gitmoot agent implement`, `gitmoot agent review`, or `gitmoot task run`.
+  Do not put branch creation, commit, push, PR creation, or merge instructions
+  inside `gitmoot agent ask`; Gitmoot owns repository orchestration.
 - If implementation depends on external APIs, docs, CLIs, data formats,
   generated scripts, installers, service launchers, subprocess calls, env vars,
   config formats, or third-party libraries, verify the real contract with local
@@ -3910,8 +5867,9 @@ main systems touched, and any explicit exclusions.
 - Use a separate branch per task.
 - Clearly assign each branch a task number and file ownership.
 - Do not duplicate work across branches.
-- If parallel branches conflict after one PR merges, rebase or update the
-  remaining branch on the latest target base and re-run its checks/review.
+- For Gitmoot-owned task PRs, let the merge gate update stale branches and
+  retry. If a real content conflict remains, resolve it in an explicit fix task
+  and re-run checks/review.
 - If a task becomes dependent on another task, stop treating it as parallel and
   merge the dependency first.
 

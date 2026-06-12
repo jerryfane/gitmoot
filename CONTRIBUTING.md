@@ -1,0 +1,94 @@
+# Contributing To Gitmoot
+
+Gitmoot is a local-first coordinator for AI agents. Keep changes scoped,
+auditable, and easy to verify from the local checkout.
+
+## Setup
+
+Install the local prerequisites:
+
+```sh
+git --version
+gh --version
+gh auth status
+go version
+node --version
+npm --version
+```
+
+Install Gitmoot from source or the latest beta, then verify:
+
+```sh
+gitmoot version
+gitmoot plugin doctor
+```
+
+For SkillOpt optimizer work, also verify the separate Python package:
+
+```sh
+gitmoot-skillopt --version
+gitmoot-skillopt optimize --help
+```
+
+## Development Checks
+
+Run focused checks for the area you changed. Common checks are:
+
+```sh
+go test ./...
+git diff --check
+```
+
+For docs:
+
+```sh
+cd website
+npm install
+npm run build
+```
+
+The docs build also regenerates `website/static/llms-full.txt` through
+`npm run build:llms`.
+
+For SkillOpt train-mode changes:
+
+```sh
+scripts/skillopt-train-smoke.sh
+```
+
+## Docs And LLM Context
+
+Public docs live in `website/docs`. Root docs under `docs/` and skill
+references under `skills/gitmoot/references/` are canonical source material for
+agent-facing details.
+
+When updating docs:
+
+- keep `website/docs` in sync with current root docs and skill references
+- update `website/static/llms.txt` when a new important public docs page exists
+- update `website/scripts/build-llms-full.mjs` when agents need fuller context
+- run `cd website && npm run build`
+- quote Mermaid node labels that contain paths or punctuation, for example
+  `P["/var/www/gitmoot-docs"]`
+
+## Style
+
+- Prefer existing repo patterns over new abstractions.
+- Keep user-facing command examples runnable.
+- Put full flag matrices in reference docs, not every workflow page.
+- Do not commit caches, local state, logs, generated reports, secrets,
+  downloaded release artifacts, or runtime transcripts.
+- Do not paste tokens into issues, PRs, docs, or logs.
+
+## Pull Requests
+
+Open focused PRs with:
+
+- what changed
+- why it changed
+- checks run
+- skipped checks or residual risk
+
+For Gitmoot-managed task work, include the raw final
+`codex exec review --uncommitted` output in the PR body when that workflow is
+used.

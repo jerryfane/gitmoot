@@ -66,7 +66,7 @@ const config: Config = {
   themeConfig: {
     image: 'img/gitmoot-hero.png',
     colorMode: {
-      defaultMode: 'light',
+      defaultMode: 'dark',
       respectPrefersColorScheme: false,
     },
     navbar: {
@@ -138,4 +138,3 @@ const config: Config = {
 };
 
 export default config;
-

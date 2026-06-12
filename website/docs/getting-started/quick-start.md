@@ -1,6 +1,25 @@
 # Quick Start
 
-Run these commands from a project checkout.
+Run from a project checkout. For Codex or Claude Code, start with the agent
+path:
+
+```text
+Install Gitmoot as a Codex or Claude skill/plugin in this repo, verify `gitmoot version`, run `gitmoot plugin doctor`, check `gh auth status`, and summarize the next Gitmoot workflow I can use.
+```
+
+That lets the runtime discover Gitmoot's skill instructions while the local
+`gitmoot` CLI remains the execution path.
+
+```mermaid
+flowchart TD
+  Prompt[Agent install prompt] --> Plugin[Gitmoot plugin/skill]
+  Plugin --> Verify[version + plugin doctor + gh auth]
+  Verify --> Setup[repo setup]
+  Setup --> Planner[planner or custom agent]
+  Planner --> Dashboard[gitmoot dashboard]
+```
+
+Manual setup uses the same checks:
 
 ```sh
 git status --short
@@ -50,6 +69,12 @@ Inspect state:
 
 ```sh
 gitmoot status --repo owner/repo
+gitmoot dashboard
+gitmoot dashboard --plain
 gitmoot job list --repo owner/repo
 gitmoot events --repo owner/repo
 ```
+
+Use `gitmoot agent run` for coordinator delegation that may route to ask,
+review, or implement. Use `gitmoot agent ask` for analysis and planning only.
+Use `gitmoot dashboard --json` for scripts and noninteractive agent checks.
