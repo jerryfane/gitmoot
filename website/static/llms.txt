@@ -22,7 +22,7 @@ workflows.
 - [Codex And Claude Plugins](https://gitmoot.io/docs/plugins/codex-claude): Plugin discovery and runtime skill setup.
 - [SkillOpt Exchange Contract](https://gitmoot.io/docs/reference/skillopt-exchange-contract): Training and candidate package boundary for the external optimizer.
 - [Troubleshooting](https://gitmoot.io/docs/operations/troubleshooting): Diagnose GitHub auth, bug reports, runtimes, agent templates, remotes, permissions, and locks.
-- [Release Notes](https://gitmoot.io/docs/release-notes/v0.3.0-beta.1): Latest beta notes, dashboard/TUI details, and known limits.
+- [Release Notes](https://gitmoot.io/docs/release-notes/v0.3.1-beta.1): Latest beta notes, presence hooks, dashboard bug reports, and known limits.
 - [Raw SKILL.md](https://gitmoot.io/SKILL.md): Agent skill entrypoint.
 - [Full LLM Context](https://gitmoot.io/llms-full.txt): Expanded Markdown context for agents.
 - [GitHub Repository](https://github.com/jerryfane/gitmoot): Source code and releases.

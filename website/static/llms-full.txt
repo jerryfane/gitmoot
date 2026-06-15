@@ -76,6 +76,13 @@ gitmoot plugin doctor
 The plugins are discovery and guidance surfaces. The `gitmoot` CLI and local
 daemon remain the execution path.
 
+For sandboxed Codex sessions, print a launch command that grants access to the
+resolved Gitmoot home:
+
+```sh
+gitmoot plugin codex-launch --repo .
+```
+
 ## Quick Start
 
 From a project checkout:
@@ -295,6 +302,9 @@ gitmoot dashboard           # interactive cockpit
 gitmoot dashboard --json    # one-shot snapshot for scripts
 ```
 
+Agents should answer directly from the SessionStart snapshot or read-only CLI
+checks first. The dashboard remains the live cockpit for humans.
+
 ### Jobs, Locks, And Recovery
 
 ```sh
@@ -429,6 +439,7 @@ can discover Gitmoot guidance from its plugin system.
 gitmoot plugin install codex
 gitmoot plugin install claude
 gitmoot plugin doctor
+gitmoot plugin codex-launch --repo .
 ```
 
 Plugins do not start a hosted service, replace the daemon, subscribe agents, or
@@ -1253,6 +1264,8 @@ remain the public audit trail.
 - Help Codex or Claude discover Gitmoot workflow instructions.
 - Add a read-only `SessionStart` presence hook that provides local Gitmoot
   context when the runtime supports hooks.
+- Include a compact local snapshot of daemon, task, job, and lock state when
+  the hook can read the local Gitmoot store.
 - Point agents to the `gitmoot` CLI for status, jobs, locks, and daemon
   management.
 
@@ -1285,6 +1298,26 @@ local Codex marketplace manifest, runs `codex plugin marketplace add`, and runs
 `codex plugin add gitmoot@gitmoot-local` when the `codex` CLI is available.
 
 Use `gitmoot plugin path codex` to print the generated package path.
+
+If Codex is sandboxed outside Gitmoot home, give the runtime explicit access to
+the resolved `.gitmoot` directory:
+
+```sh
+gitmoot plugin codex-launch --repo .
+```
+
+The command prints a launch line like:
+
+```sh
+codex-face --cd /path/to/repo --add-dir /home/user/.gitmoot -s workspace-write
+```
+
+On Windows it prints PowerShell-safe quoting. For persistent Codex config,
+print the matching snippet:
+
+```sh
+gitmoot plugin codex-launch --config-snippet
+```
 
 ## Install The Claude Plugin
 
@@ -1329,10 +1362,25 @@ JSON on stdin. The command reads the session working directory when available,
 uses local Git and Gitmoot metadata, and returns
 `hookSpecificOutput.additionalContext` for the agent.
 
-The hook is read-only context, not a control surface. It helps agents answer
-Gitmoot health and status questions directly by running relevant read-only CLI
-checks. Agents should mention `gitmoot dashboard` only after the direct answer,
-as a live monitoring follow-up for humans.
+The hook is read-only context, not a control surface. When the working
+directory belongs to a GitHub repo, it tries to open the local Gitmoot SQLite
+database read-only and injects a compact "Current snapshot" with daemon,
+task, job, and branch-lock counts for that repo. If the snapshot is unavailable,
+the hook fails open and still provides the basic repo/context guidance.
+
+Agents should answer Gitmoot health and status questions from the injected
+snapshot when it is sufficient. For more detail they should run relevant
+read-only CLI checks:
+
+- `gitmoot status --repo owner/repo`
+- `gitmoot task list --repo owner/repo --json`
+- `gitmoot job list --repo owner/repo`
+- `gitmoot lock list --repo owner/repo`
+- `gitmoot dashboard --json`
+
+They should not use nonexistent commands such as `gitmoot status --json` or
+`gitmoot task show`. Agents should mention `gitmoot dashboard` only after the
+direct answer, as a live monitoring follow-up for humans.
 
 Role split:
 
@@ -4552,6 +4600,67 @@ end-to-end **train-run TUI** for the SkillOpt optimization loop, on top of the
 
 ---
 
+# Source: docs/release-notes/v0.3.1-beta.1.md
+
+# Gitmoot v0.3.1-beta.1
+
+Gitmoot v0.3.1-beta.1 ships the presence-layer work that makes new Codex and
+Claude sessions start with useful local Gitmoot context, plus the dashboard
+bug-report workflow added after the v0.3.0 dashboard beta.
+
+## Highlights
+
+### SessionStart presence context
+
+- Generated Codex and Claude plugin packages now include a read-only
+  `SessionStart` hook manifest.
+- The hook injects repo identity, Gitmoot home, version/build metadata, and a
+  compact local snapshot of daemon, task, job, and branch-lock state.
+- Snapshot reads use the Gitmoot SQLite store in read-only mode and fail open,
+  so a missing or locked local store does not block runtime startup.
+- Agents are guided to answer health/status questions directly from the snapshot
+  or read-only CLI checks, and mention `gitmoot dashboard` only as an optional
+  live-monitoring follow-up.
+
+### Plugin install and diagnostics
+
+- `gitmoot plugin doctor` now validates generated hook manifests for Codex and
+  Claude packages.
+- `gitmoot plugin codex-launch` prints a Codex launch command with
+  `--add-dir <gitmoot-home>` so sandboxed Codex sessions can read local Gitmoot
+  state without using full sandbox bypasses.
+- The plugin docs and bundled skill now call out valid read-only status commands
+  and avoid nonexistent commands such as `gitmoot status --json` and
+  `gitmoot task show`.
+
+### Dashboard bug reports
+
+- The dashboard can open a redacted bug-report preview for failed, blocked, or
+  cancelled jobs and create or reuse a matching GitHub issue.
+- The report builder includes job context, recent events, labels, and a
+  fingerprint marker for duplicate detection.
+- Follow-up fixes tightened the busy-state shortcut and preview behavior.
+
+## Validation
+
+- `GOTOOLCHAIN=go1.26.0 go test ./internal/presence ./internal/plugincontext ./internal/cli`
+- `gitmoot plugin doctor`
+- `gitmoot plugin hook-context` smoke from `/root/gitmoot`
+- `gitmoot plugin codex-launch --repo /root/gitmoot`
+- `codex-face exec --cd /root/gitmoot --add-dir /root/.gitmoot --dangerously-bypass-hook-trust -s workspace-write ...`
+
+## Known Limits
+
+- The SessionStart snapshot is intentionally compact. Use
+  `gitmoot dashboard --json`, `gitmoot task list --repo owner/repo --json`, or
+  other read-only CLI commands when an agent needs full detail.
+- Codex plugin validation is still limited by the installed Codex CLI; `plugin
+  doctor` reports this as a warning when validation is not exposed.
+- Claude background jobs still need non-interactive Claude credentials in the
+  daemon environment.
+
+---
+
 # Source: skills/gitmoot/SKILL.md
 
 ---
@@ -4600,41 +4709,52 @@ same Codex or Claude session, and branch locks protect implementation ownership.
 The daemon default is `--workers 1`; raise it only for independent runtime
 sessions or managed agent types with `max_background` greater than one.
 
-For Gitmoot health or status questions, run the relevant read-only Gitmoot CLI
-checks and answer directly from the results. Mention `gitmoot dashboard` only
-after that answer, as a live monitoring follow-up. Do not start daemons, create
-agents, change subscriptions, update templates, or release locks unless the user
-asks for that action.
+For Gitmoot health or status questions, first use the injected SessionStart
+snapshot when it is present and sufficient. If more detail is needed, run the
+relevant read-only Gitmoot CLI checks and answer directly from the results.
+Mention `gitmoot dashboard` only after that answer, as a live monitoring
+follow-up. Do not start daemons, create agents, change subscriptions, update
+templates, or release locks unless the user asks for that action.
 
 ## Before Acting
 
 1. Check whether `gitmoot` is installed with `gitmoot version`.
-2. Confirm GitHub CLI access with `gh auth status` before using PR workflows.
+2. Confirm GitHub CLI access with `gh auth status` only before using PR
+   workflows or remote GitHub actions.
 3. Detect or ask for the target repo before starting daemons, subscribing agents,
    or routing jobs.
 4. Do not start daemons, create agents, update agent templates, or change
    subscriptions, or release locks unless the user asks or the current task
    clearly requires it.
-5. Prefer read-only status commands and answer directly before mutating Gitmoot
-   state or pointing the user to live monitoring.
+5. Prefer the SessionStart snapshot and read-only status commands, then answer
+   directly before mutating Gitmoot state or pointing the user to live
+   monitoring.
 
 ## Common Commands
 
-Use `gitmoot status --repo owner/repo` for repo status, `gitmoot daemon status`
-for daemon state, `gitmoot agent list` and `gitmoot agent show <agent>` for
-registered agents, `gitmoot task list --repo owner/repo` for imported task
-state, and `gitmoot agent prompt <agent-or-template>` to import an agent prompt
-into the current chat. Use `gitmoot agent run <agent> --repo owner/repo "..."`
-for coordinator delegation so Gitmoot can route to ask, review, or implement
-and own worktrees, branch locks, commits, pushes, PRs, and workflow
-advancement. Use `gitmoot agent ask <agent> --repo owner/repo "..."` only for
+Use the SessionStart "Current snapshot" for quick repo-local daemon/task/job/lock
+answers when available. Use `gitmoot status --repo owner/repo` for concise repo
+status, `gitmoot daemon status` for daemon state, `gitmoot agent list` and
+`gitmoot agent show <agent>` for registered agents. Use `gitmoot task list --repo owner/repo`
+or `gitmoot task list --repo owner/repo --json` for imported task state. Use
+`gitmoot job list --repo owner/repo` for jobs, and use
+`gitmoot dashboard --json` only when a structured full dashboard snapshot is
+needed. Do not use nonexistent commands such as `gitmoot status --json` or
+`gitmoot task show`. Use `gitmoot agent prompt <agent-or-template>` to import an
+agent prompt into the current chat. Use
+`gitmoot agent run <agent> --repo owner/repo "..."` for coordinator delegation
+so Gitmoot can route to ask, review, or implement and own worktrees, branch
+locks, commits, pushes, PRs, and workflow advancement. Use
+`gitmoot agent ask <agent> --repo owner/repo "..."` only for
 analysis, planning, or questions. Use `gitmoot agent review <agent> --repo
 owner/repo --pr <number> "..."` for PR review decisions and `gitmoot agent
 implement <agent> --repo owner/repo --task <task-id> "..."` for file changes.
 Add `--background` only when the user wants a queued background job. Use
-`gitmoot job list --repo owner/repo` for queued or recent jobs. Use
 `gitmoot plugin doctor` when checking whether Codex or Claude Code can discover
-Gitmoot through an installed runtime plugin. Use `gitmoot goal template` when
+Gitmoot through an installed runtime plugin. Use
+`gitmoot plugin codex-launch --repo <path>` to print a Codex launch command that
+adds the resolved `.gitmoot` home to the sandbox on Linux, macOS, and Windows.
+Use `gitmoot goal template` when
 writing a standard task-by-task goal file. Use
 `gitmoot report bug --job <job-id> --preview` to inspect a redacted GitHub issue
 draft for failed, blocked, or cancelled jobs; use
@@ -4829,10 +4949,16 @@ gitmoot plugin path codex
 gitmoot plugin path claude
 gitmoot plugin doctor codex
 gitmoot plugin doctor claude
+gitmoot plugin codex-launch --repo .
+gitmoot plugin codex-launch --config-snippet
 ```
 
 Claude scopes are supported with `--scope user|project|local`. Codex ignores
 `--scope` because the current Codex plugin install command does not use it.
+Use `plugin codex-launch` when Codex needs sandbox access to the resolved
+Gitmoot home on Linux, macOS, or Windows. It prints a `codex-face --cd ...
+--add-dir ... -s workspace-write` launch command, or a persistent config
+snippet with `--config-snippet`.
 
 ## Repo And Daemon Status
 
@@ -4844,6 +4970,10 @@ gitmoot daemon status
 gitmoot daemon logs
 gitmoot daemon stop
 ```
+
+For structured local state, use `gitmoot dashboard --json` or
+`gitmoot task list --repo owner/repo --json`. `gitmoot status --json` and
+`gitmoot task show` are not valid commands.
 
 Use `daemon start` for the background daemon. Use `daemon run` only when the
 user explicitly wants a foreground process. Keep the default `--workers 1`
