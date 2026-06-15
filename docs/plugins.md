@@ -78,9 +78,9 @@ gitmoot plugin doctor codex
 gitmoot plugin doctor claude
 ```
 
-Doctor checks the canonical skill, generated package, manifest JSON, copied
-skill, marketplace path, runtime CLI availability, and runtime validation where
-supported.
+Doctor checks the canonical skill, generated package, plugin manifest JSON,
+hook manifest JSON, copied skill, marketplace path, runtime CLI availability,
+and runtime validation where supported.
 
 ## Presence Hooks
 
