@@ -15,6 +15,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/doctor"
+	"github.com/jerryfane/gitmoot/internal/report"
 	"github.com/jerryfane/gitmoot/internal/skillopt"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
@@ -166,6 +167,39 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 				_, err := workflow.CancelJob(context.Background(), store, id)
 				return err
 			})
+		},
+		BugReportPreview: func(id string) (tui.BugReportPreview, error) {
+			var preview tui.BugReportPreview
+			err := withStore(home, func(store *db.Store) error {
+				draft, err := report.BuildJobReport(context.Background(), store, id, report.JobOptions{})
+				if err != nil {
+					return err
+				}
+				preview = tui.BugReportPreview{
+					Title:       draft.Title,
+					Body:        draft.Body,
+					Labels:      draft.Labels,
+					Fingerprint: draft.Fingerprint,
+				}
+				return nil
+			})
+			return preview, err
+		},
+		CreateBugReport: func(id string, preview tui.BugReportPreview) (tui.BugReportCreateResult, error) {
+			if strings.TrimSpace(id) == "" {
+				return tui.BugReportCreateResult{}, fmt.Errorf("job id is required")
+			}
+			draft := report.Report{
+				Title:       preview.Title,
+				Body:        preview.Body,
+				Labels:      append([]string(nil), preview.Labels...),
+				Fingerprint: preview.Fingerprint,
+			}
+			result, err := createBugReportIssueResult(context.Background(), newReportGitHubClient(), draft, nil)
+			if err != nil {
+				return tui.BugReportCreateResult{}, err
+			}
+			return tui.BugReportCreateResult{URL: result.URL, Existing: result.Existing}, nil
 		},
 		StopTrain: func(id, reason string) error {
 			return withStore(home, func(store *db.Store) error {

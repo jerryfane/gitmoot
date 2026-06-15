@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,20 @@ func (m *Model) openJobDetail(job JobRow) tea.Cmd {
 	m.actionBusy = false
 	m.mode = modeJobDetail
 	return tea.Batch(jobEventsCmd(m.deps, job.ID), jobDetailCmd(m.deps, job.ID))
+}
+
+// openBugReportPreview enters the redacted report preview for a reportable job.
+func (m *Model) openBugReportPreview(job JobRow) tea.Cmd {
+	m.activeJob = job
+	m.bugReport = BugReportPreview{}
+	m.bugReportLoaded = false
+	m.bugReportErr = ""
+	m.bugReportURL = ""
+	m.bugReportExisting = false
+	m.actionErr = ""
+	m.actionBusy = false
+	m.mode = modeBugReportPreview
+	return bugReportPreviewCmd(m.deps, job.ID)
 }
 
 // openJobConfirm enters the retry or cancel confirmation for the given job.
@@ -59,6 +74,10 @@ func jobRetryable(state string) bool {
 	return state == "failed" || state == "blocked" || state == "cancelled"
 }
 
+func jobReportable(state string) bool {
+	return state == "failed" || state == "blocked" || state == "cancelled"
+}
+
 func jobCancelable(state string) bool {
 	return state == "queued" || state == "running"
 }
@@ -74,10 +93,41 @@ func (m Model) updateJobOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if jobRetryable(m.activeJob.State) {
 				m.mode = modeConfirmJobRetry
 			}
+		case "B":
+			if jobReportable(m.activeJob.State) {
+				cmd := m.openBugReportPreview(m.activeJob)
+				m.viewport.SetContent(m.content())
+				return m, cmd
+			}
 		case "c":
 			if jobCancelable(m.activeJob.State) {
 				m.mode = modeConfirmJobCancel
 			}
+		}
+		m.viewport.SetContent(m.content())
+		return m, nil
+	case modeBugReportPreview:
+		switch msg.String() {
+		case "esc", "q":
+			if m.actionBusy {
+				return m, nil
+			}
+			m.mode = modeNormal
+			m.actionErr = ""
+			m.actionBusy = false
+		case "g":
+			if m.deps.CreateBugReport == nil || m.actionBusy || !m.bugReportLoaded || m.bugReportErr != "" || m.bugReportURL != "" {
+				return m, nil
+			}
+			m.actionBusy = true
+			m.actionErr = ""
+			m.viewport.SetContent(m.content())
+			return m, bugReportCreateCmd(m.deps, m.activeJob.ID, m.bugReport)
+		default:
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			m.viewport.SetContent(m.content())
+			return m, cmd
 		}
 		m.viewport.SetContent(m.content())
 		return m, nil
@@ -129,6 +179,26 @@ func jobDetailCmd(deps Deps, id string) tea.Cmd {
 		}
 		detail, err := deps.JobDetail(id)
 		return jobDetailMsg{id: id, detail: detail, err: err}
+	}
+}
+
+func bugReportPreviewCmd(deps Deps, id string) tea.Cmd {
+	return func() tea.Msg {
+		if deps.BugReportPreview == nil {
+			return bugReportPreviewMsg{id: id, err: errors.New("bug report preview is not available")}
+		}
+		preview, err := deps.BugReportPreview(id)
+		return bugReportPreviewMsg{id: id, preview: preview, err: err}
+	}
+}
+
+func bugReportCreateCmd(deps Deps, id string, preview BugReportPreview) tea.Cmd {
+	return func() tea.Msg {
+		if deps.CreateBugReport == nil {
+			return bugReportCreateMsg{id: id, err: errors.New("bug report issue creation is not available in this build")}
+		}
+		result, err := deps.CreateBugReport(id, preview)
+		return bugReportCreateMsg{id: id, url: result.URL, existing: result.Existing, err: err}
 	}
 }
 
@@ -225,7 +295,11 @@ func (m Model) jobsContentInteractive() string {
 	if end < n {
 		b.WriteString(mutedStyle.Render("↓ "+strconv.Itoa(n-end)+" more") + "\n")
 	}
-	b.WriteString(mutedStyle.Render("enter detail  R retry  c cancel"))
+	help := "enter detail  R retry  c cancel"
+	if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
+		help += "  B report bug"
+	}
+	b.WriteString(mutedStyle.Render(help))
 	b.WriteByte('\n')
 	return b.String()
 }
@@ -346,6 +420,52 @@ func (m Model) jobConfirmView() string {
 		b.WriteString(mutedStyle.Render("working…"))
 	} else {
 		b.WriteString(mutedStyle.Render("y confirm  n/esc cancel"))
+	}
+	return b.String()
+}
+
+func (m Model) bugReportPreviewView() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("bug report preview for job " + m.activeJob.ID))
+	b.WriteString("\n\n")
+	switch {
+	case m.bugReportErr != "":
+		b.WriteString(errorStyle.Render(m.bugReportErr))
+		b.WriteByte('\n')
+	case !m.bugReportLoaded:
+		b.WriteString(mutedStyle.Render("building redacted preview…"))
+		b.WriteByte('\n')
+	default:
+		if m.bugReport.Title != "" {
+			b.WriteString(headerStyle.Render(m.bugReport.Title))
+			b.WriteString("\n\n")
+		}
+		if len(m.bugReport.Labels) > 0 {
+			b.WriteString("labels  " + strings.Join(m.bugReport.Labels, ", ") + "\n")
+		}
+		if m.bugReport.Fingerprint != "" {
+			b.WriteString("fingerprint  " + m.bugReport.Fingerprint + "\n")
+		}
+		if m.bugReportURL != "" {
+			label := "created: "
+			if m.bugReportExisting {
+				label = "existing: "
+			}
+			b.WriteString("\n" + greenStyle.Render(label+m.bugReportURL) + "\n")
+		}
+		if m.actionErr != "" {
+			b.WriteString("\n" + errorStyle.Render(m.actionErr) + "\n")
+		}
+		if m.actionBusy {
+			b.WriteString("\n" + mutedStyle.Render("creating issue…") + "\n")
+		}
+		if m.bugReport.Body != "" {
+			b.WriteString("\n")
+			b.WriteString(m.bugReport.Body)
+			if !strings.HasSuffix(m.bugReport.Body, "\n") {
+				b.WriteByte('\n')
+			}
+		}
 	}
 	return b.String()
 }

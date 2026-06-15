@@ -162,18 +162,47 @@ func printReportPreview(w io.Writer, draft report.Report) {
 }
 
 func createBugReportIssue(ctx context.Context, stdout, stderr io.Writer, draft report.Report) int {
-	gh := newReportGitHubClient()
-	if err := gh.Preflight(ctx, reportIssueRepo); err != nil {
+	result, err := createBugReportIssueResult(ctx, newReportGitHubClient(), draft, stderr)
+	if err != nil {
 		fmt.Fprintf(stderr, "report bug: %v\n", err)
 		return 1
+	}
+	if result.Existing {
+		fmt.Fprintf(stdout, "existing issue: %s\n", result.URL)
+	} else {
+		fmt.Fprintf(stdout, "created issue: %s\n", result.URL)
+	}
+	return 0
+}
+
+type bugReportIssueResult struct {
+	URL      string
+	Existing bool
+}
+
+func createBugReportIssueResult(ctx context.Context, gh reportGitHubClient, draft report.Report, warnings io.Writer) (bugReportIssueResult, error) {
+	if gh == nil {
+		return bugReportIssueResult{}, errors.New("github client is required")
+	}
+	if strings.TrimSpace(draft.Fingerprint) == "" {
+		return bugReportIssueResult{}, errors.New("bug report fingerprint is required")
+	}
+	if strings.TrimSpace(draft.Body) == "" {
+		return bugReportIssueResult{}, errors.New("bug report body is required")
+	}
+	if err := gh.Preflight(ctx, reportIssueRepo); err != nil {
+		return bugReportIssueResult{}, err
 	}
 	marker := report.FingerprintMarker(draft.Fingerprint)
 	matches, err := gh.SearchOpenIssues(ctx, reportIssueRepo, marker)
 	if err != nil {
-		fmt.Fprintf(stderr, "warning: duplicate search failed: %v\n", err)
+		if warnings != nil {
+			fmt.Fprintf(warnings, "warning: duplicate search failed: %v\n", err)
+		} else {
+			return bugReportIssueResult{}, fmt.Errorf("duplicate search failed: %w", err)
+		}
 	} else if existing, ok := matchingIssueByMarker(matches, marker); ok {
-		fmt.Fprintf(stdout, "existing issue: %s\n", existing.URL)
-		return 0
+		return bugReportIssueResult{URL: existing.URL, Existing: true}, nil
 	}
 	issue, err := gh.CreateIssue(ctx, github.CreateIssueInput{
 		Repo:   reportIssueRepo,
@@ -182,11 +211,9 @@ func createBugReportIssue(ctx context.Context, stdout, stderr io.Writer, draft r
 		Labels: draft.Labels,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "report bug: create issue: %v\n", err)
-		return 1
+		return bugReportIssueResult{}, fmt.Errorf("create issue: %w", err)
 	}
-	fmt.Fprintf(stdout, "created issue: %s\n", issue.URL)
-	return 0
+	return bugReportIssueResult{URL: issue.URL}, nil
 }
 
 func matchingIssueByMarker(issues []github.Issue, marker string) (github.Issue, bool) {

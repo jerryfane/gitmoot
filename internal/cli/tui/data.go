@@ -164,6 +164,20 @@ type JobDetail struct {
 	ResultSummary  string // gitmoot_result.summary
 }
 
+// BugReportPreview is a redacted issue draft shown before creating a bug report.
+type BugReportPreview struct {
+	Title       string
+	Body        string
+	Labels      []string
+	Fingerprint string
+}
+
+// BugReportCreateResult is the GitHub issue selected by create action.
+type BugReportCreateResult struct {
+	URL      string
+	Existing bool
+}
+
 // JobEventView is one entry of a job's event history shown in the detail view.
 type JobEventView struct {
 	Kind    string
@@ -218,6 +232,10 @@ type Deps struct {
 	JobDetail func(id string) (JobDetail, error)
 	RetryJob  func(id string) error
 	CancelJob func(id string) error
+	// BugReportPreview builds the redacted report preview. CreateBugReport posts
+	// the exact loaded preview draft and returns the selected issue URL.
+	BugReportPreview func(id string) (BugReportPreview, error)
+	CreateBugReport  func(id string, preview BugReportPreview) (BugReportCreateResult, error)
 
 	// StartDaemon starts the background daemon when the attention list shows it
 	// stopped.
@@ -339,6 +357,21 @@ type jobDetailMsg struct {
 	id     string
 	detail JobDetail
 	err    error
+}
+
+// bugReportPreviewMsg carries a redacted report draft for the preview overlay.
+type bugReportPreviewMsg struct {
+	id      string
+	preview BugReportPreview
+	err     error
+}
+
+// bugReportCreateMsg carries the result of creating a bug report issue.
+type bugReportCreateMsg struct {
+	id       string
+	url      string
+	existing bool
+	err      error
 }
 
 // sessionActionMsg carries the outcome of a Deps.StopSession call.

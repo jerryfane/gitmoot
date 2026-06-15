@@ -84,6 +84,8 @@ func (m Model) content() string {
 		b.WriteString(m.sessionStopConfirmView())
 	case modeConfirmJobRetry, modeConfirmJobCancel:
 		b.WriteString(m.jobConfirmView())
+	case modeBugReportPreview:
+		b.WriteString(m.bugReportPreviewView())
 	case modeTrainStopReason:
 		b.WriteString(m.trainStopView())
 	case modeConfirmTrainDelete:
@@ -136,11 +138,14 @@ func (m Model) helpContent() string {
 	b.WriteString("\n\n")
 	switch pages[m.selected].page {
 	case pageAttention:
-		b.WriteString("↑/↓  select a row (pending prompts, then blocked/failed jobs)\n")
+		b.WriteString("↑/↓  select a row (pending prompts, then blocked/failed/cancelled jobs)\n")
 		b.WriteString("a    answer the selected prompt (choices or text)\n")
 		b.WriteString("d    dismiss (delete) the selected prompt\n")
 		b.WriteString("enter open the selected job's detail (events)\n")
 		b.WriteString("R    retry the selected job\n")
+		if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
+			b.WriteString("B    report bug for the selected job\n")
+		}
 		b.WriteString("s    start the daemon when it is stopped\n")
 	case pageTrains:
 		b.WriteString("↑/↓  select a train session\n")
@@ -161,6 +166,9 @@ func (m Model) helpContent() string {
 		b.WriteString("enter open the job's detail (events)\n")
 		b.WriteString("R    retry the selected job (failed/blocked/cancelled)\n")
 		b.WriteString("c    cancel the selected job (queued/running)\n")
+		if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
+			b.WriteString("B    report bug for the selected job\n")
+		}
 		b.WriteString("pgup/pgdn  scroll a long list\n")
 	case pageHealth:
 		b.WriteString("daemon state + flags, then environment checks\n")
@@ -195,9 +203,23 @@ func (m Model) footerHelp() string {
 	case modeTrainDetail:
 		return "enter/esc back"
 	case modeJobDetail:
+		if jobReportable(m.activeJob.State) {
+			return "R retry  B report bug  c cancel  esc back"
+		}
 		return "R retry  c cancel  esc back"
 	case modeConfirmJobRetry, modeConfirmJobCancel:
 		return "y confirm  n/esc cancel"
+	case modeBugReportPreview:
+		if m.bugReportURL != "" {
+			return "esc back"
+		}
+		if m.actionBusy {
+			return "creating issue…  esc back"
+		}
+		if m.bugReportLoaded && m.bugReportErr == "" && m.deps.CreateBugReport != nil {
+			return "g create issue  esc back"
+		}
+		return "esc back"
 	case modeTrainStopReason:
 		return "type reason  enter stop  esc cancel"
 	case modeConfirmTrainDelete:
@@ -221,7 +243,11 @@ func (m Model) footerHelp() string {
 	}
 	switch pages[m.selected].page {
 	case pageAttention:
-		return "tab/←→ page  ↑/↓ select  a answer  d dismiss  enter/R jobs  ? help  q quit"
+		help := "tab/←→ page  ↑/↓ select  a answer  d dismiss  enter/R jobs"
+		if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
+			help += "  B report bug"
+		}
+		return help + "  ? help  q quit"
 	case pageTrains:
 		return "tab/←→ page  ↑/↓ select  enter open  s stop  d delete  ? help  q quit"
 	case pageAgents:
@@ -229,7 +255,11 @@ func (m Model) footerHelp() string {
 	case pageSessions:
 		return "tab/←→ page  ↑/↓ select  enter detail  s stop  ? help  q quit"
 	case pageJobs:
-		return "tab/←→ page  ↑/↓ select  enter detail  R retry  c cancel  ? help  q quit"
+		help := "tab/←→ page  ↑/↓ select  enter detail  R retry  c cancel"
+		if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
+			help += "  B report bug"
+		}
+		return help + "  ? help  q quit"
 	case pageHealth:
 		return "tab/←→ page  r re-run checks  s start daemon  ? help  q quit"
 	case pageConfig:
@@ -303,7 +333,7 @@ func (m Model) locksContent() string {
 
 func jobStateColor(state string) string {
 	switch state {
-	case "failed", "blocked":
+	case "failed", "blocked", "cancelled":
 		return redStyle.Render(state)
 	case "succeeded":
 		return greenStyle.Render(state)

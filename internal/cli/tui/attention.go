@@ -9,21 +9,21 @@ import (
 )
 
 // attnItem is one selectable row on the Attention page: a pending prompt or a
-// blocked/failed job.
+// blocked/failed/cancelled job.
 type attnItem struct {
 	prompt *db.InteractivePrompt
 	job    *JobRow
 }
 
 // attentionItems lists the actionable attention rows: pending prompts first,
-// then blocked/failed jobs.
+// then blocked/failed/cancelled jobs.
 func (m Model) attentionItems() []attnItem {
 	items := make([]attnItem, 0, len(m.snap.Prompts))
 	for i := range m.snap.Prompts {
 		items = append(items, attnItem{prompt: &m.snap.Prompts[i]})
 	}
 	for i := range m.snap.JobRows {
-		if m.snap.JobRows[i].State == "blocked" || m.snap.JobRows[i].State == "failed" {
+		if jobReportable(m.snap.JobRows[i].State) {
 			items = append(items, attnItem{job: &m.snap.JobRows[i]})
 		}
 	}
@@ -179,7 +179,7 @@ func answerCmd(deps Deps, id, value string) tea.Cmd {
 }
 
 // attentionContent renders the Attention page: pending prompts (selectable),
-// then blocked/failed job counts, stale resource locks, and branch locks.
+// then blocked/failed/cancelled jobs, stale resource locks, and branch locks.
 func (m Model) attentionContent() string {
 	switch m.mode {
 	case modeAnswerChoice, modeAnswerText:
@@ -235,8 +235,12 @@ func (m Model) attentionContent() string {
 			}
 			b.WriteString(cursor + line + "\n")
 		}
-		// Attention only lists blocked/failed jobs, so cancel never applies here.
-		b.WriteString(mutedStyle.Render("prompts: a answer · d dismiss   jobs: enter detail · R retry"))
+		// Attention only lists reportable terminal jobs, so cancel never applies here.
+		help := "prompts: a answer · d dismiss   jobs: enter detail · R retry"
+		if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
+			help += " · B report bug"
+		}
+		b.WriteString(mutedStyle.Render(help))
 		b.WriteByte('\n')
 		wrote = true
 	}

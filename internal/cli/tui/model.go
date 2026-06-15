@@ -57,6 +57,7 @@ const (
 	modeConfirmSessionStop
 	modeConfirmJobRetry
 	modeConfirmJobCancel
+	modeBugReportPreview
 	modeTrainStopReason
 	modeConfirmTrainDelete
 	modeConfirmTrainRepoCleanup
@@ -105,16 +106,21 @@ type Model struct {
 	sessionNotice      string  // muted note on the Sessions page (e.g. group not stoppable)
 
 	// Jobs page interaction state.
-	jobCursor       int                 // selected row in snap.JobRows
-	activeJob       JobRow              // job shown in detail / being confirmed
-	jobEvents       []JobEventView      // lazy-loaded event history for the detail view
-	jobEventsLoaded bool                // the detail's event load has returned (possibly empty)
-	jobEventsErr    string              // error from the detail's event load
-	activeJobDetail JobDetail           // lazy-loaded parsed payload (request/result)
-	jobDetailLoaded bool                // the detail's payload load has returned
-	cancelling      map[string]struct{} // jobs with a cancel requested, until settled
-	daemonBusy      bool                // a daemon start is in flight; suppress re-submit
-	daemonErr       string              // error from the last daemon start attempt
+	jobCursor         int                 // selected row in snap.JobRows
+	activeJob         JobRow              // job shown in detail / being confirmed
+	jobEvents         []JobEventView      // lazy-loaded event history for the detail view
+	jobEventsLoaded   bool                // the detail's event load has returned (possibly empty)
+	jobEventsErr      string              // error from the detail's event load
+	activeJobDetail   JobDetail           // lazy-loaded parsed payload (request/result)
+	jobDetailLoaded   bool                // the detail's payload load has returned
+	bugReport         BugReportPreview    // redacted issue draft for modeBugReportPreview
+	bugReportLoaded   bool                // the preview build has returned
+	bugReportErr      string              // error from building the preview
+	bugReportURL      string              // created issue URL
+	bugReportExisting bool                // bugReportURL points to an existing duplicate
+	cancelling        map[string]struct{} // jobs with a cancel requested, until settled
+	daemonBusy        bool                // a daemon start is in flight; suppress re-submit
+	daemonErr         string              // error from the last daemon start attempt
 
 	// Health page state (lazy: the checks shell out, so they load on first
 	// open and on r, not on the refresh tick).
@@ -204,7 +210,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// Modal overlays capture keys first; only ctrl+c stays global.
 		switch m.mode {
-		case modeJobDetail, modeConfirmJobRetry, modeConfirmJobCancel:
+		case modeJobDetail, modeConfirmJobRetry, modeConfirmJobCancel, modeBugReportPreview:
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
 			}
@@ -352,6 +358,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.SetContent(m.content())
 				return m, tea.Batch(cmds...)
 			}
+		case "B":
+			if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
+				cmd := m.openBugReportPreview(job)
+				m.viewport.SetContent(m.content())
+				return m, cmd
+			}
 		case "c":
 			if job, ok := m.jobUnderCursor(); ok && jobCancelable(job.State) {
 				m.openJobConfirm(job, true)
@@ -483,6 +495,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.id == m.activeJob.ID {
 			m.jobDetailLoaded = true
 			m.activeJobDetail = msg.detail
+		}
+	case bugReportPreviewMsg:
+		if msg.id == m.activeJob.ID {
+			m.bugReportLoaded = true
+			if msg.err != nil {
+				m.bugReportErr = msg.err.Error()
+			} else {
+				m.bugReportErr = ""
+				m.bugReport = msg.preview
+			}
 		}
 	case healthChecksMsg:
 		m.healthLoading = false
@@ -755,6 +777,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			if cmd := m.queueLoad(); cmd != nil {
 				cmds = append(cmds, cmd)
+			}
+		}
+	case bugReportCreateMsg:
+		if m.mode == modeBugReportPreview && msg.id == m.activeJob.ID {
+			m.actionBusy = false
+			if msg.err != nil {
+				m.actionErr = msg.err.Error()
+			} else {
+				m.actionErr = ""
+				m.bugReportURL = msg.url
+				m.bugReportExisting = msg.existing
 			}
 		}
 	case snapshotMsg:

@@ -17,6 +17,7 @@ func jobsSnapshot() Snapshot {
 			{ID: "j-failed", Agent: "planner", Type: "ask", State: "failed", LatestEvent: "boom"},
 			{ID: "j-running", Agent: "planner", Type: "implement", State: "running"},
 			{ID: "j-done", Agent: "planner", Type: "review", State: "succeeded"},
+			{ID: "j-cancelled", Agent: "planner", Type: "ask", State: "cancelled", LatestEvent: "user cancelled"},
 		},
 	}
 }
@@ -195,6 +196,233 @@ func TestJobsRetryOnNonRetryableIgnored(t *testing.T) {
 	m = next.(Model)
 	if m.mode != modeNormal {
 		t.Fatalf("R on a succeeded job must be a no-op, mode=%v", m.mode)
+	}
+}
+
+func TestJobsBugReportPreviewCreateFlow(t *testing.T) {
+	var previewed, created string
+	deps := Deps{
+		BugReportPreview: func(id string) (BugReportPreview, error) {
+			previewed = id
+			return BugReportPreview{
+				Title:       "Gitmoot failed job ask for planner",
+				Body:        "<!-- gitmoot:dashboard-report fingerprint:abc123 -->\n\nredacted body",
+				Labels:      []string{"gitmoot-dashboard-report", "bug"},
+				Fingerprint: "abc123",
+			}, nil
+		},
+		CreateBugReport: func(id string, preview BugReportPreview) (BugReportCreateResult, error) {
+			created = id
+			if preview.Fingerprint != "abc123" || !strings.Contains(preview.Body, "redacted body") {
+				t.Fatalf("CreateBugReport received preview = %+v", preview)
+			}
+			return BugReportCreateResult{URL: "https://github.com/jerryfane/gitmoot/issues/777"}, nil
+		},
+	}
+	m := jobsModel(t, deps, jobsSnapshot())
+	if !strings.Contains(m.View(), "B report bug") {
+		t.Fatalf("failed selected job should advertise report action:\n%s", m.View())
+	}
+	next, cmd := m.Update(key("B"))
+	m = next.(Model)
+	if m.mode != modeBugReportPreview || cmd == nil {
+		t.Fatalf("B should open bug report preview, mode=%v", m.mode)
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if previewed != "j-failed" {
+		t.Fatalf("BugReportPreview called with %q", previewed)
+	}
+	view := m.View()
+	for _, want := range []string{"bug report preview", "Gitmoot failed job", "gitmoot-dashboard-report, bug", "abc123", "redacted body"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("preview missing %q:\n%s", want, view)
+		}
+	}
+
+	next, cmd = m.Update(key("g"))
+	m = next.(Model)
+	if cmd == nil || !m.actionBusy {
+		t.Fatalf("g should start issue creation, busy=%v cmd=%v", m.actionBusy, cmd)
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if created != "j-failed" {
+		t.Fatalf("CreateBugReport called with %q", created)
+	}
+	if m.mode != modeBugReportPreview || !strings.Contains(m.View(), "https://github.com/jerryfane/gitmoot/issues/777") {
+		t.Fatalf("success should keep preview open with URL:\n%s", m.View())
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.mode != modeNormal {
+		t.Fatalf("esc should return to dashboard, mode=%v", m.mode)
+	}
+}
+
+func TestJobsBugReportCreateErrorKeepsPreview(t *testing.T) {
+	deps := Deps{
+		BugReportPreview: func(id string) (BugReportPreview, error) {
+			return BugReportPreview{Title: "draft", Body: "body"}, nil
+		},
+		CreateBugReport: func(id string, preview BugReportPreview) (BugReportCreateResult, error) {
+			return BugReportCreateResult{}, errors.New("github unavailable")
+		},
+	}
+	m := jobsModel(t, deps, jobsSnapshot())
+	next, cmd := m.Update(key("B"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	next, cmd = m.Update(key("g"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.mode != modeBugReportPreview {
+		t.Fatalf("creation error should keep preview open, mode=%v", m.mode)
+	}
+	if !strings.Contains(m.View(), "github unavailable") {
+		t.Fatalf("creation error should render inline:\n%s", m.View())
+	}
+}
+
+func TestJobsBugReportExistingIssueLabel(t *testing.T) {
+	deps := Deps{
+		BugReportPreview: func(id string) (BugReportPreview, error) {
+			return BugReportPreview{Title: "draft", Body: "body", Fingerprint: "abc123"}, nil
+		},
+		CreateBugReport: func(id string, preview BugReportPreview) (BugReportCreateResult, error) {
+			return BugReportCreateResult{URL: "https://github.com/jerryfane/gitmoot/issues/777", Existing: true}, nil
+		},
+	}
+	m := jobsModel(t, deps, jobsSnapshot())
+	next, cmd := m.Update(key("B"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	next, cmd = m.Update(key("g"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	view := m.View()
+	if !strings.Contains(view, "existing: https://github.com/jerryfane/gitmoot/issues/777") {
+		t.Fatalf("existing issue should be labeled distinctly:\n%s", view)
+	}
+	if strings.Contains(view, "created: https://github.com/jerryfane/gitmoot/issues/777") {
+		t.Fatalf("existing issue must not be labeled created:\n%s", view)
+	}
+}
+
+func TestJobsBugReportCreateResultNotDroppedAfterEsc(t *testing.T) {
+	deps := Deps{
+		BugReportPreview: func(id string) (BugReportPreview, error) {
+			return BugReportPreview{Title: "draft", Body: "body", Fingerprint: "abc123"}, nil
+		},
+		CreateBugReport: func(id string, preview BugReportPreview) (BugReportCreateResult, error) {
+			return BugReportCreateResult{URL: "https://github.com/jerryfane/gitmoot/issues/778"}, nil
+		},
+	}
+	m := jobsModel(t, deps, jobsSnapshot())
+	next, cmd := m.Update(key("B"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	next, cmd = m.Update(key("g"))
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.mode != modeBugReportPreview {
+		t.Fatalf("esc while create is in flight must keep preview open, mode=%v", m.mode)
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if !strings.Contains(m.View(), "created: https://github.com/jerryfane/gitmoot/issues/778") {
+		t.Fatalf("create result should still render after esc:\n%s", m.View())
+	}
+}
+
+func TestJobsBugReportBuildErrorKeepsPreview(t *testing.T) {
+	deps := Deps{BugReportPreview: func(id string) (BugReportPreview, error) {
+		return BugReportPreview{}, errors.New("payload malformed")
+	}}
+	m := jobsModel(t, deps, jobsSnapshot())
+	next, cmd := m.Update(key("B"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.mode != modeBugReportPreview || !strings.Contains(m.View(), "payload malformed") {
+		t.Fatalf("build error should render in preview mode:\n%s", m.View())
+	}
+	next, cmd = m.Update(key("g"))
+	if cmd != nil {
+		t.Fatal("g must not create when preview build failed")
+	}
+}
+
+func TestJobsBugReportPreviewWithoutCreateDepDoesNotAdvertiseCreate(t *testing.T) {
+	deps := Deps{BugReportPreview: func(id string) (BugReportPreview, error) {
+		return BugReportPreview{Title: "draft", Body: "body"}, nil
+	}}
+	m := jobsModel(t, deps, jobsSnapshot())
+	next, cmd := m.Update(key("B"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if strings.Contains(m.footerHelp(), "g create issue") {
+		t.Fatalf("missing create dep must not advertise g create issue: %q", m.footerHelp())
+	}
+	next, cmd = m.Update(key("g"))
+	m = next.(Model)
+	if cmd != nil || m.actionBusy || m.actionErr != "" {
+		t.Fatalf("g without create dep should be inert, busy=%v err=%q cmd=%v", m.actionBusy, m.actionErr, cmd)
+	}
+}
+
+func TestJobsBugReportIgnoredForNonReportableJob(t *testing.T) {
+	deps := Deps{
+		BugReportPreview: func(id string) (BugReportPreview, error) {
+			t.Fatalf("must not build report for non-reportable job %s", id)
+			return BugReportPreview{}, nil
+		},
+	}
+	m := jobsModel(t, deps, jobsSnapshot())
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	if strings.Contains(m.View(), "B report bug") {
+		t.Fatalf("running selected job must not advertise report action:\n%s", m.View())
+	}
+	next, cmd := m.Update(key("B"))
+	m = next.(Model)
+	if cmd != nil || m.mode != modeNormal {
+		t.Fatalf("B on running job should be a no-op, mode=%v cmd=%v", m.mode, cmd)
+	}
+}
+
+func TestAttentionCancelledJobReportable(t *testing.T) {
+	var previewed string
+	snap := Snapshot{
+		Daemon:  Daemon{Running: true},
+		JobRows: []JobRow{{ID: "j-cancelled", Agent: "planner", Type: "ask", State: "cancelled", LatestEvent: "user cancelled"}},
+	}
+	deps := Deps{
+		Load: func() (Snapshot, error) { return snap, nil },
+		BugReportPreview: func(id string) (BugReportPreview, error) {
+			previewed = id
+			return BugReportPreview{Title: "cancelled draft", Body: "body"}, nil
+		},
+	}
+	m := sizedModel(deps)
+	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
+	m = next.(Model)
+	if !strings.Contains(m.View(), "job j-cancelled") || !strings.Contains(m.View(), "B report bug") {
+		t.Fatalf("cancelled attention job should be visible and reportable:\n%s", m.View())
+	}
+	next, cmd := m.Update(key("B"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if previewed != "j-cancelled" || m.mode != modeBugReportPreview {
+		t.Fatalf("cancelled job previewed=%q mode=%v", previewed, m.mode)
 	}
 }
 

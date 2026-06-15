@@ -12,6 +12,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/github"
+	"github.com/jerryfane/gitmoot/internal/report"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
@@ -240,5 +241,26 @@ func TestReportBugContinuesWhenDuplicateSearchFails(t *testing.T) {
 	}
 	if stdout.String() != "created issue: https://github.com/jerryfane/gitmoot/issues/290\n" {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestCreateBugReportIssueResultRequiresVisibleDuplicateSearchWarning(t *testing.T) {
+	fake := &reportFakeGitHub{
+		searchErr: errors.New("search unavailable"),
+	}
+	draft := report.Report{
+		Title:       "Gitmoot failed job ask for planner",
+		Body:        "<!-- gitmoot:dashboard-report fingerprint:abc123 -->\n\nbody",
+		Labels:      []string{"gitmoot-dashboard-report", "bug"},
+		Fingerprint: "abc123",
+	}
+
+	_, err := createBugReportIssueResult(context.Background(), fake, draft, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "duplicate search failed: search unavailable") {
+		t.Fatalf("expected duplicate search error, got %v", err)
+	}
+	if fake.createCalled {
+		t.Fatal("must not create an issue when duplicate search failed without a warning sink")
 	}
 }
