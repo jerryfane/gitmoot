@@ -127,6 +127,194 @@ func TestBuildClaudePackage(t *testing.T) {
 	}
 }
 
+func TestValidateHooksManifestAcceptsGeneratedPackage(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gitmoot")
+	gitmootBinary := writeTempGitmootBinary(t)
+	if _, err := Build(BuildOptions{
+		Provider:      ProviderCodex,
+		OutDir:        out,
+		SourceFS:      validSkillFS(),
+		GitmootBinary: gitmootBinary,
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if err := ValidateHooksManifest(out, ProviderCodex); err != nil {
+		t.Fatalf("ValidateHooksManifest() error = %v", err)
+	}
+}
+
+func TestValidateHooksManifestAcceptsRenamedExecutablePath(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gitmoot")
+	gitmootBinary := writeTempExecutable(t, "gitmoot-current")
+	if _, err := Build(BuildOptions{
+		Provider:      ProviderCodex,
+		OutDir:        out,
+		SourceFS:      validSkillFS(),
+		GitmootBinary: gitmootBinary,
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if err := ValidateHooksManifest(out, ProviderCodex); err != nil {
+		t.Fatalf("ValidateHooksManifest() error = %v", err)
+	}
+}
+
+func TestValidateHooksManifestRejectsMissingHookContextCommand(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gitmoot")
+	if _, err := Build(BuildOptions{
+		Provider:      ProviderClaude,
+		OutDir:        out,
+		SourceFS:      validSkillFS(),
+		GitmootBinary: "/opt/gitmoot/bin/gitmoot",
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	hooks := readHooksFile(t, HooksPath(out))
+	hooks.Hooks["SessionStart"][0].Hooks[0].Command = "echo ready || true"
+	if err := writeJSON(HooksPath(out), hooks); err != nil {
+		t.Fatalf("write hooks manifest: %v", err)
+	}
+
+	err := ValidateHooksManifest(out, ProviderClaude)
+	if err == nil {
+		t.Fatal("ValidateHooksManifest() error = nil, want malformed command error")
+	}
+	if !strings.Contains(err.Error(), "unexpected shape") {
+		t.Fatalf("ValidateHooksManifest() error = %v", err)
+	}
+}
+
+func TestValidateHooksManifestRejectsExtraSessionStartHook(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gitmoot")
+	if _, err := Build(BuildOptions{
+		Provider:      ProviderCodex,
+		OutDir:        out,
+		SourceFS:      validSkillFS(),
+		GitmootBinary: "/opt/gitmoot/bin/gitmoot",
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	hooks := readHooksFile(t, HooksPath(out))
+	hooks.Hooks["SessionStart"][0].Hooks = append(hooks.Hooks["SessionStart"][0].Hooks, commandHook{
+		Type:           "command",
+		Command:        "echo extra || true",
+		CommandWindows: `& "gitmoot" plugin hook-context; exit 0`,
+		Timeout:        hookTimeoutSeconds,
+		StatusMessage:  hookStatusMessage,
+	})
+	if err := writeJSON(HooksPath(out), hooks); err != nil {
+		t.Fatalf("write hooks manifest: %v", err)
+	}
+
+	err := ValidateHooksManifest(out, ProviderCodex)
+	if err == nil {
+		t.Fatal("ValidateHooksManifest() error = nil, want extra hook error")
+	}
+	if !strings.Contains(err.Error(), "command hooks = 2") {
+		t.Fatalf("ValidateHooksManifest() error = %v", err)
+	}
+}
+
+func TestValidateHooksManifestRejectsExtraShellOperation(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gitmoot")
+	if _, err := Build(BuildOptions{
+		Provider:      ProviderCodex,
+		OutDir:        out,
+		SourceFS:      validSkillFS(),
+		GitmootBinary: "/opt/gitmoot/bin/gitmoot",
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	hooks := readHooksFile(t, HooksPath(out))
+	hooks.Hooks["SessionStart"][0].Hooks[0].Command = "gitmoot plugin hook-context || true; echo extra"
+	if err := writeJSON(HooksPath(out), hooks); err != nil {
+		t.Fatalf("write hooks manifest: %v", err)
+	}
+
+	err := ValidateHooksManifest(out, ProviderCodex)
+	if err == nil {
+		t.Fatal("ValidateHooksManifest() error = nil, want extra shell operation error")
+	}
+	if !strings.Contains(err.Error(), "unexpected shape") {
+		t.Fatalf("ValidateHooksManifest() error = %v", err)
+	}
+}
+
+func TestValidateHooksManifestRejectsPowerShellExpansion(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gitmoot")
+	gitmootBinary := writeTempGitmootBinary(t)
+	if _, err := Build(BuildOptions{
+		Provider:      ProviderCodex,
+		OutDir:        out,
+		SourceFS:      validSkillFS(),
+		GitmootBinary: gitmootBinary,
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	hooks := readHooksFile(t, HooksPath(out))
+	hooks.Hooks["SessionStart"][0].Hooks[0].CommandWindows = `& "$(Write-Output gitmoot)" plugin hook-context; exit 0`
+	if err := writeJSON(HooksPath(out), hooks); err != nil {
+		t.Fatalf("write hooks manifest: %v", err)
+	}
+
+	err := ValidateHooksManifest(out, ProviderCodex)
+	if err == nil {
+		t.Fatal("ValidateHooksManifest() error = nil, want PowerShell expansion error")
+	}
+	if !strings.Contains(err.Error(), "PowerShell expansion") {
+		t.Fatalf("ValidateHooksManifest() error = %v", err)
+	}
+}
+
+func TestValidateHooksManifestRejectsNonGitmootBinary(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gitmoot")
+	if _, err := Build(BuildOptions{
+		Provider:      ProviderClaude,
+		OutDir:        out,
+		SourceFS:      validSkillFS(),
+		GitmootBinary: "gitmoot",
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	hooks := readHooksFile(t, HooksPath(out))
+	hooks.Hooks["SessionStart"][0].Hooks[0].Command = "true plugin hook-context || true"
+	hooks.Hooks["SessionStart"][0].Hooks[0].Shell = ""
+	if err := writeJSON(HooksPath(out), hooks); err != nil {
+		t.Fatalf("write hooks manifest: %v", err)
+	}
+
+	err := ValidateHooksManifest(out, ProviderClaude)
+	if err == nil {
+		t.Fatal("ValidateHooksManifest() error = nil, want non-gitmoot binary error")
+	}
+	if !strings.Contains(err.Error(), "want gitmoot executable") {
+		t.Fatalf("ValidateHooksManifest() error = %v", err)
+	}
+}
+
+func TestValidateHooksManifestRejectsUnavailableGitmootPath(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gitmoot")
+	missingGitmoot := filepath.Join(t.TempDir(), "gitmoot")
+	if _, err := Build(BuildOptions{
+		Provider:      ProviderClaude,
+		OutDir:        out,
+		SourceFS:      validSkillFS(),
+		GitmootBinary: missingGitmoot,
+	}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	err := ValidateHooksManifest(out, ProviderClaude)
+	if err == nil {
+		t.Fatal("ValidateHooksManifest() error = nil, want missing binary error")
+	}
+	if !strings.Contains(err.Error(), "is unavailable") {
+		t.Fatalf("ValidateHooksManifest() error = %v", err)
+	}
+}
+
 func TestHookCommandsFallbackToGitmoot(t *testing.T) {
 	if got := posixHookCommand(""); got != "gitmoot plugin hook-context || true" {
 		t.Fatalf("posixHookCommand fallback = %q", got)
@@ -318,6 +506,20 @@ func validSkillFS() fstest.MapFS {
 		"gitmoot/references/SAFETY.md":    {Data: []byte("safety\n")},
 		"gitmoot/references/WORKFLOWS.md": {Data: []byte("workflow\n")},
 	}
+}
+
+func writeTempGitmootBinary(t *testing.T) string {
+	t.Helper()
+	return writeTempExecutable(t, "gitmoot")
+}
+
+func writeTempExecutable(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write temp gitmoot binary: %v", err)
+	}
+	return path
 }
 
 func assertFileContains(t *testing.T, path, want string) {

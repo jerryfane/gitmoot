@@ -253,10 +253,51 @@ func TestRunPluginDoctorJSON(t *testing.T) {
 		t.Fatalf("codex runtime should be healthy: %+v", output.Runtimes[0])
 	}
 	assertDoctorCheck(t, output.Runtimes[0].Checks, "manifest", "ok")
+	assertDoctorCheck(t, output.Runtimes[0].Checks, "hook-manifest", "ok")
 	assertDoctorCheck(t, output.Runtimes[0].Checks, "copied-skill", "ok")
 	assertDoctorCheck(t, output.Runtimes[0].Checks, "marketplace-path", "ok")
 	assertDoctorCheck(t, output.Runtimes[0].Checks, "runtime-cli", "ok")
 	assertDoctorCheck(t, output.Runtimes[0].Checks, "validation-command", "warn")
+}
+
+func TestRunPluginDoctorFailsMissingHookManifest(t *testing.T) {
+	home := t.TempDir()
+	if _, err := pluginpack.Build(pluginpack.BuildOptions{
+		Provider: pluginpack.ProviderCodex,
+		Home:     filepath.Join(home, ".gitmoot"),
+	}); err != nil {
+		t.Fatalf("build package: %v", err)
+	}
+	packagePath := filepath.Join(home, ".gitmoot", "plugins", "build", "codex", "gitmoot")
+	if err := os.Remove(pluginpack.HooksPath(packagePath)); err != nil {
+		t.Fatalf("remove hooks manifest: %v", err)
+	}
+	restore := stubPluginLookPath(map[string]string{"codex": "/tmp/bin/codex"})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"plugin", "doctor", "codex", "--home", home, "--json"}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("plugin doctor exit code = %d, want 1; stderr=%s\nstdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "codex runtime is unhealthy") {
+		t.Fatalf("stderr missing unhealthy runtime:\n%s", stderr.String())
+	}
+	var output pluginDoctorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("doctor JSON did not parse: %v\n%s", err, stdout.String())
+	}
+	if output.Runtimes[0].Healthy {
+		t.Fatalf("codex runtime should be unhealthy: %+v", output.Runtimes[0])
+	}
+	check := findDoctorCheck(t, output.Runtimes[0].Checks, "hook-manifest")
+	if check.Status != "fail" {
+		t.Fatalf("hook-manifest status = %q, want fail; checks=%+v", check.Status, output.Runtimes[0].Checks)
+	}
+	if !strings.Contains(check.Detail, filepath.Join("hooks", "hooks.json")) {
+		t.Fatalf("hook-manifest detail = %q, want hooks path", check.Detail)
+	}
 }
 
 func TestRunPluginDoctorClaudeReportsMaskedAuthEnv(t *testing.T) {

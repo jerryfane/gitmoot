@@ -87,6 +87,22 @@ func HooksPath(root string) string {
 	return filepath.Join(root, "hooks", "hooks.json")
 }
 
+func ValidateHooksManifest(root string, provider Provider) error {
+	if _, err := validateProvider(provider); err != nil {
+		return err
+	}
+	path := HooksPath(root)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	var hooks hooksFile
+	if err := json.Unmarshal(content, &hooks); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return validateHooksManifest(hooks, provider)
+}
+
 func IsGeneratedPackageDir(path string, provider Provider) bool {
 	return isGeneratedPackageDir(path, provider)
 }
@@ -378,6 +394,168 @@ func hooksManifest(provider Provider, gitmootBinary string, goos string) (hooksF
 			}},
 		},
 	}, nil
+}
+
+func validateHooksManifest(hooks hooksFile, provider Provider) error {
+	if len(hooks.Hooks) != 1 {
+		return fmt.Errorf("hook manifest has %d hook events, want exactly SessionStart", len(hooks.Hooks))
+	}
+	groups := hooks.Hooks["SessionStart"]
+	if len(groups) != 1 {
+		return fmt.Errorf("SessionStart hook groups = %d, want one", len(groups))
+	}
+	group := groups[0]
+	if group.Matcher != sessionStartMatcher {
+		return fmt.Errorf("SessionStart matcher = %q, want %q", group.Matcher, sessionStartMatcher)
+	}
+	if len(group.Hooks) != 1 {
+		return fmt.Errorf("SessionStart command hooks = %d, want one", len(group.Hooks))
+	}
+	return validateHookCommand(group.Hooks[0], provider)
+}
+
+func validateHookCommand(hook commandHook, provider Provider) error {
+	if hook.Type != "command" {
+		return fmt.Errorf("hook type = %q, want command", hook.Type)
+	}
+	if hook.Timeout != hookTimeoutSeconds {
+		return fmt.Errorf("hook timeout = %d, want %d", hook.Timeout, hookTimeoutSeconds)
+	}
+	if hook.StatusMessage != hookStatusMessage {
+		return fmt.Errorf("hook statusMessage = %q, want %q", hook.StatusMessage, hookStatusMessage)
+	}
+	switch provider {
+	case ProviderCodex:
+		if err := validatePOSIXHookCommand("command", hook.Command); err != nil {
+			return err
+		}
+		return validatePowerShellHookCommand("commandWindows", hook.CommandWindows)
+	case ProviderClaude:
+		if hook.Shell == "powershell" {
+			return validatePowerShellHookCommand("command", hook.Command)
+		}
+		if strings.TrimSpace(hook.Shell) != "" {
+			return fmt.Errorf("hook shell = %q, want empty or powershell", hook.Shell)
+		}
+		return validatePOSIXHookCommand("command", hook.Command)
+	default:
+		return fmt.Errorf("unknown plugin runtime %q", provider)
+	}
+}
+
+func validatePOSIXHookCommand(label string, command string) error {
+	command = strings.TrimSpace(command)
+	const suffix = " plugin hook-context || true"
+	if !strings.HasSuffix(command, suffix) {
+		return fmt.Errorf("%s has unexpected shape; want <gitmoot-binary> plugin hook-context || true", label)
+	}
+	binary, ok := parsePOSIXCommandWord(strings.TrimSuffix(command, suffix))
+	if !ok {
+		return fmt.Errorf("%s gitmoot binary is not a single POSIX shell word", label)
+	}
+	return validateHookBinary(label, binary)
+}
+
+func validatePowerShellHookCommand(label string, command string) error {
+	command = strings.TrimSpace(command)
+	const prefix = `& "`
+	if !strings.HasPrefix(command, prefix) {
+		return fmt.Errorf("%s has unexpected shape; want & \"<gitmoot-binary>\" plugin hook-context; exit 0", label)
+	}
+	end := len(prefix)
+	var binary strings.Builder
+	for end < len(command) {
+		switch command[end] {
+		case '`':
+			if end+1 >= len(command) {
+				return fmt.Errorf("%s has dangling PowerShell escape", label)
+			}
+			switch command[end+1] {
+			case '`', '"', '$':
+			default:
+				return fmt.Errorf("%s has unsupported PowerShell escape", label)
+			}
+			binary.WriteByte(command[end+1])
+			end += 2
+		case '$':
+			return fmt.Errorf("%s gitmoot binary contains unescaped PowerShell expansion", label)
+		case '"':
+			if end == len(prefix) {
+				return fmt.Errorf("%s gitmoot binary is empty", label)
+			}
+			const suffix = `" plugin hook-context; exit 0`
+			if command[end:] != suffix {
+				return fmt.Errorf("%s has unexpected shape; want & \"<gitmoot-binary>\" plugin hook-context; exit 0", label)
+			}
+			return validateHookBinary(label, binary.String())
+		default:
+			binary.WriteByte(command[end])
+			end++
+		}
+	}
+	return fmt.Errorf("%s has unterminated PowerShell string", label)
+}
+
+func parsePOSIXCommandWord(word string) (string, bool) {
+	if word == "" {
+		return "", false
+	}
+	var binary strings.Builder
+	for i := 0; i < len(word); {
+		switch word[i] {
+		case '\'':
+			i++
+			for i < len(word) && word[i] != '\'' {
+				binary.WriteByte(word[i])
+				i++
+			}
+			if i == len(word) {
+				return "", false
+			}
+			i++
+		case '"':
+			if i+3 > len(word) || word[i:i+3] != `"'"` {
+				return "", false
+			}
+			binary.WriteByte('\'')
+			i += 3
+		default:
+			if !isPOSIXShellSafe(rune(word[i])) {
+				return "", false
+			}
+			binary.WriteByte(word[i])
+			i++
+		}
+	}
+	return binary.String(), true
+}
+
+func validateHookBinary(label string, binary string) error {
+	binary = strings.TrimSpace(binary)
+	if !hookBinaryHasPath(binary) {
+		if binary != "gitmoot" && binary != "gitmoot.exe" {
+			return fmt.Errorf("%s gitmoot binary = %q, want gitmoot executable on PATH or a path to an existing executable", label, binary)
+		}
+		return nil
+	}
+	if !filepath.IsAbs(binary) {
+		return fmt.Errorf("%s gitmoot binary %q must be absolute", label, binary)
+	}
+	info, err := os.Stat(binary)
+	if err != nil {
+		return fmt.Errorf("%s gitmoot binary %q is unavailable: %w", label, binary, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s gitmoot binary %q is a directory", label, binary)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("%s gitmoot binary %q is not executable", label, binary)
+	}
+	return nil
+}
+
+func hookBinaryHasPath(binary string) bool {
+	return filepath.IsAbs(binary) || strings.ContainsAny(binary, `/\`)
 }
 
 func posixHookCommand(gitmootBinary string) string {

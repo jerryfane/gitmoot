@@ -379,6 +379,7 @@ func doctorRuntime(home string, provider pluginpack.Provider, explicitRuntime bo
 	runtime.Checks = append(runtime.Checks, checkCanonicalSkill())
 	runtime.Checks = append(runtime.Checks, checkPackage(packagePath))
 	runtime.Checks = append(runtime.Checks, checkManifest(packagePath, provider))
+	runtime.Checks = append(runtime.Checks, checkHookManifest(packagePath, provider))
 	runtime.Checks = append(runtime.Checks, checkCopiedSkill(packagePath))
 	runtime.Checks = append(runtime.Checks, checkMarketplacePath(home, provider))
 	runtime.Checks = append(runtime.Checks, checkRuntimeCLI(provider, explicitRuntime))
@@ -440,6 +441,13 @@ func checkManifest(packagePath string, provider pluginpack.Provider) pluginCheck
 		return failCheck("manifest", manifest+": "+err.Error(), true)
 	}
 	return okCheck("manifest", manifest, true)
+}
+
+func checkHookManifest(packagePath string, provider pluginpack.Provider) pluginCheck {
+	if err := pluginpack.ValidateHooksManifest(packagePath, provider); err != nil {
+		return failCheck("hook-manifest", err.Error(), true)
+	}
+	return okCheck("hook-manifest", pluginpack.HooksPath(packagePath), true)
 }
 
 func checkCopiedSkill(packagePath string) pluginCheck {
