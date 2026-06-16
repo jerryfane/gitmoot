@@ -265,13 +265,22 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 			if err := e.advanceDelegations(ctx, parentJob, parentPayload, parentPayload.Result, taskRefFromPayload(parentPayload)); err != nil {
 				return err
 			}
-			// A child that failed under a continue/escalate failure_policy is
-			// handled by the delegation graph (siblings keep running, or the
-			// coordinator continuation was enqueued); do not also block the
-			// shared parent task via the failed-decision path below.
-			if (payload.Result.Decision == "blocked" || payload.Result.Decision == "failed") &&
-				delegationFailureHandledByPolicy(parentPayload.Result, payload.DelegationID) {
-				return nil
+			// A child that failed under a continue/escalate failure_policy, or one
+			// that was re-enqueued by the retry pass, is handled by the delegation
+			// graph (siblings keep running, the retry runs, or the coordinator
+			// continuation was enqueued); do not also block the shared parent task
+			// via the failed-decision path below.
+			if payload.Result.Decision == "blocked" || payload.Result.Decision == "failed" {
+				if delegationFailureHandledByPolicy(parentPayload.Result, payload.DelegationID) {
+					return nil
+				}
+				retrying, err := e.delegationRetryPending(ctx, parentJob.ID, payload.DelegationID)
+				if err != nil {
+					return err
+				}
+				if retrying {
+					return nil
+				}
 			}
 		}
 	}
@@ -397,6 +406,10 @@ func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) 
 		DelegationDepth: payload.DelegationDepth + 1,
 		DelegatedBy:     job.Agent,
 		Deps:            compactStrings(d.Deps),
+		JobTimeout:      strings.TrimSpace(d.Timeout),
+		Fingerprint:     strings.TrimSpace(d.Fingerprint),
+		FailurePolicy:   strings.TrimSpace(d.FailurePolicy),
+		SynthesisRule:   strings.TrimSpace(d.SynthesisRule),
 	}
 }
 
@@ -462,6 +475,35 @@ func (e Engine) enqueueDelegation(ctx context.Context, job db.Job, payload JobPa
 	request := e.delegationRequest(job, payload, d)
 	request.DelegationArtifactDir = artifactDir
 
+	// Fingerprint dedup: skip enqueueing a child whose fingerprint already
+	// appears among a sibling under the same parent. Scoped to this parent via
+	// the (parentJobID, fingerprint) key so identical fingerprints under
+	// different parents never collide. The delegation's own child is excluded so
+	// an idempotent re-enqueue of the same delegation is not treated as a dup.
+	if fingerprint := strings.TrimSpace(d.Fingerprint); fingerprint != "" {
+		seen, err := e.delegationFingerprintSeen(ctx, job.ID, d.ID, fingerprint)
+		if err != nil {
+			return err
+		}
+		if seen {
+			_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+				JobID:   job.ID,
+				Kind:    "delegation_deduped",
+				Message: fmt.Sprintf("delegation %q skipped: fingerprint %q already enqueued (key %s)", d.ID, fingerprint, delegationFingerprintKey(job.ID, fingerprint)),
+			})
+			return nil
+		}
+	}
+
+	return e.allocateAndEnqueueDelegation(ctx, job, payload, d, request, ref)
+}
+
+// allocateAndEnqueueDelegation allocates the per-delegation worktree (or branch
+// lock) for implement delegations and enqueues the prepared request, recording a
+// delegation_enqueued event. It is shared by enqueueDelegation (initial/deferred
+// dispatch) and requeueDelegation (retry) so both go through identical worktree
+// allocation and idempotent enqueue.
+func (e Engine) allocateAndEnqueueDelegation(ctx context.Context, job db.Job, payload JobPayload, d Delegation, request JobRequest, ref taskRef) error {
 	if request.Action == "implement" {
 		if e.DelegationWorktrees == nil || strings.TrimSpace(e.Home) == "" {
 			if err := e.ensureBranchLock(ctx, request.Repo, request.Branch, request.Agent, ref); err != nil {
@@ -501,6 +543,38 @@ func (e Engine) enqueueDelegation(ctx context.Context, job db.Job, payload JobPa
 	return nil
 }
 
+// requeueDelegation re-enqueues a failed delegation child as a fresh job when
+// the delegation has retry budget left (failedChild's RetryCount < d.Retry). The
+// retry uses a distinct .../retry/<n> id so the enqueue idempotency path does not
+// mistake it for the already-failed original, carries RetryCount+1 in its
+// payload, and inherits the same DelegationID so it represents the same node in
+// the delegation graph. It returns whether a retry was enqueued.
+func (e Engine) requeueDelegation(ctx context.Context, parentJob db.Job, parentPayload JobPayload, d Delegation, failedChild db.Job, artifactDir string, ref taskRef) (bool, error) {
+	if d.Retry <= 0 {
+		return false, nil
+	}
+	attempt := delegationJobRetryCount(failedChild)
+	if attempt >= d.Retry {
+		return false, nil
+	}
+	next := attempt + 1
+
+	request := e.delegationRequest(parentJob, parentPayload, d)
+	request.ID = parentJob.ID + "/delegation/" + d.ID + "/retry/" + strconv.Itoa(next)
+	request.RetryCount = next
+	request.DelegationArtifactDir = artifactDir
+
+	if err := e.allocateAndEnqueueDelegation(ctx, parentJob, parentPayload, d, request, ref); err != nil {
+		return false, err
+	}
+	_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   parentJob.ID,
+		Kind:    "delegation_retry",
+		Message: fmt.Sprintf("delegation %q retry %d/%d enqueued as job %s after %s failed", d.ID, next, d.Retry, request.ID, failedChild.ID),
+	})
+	return true, nil
+}
+
 // advanceDelegations runs on a parent coordinator job each time one of its
 // delegated children finishes. It enqueues now-ready dependent siblings,
 // applies the failed delegation's failure_policy, and enqueues a single
@@ -523,6 +597,33 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 	artifactDir, err := delegationArtifactDir(e.ArtifactRoot, parentJob.ID, parentResult)
 	if err != nil {
 		return err
+	}
+
+	// Retry pass: a delegation that failed but has retry budget left is
+	// re-enqueued as a fresh child before any failure_policy is applied, so its
+	// failure is absorbed by the retry rather than blocking/escalating. A
+	// successful retry replaces the failed attempt in the children map (the retry
+	// id sorts after the original), so the delegation looks active again this
+	// pass and the failure switch below skips it.
+	retried := false
+	for _, d := range parentResult.Delegations {
+		child, ok := children[d.ID]
+		if !ok || !isTerminalJobState(child.State) || child.State == string(JobSucceeded) {
+			continue
+		}
+		didRetry, err := e.requeueDelegation(ctx, parentJob, parentPayload, d, child, artifactDir, ref)
+		if err != nil {
+			return err
+		}
+		if didRetry {
+			retried = true
+		}
+	}
+	if retried {
+		children, err = e.childDelegationJobs(ctx, parentJob.ID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Apply failure policies first so a failed dependency stops its dependents
@@ -576,7 +677,7 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 	// is resolved (terminal child, or permanently gated by a failed dependency
 	// under a continue policy), or immediately when a failure escalates.
 	if escalate || allDelegationsResolved(parentResult.Delegations, children) {
-		if err := e.maybeEnqueueContinuation(ctx, parentJob, parentPayload, parentResult, children); err != nil {
+		if err := e.maybeEnqueueContinuation(ctx, parentJob, parentPayload, parentResult, children, ref); err != nil {
 			return err
 		}
 	}
@@ -587,7 +688,9 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 // a parent whose delegations have all finished. Idempotency is enforced by a
 // deterministic continuation id plus a one-shot delegation_continuation_enqueued
 // event on the parent, so concurrent child completions enqueue it at most once.
-func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, parentPayload JobPayload, parentResult *AgentResult, children map[string]db.Job) error {
+// When any delegation declares synthesis_rule "vote", the continuation is gated:
+// the parent task is blocked unless every child was approved/succeeded.
+func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, parentPayload JobPayload, parentResult *AgentResult, children map[string]db.Job, ref taskRef) error {
 	events, err := e.Store.ListJobEvents(ctx, parentJob.ID)
 	if err != nil {
 		return err
@@ -603,6 +706,13 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 			return err
 		}
 		childPayloads[id] = childPayload
+	}
+
+	// synthesis_rule "vote": block the parent unless every child approved or
+	// succeeded. The default ("" / "summary") concatenates child summaries into
+	// the continuation prompt below.
+	if delegationSynthesisRequiresVote(parentResult.Delegations) && !delegationVoteSatisfied(parentResult.Delegations, children, childPayloads) {
+		return e.block(ctx, ref, fmt.Sprintf("delegation synthesis_rule vote failed: not all delegated children for %s were approved/succeeded", parentJob.ID))
 	}
 
 	request := JobRequest{
@@ -645,13 +755,76 @@ func (e Engine) childDelegationJobs(ctx context.Context, parentJobID string) (ma
 		return nil, err
 	}
 	children := make(map[string]db.Job)
+	attempts := make(map[string]int)
 	for _, job := range jobs {
 		if job.ParentJobID != parentJobID || strings.TrimSpace(job.DelegationID) == "" {
 			continue
 		}
+		// A delegation may have several attempts after retries; keep the latest
+		// (highest RetryCount) so the failure/resolution logic always observes the
+		// current attempt regardless of ListJobs ordering.
+		attempt := delegationJobRetryCount(job)
+		if _, ok := children[job.DelegationID]; ok && attempt < attempts[job.DelegationID] {
+			continue
+		}
 		children[job.DelegationID] = job
+		attempts[job.DelegationID] = attempt
 	}
 	return children, nil
+}
+
+// delegationJobRetryCount reads a child job's RetryCount from its payload,
+// returning 0 when the payload is missing or cannot be parsed.
+func delegationJobRetryCount(job db.Job) int {
+	payload, err := unmarshalPayload(job.Payload)
+	if err != nil {
+		return 0
+	}
+	return payload.RetryCount
+}
+
+// delegationFingerprintSeen reports whether a sibling delegation under the same
+// parent (other than skipDelegationID) has already been enqueued with the given
+// fingerprint. It scans ListJobs filtered by ParentJobID, mirroring
+// childDelegationJobs, and compares each child's stored payload.Fingerprint so
+// dedup is scoped per the goal's (parentJobID, fingerprint) key.
+func (e Engine) delegationFingerprintSeen(ctx context.Context, parentJobID, skipDelegationID, fingerprint string) (bool, error) {
+	fingerprint = strings.TrimSpace(fingerprint)
+	if fingerprint == "" {
+		return false, nil
+	}
+	jobs, err := e.Store.ListJobs(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, job := range jobs {
+		if job.ParentJobID != parentJobID || strings.TrimSpace(job.DelegationID) == "" {
+			continue
+		}
+		if job.DelegationID == skipDelegationID {
+			continue
+		}
+		childPayload, err := unmarshalPayload(job.Payload)
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(childPayload.Fingerprint) == fingerprint {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// delegationFingerprintKey hashes (parentJobID, fingerprint) into a stable,
+// parent-scoped dedup key, mirroring jobID's fnv hashing so identical
+// fingerprints under different parents never collide.
+func delegationFingerprintKey(parentJobID, fingerprint string) string {
+	hash := fnv.New64a()
+	for _, value := range []string{parentJobID, fingerprint} {
+		_, _ = hash.Write([]byte(value))
+		_, _ = hash.Write([]byte{0})
+	}
+	return "deleg-fp-" + strconv.FormatUint(hash.Sum64(), 36)
 }
 
 // depsSatisfied reports whether every dependency id maps to a succeeded sibling.
@@ -767,6 +940,25 @@ func delegationFailureHandledByPolicy(parentResult *AgentResult, delegationID st
 	return false
 }
 
+// delegationRetryPending reports whether the named delegation currently has a
+// non-terminal child, meaning the retry pass re-enqueued a fresh attempt and the
+// failed attempt's outcome is now superseded. childDelegationJobs already keeps
+// the latest attempt per delegation id, so a queued/running retry shows here.
+func (e Engine) delegationRetryPending(ctx context.Context, parentJobID, delegationID string) (bool, error) {
+	if strings.TrimSpace(delegationID) == "" {
+		return false, nil
+	}
+	children, err := e.childDelegationJobs(ctx, parentJobID)
+	if err != nil {
+		return false, err
+	}
+	child, ok := children[delegationID]
+	if !ok {
+		return false, nil
+	}
+	return !isTerminalJobState(child.State), nil
+}
+
 func childFailureReason(child db.Job) string {
 	payload, err := unmarshalPayload(child.Payload)
 	if err == nil && payload.Result != nil && strings.TrimSpace(payload.Result.Summary) != "" {
@@ -826,6 +1018,59 @@ func childPullRequestLink(payload JobPayload) string {
 		return ""
 	}
 	return fmt.Sprintf("https://github.com/%s/pull/%d", payload.Repo, payload.PullRequest)
+}
+
+func delegationSynthesisRule(d Delegation) string {
+	rule := strings.ToLower(strings.TrimSpace(d.SynthesisRule))
+	if rule == "" {
+		return "summary"
+	}
+	return rule
+}
+
+// delegationSynthesisRequiresVote reports whether any delegation in the batch
+// declares synthesis_rule "vote", which gates the coordinator continuation on
+// every child being approved/succeeded.
+func delegationSynthesisRequiresVote(delegations []Delegation) bool {
+	for _, d := range delegations {
+		if delegationSynthesisRule(d) == "vote" {
+			return true
+		}
+	}
+	return false
+}
+
+// delegationVoteSatisfied reports whether every delegation's child reached an
+// approving outcome: a succeeded job state, or a child result decision of
+// approved/succeeded/implemented. A missing or non-approving child fails the
+// vote.
+func delegationVoteSatisfied(delegations []Delegation, children map[string]db.Job, childPayloads map[string]JobPayload) bool {
+	for _, d := range delegations {
+		child, ok := children[d.ID]
+		if !ok {
+			return false
+		}
+		if child.State == string(JobSucceeded) {
+			continue
+		}
+		payload, ok := childPayloads[d.ID]
+		if !ok || payload.Result == nil {
+			return false
+		}
+		if !delegationDecisionApproves(payload.Result.Decision) {
+			return false
+		}
+	}
+	return true
+}
+
+func delegationDecisionApproves(decision string) bool {
+	switch strings.ToLower(strings.TrimSpace(decision)) {
+	case "approved", "succeeded", "implemented":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e Engine) preflightDelegation(ctx context.Context, request JobRequest) error {

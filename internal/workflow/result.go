@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const resultKey = `"gitmoot_result"`
@@ -121,6 +122,39 @@ func validateAgentResult(result AgentResult) error {
 		if strings.TrimSpace(d.Prompt) == "" {
 			return errors.New("delegation prompt is required")
 		}
+		if err := validateDelegationLifecycle(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateDelegationLifecycle validates the Phase 2 lifecycle controls on a
+// delegation: timeout must parse as a positive duration, retry must be
+// non-negative, and failure_policy/synthesis_rule must be drawn from their
+// allowed sets. Empty values are accepted and fall back to defaults.
+func validateDelegationLifecycle(d Delegation) error {
+	if timeout := strings.TrimSpace(d.Timeout); timeout != "" {
+		parsed, err := time.ParseDuration(timeout)
+		if err != nil {
+			return fmt.Errorf("delegation %q timeout %q is invalid: %w", d.ID, timeout, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("delegation %q timeout %q must be positive", d.ID, timeout)
+		}
+	}
+	if d.Retry < 0 {
+		return fmt.Errorf("delegation %q retry must be >= 0", d.ID)
+	}
+	switch strings.ToLower(strings.TrimSpace(d.FailurePolicy)) {
+	case "", "block_parent", "continue", "escalate":
+	default:
+		return fmt.Errorf("delegation %q failure_policy %q is invalid", d.ID, d.FailurePolicy)
+	}
+	switch strings.ToLower(strings.TrimSpace(d.SynthesisRule)) {
+	case "", "summary", "vote":
+	default:
+		return fmt.Errorf("delegation %q synthesis_rule %q is invalid", d.ID, d.SynthesisRule)
 	}
 	return nil
 }

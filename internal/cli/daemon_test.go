@@ -4055,3 +4055,37 @@ func daemonWorkerHasEvent(events []db.JobEvent, kind string) bool {
 	}
 	return false
 }
+
+func TestEffectiveJobTimeout(t *testing.T) {
+	managed := managedJobRuntimeConfig{OK: true, JobTimeout: 10 * time.Minute}
+
+	// A valid per-delegation timeout overrides the agent-type timeout.
+	if got := effectiveJobTimeout(workflow.JobPayload{JobTimeout: "30s"}, managed); got != 30*time.Second {
+		t.Fatalf("effectiveJobTimeout(payload override) = %v, want 30s", got)
+	}
+
+	// An empty payload timeout falls back to the managed timeout.
+	if got := effectiveJobTimeout(workflow.JobPayload{}, managed); got != 10*time.Minute {
+		t.Fatalf("effectiveJobTimeout(empty payload) = %v, want 10m", got)
+	}
+
+	// An unparseable payload timeout falls back to the managed timeout.
+	if got := effectiveJobTimeout(workflow.JobPayload{JobTimeout: "banana"}, managed); got != 10*time.Minute {
+		t.Fatalf("effectiveJobTimeout(invalid payload) = %v, want 10m", got)
+	}
+
+	// A non-positive payload timeout falls back to the managed timeout.
+	if got := effectiveJobTimeout(workflow.JobPayload{JobTimeout: "0s"}, managed); got != 10*time.Minute {
+		t.Fatalf("effectiveJobTimeout(zero payload) = %v, want 10m", got)
+	}
+
+	// With no managed config, an empty payload timeout yields zero (no deadline).
+	if got := effectiveJobTimeout(workflow.JobPayload{}, managedJobRuntimeConfig{}); got != 0 {
+		t.Fatalf("effectiveJobTimeout(unmanaged, empty) = %v, want 0", got)
+	}
+
+	// With no managed config, a valid payload timeout still applies.
+	if got := effectiveJobTimeout(workflow.JobPayload{JobTimeout: "45s"}, managedJobRuntimeConfig{}); got != 45*time.Second {
+		t.Fatalf("effectiveJobTimeout(unmanaged, payload) = %v, want 45s", got)
+	}
+}

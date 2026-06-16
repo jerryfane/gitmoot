@@ -40,6 +40,11 @@ type JobRequest struct {
 	DelegationDepth       int
 	DelegatedBy           string
 	Deps                  []string
+	JobTimeout            string
+	RetryCount            int
+	Fingerprint           string
+	FailurePolicy         string
+	SynthesisRule         string
 	DelegationArtifactDir string
 	WorktreePath          string
 	OriginalAgent         string
@@ -66,6 +71,11 @@ type JobPayload struct {
 	DelegationDepth        int          `json:"delegation_depth,omitempty"`
 	DelegatedBy            string       `json:"delegated_by,omitempty"`
 	Deps                   []string     `json:"deps,omitempty"`
+	JobTimeout             string       `json:"job_timeout,omitempty"`
+	RetryCount             int          `json:"retry_count,omitempty"`
+	Fingerprint            string       `json:"fingerprint,omitempty"`
+	FailurePolicy          string       `json:"failure_policy,omitempty"`
+	SynthesisRule          string       `json:"synthesis_rule,omitempty"`
 	DelegationArtifactDir  string       `json:"delegation_artifact_dir,omitempty"`
 	WorktreePath           string       `json:"worktree_path,omitempty"`
 	TemplateID             string       `json:"template_id,omitempty"`
@@ -114,6 +124,11 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		DelegationDepth:        request.DelegationDepth,
 		DelegatedBy:            request.DelegatedBy,
 		Deps:                   compactStrings(request.Deps),
+		JobTimeout:             strings.TrimSpace(request.JobTimeout),
+		RetryCount:             request.RetryCount,
+		Fingerprint:            strings.TrimSpace(request.Fingerprint),
+		FailurePolicy:          strings.TrimSpace(request.FailurePolicy),
+		SynthesisRule:          strings.TrimSpace(request.SynthesisRule),
 		DelegationArtifactDir:  request.DelegationArtifactDir,
 		WorktreePath:           request.WorktreePath,
 		TemplateID:             snapshot.ID,

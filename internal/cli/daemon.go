@@ -1625,9 +1625,10 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 		_ = w.postJobResultComment(ctx, job.ID, agent, checkout, err)
 		return nil
 	}
+	jobTimeout := effectiveJobTimeout(payload, managed)
 	lockTTL := daemonRunningJobStaleAfter
-	if managed.OK {
-		lockTTL = managed.JobTimeout
+	if jobTimeout > 0 {
+		lockTTL = jobTimeout
 	}
 	releaseLock, acquired, lockKey, err := acquireRuntimeSessionLock(ctx, w.Store, job.ID, agent, time.Now().UTC(), lockTTL)
 	if err != nil {
@@ -1686,9 +1687,9 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 	engine := w.WorkflowFactory(checkout)
 	runCtx, stopRun := w.runningJobContext(ctx, job.ID)
 	defer stopRun()
-	if managed.OK {
+	if jobTimeout > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(runCtx, managed.JobTimeout)
+		runCtx, cancel = context.WithTimeout(runCtx, jobTimeout)
 		defer cancel()
 	}
 	_, err = engine.RunJob(runCtx, job.ID, agent, adapter)
@@ -1797,6 +1798,11 @@ func (w jobWorker) runWithTempWorker(ctx context.Context, job db.Job, payload wo
 		}
 		writeLine(w.Stdout, "job %s waiting: %s", job.ID, waitMessage)
 		return fmt.Errorf("%w: %s", errRuntimeSessionBusy, waitMessage)
+	}
+	// A per-delegation timeout on the payload overrides the agent-type job
+	// timeout for both the lock TTL and the run deadline below.
+	if d, perr := time.ParseDuration(strings.TrimSpace(payload.JobTimeout)); perr == nil && d > 0 {
+		started.JobTimeout = d
 	}
 	payload.OriginalAgent = original.Name
 	payload.DelegatedAgent = started.Agent.Name
@@ -2136,6 +2142,18 @@ func (w jobWorker) managedJobConfig(ctx context.Context, agentName string) (mana
 		return managedJobRuntimeConfig{}, fmt.Errorf("agent type %s idle_timeout must be positive", configType)
 	}
 	return managedJobRuntimeConfig{OK: true, JobTimeout: jobTimeout, IdleTimeout: idleTimeout}, nil
+}
+
+// effectiveJobTimeout returns the timeout to enforce for a job: the
+// per-delegation payload.JobTimeout when it parses to a positive duration,
+// otherwise the agent-type managed.JobTimeout (which is zero when the agent is
+// not managed). The same value drives both the runtime-session lock TTL and the
+// run context deadline so the lock cannot expire before the job does.
+func effectiveJobTimeout(payload workflow.JobPayload, managed managedJobRuntimeConfig) time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(payload.JobTimeout)); err == nil && d > 0 {
+		return d
+	}
+	return managed.JobTimeout
 }
 
 func originalAgentForTempWorkerType(typ string) string {
