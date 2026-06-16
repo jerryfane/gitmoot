@@ -39,6 +39,7 @@ type JobRequest struct {
 	DelegationID          string
 	DelegationDepth       int
 	DelegatedBy           string
+	Deps                  []string
 	DelegationArtifactDir string
 	WorktreePath          string
 	OriginalAgent         string
@@ -64,6 +65,7 @@ type JobPayload struct {
 	DelegationID           string       `json:"delegation_id,omitempty"`
 	DelegationDepth        int          `json:"delegation_depth,omitempty"`
 	DelegatedBy            string       `json:"delegated_by,omitempty"`
+	Deps                   []string     `json:"deps,omitempty"`
 	DelegationArtifactDir  string       `json:"delegation_artifact_dir,omitempty"`
 	WorktreePath           string       `json:"worktree_path,omitempty"`
 	TemplateID             string       `json:"template_id,omitempty"`
@@ -111,6 +113,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		DelegationID:           request.DelegationID,
 		DelegationDepth:        request.DelegationDepth,
 		DelegatedBy:            request.DelegatedBy,
+		Deps:                   compactStrings(request.Deps),
 		DelegationArtifactDir:  request.DelegationArtifactDir,
 		WorktreePath:           request.WorktreePath,
 		TemplateID:             snapshot.ID,

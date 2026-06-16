@@ -78,6 +78,25 @@ func writeDelegationArtifacts(root string, parentJobID string, result *AgentResu
 	return dir, nil
 }
 
+// delegationArtifactDir returns the directory writeDelegationArtifacts would
+// have written for this parent, without touching the filesystem. It lets the
+// deferred-enqueue path (advanceDelegations) point late-running children at the
+// same brief.md/context-manifest.json the ready children received, returning ""
+// when no artifacts were requested or the engine has no artifact root.
+func delegationArtifactDir(root string, parentJobID string, result *AgentResult) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", nil
+	}
+	if result == nil || !delegationsRequestArtifacts(result.Delegations) {
+		return "", nil
+	}
+	segment, err := safeDelegationPathSegment(parentJobID, "parent job id")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "delegations", segment), nil
+}
+
 func delegationsRequestArtifacts(delegations []Delegation) bool {
 	for _, d := range delegations {
 		if len(d.Artifacts) > 0 {

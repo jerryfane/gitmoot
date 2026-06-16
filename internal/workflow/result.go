@@ -121,9 +121,6 @@ func validateAgentResult(result AgentResult) error {
 		if strings.TrimSpace(d.Prompt) == "" {
 			return errors.New("delegation prompt is required")
 		}
-		if len(d.Deps) > 0 {
-			return fmt.Errorf("delegation %q uses dependencies, which are not yet supported", d.ID)
-		}
 	}
 	return nil
 }
