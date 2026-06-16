@@ -2959,12 +2959,33 @@ func (w jobWorker) handleRunJobError(ctx context.Context, jobID string, cause er
 // finalizeTimedOutDelegationChild bridges the daemon run-error path into the
 // engine's delegation DAG: it converts a timed-out/runtime-failed delegation
 // child with no stored result into a terminal failed child and advances the
-// parent. It builds a checkout-less engine because only DB/DAG operations run
-// here (no git/worktree work). Returns whether the child was finalized.
+// parent. Advancing the parent can trigger a retry of an *implement* delegation,
+// which must allocate a fresh per-delegation worktree; so it resolves the repo's
+// main checkout and builds a fully-wired engine instead of a checkout-less one.
+// A missing checkout degrades gracefully (the engine emits
+// delegation_worktree_skipped and falls back to a shared-checkout branch lock).
+// Returns whether the child was finalized.
 func (w jobWorker) finalizeTimedOutDelegationChild(ctx context.Context, job db.Job, cause error) (bool, error) {
 	reason := fmt.Sprintf("delegation child %s ended without a result: %v", job.ID, cause)
-	engine := w.WorkflowFactory("")
+	engine := w.WorkflowFactory(w.delegationParentCheckout(ctx, job))
 	return engine.FinalizeTimedOutDelegationChild(ctx, job.ID, reason)
+}
+
+// delegationParentCheckout returns the repo's main registered checkout for a
+// delegation child job (NOT the child's own worktree), so the engine can
+// `git worktree add` a retry's per-delegation worktree against it. It returns
+// "" on any lookup failure, leaving the engine to advance the DAG without
+// worktree isolation rather than blocking finalization.
+func (w jobWorker) delegationParentCheckout(ctx context.Context, job db.Job) string {
+	payload, err := daemonJobPayload(job)
+	if err != nil {
+		return ""
+	}
+	repoRecord, err := w.Store.GetRepo(ctx, payload.Repo)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(repoRecord.CheckoutPath)
 }
 
 func (w jobWorker) recordPostDeliveryWorkflowError(ctx context.Context, job db.Job, cause error) error {
