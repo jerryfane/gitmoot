@@ -808,7 +808,7 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 			NextPoll:    map[string]time.Time{},
 			ErrorStreak: map[string]int{},
 		}
-		poller := defaultRegisteredRepoPoller(store, workers, dryRun, stdout)
+		poller := defaultRegisteredRepoPoller(store, workers, dryRun, stdout, paths.Home)
 		blobStore := artifact.NewStore(paths.ArtifactBlobs)
 		reviewGitHub := newSkillOptGitHubClient()
 		worker := defaultJobWorker(store, stdout, home)
@@ -958,7 +958,7 @@ func (l *repoCheckoutLocks) For(repo string) *sync.Mutex {
 }
 
 func pollRegisteredRepos(ctx context.Context, store *db.Store, workers int, dryRun bool, stdout io.Writer, nextPoll map[string]time.Time, now time.Time, fallbackPoll time.Duration) (time.Duration, error) {
-	return pollRegisteredReposWithPoller(ctx, defaultRegisteredRepoPoller(store, workers, dryRun, stdout), registeredRepoSchedule{NextPoll: nextPoll}, now, fallbackPoll)
+	return pollRegisteredReposWithPoller(ctx, defaultRegisteredRepoPoller(store, workers, dryRun, stdout, ""), registeredRepoSchedule{NextPoll: nextPoll}, now, fallbackPoll)
 }
 
 type registeredRepoSchedule struct {
@@ -987,7 +987,7 @@ type registeredRepoPoller struct {
 	WorkflowFactory func(store *db.Store, gh github.Client, checkout string) *workflow.Engine
 }
 
-func defaultRegisteredRepoPoller(store *db.Store, workers int, dryRun bool, stdout io.Writer) registeredRepoPoller {
+func defaultRegisteredRepoPoller(store *db.Store, workers int, dryRun bool, stdout io.Writer, home string) registeredRepoPoller {
 	return registeredRepoPoller{
 		Store:        store,
 		Workers:      workers,
@@ -995,7 +995,7 @@ func defaultRegisteredRepoPoller(store *db.Store, workers int, dryRun bool, stdo
 		Stdout:       stdout,
 		GitHubClient: func(checkout string) github.Client { return github.NewClient(checkout) },
 		WorkflowFactory: func(store *db.Store, gh github.Client, checkout string) *workflow.Engine {
-			engine := daemonWorkflowEngine(store, gh, checkout)
+			engine := daemonWorkflowEngine(store, gh, checkout, home)
 			return &engine
 		},
 	}
@@ -1536,6 +1536,13 @@ func queuedJobCheckoutKey(ctx context.Context, store *db.Store, job db.Job) stri
 }
 
 func queuedJobTaskWorktreePath(ctx context.Context, store *db.Store, payload workflow.JobPayload) (string, bool) {
+	// Sibling delegations share a task id but run in distinct per-delegation
+	// worktrees; key off the payload worktree path so they schedule as separate
+	// checkout keys and can run in parallel.
+	if delegationPath := strings.TrimSpace(payload.WorktreePath); delegationPath != "" {
+		path, err := normalizeTaskWorktreePath(delegationPath)
+		return path, err == nil && path != ""
+	}
 	if store == nil || strings.TrimSpace(payload.TaskID) == "" {
 		return "", false
 	}
@@ -1618,9 +1625,10 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 		_ = w.postJobResultComment(ctx, job.ID, agent, checkout, err)
 		return nil
 	}
+	jobTimeout := effectiveJobTimeout(payload, managed)
 	lockTTL := daemonRunningJobStaleAfter
-	if managed.OK {
-		lockTTL = managed.JobTimeout
+	if jobTimeout > 0 {
+		lockTTL = jobTimeout
 	}
 	releaseLock, acquired, lockKey, err := acquireRuntimeSessionLock(ctx, w.Store, job.ID, agent, time.Now().UTC(), lockTTL)
 	if err != nil {
@@ -1679,9 +1687,9 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 	engine := w.WorkflowFactory(checkout)
 	runCtx, stopRun := w.runningJobContext(ctx, job.ID)
 	defer stopRun()
-	if managed.OK {
+	if jobTimeout > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(runCtx, managed.JobTimeout)
+		runCtx, cancel = context.WithTimeout(runCtx, jobTimeout)
 		defer cancel()
 	}
 	_, err = engine.RunJob(runCtx, job.ID, agent, adapter)
@@ -1790,6 +1798,11 @@ func (w jobWorker) runWithTempWorker(ctx context.Context, job db.Job, payload wo
 		}
 		writeLine(w.Stdout, "job %s waiting: %s", job.ID, waitMessage)
 		return fmt.Errorf("%w: %s", errRuntimeSessionBusy, waitMessage)
+	}
+	// A per-delegation timeout on the payload overrides the agent-type job
+	// timeout for both the lock TTL and the run deadline below.
+	if d, perr := time.ParseDuration(strings.TrimSpace(payload.JobTimeout)); perr == nil && d > 0 {
+		started.JobTimeout = d
 	}
 	payload.OriginalAgent = original.Name
 	payload.DelegatedAgent = started.Agent.Name
@@ -2131,6 +2144,18 @@ func (w jobWorker) managedJobConfig(ctx context.Context, agentName string) (mana
 	return managedJobRuntimeConfig{OK: true, JobTimeout: jobTimeout, IdleTimeout: idleTimeout}, nil
 }
 
+// effectiveJobTimeout returns the timeout to enforce for a job: the
+// per-delegation payload.JobTimeout when it parses to a positive duration,
+// otherwise the agent-type managed.JobTimeout (which is zero when the agent is
+// not managed). The same value drives both the runtime-session lock TTL and the
+// run context deadline so the lock cannot expire before the job does.
+func effectiveJobTimeout(payload workflow.JobPayload, managed managedJobRuntimeConfig) time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(payload.JobTimeout)); err == nil && d > 0 {
+		return d
+	}
+	return managed.JobTimeout
+}
+
 func originalAgentForTempWorkerType(typ string) string {
 	original, ok := strings.CutPrefix(strings.TrimSpace(typ), "temp:")
 	if !ok {
@@ -2294,15 +2319,27 @@ func (w jobWorker) defaultStartAdapter(runtimeName string, checkout string) (run
 }
 
 func (w jobWorker) defaultWorkflow(checkout string) workflow.Engine {
-	return daemonWorkflowEngine(w.Store, github.NewClient(checkout), checkout)
+	return daemonWorkflowEngine(w.Store, github.NewClient(checkout), checkout, w.workflowHome())
+}
+
+// workflowHome resolves the GITMOOT_HOME root used to place per-delegation
+// worktrees, mirroring how the daemon resolves paths elsewhere. It returns an
+// empty string when resolution fails so the engine falls back to legacy
+// shared-checkout dispatch rather than failing the job.
+func (w jobWorker) workflowHome() string {
+	paths, err := pathsFromFlag(w.ConfigHome)
+	if err != nil {
+		return ""
+	}
+	return paths.Home
 }
 
 func (w jobWorker) defaultCommenter(_ string) github.Client {
 	return github.NewClient("")
 }
 
-func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string) workflow.Engine {
-	return workflow.Engine{
+func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, home string) workflow.Engine {
+	engine := workflow.Engine{
 		Store:                   store,
 		MergeGate:               daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout},
 		ImplementationFinalizer: daemonImplementationFinalizer{Store: store, GitHub: gh, FallbackCheckout: checkout},
@@ -2310,6 +2347,18 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string) wo
 			return refreshDaemonJobPayload(ctx, store, checkout, job, payload)
 		},
 	}
+	if strings.TrimSpace(home) != "" {
+		// Root delegation artifacts under GITMOOT_HOME (alongside worktrees)
+		// rather than inside the repo checkout, so generated briefs stay out of
+		// the tracked tree and are never committed.
+		engine.ArtifactRoot = home
+	}
+	if strings.TrimSpace(home) != "" && strings.TrimSpace(checkout) != "" {
+		engine.Home = home
+		engine.DelegationCheckout = checkout
+		engine.DelegationWorktrees = gitutil.Client{Dir: checkout}
+	}
+	return engine
 }
 
 type daemonImplementationFinalizer struct {
@@ -2685,6 +2734,16 @@ func (w jobWorker) resolveJobCheckout(ctx context.Context, job db.Job, payload w
 }
 
 func (w jobWorker) taskWorktreeCheckout(ctx context.Context, payload workflow.JobPayload) (string, bool, error) {
+	// Delegated implement jobs carry their own per-delegation worktree path in
+	// the payload; prefer it over the task-table worktree so the child runs in
+	// its isolated checkout.
+	if delegationPath := strings.TrimSpace(payload.WorktreePath); delegationPath != "" {
+		checkout, err := normalizeTaskWorktreePath(delegationPath)
+		if err != nil {
+			return "", false, err
+		}
+		return checkout, checkout != "", nil
+	}
 	if strings.TrimSpace(payload.TaskID) == "" {
 		return "", false, nil
 	}
@@ -2740,6 +2799,15 @@ func (w jobWorker) validateTargetCheckout(ctx context.Context, payload workflow.
 	if !clean {
 		return fmt.Errorf("checkout %s has uncommitted changes", checkout)
 	}
+	// A delegated implement child runs in its own freshly-allocated worktree,
+	// created off the parent's base branch whose tip may have advanced past the
+	// HeadSHA the child inherited from the parent payload. The dispatcher clears
+	// the inherited HeadSHA for these children, so the worktree HEAD is correct
+	// by construction (it is the base-branch tip at allocation time) and there is
+	// nothing to compare against. Skip the HeadSHA equality check for them.
+	if isDelegationWorktreeChild(payload) {
+		return nil
+	}
 	expectedHead := strings.TrimSpace(payload.HeadSHA)
 	if expectedHead == "" {
 		return fmt.Errorf("job for %s has no head SHA", payload.Branch)
@@ -2752,6 +2820,14 @@ func (w jobWorker) validateTargetCheckout(ctx context.Context, payload workflow.
 		return fmt.Errorf("checkout head is %s, not job head %s", head, expectedHead)
 	}
 	return nil
+}
+
+// isDelegationWorktreeChild reports whether the job is a delegated child running
+// in its own per-delegation worktree (it carries both a delegation id and an
+// allocated worktree path). Such children are validated against their isolated
+// worktree HEAD rather than the inherited parent HeadSHA.
+func isDelegationWorktreeChild(payload workflow.JobPayload) bool {
+	return strings.TrimSpace(payload.DelegationID) != "" && strings.TrimSpace(payload.WorktreePath) != ""
 }
 
 func (w jobWorker) validateReviewCheckout(ctx context.Context, payload workflow.JobPayload, checkout string) error {
@@ -2850,10 +2926,66 @@ func (w jobWorker) handleRunJobError(ctx context.Context, jobID string, cause er
 		}
 		return nil
 	}
+	if payloadErr == nil && strings.TrimSpace(payload.ParentJobID) != "" {
+		// A delegation child killed by its per-delegation timeout (or any runtime
+		// failure that yields no parseable gitmoot_result) lands here still
+		// JobRunning, or JobFailed/JobBlocked WITHOUT a stored result: Mailbox.Run
+		// errored, so RunJob returned before AdvanceJob and the parent's
+		// advanceDelegations never ran. Finalize it as a terminal failed child and
+		// drive the parent DAG so the delegation's retry/failure_policy/continuation
+		// actually fire instead of the child stranding until the 30m stale-running
+		// recovery blindly re-queues it.
+		finalized, finalizeErr := w.finalizeTimedOutDelegationChild(ctx, latest, cause)
+		if finalizeErr != nil {
+			var blocked workflow.BlockedError
+			if errors.As(finalizeErr, &blocked) {
+				// block_parent failure_policy blocked the shared parent task; the
+				// child is finalized and the DAG advanced, so this is the expected
+				// terminal outcome rather than an error to propagate.
+				return nil
+			}
+			return finalizeErr
+		}
+		if finalized {
+			return nil
+		}
+	}
 	if latest.State == string(workflow.JobFailed) || latest.State == string(workflow.JobBlocked) {
 		return nil
 	}
 	return cause
+}
+
+// finalizeTimedOutDelegationChild bridges the daemon run-error path into the
+// engine's delegation DAG: it converts a timed-out/runtime-failed delegation
+// child with no stored result into a terminal failed child and advances the
+// parent. Advancing the parent can trigger a retry of an *implement* delegation,
+// which must allocate a fresh per-delegation worktree; so it resolves the repo's
+// main checkout and builds a fully-wired engine instead of a checkout-less one.
+// A missing checkout degrades gracefully (the engine emits
+// delegation_worktree_skipped and falls back to a shared-checkout branch lock).
+// Returns whether the child was finalized.
+func (w jobWorker) finalizeTimedOutDelegationChild(ctx context.Context, job db.Job, cause error) (bool, error) {
+	reason := fmt.Sprintf("delegation child %s ended without a result: %v", job.ID, cause)
+	engine := w.WorkflowFactory(w.delegationParentCheckout(ctx, job))
+	return engine.FinalizeTimedOutDelegationChild(ctx, job.ID, reason)
+}
+
+// delegationParentCheckout returns the repo's main registered checkout for a
+// delegation child job (NOT the child's own worktree), so the engine can
+// `git worktree add` a retry's per-delegation worktree against it. It returns
+// "" on any lookup failure, leaving the engine to advance the DAG without
+// worktree isolation rather than blocking finalization.
+func (w jobWorker) delegationParentCheckout(ctx context.Context, job db.Job) string {
+	payload, err := daemonJobPayload(job)
+	if err != nil {
+		return ""
+	}
+	repoRecord, err := w.Store.GetRepo(ctx, payload.Repo)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(repoRecord.CheckoutPath)
 }
 
 func (w jobWorker) recordPostDeliveryWorkflowError(ctx context.Context, job db.Job, cause error) error {

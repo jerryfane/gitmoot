@@ -20,6 +20,22 @@ type Engine struct {
 	JobID                   func(JobRequest) string
 	PayloadRefresher        func(context.Context, db.Job, JobPayload) (JobPayload, error)
 	ImplementationFinalizer ImplementationFinalizer
+	// Home is the resolved GITMOOT_HOME root used to place per-delegation
+	// worktrees. DelegationWorktrees is the checkout-bound git client that
+	// performs the worktree-add. Both are optional: when either is unset, the
+	// dispatcher enqueues implement delegations against the shared checkout
+	// (legacy behavior) rather than allocating isolated worktrees.
+	Home                string
+	DelegationWorktrees WorktreeManager
+	DelegationCheckout  string
+	// ArtifactRoot is the filesystem root under which delegation artifacts
+	// (delegations/<parent-job-id>/brief.md and context-manifest.json) are
+	// written when a coordinator returns delegations that request artifacts.
+	// It is the resolved GITMOOT_HOME root (already ending in .gitmoot), kept
+	// outside any repo checkout so generated briefs are never committed. When
+	// empty, artifact writing is skipped (ask-path and tests that build an
+	// Engine without it keep their existing behavior).
+	ArtifactRoot string
 }
 
 type PullRequestEvent struct {
@@ -205,6 +221,81 @@ func (e Engine) RunJob(ctx context.Context, jobID string, agent runtime.Agent, a
 	return result, nil
 }
 
+// FinalizeTimedOutDelegationChild turns a delegation child that was killed by its
+// per-delegation timeout (or any runtime failure that left it JobRunning with no
+// parseable gitmoot_result) into a terminal FAILED child carrying a synthetic
+// failed result, then runs AdvanceJob so the parent's advanceDelegations applies
+// the delegation's retry/failure_policy/continuation. Without this a timeout kill
+// strands the child in JobRunning forever (Mailbox.Run errored, so RunJob returned
+// before AdvanceJob), and only the blind 30m stale-running recovery would re-queue
+// it, bypassing delegation.Retry and failure_policy.
+//
+// It is a no-op (returns false) for a non-delegation job, a job that already left
+// JobRunning, or a job that already stored a result, so it is safe to call from
+// the daemon's run-error handler and idempotent under concurrent recovery. When
+// the synthetic failure blocks the parent task under block_parent, AdvanceJob
+// returns a BlockedError, which is propagated like the result-bearing path.
+func (e Engine) FinalizeTimedOutDelegationChild(ctx context.Context, jobID string, reason string) (bool, error) {
+	if err := e.validate(); err != nil {
+		return false, err
+	}
+	job, payload, err := e.jobPayload(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(payload.ParentJobID) == "" {
+		return false, nil
+	}
+	// Already has a result -> the normal RunJob/AdvanceJob path handled it; nothing
+	// to recover. A deadline can leave the child either still JobRunning (the
+	// cancelled context aborted Mailbox.Run's own fail write) or already
+	// JobFailed/JobBlocked but WITHOUT a stored result (so the parent's
+	// advanceDelegations never ran). Recover both, but never touch a succeeded or
+	// cancelled child.
+	if payload.Result != nil {
+		return false, nil
+	}
+	switch job.State {
+	case string(JobRunning), string(JobFailed), string(JobBlocked):
+	default:
+		return false, nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "delegation child timed out before returning a result"
+	}
+	payload.Result = &AgentResult{
+		Decision: "failed",
+		Summary:  reason,
+	}
+	mailbox := Mailbox{Store: e.Store}
+	if job.State == string(JobRunning) {
+		if err := mailbox.finishWithPayload(ctx, jobID, JobFailed, reason, payload); err != nil {
+			return false, err
+		}
+	} else {
+		// Already terminal-failed/blocked: only attach the synthetic result so
+		// AdvanceJob (which requires a non-nil Result) can drive the parent DAG.
+		if err := mailbox.savePayload(ctx, jobID, payload); err != nil {
+			return false, err
+		}
+	}
+	if err := e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   jobID,
+		Kind:    "delegation_timeout_finalized",
+		Message: reason,
+	}); err != nil {
+		return false, err
+	}
+	if err := e.AdvanceJob(ctx, jobID); err != nil {
+		return true, err
+	}
+	if err := e.Store.AddJobEvent(ctx, db.JobEvent{JobID: jobID, Kind: "advance_completed", Message: "workflow advancement completed"}); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 func (e Engine) refreshJobPayload(ctx context.Context, jobID string) error {
 	job, payload, err := e.jobPayload(ctx, jobID)
 	if err != nil {
@@ -233,6 +324,53 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 		return fmt.Errorf("job %q has no agent result", jobID)
 	}
 	ref := taskRefFromPayload(payload)
+
+	// When a delegated child job finishes, advance its parent's delegation DAG
+	// before running the child's own advancement: enqueue any now-ready
+	// dependent siblings, apply the failed delegation's failure_policy, and
+	// enqueue the coordinator continuation job once every top-level sibling is
+	// terminal. This runs here (the child's AdvanceJob) because RunJob calls
+	// AdvanceJob per finishing child. A child with no parent is unaffected.
+	if strings.TrimSpace(payload.ParentJobID) != "" {
+		parentJob, parentPayload, err := e.jobPayload(ctx, payload.ParentJobID)
+		if err != nil {
+			return err
+		}
+		if parentPayload.Result != nil {
+			if err := e.advanceDelegations(ctx, parentJob, parentPayload, parentPayload.Result, taskRefFromPayload(parentPayload)); err != nil {
+				return err
+			}
+			// A child that failed under a continue/escalate failure_policy, one that
+			// was re-enqueued by the retry pass, or one whose parent already has a
+			// continuation in flight, is handled by the delegation graph (siblings
+			// keep running, the retry runs, or the coordinator continuation absorbs
+			// the failure); do not also block the shared parent task via the
+			// failed-decision path below.
+			if payload.Result.Decision == "blocked" || payload.Result.Decision == "failed" {
+				if delegationFailureHandledByPolicy(parentPayload.Result, payload.DelegationID) {
+					return nil
+				}
+				retrying, err := e.delegationRetryPending(ctx, parentJob.ID, payload.DelegationID)
+				if err != nil {
+					return err
+				}
+				if retrying {
+					return nil
+				}
+				// Once a continuation has been enqueued (e.g. an earlier escalate
+				// fired it), a later block_parent sibling failure must not block the
+				// shared parent task: that would contradict the in-flight
+				// continuation, which already carries every child outcome.
+				parentEvents, err := e.Store.ListJobEvents(ctx, parentJob.ID)
+				if err != nil {
+					return err
+				}
+				if continuationEnqueued(parentEvents) {
+					return nil
+				}
+			}
+		}
+	}
 
 	if job.Type == "review" {
 		latest, err := e.latestReviewRound(ctx, payload)
@@ -326,67 +464,881 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
+// delegationRequest builds the canonical child JobRequest for a delegation,
+// inheriting the parent's repo/branch/PR context and stamping the DAG fields
+// (ParentJobID/DelegationID/DelegationDepth/DelegatedBy/Deps). It is shared by
+// dispatchDelegations (initial enqueue of ready delegations) and
+// advanceDelegations (deferred enqueue once deps clear) so both paths produce
+// identical, idempotent requests for the same delegation ID.
+func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) JobRequest {
+	return JobRequest{
+		ID:              job.ID + "/delegation/" + d.ID,
+		Agent:           d.Agent,
+		Action:          d.Action,
+		Repo:            payload.Repo,
+		Branch:          payload.Branch,
+		PullRequest:     payload.PullRequest,
+		HeadSHA:         payload.HeadSHA,
+		GoalID:          payload.GoalID,
+		TaskID:          payload.TaskID,
+		TaskTitle:       payload.TaskTitle,
+		LeadAgent:       payload.LeadAgent,
+		Reviewers:       payload.Reviewers,
+		ReviewRound:     payload.ReviewRound,
+		Sender:          job.Agent,
+		Instructions:    strings.TrimSpace(d.Prompt),
+		Constraints:     payload.Constraints,
+		ParentJobID:     job.ID,
+		DelegationID:    d.ID,
+		DelegationDepth: payload.DelegationDepth + 1,
+		DelegatedBy:     job.Agent,
+		Deps:            compactStrings(d.Deps),
+		JobTimeout:      strings.TrimSpace(d.Timeout),
+		Fingerprint:     strings.TrimSpace(d.Fingerprint),
+		FailurePolicy:   strings.TrimSpace(d.FailurePolicy),
+		SynthesisRule:   strings.TrimSpace(d.SynthesisRule),
+	}
+}
+
+// MaxDelegationDepth bounds how deep delegation nesting and coordinator
+// continuation chains may go. Each delegation child and each coordinator
+// continuation increments DelegationDepth; once a job at or beyond this depth
+// would dispatch, dispatchDelegations refuses and records a
+// delegation_depth_exceeded event. This is a safety net against runaway
+// recursion: a coordinator whose continuation re-delegates (e.g. a static or
+// looping agent) would otherwise spawn jobs forever.
+const MaxDelegationDepth = 8
+
 func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload JobPayload, ref taskRef) error {
 	if payload.Result == nil || len(payload.Result.Delegations) == 0 {
 		return nil
 	}
 
-	requests := make([]JobRequest, 0, len(payload.Result.Delegations))
-	for _, d := range payload.Result.Delegations {
-		requests = append(requests, JobRequest{
-			ID:              job.ID + "/delegation/" + d.ID,
-			Agent:           d.Agent,
-			Action:          d.Action,
-			Repo:            payload.Repo,
-			Branch:          payload.Branch,
-			PullRequest:     payload.PullRequest,
-			HeadSHA:         payload.HeadSHA,
-			GoalID:          payload.GoalID,
-			TaskID:          payload.TaskID,
-			TaskTitle:       payload.TaskTitle,
-			LeadAgent:       payload.LeadAgent,
-			Reviewers:       payload.Reviewers,
-			ReviewRound:     payload.ReviewRound,
-			Sender:          job.Agent,
-			Instructions:    strings.TrimSpace(d.Prompt),
-			Constraints:     payload.Constraints,
-			ParentJobID:     job.ID,
-			DelegationID:    d.ID,
-			DelegationDepth: payload.DelegationDepth + 1,
-			DelegatedBy:     job.Agent,
+	if payload.DelegationDepth >= MaxDelegationDepth {
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "delegation_depth_exceeded",
+			Message: fmt.Sprintf("delegation depth %d reached the limit of %d; not dispatching %d delegation(s)", payload.DelegationDepth, MaxDelegationDepth, len(payload.Result.Delegations)),
 		})
+		return nil
 	}
 
-	// Preflight all delegations before enqueueing any child job so that a
-	// partial failure does not leave the parent half-dispatched. Use a lightweight
-	// check that does not acquire branch locks or other execution side effects.
-	for _, request := range requests {
+	delegations := payload.Result.Delegations
+
+	// Preflight every delegation (ready and deferred) before enqueueing any
+	// child job so a partial failure does not leave the parent half-dispatched
+	// and an unknown/uncapable agent on a deferred delegation blocks the parent
+	// immediately rather than only when its deps clear. Use a lightweight check
+	// that does not acquire branch locks or other execution side effects.
+	for _, d := range delegations {
+		request := e.delegationRequest(job, payload, d)
 		if err := e.preflightDelegation(ctx, request); err != nil {
 			return e.block(ctx, ref, fmt.Sprintf("delegation %q preflight failed: %v", request.DelegationID, err))
 		}
 	}
 
-	// Acquire branch locks for all implement delegations before enqueueing any
-	// child job, so a later lock failure does not leave a half-dispatched batch.
-	for _, request := range requests {
-		if request.Action == "implement" {
-			if err := e.ensureBranchLock(ctx, request.Repo, request.Branch, request.Agent, ref); err != nil {
-				return err
-			}
+	// Write the shared coordinator brief and context manifest once, fully,
+	// before enqueueing any child job so a child that starts immediately reads a
+	// complete directory. Every child of a parent that produced artifacts is
+	// pointed at the same directory so its prompt can reference brief.md and
+	// context-manifest.json. Writing is skipped when the engine has no artifact
+	// root or no delegation requested artifacts.
+	artifactDir, err := writeDelegationArtifacts(e.ArtifactRoot, job.ID, payload.Result)
+	if err != nil {
+		return e.block(ctx, ref, fmt.Sprintf("write delegation artifacts: %v", err))
+	}
+	if artifactDir != "" {
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "delegation_artifacts_written",
+			Message: fmt.Sprintf("delegation artifacts written to %s", artifactDir),
+		})
+	}
+
+	// Only delegations with no unmet deps are enqueued now; deferred ones are
+	// enqueued by advanceDelegations once every dep has succeeded. Allocate
+	// worktrees/branch locks only for the ready implement delegations so a
+	// deferred delegation does not hold a lock before it can run.
+	for _, d := range delegations {
+		if len(compactStrings(d.Deps)) > 0 {
+			continue
+		}
+		if err := e.enqueueDelegation(ctx, job, payload, d, artifactDir, ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// enqueueDelegation allocates the per-delegation worktree (or branch lock) for
+// implement delegations, then enqueues the child job and records a
+// delegation_enqueued event on the parent. It is idempotent: a duplicate
+// deterministic-ID insert is swallowed by e.enqueue when the existing job
+// matches the request, so it is safe to call from both dispatchDelegations and
+// advanceDelegations.
+func (e Engine) enqueueDelegation(ctx context.Context, job db.Job, payload JobPayload, d Delegation, artifactDir string, ref taskRef) error {
+	request := e.delegationRequest(job, payload, d)
+	request.DelegationArtifactDir = artifactDir
+
+	// Fingerprint dedup: skip enqueueing a child whose fingerprint already
+	// appears among a sibling under the same parent. Scoped to this parent via
+	// the (parentJobID, fingerprint) key so identical fingerprints under
+	// different parents never collide. The delegation's own child is excluded so
+	// an idempotent re-enqueue of the same delegation is not treated as a dup.
+	if fingerprint := strings.TrimSpace(d.Fingerprint); fingerprint != "" {
+		seen, err := e.delegationFingerprintSeen(ctx, job.ID, d.ID, fingerprint)
+		if err != nil {
+			return err
+		}
+		if seen {
+			_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+				JobID:   job.ID,
+				Kind:    "delegation_deduped",
+				Message: fmt.Sprintf("delegation %q skipped: fingerprint %q already enqueued (key %s)", d.ID, fingerprint, delegationFingerprintKey(job.ID, fingerprint)),
+			})
+			return nil
 		}
 	}
 
-	for _, request := range requests {
-		if err := e.enqueue(ctx, request); err != nil {
-			return fmt.Errorf("dispatch delegation %q: %w", request.DelegationID, err)
+	return e.allocateAndEnqueueDelegation(ctx, job, payload, d, request, ref)
+}
+
+// allocateAndEnqueueDelegation allocates the per-delegation worktree (or branch
+// lock) for implement delegations and enqueues the prepared request, recording a
+// delegation_enqueued event. It is shared by enqueueDelegation (initial/deferred
+// dispatch) and requeueDelegation (retry) so both go through identical worktree
+// allocation and idempotent enqueue.
+func (e Engine) allocateAndEnqueueDelegation(ctx context.Context, job db.Job, payload JobPayload, d Delegation, request JobRequest, ref taskRef) error {
+	if request.Action == "implement" {
+		if e.DelegationWorktrees == nil || strings.TrimSpace(e.Home) == "" {
+			// No per-delegation worktree isolation is available (the engine lacks a
+			// Home/DelegationWorktrees manager), so the child falls back to a
+			// shared-checkout branch lock. Emit a parent event so the loss of
+			// isolation is observable rather than silent.
+			_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+				JobID:   job.ID,
+				Kind:    "delegation_worktree_skipped",
+				Message: fmt.Sprintf("delegation %q implement runs in the shared checkout on branch %s: per-delegation worktree isolation unavailable", request.DelegationID, request.Branch),
+			})
+			if err := e.ensureBranchLock(ctx, request.Repo, request.Branch, request.Agent, ref); err != nil {
+				return err
+			}
+		} else {
+			result, err := e.AllocateDelegationWorktree(ctx, DelegationWorktreeRequest{
+				Home:         e.Home,
+				Repo:         request.Repo,
+				ParentJobID:  job.ID,
+				DelegationID: request.DelegationID,
+				Delegation:   d,
+				BaseBranch:   payload.Branch,
+				Owner:        request.Agent,
+				Checkout:     e.DelegationCheckout,
+				RetryAttempt: request.RetryCount,
+			}, e.DelegationWorktrees)
+			if err != nil {
+				var blocked BlockedError
+				if errors.As(err, &blocked) {
+					return e.block(ctx, ref, blocked.Reason)
+				}
+				return err
+			}
+			request.Branch = result.Branch
+			request.WorktreePath = result.Path
+			// The freshly-allocated worktree is created off the parent's base
+			// branch, whose tip may have advanced past the HeadSHA the child
+			// inherited from the parent payload. validateTargetCheckout (daemon)
+			// compares the worktree HEAD against payload.HeadSHA and would
+			// spuriously reject the child on a moving parent branch. Clear the
+			// inherited HeadSHA so the child validates against its own fresh
+			// worktree HEAD instead of a stale parent SHA.
+			request.HeadSHA = ""
 		}
-		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
-			JobID:   job.ID,
-			Kind:    "delegation_enqueued",
-			Message: fmt.Sprintf("delegation %q enqueued as job %s", request.DelegationID, request.ID),
-		})
+	}
+
+	if err := e.enqueue(ctx, request); err != nil {
+		return fmt.Errorf("dispatch delegation %q: %w", request.DelegationID, err)
+	}
+	_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   job.ID,
+		Kind:    "delegation_enqueued",
+		Message: fmt.Sprintf("delegation %q enqueued as job %s", request.DelegationID, request.ID),
+	})
+	return nil
+}
+
+// requeueDelegation re-enqueues a failed delegation child as a fresh job when
+// the delegation has retry budget left (failedChild's RetryCount < d.Retry). The
+// retry uses a distinct .../retry/<n> id so the enqueue idempotency path does not
+// mistake it for the already-failed original, carries RetryCount+1 in its
+// payload, and inherits the same DelegationID so it represents the same node in
+// the delegation graph. It returns whether a retry was enqueued.
+func (e Engine) requeueDelegation(ctx context.Context, parentJob db.Job, parentPayload JobPayload, d Delegation, failedChild db.Job, artifactDir string, ref taskRef) (bool, error) {
+	if d.Retry <= 0 {
+		return false, nil
+	}
+	attempt := delegationJobRetryCount(failedChild)
+	if attempt >= d.Retry {
+		return false, nil
+	}
+	next := attempt + 1
+
+	request := e.delegationRequest(parentJob, parentPayload, d)
+	request.ID = parentJob.ID + "/delegation/" + d.ID + "/retry/" + strconv.Itoa(next)
+	request.RetryCount = next
+	request.DelegationArtifactDir = artifactDir
+
+	if err := e.allocateAndEnqueueDelegation(ctx, parentJob, parentPayload, d, request, ref); err != nil {
+		return false, err
+	}
+	_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   parentJob.ID,
+		Kind:    "delegation_retry",
+		Message: fmt.Sprintf("delegation %q retry %d/%d enqueued as job %s after %s failed", d.ID, next, d.Retry, request.ID, failedChild.ID),
+	})
+	return true, nil
+}
+
+// advanceDelegations runs on a parent coordinator job each time one of its
+// delegated children finishes. It enqueues now-ready dependent siblings,
+// applies the failed delegation's failure_policy, and enqueues a single
+// coordinator continuation job once every top-level sibling has reached a
+// terminal state. It is idempotent: deferred dependents and the continuation
+// job use deterministic ids, so concurrent child completions cannot double
+// enqueue.
+func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parentPayload JobPayload, parentResult *AgentResult, ref taskRef) error {
+	if parentResult == nil || len(parentResult.Delegations) == 0 {
+		return nil
+	}
+
+	children, err := e.childDelegationJobs(ctx, parentJob.ID)
+	if err != nil {
+		return err
+	}
+
+	// Parent job events drive two decisions below: which delegations dispatch
+	// skipped via fingerprint dedup (so they resolve against their winning
+	// sibling rather than stalling the continuation forever), and whether a
+	// continuation has already been enqueued (so a late block_parent failure does
+	// not contradict it).
+	parentEvents, err := e.Store.ListJobEvents(ctx, parentJob.ID)
+	if err != nil {
+		return err
+	}
+	dedupWinners := dedupedDelegationWinners(parentResult.Delegations, children, parentEvents)
+
+	// Resolve the shared artifact directory the same way dispatchDelegations did
+	// so late-running dependents reference the same brief.md/context-manifest.
+	artifactDir, err := delegationArtifactDir(e.ArtifactRoot, parentJob.ID, parentResult)
+	if err != nil {
+		return err
+	}
+
+	// Retry pass: a delegation that failed but has retry budget left is
+	// re-enqueued as a fresh child before any failure_policy is applied, so its
+	// failure is absorbed by the retry rather than blocking/escalating. A
+	// successful retry replaces the failed attempt in the children map (the retry
+	// id sorts after the original), so the delegation looks active again this
+	// pass and the failure switch below skips it.
+	retried := false
+	for _, d := range parentResult.Delegations {
+		child, ok := children[d.ID]
+		if !ok || !isTerminalJobState(child.State) || child.State == string(JobSucceeded) {
+			continue
+		}
+		didRetry, err := e.requeueDelegation(ctx, parentJob, parentPayload, d, child, artifactDir, ref)
+		if err != nil {
+			return err
+		}
+		if didRetry {
+			retried = true
+		}
+	}
+	if retried {
+		children, err = e.childDelegationJobs(ctx, parentJob.ID)
+		if err != nil {
+			return err
+		}
+		// Re-read events too: a delegation deduped during this pass emits a new
+		// delegation_deduped event, and dedupedDelegationWinners derives the
+		// deduped set from events. Reusing the stale snapshot would hide it.
+		parentEvents, err = e.Store.ListJobEvents(ctx, parentJob.ID)
+		if err != nil {
+			return err
+		}
+		dedupWinners = dedupedDelegationWinners(parentResult.Delegations, children, parentEvents)
+	}
+
+	// Apply failure policies first so a failed dependency stops its dependents
+	// (or escalates/blocks) before we try to enqueue anything new. Once a
+	// continuation has already been enqueued (e.g. an earlier escalate fired it),
+	// a later block_parent sibling failure must not block the shared parent task:
+	// that would leave a blocked task AND an in-flight continuation, a
+	// contradictory end state the continuation prompt does not reflect. The
+	// continuation already carries every child outcome, so we fold the block into
+	// it by skipping the block here.
+	continuationAlreadyEnqueued := continuationEnqueued(parentEvents)
+	escalate := false
+	for _, d := range parentResult.Delegations {
+		child, ok := children[d.ID]
+		if !ok || !isTerminalJobState(child.State) || child.State == string(JobSucceeded) {
+			continue
+		}
+		switch delegationFailurePolicy(d) {
+		case "continue":
+			// Independent ready siblings still run; only this branch's
+			// dependents are skipped (handled by depsSatisfied below).
+			continue
+		case "escalate":
+			escalate = true
+		default: // block_parent (also the empty default)
+			if continuationAlreadyEnqueued {
+				continue
+			}
+			return e.block(ctx, ref, fmt.Sprintf("delegation %q failed (failure_policy block_parent): %s", d.ID, childFailureReason(child)))
+		}
+	}
+
+	// Enqueue deferred dependents whose deps have all succeeded. Skip any whose
+	// dependency failed under a continue policy (depsSatisfied returns false
+	// unless every dep is succeeded). Already-enqueued children are skipped via
+	// the children map and e.enqueue's idempotency.
+	if !escalate {
+		for _, d := range parentResult.Delegations {
+			if len(compactStrings(d.Deps)) == 0 {
+				continue
+			}
+			if _, exists := children[d.ID]; exists {
+				continue
+			}
+			// A deduped delegation folds into its winning sibling and must never
+			// get its own child, even if its deps are now satisfied.
+			if _, deduped := dedupWinners[d.ID]; deduped {
+				continue
+			}
+			if !depsSatisfied(d.Deps, children, dedupWinners) {
+				continue
+			}
+			if err := e.enqueueDelegation(ctx, parentJob, parentPayload, d, artifactDir, ref); err != nil {
+				return err
+			}
+			// Re-read children AND events so a second satisfied dependent in the
+			// same pass is not mistaken for still-pending, and a delegation
+			// deduped by the enqueueDelegation call above (which emits a fresh
+			// delegation_deduped event) is observed by the final
+			// allDelegationsResolved check below rather than stalling forever.
+			children, err = e.childDelegationJobs(ctx, parentJob.ID)
+			if err != nil {
+				return err
+			}
+			parentEvents, err = e.Store.ListJobEvents(ctx, parentJob.ID)
+			if err != nil {
+				return err
+			}
+			dedupWinners = dedupedDelegationWinners(parentResult.Delegations, children, parentEvents)
+		}
+	}
+
+	// Enqueue the coordinator continuation job once every top-level delegation
+	// is resolved (terminal child, or permanently gated by a failed dependency
+	// under a continue policy), or immediately when a failure escalates.
+	if escalate || allDelegationsResolved(parentResult.Delegations, children, dedupWinners) {
+		if err := e.maybeEnqueueContinuation(ctx, parentJob, parentPayload, parentResult, children, ref); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// maybeEnqueueContinuation enqueues exactly one coordinator continuation job for
+// a parent whose delegations have all finished. Idempotency is enforced by a
+// deterministic continuation id plus a one-shot delegation_continuation_enqueued
+// event on the parent, so concurrent child completions enqueue it at most once.
+// When any delegation declares synthesis_rule "vote", the continuation is gated:
+// the parent task is blocked unless every child was approved/succeeded.
+func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, parentPayload JobPayload, parentResult *AgentResult, children map[string]db.Job, ref taskRef) error {
+	events, err := e.Store.ListJobEvents(ctx, parentJob.ID)
+	if err != nil {
+		return err
+	}
+	if continuationEnqueued(events) {
+		return nil
+	}
+
+	childPayloads := make(map[string]JobPayload, len(children))
+	for id, child := range children {
+		childPayload, err := unmarshalPayload(child.Payload)
+		if err != nil {
+			return err
+		}
+		childPayloads[id] = childPayload
+	}
+
+	// synthesis_rule "vote": block the parent unless every child approved or
+	// succeeded. The default ("" / "summary") concatenates child summaries into
+	// the continuation prompt below.
+	if delegationSynthesisRequiresVote(parentResult.Delegations) && !delegationVoteSatisfied(parentResult.Delegations, children, childPayloads) {
+		return e.block(ctx, ref, fmt.Sprintf("delegation synthesis_rule vote failed: not all delegated children for %s were approved/succeeded", parentJob.ID))
+	}
+
+	request := JobRequest{
+		ID:              delegationContinuationID(parentJob.ID),
+		Agent:           parentJob.Agent,
+		Action:          "ask",
+		Repo:            parentPayload.Repo,
+		Branch:          parentPayload.Branch,
+		PullRequest:     parentPayload.PullRequest,
+		HeadSHA:         parentPayload.HeadSHA,
+		GoalID:          parentPayload.GoalID,
+		TaskID:          parentPayload.TaskID,
+		TaskTitle:       parentPayload.TaskTitle,
+		LeadAgent:       parentPayload.LeadAgent,
+		Reviewers:       parentPayload.Reviewers,
+		Sender:          parentJob.Agent,
+		Instructions:    buildContinuationPrompt(parentResult, children, childPayloads),
+		Constraints:     parentPayload.Constraints,
+		ParentJobID:     parentJob.ID,
+		// Increment depth per continuation generation so a coordinator whose
+		// continuation re-delegates is bounded by MaxDelegationDepth instead of
+		// looping forever (the continuation reused the parent's depth before).
+		DelegationDepth: parentPayload.DelegationDepth + 1,
+		DelegatedBy:     parentJob.Agent,
+	}
+	if err := e.enqueue(ctx, request); err != nil {
+		return fmt.Errorf("enqueue continuation for %q: %w", parentJob.ID, err)
+	}
+	_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   parentJob.ID,
+		Kind:    "delegation_continuation_enqueued",
+		Message: fmt.Sprintf("delegation continuation enqueued as job %s", request.ID),
+	})
+	return nil
+}
+
+// childDelegationJobs returns the direct delegation children of a parent job,
+// keyed by delegation id. There is no ListJobsByParent store query, so this
+// filters ListJobs on ParentJobID (mirroring latestReviewRound's list+filter).
+func (e Engine) childDelegationJobs(ctx context.Context, parentJobID string) (map[string]db.Job, error) {
+	jobs, err := e.Store.ListJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	children := make(map[string]db.Job)
+	attempts := make(map[string]int)
+	for _, job := range jobs {
+		if job.ParentJobID != parentJobID || strings.TrimSpace(job.DelegationID) == "" {
+			continue
+		}
+		// A delegation may have several attempts after retries; keep the latest
+		// (highest RetryCount) so the failure/resolution logic always observes the
+		// current attempt regardless of ListJobs ordering.
+		attempt := delegationJobRetryCount(job)
+		if _, ok := children[job.DelegationID]; ok && attempt < attempts[job.DelegationID] {
+			continue
+		}
+		children[job.DelegationID] = job
+		attempts[job.DelegationID] = attempt
+	}
+	return children, nil
+}
+
+// delegationJobRetryCount reads a child job's RetryCount from its payload,
+// returning 0 when the payload is missing or cannot be parsed.
+func delegationJobRetryCount(job db.Job) int {
+	payload, err := unmarshalPayload(job.Payload)
+	if err != nil {
+		return 0
+	}
+	return payload.RetryCount
+}
+
+// delegationFingerprintSeen reports whether a sibling delegation under the same
+// parent (other than skipDelegationID) has already been enqueued with the given
+// fingerprint. It scans ListJobs filtered by ParentJobID, mirroring
+// childDelegationJobs, and compares each child's stored payload.Fingerprint so
+// dedup is scoped per the goal's (parentJobID, fingerprint) key.
+func (e Engine) delegationFingerprintSeen(ctx context.Context, parentJobID, skipDelegationID, fingerprint string) (bool, error) {
+	fingerprint = strings.TrimSpace(fingerprint)
+	if fingerprint == "" {
+		return false, nil
+	}
+	jobs, err := e.Store.ListJobs(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, job := range jobs {
+		if job.ParentJobID != parentJobID || strings.TrimSpace(job.DelegationID) == "" {
+			continue
+		}
+		if job.DelegationID == skipDelegationID {
+			continue
+		}
+		childPayload, err := unmarshalPayload(job.Payload)
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(childPayload.Fingerprint) == fingerprint {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// delegationFingerprintKey hashes (parentJobID, fingerprint) into a stable,
+// parent-scoped dedup key, mirroring jobID's fnv hashing so identical
+// fingerprints under different parents never collide.
+func delegationFingerprintKey(parentJobID, fingerprint string) string {
+	hash := fnv.New64a()
+	for _, value := range []string{parentJobID, fingerprint} {
+		_, _ = hash.Write([]byte(value))
+		_, _ = hash.Write([]byte{0})
+	}
+	return "deleg-fp-" + strconv.FormatUint(hash.Sum64(), 36)
+}
+
+// dedupedDelegationWinners maps each fingerprint-deduped delegation id to the
+// winning sibling's child job: the same-fingerprint delegation that DID get a
+// child (and is therefore the canonical attempt the deduped node folds into). A
+// deduped delegation produces no child of its own (enqueueDelegation returns
+// early after a delegation_deduped event), so without this mapping
+// allDelegationsResolved/depsSatisfied would treat it as forever-active and stall
+// the coordinator continuation. The deduped set is taken from the parent's
+// recorded delegation_deduped events so it reflects exactly what dispatch skipped,
+// and each deduped id is resolved to its winner by fingerprint among siblings that
+// own a child.
+func dedupedDelegationWinners(delegations []Delegation, children map[string]db.Job, events []db.JobEvent) map[string]db.Job {
+	deduped := dedupedDelegationIDs(delegations, events)
+	if len(deduped) == 0 {
+		return nil
+	}
+	// Map each fingerprint to the winning sibling's child (the same-fingerprint
+	// delegation that owns a child). Delegation order is deterministic, so the
+	// first such sibling is a stable winner.
+	winnerByFingerprint := make(map[string]db.Job)
+	for _, d := range delegations {
+		fingerprint := strings.TrimSpace(d.Fingerprint)
+		if fingerprint == "" {
+			continue
+		}
+		if _, taken := winnerByFingerprint[fingerprint]; taken {
+			continue
+		}
+		if child, ok := children[d.ID]; ok {
+			winnerByFingerprint[fingerprint] = child
+		}
+	}
+	winners := make(map[string]db.Job)
+	for _, d := range delegations {
+		if !deduped[d.ID] {
+			continue
+		}
+		if winner, ok := winnerByFingerprint[strings.TrimSpace(d.Fingerprint)]; ok {
+			winners[d.ID] = winner
+		}
+	}
+	if len(winners) == 0 {
+		return nil
+	}
+	return winners
+}
+
+// dedupedDelegationIDs returns the set of delegation ids that dispatch skipped
+// via fingerprint dedup, by matching each known delegation against the parent's
+// recorded delegation_deduped event messages. enqueueDelegation formats those
+// messages as `delegation %q skipped: ...`, so a delegation is deduped when an
+// event message carries its %q-quoted id as the prefix. Reconstructing the
+// quoted prefix per delegation (rather than parsing the id out of the message)
+// keeps the match exact even for ids containing quotes or backslashes.
+func dedupedDelegationIDs(delegations []Delegation, events []db.JobEvent) map[string]bool {
+	var dedupedMessages []string
+	for _, event := range events {
+		if event.Kind == "delegation_deduped" {
+			dedupedMessages = append(dedupedMessages, event.Message)
+		}
+	}
+	if len(dedupedMessages) == 0 {
+		return nil
+	}
+	var ids map[string]bool
+	for _, d := range delegations {
+		prefix := fmt.Sprintf("delegation %q skipped:", d.ID)
+		for _, message := range dedupedMessages {
+			if strings.HasPrefix(message, prefix) {
+				if ids == nil {
+					ids = make(map[string]bool)
+				}
+				ids[d.ID] = true
+				break
+			}
+		}
+	}
+	return ids
+}
+
+// depsSatisfied reports whether every dependency id maps to a succeeded sibling.
+// An unknown dep id (not yet a child, or never created) is never satisfied, so a
+// failed or missing dependency keeps the dependent gated rather than enqueuing
+// it prematurely. A dep that points at a fingerprint-deduped delegation is
+// resolved against its winning sibling: satisfied iff that sibling succeeded.
+func depsSatisfied(deps []string, children map[string]db.Job, dedupWinners map[string]db.Job) bool {
+	for _, dep := range compactStrings(deps) {
+		if winner, ok := dedupWinners[dep]; ok {
+			if winner.State != string(JobSucceeded) {
+				return false
+			}
+			continue
+		}
+		child, ok := children[dep]
+		if !ok || child.State != string(JobSucceeded) {
+			return false
+		}
+	}
+	return true
+}
+
+// allDelegationsResolved reports whether every top-level delegation has reached
+// a final disposition: either a terminal child job, or no child at all because a
+// dependency failed under a continue policy and the delegation can never run.
+// queued/running children, or a not-yet-enqueued delegation whose deps are still
+// in flight, mean the batch is still active and no continuation is enqueued yet.
+func allDelegationsResolved(delegations []Delegation, children map[string]db.Job, dedupWinners map[string]db.Job) bool {
+	byID := delegationsByID(delegations)
+	for _, d := range delegations {
+		if !delegationResolved(d, children, byID, dedupWinners) {
+			return false
+		}
+	}
+	return true
+}
+
+func delegationResolved(d Delegation, children map[string]db.Job, byID map[string]Delegation, dedupWinners map[string]db.Job) bool {
+	if child, ok := children[d.ID]; ok {
+		return isTerminalJobState(child.State)
+	}
+	// A fingerprint-deduped delegation never gets its own child; it is resolved
+	// when its winning sibling (the same-fingerprint delegation that did get a
+	// child) reaches a terminal state, so it cannot stall the continuation.
+	if winner, ok := dedupWinners[d.ID]; ok {
+		return isTerminalJobState(winner.State)
+	}
+	// No child job yet: the delegation is resolved only if it can never run
+	// because one of its dependencies is permanently unrunnable.
+	return delegationPermanentlyBlocked(d, children, byID, dedupWinners, map[string]bool{})
+}
+
+// delegationPermanentlyBlocked reports whether a not-yet-enqueued delegation can
+// never run because a dependency terminally failed (or is itself permanently
+// blocked). It guards against cycles via the visiting set, treating a delegation
+// caught in a dependency cycle as blocked so the batch cannot deadlock. A dep
+// that points at a fingerprint-deduped delegation is resolved against its
+// winning sibling: a terminally-failed winner permanently blocks the dependent.
+func delegationPermanentlyBlocked(d Delegation, children map[string]db.Job, byID map[string]Delegation, dedupWinners map[string]db.Job, visiting map[string]bool) bool {
+	if visiting[d.ID] {
+		return true
+	}
+	visiting[d.ID] = true
+	defer delete(visiting, d.ID)
+	for _, dep := range compactStrings(d.Deps) {
+		if winner, ok := dedupWinners[dep]; ok {
+			if isTerminalJobState(winner.State) && winner.State != string(JobSucceeded) {
+				return true
+			}
+			continue
+		}
+		if child, ok := children[dep]; ok {
+			if isTerminalJobState(child.State) && child.State != string(JobSucceeded) {
+				return true
+			}
+			continue
+		}
+		depDel, ok := byID[dep]
+		if !ok {
+			// Unknown dependency id can never be satisfied.
+			return true
+		}
+		if delegationPermanentlyBlocked(depDel, children, byID, dedupWinners, visiting) {
+			return true
+		}
+	}
+	return false
+}
+
+func delegationsByID(delegations []Delegation) map[string]Delegation {
+	byID := make(map[string]Delegation, len(delegations))
+	for _, d := range delegations {
+		byID[d.ID] = d
+	}
+	return byID
+}
+
+func isTerminalJobState(state string) bool {
+	switch state {
+	case string(JobSucceeded), string(JobFailed), string(JobBlocked), string(JobCancelled):
+		return true
+	default:
+		return false
+	}
+}
+
+func delegationFailurePolicy(d Delegation) string {
+	policy := strings.ToLower(strings.TrimSpace(d.FailurePolicy))
+	if policy == "" {
+		return "block_parent"
+	}
+	return policy
+}
+
+// delegationFailureHandledByPolicy reports whether the named delegation declares
+// a continue/escalate failure_policy, meaning a failure of its child is governed
+// by the delegation graph rather than blocking the shared parent task.
+func delegationFailureHandledByPolicy(parentResult *AgentResult, delegationID string) bool {
+	if parentResult == nil || strings.TrimSpace(delegationID) == "" {
+		return false
+	}
+	for _, d := range parentResult.Delegations {
+		if d.ID != delegationID {
+			continue
+		}
+		switch delegationFailurePolicy(d) {
+		case "continue", "escalate":
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// delegationRetryPending reports whether the named delegation currently has a
+// non-terminal child, meaning the retry pass re-enqueued a fresh attempt and the
+// failed attempt's outcome is now superseded. childDelegationJobs already keeps
+// the latest attempt per delegation id, so a queued/running retry shows here.
+func (e Engine) delegationRetryPending(ctx context.Context, parentJobID, delegationID string) (bool, error) {
+	if strings.TrimSpace(delegationID) == "" {
+		return false, nil
+	}
+	children, err := e.childDelegationJobs(ctx, parentJobID)
+	if err != nil {
+		return false, err
+	}
+	child, ok := children[delegationID]
+	if !ok {
+		return false, nil
+	}
+	return !isTerminalJobState(child.State), nil
+}
+
+func childFailureReason(child db.Job) string {
+	payload, err := unmarshalPayload(child.Payload)
+	if err == nil && payload.Result != nil && strings.TrimSpace(payload.Result.Summary) != "" {
+		return payload.Result.Summary
+	}
+	return child.State
+}
+
+func continuationEnqueued(events []db.JobEvent) bool {
+	for _, event := range events {
+		if event.Kind == "delegation_continuation_enqueued" {
+			return true
+		}
+	}
+	return false
+}
+
+func delegationContinuationID(parentJobID string) string {
+	return parentJobID + "/continuation"
+}
+
+// buildContinuationPrompt inlines each finished child's job id, agent, decision,
+// summary, and PR link into the coordinator continuation prompt so the
+// coordinator can synthesize the results without re-reading every child job.
+func buildContinuationPrompt(parentResult *AgentResult, children map[string]db.Job, childPayloads map[string]JobPayload) string {
+	var builder strings.Builder
+	builder.WriteString("All delegated jobs have finished. Review the results below and decide the next step.\n\n")
+	builder.WriteString("Delegation results:\n")
+	for _, d := range parentResult.Delegations {
+		child, ok := children[d.ID]
+		if !ok {
+			fmt.Fprintf(&builder, "- delegation %q (agent %s): not enqueued (dependencies unmet)\n", d.ID, d.Agent)
+			continue
+		}
+		decision := child.State
+		summary := ""
+		if payload, ok := childPayloads[d.ID]; ok && payload.Result != nil {
+			if strings.TrimSpace(payload.Result.Decision) != "" {
+				decision = payload.Result.Decision
+			}
+			summary = strings.TrimSpace(payload.Result.Summary)
+		}
+		fmt.Fprintf(&builder, "- delegation %q (job %s, agent %s): %s", d.ID, child.ID, child.Agent, decision)
+		if summary != "" {
+			fmt.Fprintf(&builder, " — %s", summary)
+		}
+		if link := childPullRequestLink(childPayloads[d.ID]); link != "" {
+			fmt.Fprintf(&builder, " (%s)", link)
+		}
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
+func childPullRequestLink(payload JobPayload) string {
+	if payload.PullRequest <= 0 || strings.TrimSpace(payload.Repo) == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://github.com/%s/pull/%d", payload.Repo, payload.PullRequest)
+}
+
+func delegationSynthesisRule(d Delegation) string {
+	rule := strings.ToLower(strings.TrimSpace(d.SynthesisRule))
+	if rule == "" {
+		return "summary"
+	}
+	return rule
+}
+
+// delegationSynthesisRequiresVote reports whether any delegation in the batch
+// declares synthesis_rule "vote", which gates the coordinator continuation on
+// every child being approved/succeeded.
+func delegationSynthesisRequiresVote(delegations []Delegation) bool {
+	for _, d := range delegations {
+		if delegationSynthesisRule(d) == "vote" {
+			return true
+		}
+	}
+	return false
+}
+
+// delegationVoteSatisfied reports whether every delegation's child reached an
+// approving outcome: a succeeded job state, or a child result decision of
+// approved/succeeded/implemented. A missing or non-approving child fails the
+// vote.
+func delegationVoteSatisfied(delegations []Delegation, children map[string]db.Job, childPayloads map[string]JobPayload) bool {
+	for _, d := range delegations {
+		child, ok := children[d.ID]
+		if !ok {
+			return false
+		}
+		if child.State == string(JobSucceeded) {
+			continue
+		}
+		payload, ok := childPayloads[d.ID]
+		if !ok || payload.Result == nil {
+			return false
+		}
+		if !delegationDecisionApproves(payload.Result.Decision) {
+			return false
+		}
+	}
+	return true
+}
+
+func delegationDecisionApproves(decision string) bool {
+	switch strings.ToLower(strings.TrimSpace(decision)) {
+	case "approved", "succeeded", "implemented":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e Engine) preflightDelegation(ctx context.Context, request JobRequest) error {
@@ -716,6 +1668,7 @@ func payloadMatchesRequest(payload JobPayload, request JobRequest) bool {
 		payload.ReviewRound == request.ReviewRound &&
 		payload.Sender == request.Sender &&
 		payload.Instructions == request.Instructions &&
+		payload.WorktreePath == request.WorktreePath &&
 		payloadDelegationMatchesRequest(payload, request) &&
 		equalStrings(payload.Reviewers, compactStrings(request.Reviewers)) &&
 		equalStrings(payload.Constraints, compactStrings(request.Constraints))

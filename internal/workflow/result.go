@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const resultKey = `"gitmoot_result"`
@@ -112,6 +113,12 @@ func validateAgentResult(result AgentResult) error {
 		if strings.TrimSpace(d.ID) == "" {
 			return errors.New("delegation id is required")
 		}
+		// The engine keys child jobs, the dedup map, and the DAG on the raw id
+		// while deps are matched trimmed; a surrounding-whitespace id would make
+		// those disagree and silently drop the delegation. Require them equal.
+		if d.ID != strings.TrimSpace(d.ID) {
+			return fmt.Errorf("delegation id %q must not have leading or trailing whitespace", d.ID)
+		}
 		if strings.TrimSpace(d.Agent) == "" {
 			return errors.New("delegation agent is required")
 		}
@@ -121,9 +128,145 @@ func validateAgentResult(result AgentResult) error {
 		if strings.TrimSpace(d.Prompt) == "" {
 			return errors.New("delegation prompt is required")
 		}
-		if len(d.Deps) > 0 {
-			return fmt.Errorf("delegation %q uses dependencies, which are not yet supported", d.ID)
+		if err := validateDelegationLifecycle(d); err != nil {
+			return err
 		}
+	}
+	if err := validateDelegationGraph(result.Delegations); err != nil {
+		return err
+	}
+	if delegationsRequestArtifacts(result.Delegations) && strings.TrimSpace(result.ArtifactBody) == "" {
+		return errors.New("artifact_body is required when delegations request artifacts")
+	}
+	return nil
+}
+
+// validateDelegationGraph enforces the structural invariants of the delegation
+// dependency DAG: every id is unique, every declared dep references a known
+// sibling id (and never the delegation itself), and the deps form no cycle. A
+// coordinator that violates any of these would otherwise crash mid-dispatch
+// (duplicate ids collide on the deterministic child job id) or silently drop a
+// delegation while falsely signalling the batch is complete (unknown deps and
+// cycles are treated as permanently blocked by the engine). Validating here
+// turns those into clean errors at result-parse time, before any side effects.
+func validateDelegationGraph(delegations []Delegation) error {
+	known := make(map[string]struct{}, len(delegations))
+	for _, d := range delegations {
+		id := strings.TrimSpace(d.ID)
+		if _, ok := known[id]; ok {
+			return fmt.Errorf("delegation id %q is not unique", id)
+		}
+		known[id] = struct{}{}
+	}
+	for _, d := range delegations {
+		id := strings.TrimSpace(d.ID)
+		for _, dep := range d.Deps {
+			dep = strings.TrimSpace(dep)
+			if dep == "" {
+				continue
+			}
+			if dep == id {
+				return fmt.Errorf("delegation %q depends on itself", id)
+			}
+			if _, ok := known[dep]; !ok {
+				return fmt.Errorf("delegation %q references unknown dep %q", id, dep)
+			}
+		}
+	}
+	return detectDelegationCycle(delegations)
+}
+
+// detectDelegationCycle runs a depth-first search over the delegation deps and
+// reports the first cycle it finds, naming the delegations involved. Deps that
+// reference unknown ids are ignored here because validateDelegationGraph has
+// already rejected those; this keeps the traversal focused on real edges.
+func detectDelegationCycle(delegations []Delegation) error {
+	edges := make(map[string][]string, len(delegations))
+	for _, d := range delegations {
+		id := strings.TrimSpace(d.ID)
+		for _, dep := range d.Deps {
+			dep = strings.TrimSpace(dep)
+			if dep != "" {
+				edges[id] = append(edges[id], dep)
+			}
+		}
+	}
+
+	const (
+		unvisited = 0
+		visiting  = 1
+		done      = 2
+	)
+	state := make(map[string]int, len(delegations))
+	var stack []string
+
+	var visit func(id string) []string
+	visit = func(id string) []string {
+		state[id] = visiting
+		stack = append(stack, id)
+		for _, dep := range edges[id] {
+			switch state[dep] {
+			case visiting:
+				// Found a back-edge; slice the stack from dep to close the cycle.
+				cycle := append([]string{}, stack[indexOf(stack, dep):]...)
+				return append(cycle, dep)
+			case unvisited:
+				if cycle := visit(dep); cycle != nil {
+					return cycle
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[id] = done
+		return nil
+	}
+
+	for _, d := range delegations {
+		id := strings.TrimSpace(d.ID)
+		if state[id] == unvisited {
+			if cycle := visit(id); cycle != nil {
+				return fmt.Errorf("delegations form a dependency cycle: %s", strings.Join(cycle, " -> "))
+			}
+		}
+	}
+	return nil
+}
+
+func indexOf(values []string, target string) int {
+	for i, v := range values {
+		if v == target {
+			return i
+		}
+	}
+	return 0
+}
+
+// validateDelegationLifecycle validates the Phase 2 lifecycle controls on a
+// delegation: timeout must parse as a positive duration, retry must be
+// non-negative, and failure_policy/synthesis_rule must be drawn from their
+// allowed sets. Empty values are accepted and fall back to defaults.
+func validateDelegationLifecycle(d Delegation) error {
+	if timeout := strings.TrimSpace(d.Timeout); timeout != "" {
+		parsed, err := time.ParseDuration(timeout)
+		if err != nil {
+			return fmt.Errorf("delegation %q timeout %q is invalid: %w", d.ID, timeout, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("delegation %q timeout %q must be positive", d.ID, timeout)
+		}
+	}
+	if d.Retry < 0 {
+		return fmt.Errorf("delegation %q retry must be >= 0", d.ID)
+	}
+	switch strings.ToLower(strings.TrimSpace(d.FailurePolicy)) {
+	case "", "block_parent", "continue", "escalate":
+	default:
+		return fmt.Errorf("delegation %q failure_policy %q is invalid", d.ID, d.FailurePolicy)
+	}
+	switch strings.ToLower(strings.TrimSpace(d.SynthesisRule)) {
+	case "", "summary", "vote":
+	default:
+		return fmt.Errorf("delegation %q synthesis_rule %q is invalid", d.ID, d.SynthesisRule)
 	}
 	return nil
 }

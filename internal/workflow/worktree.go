@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,6 +142,98 @@ func (e Engine) AllocateTaskWorktree(ctx context.Context, request TaskWorktreeRe
 	return task, nil
 }
 
+// DelegationWorktreeRequest carries the inputs needed to allocate a git
+// worktree for a delegated implement job. Unlike TaskWorktreeRequest it does not
+// touch the tasks table; the resulting path and branch are returned to the
+// dispatcher for storage in the child JobPayload.
+type DelegationWorktreeRequest struct {
+	Home         string
+	Repo         string
+	ParentJobID  string
+	DelegationID string
+	Delegation   Delegation
+	BaseBranch   string
+	Owner        string
+	Checkout     string
+	// RetryAttempt is the 1-based retry number for a re-enqueued delegation. It
+	// is 0 for the original attempt. A non-zero value gives the retry an isolated
+	// worktree path and branch so it never collides with the failed attempt's
+	// still-present worktree directory and checked-out branch.
+	RetryAttempt int
+}
+
+// DelegationWorktreeResult is the allocated worktree path and branch for a
+// delegated implement job.
+type DelegationWorktreeResult struct {
+	Path   string
+	Branch string
+}
+
+// AllocateDelegationWorktree creates an isolated git worktree for a delegated
+// implement job. It mirrors AllocateTaskWorktree's lock ordering (branch lock,
+// then checkout mutation lock, then the git worktree add) but writes nothing to
+// the tasks table: the deterministic path and computed branch are returned so
+// the dispatcher can store them in the child JobPayload. Two delegations from
+// the same parent get distinct paths and branches.
+func (e Engine) AllocateDelegationWorktree(ctx context.Context, request DelegationWorktreeRequest, manager WorktreeManager) (DelegationWorktreeResult, error) {
+	if err := e.validate(); err != nil {
+		return DelegationWorktreeResult{}, err
+	}
+	if manager == nil {
+		return DelegationWorktreeResult{}, errors.New("worktree manager is required")
+	}
+	if strings.TrimSpace(request.ParentJobID) == "" {
+		return DelegationWorktreeResult{}, errors.New("delegation worktree parent job id is required")
+	}
+	if strings.TrimSpace(request.DelegationID) == "" {
+		return DelegationWorktreeResult{}, errors.New("delegation worktree delegation id is required")
+	}
+	if strings.TrimSpace(request.Owner) == "" {
+		return DelegationWorktreeResult{}, errors.New("delegation worktree owner is required")
+	}
+	path, err := DelegationWorktreePath(request.Home, request.Repo, request.ParentJobID, request.DelegationID, request.RetryAttempt)
+	if err != nil {
+		return DelegationWorktreeResult{}, err
+	}
+	branch := delegationBranchName(request.Delegation, request.ParentJobID, request.DelegationID, request.RetryAttempt)
+	if strings.TrimSpace(branch) == "" {
+		return DelegationWorktreeResult{}, errors.New("delegation worktree branch could not be derived")
+	}
+	lock := db.BranchLock{RepoFullName: request.Repo, Branch: branch, Owner: request.Owner}
+	createdLock, err := e.Store.CreateLock(ctx, lock)
+	if err != nil {
+		return DelegationWorktreeResult{}, err
+	}
+	if !createdLock {
+		existingLock, err := e.Store.GetBranchLock(ctx, request.Repo, branch)
+		if err != nil {
+			return DelegationWorktreeResult{}, err
+		}
+		if existingLock.Owner != request.Owner {
+			return DelegationWorktreeResult{}, BlockedError{Reason: "branch lock rejected action for " + branch}
+		}
+	}
+	releaseCheckoutLock, _, err := acquireCheckoutMutationLockWithWait(ctx, e.Store, request.Checkout, "worktree:"+request.ParentJobID+"/"+request.DelegationID, time.Now().UTC())
+	if err != nil {
+		if createdLock {
+			_, _ = e.Store.ReleaseLock(ctx, lock)
+		}
+		return DelegationWorktreeResult{}, err
+	}
+	defer func() {
+		if releaseCheckoutLock != nil {
+			_ = releaseCheckoutLock(context.Background())
+		}
+	}()
+	if err := addTaskWorktree(ctx, manager, branch, path, request.BaseBranch); err != nil {
+		if createdLock {
+			_, _ = e.Store.ReleaseLock(ctx, lock)
+		}
+		return DelegationWorktreeResult{}, err
+	}
+	return DelegationWorktreeResult{Path: path, Branch: branch}, nil
+}
+
 func addTaskWorktree(ctx context.Context, manager WorktreeManager, branch string, path string, base string) error {
 	if checker, ok := manager.(BranchExistenceChecker); ok {
 		exists, err := checker.BranchExists(ctx, branch)
@@ -172,6 +265,36 @@ func TaskWorktreePath(home string, repo string, taskID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, "worktrees", repoSegment, taskSegment), nil
+}
+
+// DelegationWorktreePath builds the deterministic on-disk worktree path for a
+// delegated implement job:
+// $GITMOOT_HOME/worktrees/<owner>--<repo>/delegations/<parent-job-id>/<delegation-id>/.
+// A retryAttempt > 0 appends /retry/<n> so a re-enqueued delegation gets a fresh
+// isolated directory rather than colliding with the failed attempt's worktree.
+// It reuses the same repo/segment sanitization as TaskWorktreePath.
+func DelegationWorktreePath(home string, repo string, parentJobID string, delegationID string, retryAttempt int) (string, error) {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return "", errors.New("delegation worktree home is required")
+	}
+	repoSegment, err := taskWorktreeRepoSegment(repo)
+	if err != nil {
+		return "", err
+	}
+	parentSegment, err := taskWorktreePathSegment(parentJobID, "parent job id")
+	if err != nil {
+		return "", err
+	}
+	delegationSegment, err := taskWorktreePathSegment(delegationID, "delegation id")
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Join(home, "worktrees", repoSegment, "delegations", parentSegment, delegationSegment)
+	if retryAttempt > 0 {
+		base = filepath.Join(base, "retry", strconv.Itoa(retryAttempt))
+	}
+	return base, nil
 }
 
 func taskWorktreeRepoSegment(repo string) (string, error) {

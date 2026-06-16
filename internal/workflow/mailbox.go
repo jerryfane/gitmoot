@@ -19,29 +19,37 @@ type Mailbox struct {
 }
 
 type JobRequest struct {
-	ID               string
-	Agent            string
-	Action           string
-	Repo             string
-	Branch           string
-	PullRequest      int
-	HeadSHA          string
-	GoalID           string
-	TaskID           string
-	TaskTitle        string
-	LeadAgent        string
-	Reviewers        []string
-	ReviewRound      string
-	Sender           string
-	Instructions     string
-	Constraints      []string
-	ParentJobID      string
-	DelegationID     string
-	DelegationDepth  int
-	DelegatedBy      string
-	OriginalAgent    string
-	DelegatedAgent   string
-	DelegationReason string
+	ID                    string
+	Agent                 string
+	Action                string
+	Repo                  string
+	Branch                string
+	PullRequest           int
+	HeadSHA               string
+	GoalID                string
+	TaskID                string
+	TaskTitle             string
+	LeadAgent             string
+	Reviewers             []string
+	ReviewRound           string
+	Sender                string
+	Instructions          string
+	Constraints           []string
+	ParentJobID           string
+	DelegationID          string
+	DelegationDepth       int
+	DelegatedBy           string
+	Deps                  []string
+	JobTimeout            string
+	RetryCount            int
+	Fingerprint           string
+	FailurePolicy         string
+	SynthesisRule         string
+	DelegationArtifactDir string
+	WorktreePath          string
+	OriginalAgent         string
+	DelegatedAgent        string
+	DelegationReason      string
 }
 
 type JobPayload struct {
@@ -62,6 +70,14 @@ type JobPayload struct {
 	DelegationID           string       `json:"delegation_id,omitempty"`
 	DelegationDepth        int          `json:"delegation_depth,omitempty"`
 	DelegatedBy            string       `json:"delegated_by,omitempty"`
+	Deps                   []string     `json:"deps,omitempty"`
+	JobTimeout             string       `json:"job_timeout,omitempty"`
+	RetryCount             int          `json:"retry_count,omitempty"`
+	Fingerprint            string       `json:"fingerprint,omitempty"`
+	FailurePolicy          string       `json:"failure_policy,omitempty"`
+	SynthesisRule          string       `json:"synthesis_rule,omitempty"`
+	DelegationArtifactDir  string       `json:"delegation_artifact_dir,omitempty"`
+	WorktreePath           string       `json:"worktree_path,omitempty"`
 	TemplateID             string       `json:"template_id,omitempty"`
 	TemplateResolvedCommit string       `json:"template_resolved_commit,omitempty"`
 	TemplateContent        string       `json:"template_content,omitempty"`
@@ -107,6 +123,14 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		DelegationID:           request.DelegationID,
 		DelegationDepth:        request.DelegationDepth,
 		DelegatedBy:            request.DelegatedBy,
+		Deps:                   compactStrings(request.Deps),
+		JobTimeout:             strings.TrimSpace(request.JobTimeout),
+		RetryCount:             request.RetryCount,
+		Fingerprint:            strings.TrimSpace(request.Fingerprint),
+		FailurePolicy:          strings.TrimSpace(request.FailurePolicy),
+		SynthesisRule:          strings.TrimSpace(request.SynthesisRule),
+		DelegationArtifactDir:  request.DelegationArtifactDir,
+		WorktreePath:           request.WorktreePath,
 		TemplateID:             snapshot.ID,
 		TemplateResolvedCommit: snapshot.ResolvedCommit,
 		TemplateContent:        snapshot.Content,
@@ -354,6 +378,7 @@ func (p JobPayload) prompt(action string) prompts.JobPrompt {
 		Action:                 action,
 		Instructions:           p.Instructions,
 		Constraints:            p.Constraints,
+		DelegationArtifactDir:  p.DelegationArtifactDir,
 		TemplateID:             p.TemplateID,
 		TemplateResolvedCommit: p.TemplateResolvedCommit,
 		TemplateInstructions:   agenttemplate.InstructionsForContent(p.TemplateContent),

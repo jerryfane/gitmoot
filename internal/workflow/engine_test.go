@@ -2,9 +2,12 @@ package workflow
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jerryfane/gitmoot/internal/db"
@@ -60,6 +63,339 @@ func TestEngineAdvanceJobDispatchesDelegations(t *testing.T) {
 	// Idempotent: advancing the same parent again must not duplicate the child.
 	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
 		t.Fatalf("second AdvanceJob returned error: %v", err)
+	}
+}
+
+func TestEngineAdvanceJobWritesDelegationArtifacts(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	root := t.TempDir()
+	engine.ArtifactRoot = root
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision:     "approved",
+			Summary:      "done",
+			ArtifactBody: "# Shared brief\n\nDo the work.\n",
+			Delegations: []Delegation{
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Artifacts: []string{"brief.md"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	wantDir := filepath.Join(root, "delegations", "parent-job")
+	briefBytes, err := os.ReadFile(filepath.Join(wantDir, "brief.md"))
+	if err != nil {
+		t.Fatalf("read brief.md: %v", err)
+	}
+	if string(briefBytes) != "# Shared brief\n\nDo the work.\n" {
+		t.Fatalf("brief.md = %q", string(briefBytes))
+	}
+	if _, err := os.Stat(filepath.Join(wantDir, "context-manifest.json")); err != nil {
+		t.Fatalf("context-manifest.json missing: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/del-1")
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.DelegationArtifactDir != wantDir {
+		t.Fatalf("child DelegationArtifactDir = %q, want %q", payload.DelegationArtifactDir, wantDir)
+	}
+}
+
+func TestEngineAdvanceJobSkipsArtifactsWithoutRoot(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision:     "approved",
+			Summary:      "done",
+			ArtifactBody: "brief",
+			Delegations: []Delegation{
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Artifacts: []string{"brief.md"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/del-1")
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.DelegationArtifactDir != "" {
+		t.Fatalf("child DelegationArtifactDir = %q, want empty when no artifact root", payload.DelegationArtifactDir)
+	}
+}
+
+func TestDispatchDelegationsTwoImplementSiblingsGetSeparateWorktrees(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "builder-a", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "builder-b", []string{"implement"}, "jerryfane/gitmoot")
+	home := t.TempDir()
+	manager := &fakeWorktreeManager{}
+	engine := testEngine(store)
+	engine.Home = home
+	engine.DelegationCheckout = t.TempDir()
+	engine.DelegationWorktrees = manager
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "d1", Agent: "builder-a", Action: "implement", Prompt: "build one"},
+				{ID: "d2", Agent: "builder-b", Action: "implement", Prompt: "build two"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	childOne := mustJob(t, store, "parent-job/delegation/d1")
+	childTwo := mustJob(t, store, "parent-job/delegation/d2")
+	payloadOne, err := unmarshalPayload(childOne.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(d1) returned error: %v", err)
+	}
+	payloadTwo, err := unmarshalPayload(childTwo.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(d2) returned error: %v", err)
+	}
+
+	wantPathOne := filepath.Join(home, "worktrees", "jerryfane--gitmoot", "delegations", "parent-job", "d1")
+	wantPathTwo := filepath.Join(home, "worktrees", "jerryfane--gitmoot", "delegations", "parent-job", "d2")
+	if payloadOne.WorktreePath != wantPathOne {
+		t.Fatalf("d1 worktree path = %q, want %q", payloadOne.WorktreePath, wantPathOne)
+	}
+	if payloadTwo.WorktreePath != wantPathTwo {
+		t.Fatalf("d2 worktree path = %q, want %q", payloadTwo.WorktreePath, wantPathTwo)
+	}
+	if payloadOne.WorktreePath == payloadTwo.WorktreePath {
+		t.Fatalf("siblings share worktree path %q", payloadOne.WorktreePath)
+	}
+	if payloadOne.Branch == payloadTwo.Branch {
+		t.Fatalf("siblings share branch %q", payloadOne.Branch)
+	}
+	if payloadOne.Branch == "task-005" || payloadTwo.Branch == "task-005" {
+		t.Fatalf("delegation branch not overridden: d1=%q d2=%q", payloadOne.Branch, payloadTwo.Branch)
+	}
+	if len(manager.calls) != 2 {
+		t.Fatalf("AddWorktree calls = %+v, want two", manager.calls)
+	}
+	// Each child's HeadSHA is cleared so validateTargetCheckout validates the
+	// fresh worktree HEAD instead of the stale parent SHA.
+	if payloadOne.HeadSHA != "" || payloadTwo.HeadSHA != "" {
+		t.Fatalf("delegated implement children must not inherit parent HeadSHA: d1=%q d2=%q", payloadOne.HeadSHA, payloadTwo.HeadSHA)
+	}
+}
+
+func TestDispatchDelegationsSiblingsSharingWorktreeHintGetDistinctBranches(t *testing.T) {
+	// Two sibling implement delegations that share an identical worktree hint must
+	// still receive distinct, namespaced branches so the second AddWorktree does
+	// not collide on a branch already checked out by the first.
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "builder-a", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "builder-b", []string{"implement"}, "jerryfane/gitmoot")
+	home := t.TempDir()
+	manager := &fakeWorktreeManager{}
+	engine := testEngine(store)
+	engine.Home = home
+	engine.DelegationCheckout = t.TempDir()
+	engine.DelegationWorktrees = manager
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "d1", Agent: "builder-a", Action: "implement", Prompt: "build one", Worktree: "shared"},
+				{ID: "d2", Agent: "builder-b", Action: "implement", Prompt: "build two", Worktree: "shared"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	payloadOne, err := unmarshalPayload(mustJob(t, store, "parent-job/delegation/d1").Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(d1) returned error: %v", err)
+	}
+	payloadTwo, err := unmarshalPayload(mustJob(t, store, "parent-job/delegation/d2").Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(d2) returned error: %v", err)
+	}
+	if payloadOne.Branch == payloadTwo.Branch {
+		t.Fatalf("siblings sharing worktree hint share branch %q", payloadOne.Branch)
+	}
+	if len(manager.calls) != 2 {
+		t.Fatalf("AddWorktree calls = %+v, want two distinct allocations", manager.calls)
+	}
+	if manager.calls[0].branch == manager.calls[1].branch {
+		t.Fatalf("AddWorktree branches collide: %+v", manager.calls)
+	}
+}
+
+func TestDispatchDelegationsWithoutWorktreeManagerEmitsSkippedEvent(t *testing.T) {
+	// When the engine has no per-delegation worktree manager, an implement
+	// delegation falls back to a shared-checkout branch lock; the loss of
+	// isolation must be observable via a delegation_worktree_skipped event.
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "builder", []string{"implement"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	// No engine.Home / engine.DelegationWorktrees: isolation unavailable.
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "d1", Agent: "builder", Action: "implement", Prompt: "build one"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/d1")
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	// The fallback child runs in the shared checkout on the parent branch with no
+	// per-delegation worktree path.
+	if strings.TrimSpace(payload.WorktreePath) != "" {
+		t.Fatalf("fallback child unexpectedly got worktree path %q", payload.WorktreePath)
+	}
+	if payload.Branch != "task-005" {
+		t.Fatalf("fallback child branch = %q, want parent branch task-005", payload.Branch)
+	}
+	if got := countJobEvents(t, store, "parent-job", "delegation_worktree_skipped"); got != 1 {
+		t.Fatalf("delegation_worktree_skipped event count = %d, want 1", got)
+	}
+}
+
+func TestEngineDelegationRetryGetsIsolatedWorktreePathAndBranch(t *testing.T) {
+	// A retry of a failed implement delegation must allocate a fresh, isolated
+	// worktree path and branch (retry-suffixed) so it never collides with the
+	// failed original attempt's leftover worktree directory and checked-out branch.
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "builder", []string{"implement"}, "jerryfane/gitmoot")
+	home := t.TempDir()
+	manager := &fakeWorktreeManager{}
+	engine := testEngine(store)
+	engine.Home = home
+	engine.DelegationCheckout = t.TempDir()
+	engine.DelegationWorktrees = manager
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "build", Agent: "builder", Action: "implement", Prompt: "build it", Retry: 1},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+	originalPayload, err := unmarshalPayload(mustJob(t, store, "parent-job/delegation/build").Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(original) returned error: %v", err)
+	}
+
+	// Fail the original attempt and advance the parent so a retry is enqueued.
+	completeDelegationChild(t, store, "parent-job/delegation/build", JobFailed, AgentResult{Decision: "failed", Summary: "broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/build"); err != nil {
+		t.Fatalf("AdvanceJob(build) returned error: %v", err)
+	}
+
+	retry := mustJob(t, store, "parent-job/delegation/build/retry/1")
+	retryPayload, err := unmarshalPayload(retry.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(retry) returned error: %v", err)
+	}
+	if retryPayload.WorktreePath == originalPayload.WorktreePath {
+		t.Fatalf("retry reuses original worktree path %q", retryPayload.WorktreePath)
+	}
+	if retryPayload.Branch == originalPayload.Branch {
+		t.Fatalf("retry reuses original branch %q", retryPayload.Branch)
+	}
+	wantRetryPath := filepath.Join(home, "worktrees", "jerryfane--gitmoot", "delegations", "parent-job", "build", "retry", "1")
+	if retryPayload.WorktreePath != wantRetryPath {
+		t.Fatalf("retry worktree path = %q, want %q", retryPayload.WorktreePath, wantRetryPath)
+	}
+	if !strings.HasSuffix(retryPayload.Branch, "-retry-1") {
+		t.Fatalf("retry branch = %q, want -retry-1 suffix", retryPayload.Branch)
+	}
+	// Two distinct git worktrees were added: the original and the isolated retry.
+	if len(manager.calls) != 2 {
+		t.Fatalf("AddWorktree calls = %+v, want two (original + retry)", manager.calls)
+	}
+	if manager.calls[0].path == manager.calls[1].path || manager.calls[0].branch == manager.calls[1].branch {
+		t.Fatalf("retry allocation collides with original: %+v", manager.calls)
 	}
 }
 
@@ -1349,9 +1685,6 @@ func TestEngineAdvanceBlocksOnAgentBlockedResult(t *testing.T) {
 	assertTaskState(t, store, "task-7", TaskBlocked)
 }
 
-
-
-
 func TestEngineSetTaskStatePreservesExistingMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
@@ -1453,6 +1786,1092 @@ func mustJob(t *testing.T, store *db.Store, jobID string) db.Job {
 		t.Fatalf("GetJob(%s) returned error: %v", jobID, err)
 	}
 	return job
+}
+
+// completeDelegationChild transitions a queued delegation child to a terminal
+// state and stamps a Result into its payload, mirroring what Mailbox.Run does
+// when a child finishes, so the engine's advanceDelegations can observe it.
+func completeDelegationChild(t *testing.T, store *db.Store, childID string, state JobState, result AgentResult) {
+	t.Helper()
+	ctx := context.Background()
+	job, err := store.GetJob(ctx, childID)
+	if err != nil {
+		t.Fatalf("GetJob(%s) returned error: %v", childID, err)
+	}
+	payload, err := unmarshalPayload(job.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(%s) returned error: %v", childID, err)
+	}
+	payload.Result = &result
+	encoded, err := marshalPayload(payload)
+	if err != nil {
+		t.Fatalf("marshalPayload(%s) returned error: %v", childID, err)
+	}
+	if err := store.UpdateJobPayload(ctx, childID, encoded); err != nil {
+		t.Fatalf("UpdateJobPayload(%s) returned error: %v", childID, err)
+	}
+	if err := store.UpdateJobState(ctx, childID, string(state)); err != nil {
+		t.Fatalf("UpdateJobState(%s) returned error: %v", childID, err)
+	}
+}
+
+func jobExists(t *testing.T, store *db.Store, jobID string) bool {
+	t.Helper()
+	_, err := store.GetJob(context.Background(), jobID)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	t.Fatalf("GetJob(%s) returned error: %v", jobID, err)
+	return false
+}
+
+func TestEngineAdvanceDelegationsGatesOnDeps(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "integ", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api"},
+				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+				{ID: "integrate", Agent: "integ", Action: "review", Prompt: "integrate", Deps: []string{"api", "ui"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// Only the dependency-free delegations are enqueued initially.
+	if !jobExists(t, store, "parent-job/delegation/api") {
+		t.Fatalf("api child should be enqueued")
+	}
+	if !jobExists(t, store, "parent-job/delegation/ui") {
+		t.Fatalf("ui child should be enqueued")
+	}
+	if jobExists(t, store, "parent-job/delegation/integrate") {
+		t.Fatalf("integrate child must not be enqueued before deps succeed")
+	}
+
+	// First dep succeeds: integrate is still gated on ui.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobSucceeded, AgentResult{Decision: "approved", Summary: "api ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	if jobExists(t, store, "parent-job/delegation/integrate") {
+		t.Fatalf("integrate child must not be enqueued until all deps succeed")
+	}
+
+	// Second dep succeeds: integrate is now enqueued with correct metadata.
+	completeDelegationChild(t, store, "parent-job/delegation/ui", JobSucceeded, AgentResult{Decision: "approved", Summary: "ui ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/ui"); err != nil {
+		t.Fatalf("AdvanceJob(ui) returned error: %v", err)
+	}
+	integrate := mustJob(t, store, "parent-job/delegation/integrate")
+	if integrate.Agent != "integ" || integrate.Type != "review" || integrate.State != string(JobQueued) {
+		t.Fatalf("integrate child = %+v", integrate)
+	}
+	if integrate.ParentJobID != "parent-job" || integrate.DelegationID != "integrate" || integrate.DelegationDepth != 1 {
+		t.Fatalf("integrate child metadata = %+v", integrate)
+	}
+	payload, err := unmarshalPayload(integrate.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(integrate) returned error: %v", err)
+	}
+	if len(payload.Deps) != 2 || payload.Deps[0] != "api" || payload.Deps[1] != "ui" {
+		t.Fatalf("integrate child deps = %v", payload.Deps)
+	}
+}
+
+func TestEngineAdvanceDelegationsEnqueuesContinuationOnce(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api"},
+				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// First child finishes: not all siblings terminal, so no continuation yet.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobSucceeded, AgentResult{Decision: "approved", Summary: "api ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	if jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatalf("continuation must not be enqueued before all siblings finish")
+	}
+
+	// Second child finishes: continuation enqueued exactly once.
+	completeDelegationChild(t, store, "parent-job/delegation/ui", JobSucceeded, AgentResult{Decision: "approved", Summary: "ui ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/ui"); err != nil {
+		t.Fatalf("AdvanceJob(ui) returned error: %v", err)
+	}
+	continuation := mustJob(t, store, delegationContinuationID("parent-job"))
+	if continuation.Agent != "coord" || continuation.Type != "ask" || continuation.ParentJobID != "parent-job" {
+		t.Fatalf("continuation job = %+v", continuation)
+	}
+	if continuation.State != string(JobQueued) {
+		t.Fatalf("continuation state = %q", continuation.State)
+	}
+
+	// Re-advancing another finished child must not create a duplicate.
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("second AdvanceJob(api) returned error: %v", err)
+	}
+	children, err := engine.childDelegationJobs(ctx, "parent-job")
+	if err != nil {
+		t.Fatalf("childDelegationJobs returned error: %v", err)
+	}
+	if _, ok := children[""]; ok {
+		t.Fatalf("continuation should not appear as a delegation child")
+	}
+	continuationCount := 0
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListJobs returned error: %v", err)
+	}
+	for _, job := range jobs {
+		if job.ID == delegationContinuationID("parent-job") {
+			continuationCount++
+		}
+	}
+	if continuationCount != 1 {
+		t.Fatalf("continuation job count = %d, want 1", continuationCount)
+	}
+}
+
+func TestEngineDelegationFailurePolicyBlockParent(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "integ", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api"},
+				{ID: "integrate", Agent: "integ", Action: "review", Prompt: "integrate", Deps: []string{"api"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobFailed, AgentResult{Decision: "failed", Summary: "api broke"})
+	err := engine.AdvanceJob(ctx, "parent-job/delegation/api")
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("AdvanceJob(api) error = %v, want BlockedError", err)
+	}
+	assertTaskState(t, store, "task-5", TaskBlocked)
+	if jobExists(t, store, "parent-job/delegation/integrate") {
+		t.Fatalf("dependent integrate child must not be enqueued after dep failed")
+	}
+}
+
+func TestEngineDelegationFailurePolicyContinue(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "integ", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", FailurePolicy: "continue"},
+				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+				{ID: "integrate", Agent: "integ", Action: "review", Prompt: "integrate", Deps: []string{"api"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// api fails under a continue policy: the parent is not blocked and the
+	// independent ui sibling keeps running.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobFailed, AgentResult{Decision: "failed", Summary: "api broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	if state, _ := store.GetTask(ctx, "task-5"); state.State == string(TaskBlocked) {
+		t.Fatalf("continue policy must not block the parent task")
+	}
+	// integrate depends on the failed api and must never enqueue.
+	if jobExists(t, store, "parent-job/delegation/integrate") {
+		t.Fatalf("integrate depends on failed api and must not enqueue under continue")
+	}
+
+	// ui still completes; with api terminal-failed and ui succeeded and
+	// integrate gated out, all top-level dels are terminal -> continuation.
+	completeDelegationChild(t, store, "parent-job/delegation/ui", JobSucceeded, AgentResult{Decision: "approved", Summary: "ui ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/ui"); err != nil {
+		t.Fatalf("AdvanceJob(ui) returned error: %v", err)
+	}
+	if jobExists(t, store, "parent-job/delegation/integrate") {
+		t.Fatalf("integrate must remain gated out after dep failure under continue")
+	}
+	// Once the continue-gated batch resolves (api failed under continue, ui
+	// succeeded, integrate permanently gated), the coordinator continuation must
+	// be enqueued so the batch does not stall.
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatalf("continuation must be enqueued once the continue-gated batch resolves")
+	}
+}
+
+func TestEngineDelegationFailurePolicyEscalate(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", FailurePolicy: "escalate"},
+				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// api fails under escalate: a continuation job is enqueued immediately,
+	// without waiting for the ui sibling, and the parent is not blocked.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobFailed, AgentResult{Decision: "failed", Summary: "api broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatalf("escalate must enqueue the continuation immediately")
+	}
+	if state, _ := store.GetTask(ctx, "task-5"); state.State == string(TaskBlocked) {
+		t.Fatalf("escalate policy must not block the parent task")
+	}
+}
+
+func TestContinuationPromptInlinesChildResults(t *testing.T) {
+	dels := []Delegation{
+		{ID: "api", Agent: "api", Action: "review", Prompt: "build api"},
+		{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+	}
+	children := map[string]db.Job{
+		"api": {ID: "parent-job/delegation/api", Agent: "api", State: string(JobSucceeded)},
+		"ui":  {ID: "parent-job/delegation/ui", Agent: "ui", State: string(JobSucceeded)},
+	}
+	childPayloads := map[string]JobPayload{
+		"api": {Repo: "jerryfane/gitmoot", PullRequest: 12, Result: &AgentResult{Decision: "implemented", Summary: "api built"}},
+		"ui":  {Result: &AgentResult{Decision: "approved", Summary: "ui built"}},
+	}
+	prompt := buildContinuationPrompt(&AgentResult{Delegations: dels}, children, childPayloads)
+	for _, want := range []string{
+		"parent-job/delegation/api",
+		"parent-job/delegation/ui",
+		"api built",
+		"ui built",
+		"implemented",
+		"approved",
+		"https://github.com/jerryfane/gitmoot/pull/12",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("continuation prompt missing %q\n%s", want, prompt)
+		}
+	}
+}
+
+func countJobEvents(t *testing.T, store *db.Store, jobID, kind string) int {
+	t.Helper()
+	events, err := store.ListJobEvents(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("ListJobEvents(%s) returned error: %v", jobID, err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Kind == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func TestEngineDelegationTimeoutPlumbedToChildPayload(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Timeout: "30s"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/del-1")
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.JobTimeout != "30s" {
+		t.Fatalf("child JobTimeout = %q, want %q", payload.JobTimeout, "30s")
+	}
+}
+
+func TestEngineDelegationInvalidLifecycleRejectedAtExtraction(t *testing.T) {
+	// Each invalid lifecycle control must be rejected when the agent result is
+	// extracted, so a malformed delegation never reaches the dispatcher.
+	cases := map[string]string{
+		"timeout":        `{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[{"id":"d","agent":"a","action":"review","prompt":"go","timeout":"banana"}]}}`,
+		"negative retry": `{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[{"id":"d","agent":"a","action":"review","prompt":"go","retry":-1}]}}`,
+		"failure_policy": `{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[{"id":"d","agent":"a","action":"review","prompt":"go","failure_policy":"explode"}]}}`,
+		"synthesis_rule": `{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[{"id":"d","agent":"a","action":"review","prompt":"go","synthesis_rule":"coinflip"}]}}`,
+	}
+	for name, output := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ExtractAgentResult(output); err == nil {
+				t.Fatalf("ExtractAgentResult accepted invalid %s", name)
+			}
+		})
+	}
+
+	// Valid lifecycle controls pass validation.
+	if err := validateDelegationLifecycle(Delegation{ID: "d", Timeout: "30s", Retry: 2, FailurePolicy: "continue", SynthesisRule: "vote"}); err != nil {
+		t.Fatalf("validateDelegationLifecycle rejected valid controls: %v", err)
+	}
+}
+
+func TestEngineDelegationRetryReenqueuesUntilExhausted(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", Retry: 2},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// First failure: retry 1 is enqueued; the parent is not blocked.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobFailed, AgentResult{Decision: "failed", Summary: "api broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	retry1 := mustJob(t, store, "parent-job/delegation/api/retry/1")
+	if retry1.State != string(JobQueued) || retry1.DelegationID != "api" {
+		t.Fatalf("retry/1 = %+v", retry1)
+	}
+	retry1Payload, err := unmarshalPayload(retry1.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(retry/1) returned error: %v", err)
+	}
+	if retry1Payload.RetryCount != 1 {
+		t.Fatalf("retry/1 RetryCount = %d, want 1", retry1Payload.RetryCount)
+	}
+	if state, _ := store.GetTask(ctx, "task-5"); state.State == string(TaskBlocked) {
+		t.Fatalf("parent must not be blocked while retries remain")
+	}
+
+	// Second failure: retry 2 is enqueued.
+	completeDelegationChild(t, store, "parent-job/delegation/api/retry/1", JobFailed, AgentResult{Decision: "failed", Summary: "still broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api/retry/1"); err != nil {
+		t.Fatalf("AdvanceJob(retry/1) returned error: %v", err)
+	}
+	retry2 := mustJob(t, store, "parent-job/delegation/api/retry/2")
+	retry2Payload, err := unmarshalPayload(retry2.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload(retry/2) returned error: %v", err)
+	}
+	if retry2Payload.RetryCount != 2 {
+		t.Fatalf("retry/2 RetryCount = %d, want 2", retry2Payload.RetryCount)
+	}
+
+	// Third failure: retry budget exhausted (RetryCount 2 == Retry 2). No retry/3
+	// is enqueued and the default block_parent policy blocks the parent.
+	completeDelegationChild(t, store, "parent-job/delegation/api/retry/2", JobFailed, AgentResult{Decision: "failed", Summary: "broke again"})
+	err = engine.AdvanceJob(ctx, "parent-job/delegation/api/retry/2")
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("AdvanceJob(retry/2) error = %v, want BlockedError after retries exhausted", err)
+	}
+	if jobExists(t, store, "parent-job/delegation/api/retry/3") {
+		t.Fatal("retry/3 must not be enqueued after the retry budget is exhausted")
+	}
+	if got := countJobEvents(t, store, "parent-job", "delegation_retry"); got != 2 {
+		t.Fatalf("delegation_retry event count = %d, want 2", got)
+	}
+	assertTaskState(t, store, "task-5", TaskBlocked)
+}
+
+func TestEngineDelegationFingerprintDedup(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", Fingerprint: "shared-fp"},
+				{ID: "dup", Agent: "ui", Action: "review", Prompt: "build api again", Fingerprint: "shared-fp"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	if !jobExists(t, store, "parent-job/delegation/api") {
+		t.Fatal("first delegation with the fingerprint must be enqueued")
+	}
+	if jobExists(t, store, "parent-job/delegation/dup") {
+		t.Fatal("second delegation with the same fingerprint must be deduped")
+	}
+	if got := countJobEvents(t, store, "parent-job", "delegation_deduped"); got != 1 {
+		t.Fatalf("delegation_deduped event count = %d, want 1", got)
+	}
+}
+
+func TestEngineDelegationFingerprintScopedPerParent(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	for _, parent := range []string{"parent-a", "parent-b"} {
+		insertCompletedJob(t, store, db.Job{ID: parent, Agent: "coord", Type: "ask"}, JobPayload{
+			Repo:      "jerryfane/gitmoot",
+			Branch:    "task-005",
+			TaskID:    "task-5",
+			TaskTitle: "Parent",
+			Sender:    "coord",
+			Result: &AgentResult{
+				Decision: "approved",
+				Summary:  "done",
+				Delegations: []Delegation{
+					{ID: "api", Agent: "api", Action: "review", Prompt: "build api", Fingerprint: "shared-fp"},
+				},
+			},
+		})
+		if err := engine.AdvanceJob(ctx, parent); err != nil {
+			t.Fatalf("AdvanceJob(%s) returned error: %v", parent, err)
+		}
+	}
+
+	// The same fingerprint under a different parent must NOT be deduped.
+	if !jobExists(t, store, "parent-a/delegation/api") {
+		t.Fatal("parent-a child must be enqueued")
+	}
+	if !jobExists(t, store, "parent-b/delegation/api") {
+		t.Fatal("parent-b child must be enqueued; fingerprint dedup is scoped per parent")
+	}
+	if delegationFingerprintKey("parent-a", "shared-fp") == delegationFingerprintKey("parent-b", "shared-fp") {
+		t.Fatal("fingerprint key must differ per parent")
+	}
+}
+
+// TestEngineDelegationDedupedResolvesContinuationAndDependent pins the critical
+// liveness fix: a fingerprint-deduped delegation has no child of its own, yet it
+// must resolve against its winning sibling so the coordinator continuation is
+// enqueued and a dependent of the deduped node still runs once the winner
+// succeeds. Before the fix the deduped node was treated as forever-active and the
+// continuation never fired.
+func TestEngineDelegationDedupedResolvesContinuationAndDependent(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "synth", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", Fingerprint: "shared-fp"},
+				{ID: "dup", Agent: "ui", Action: "review", Prompt: "build api again", Fingerprint: "shared-fp"},
+				{ID: "synth", Agent: "synth", Action: "review", Prompt: "synthesize", Deps: []string{"dup"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+	// api wins the fingerprint; dup is deduped (no child) and synth is gated.
+	if !jobExists(t, store, "parent-job/delegation/api") {
+		t.Fatal("api child should be enqueued")
+	}
+	if jobExists(t, store, "parent-job/delegation/dup") {
+		t.Fatal("dup must be deduped and never get a child")
+	}
+	if jobExists(t, store, "parent-job/delegation/synth") {
+		t.Fatal("synth depends on the deduped dup and must wait for the winner")
+	}
+
+	// The winning sibling succeeds: the deduped dup resolves against it, so the
+	// dependent of the deduped node enqueues and the continuation fires.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobSucceeded, AgentResult{Decision: "approved", Summary: "api ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	if !jobExists(t, store, "parent-job/delegation/synth") {
+		t.Fatal("dependent of the deduped node must enqueue once the winner succeeds")
+	}
+	// synth has not finished, so the continuation is still gated on it.
+	if jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("continuation must wait for the dependent of the deduped node")
+	}
+
+	completeDelegationChild(t, store, "parent-job/delegation/synth", JobSucceeded, AgentResult{Decision: "approved", Summary: "synth ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/synth"); err != nil {
+		t.Fatalf("AdvanceJob(synth) returned error: %v", err)
+	}
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("continuation must be enqueued once the deduped node and its dependent resolve")
+	}
+}
+
+// TestEngineDelegationDeferredDedupResolvesContinuation covers the narrower
+// deferred-dedup ordering: two same-fingerprint delegations are BOTH deferred
+// behind different deps, so the loser is deduped lazily inside the same
+// advanceDelegations pass that clears its dep. Before re-reading events at the
+// recompute points, the just-deduped delegation was invisible to
+// allDelegationsResolved and the coordinator continuation stalled forever (no
+// child ever re-triggers the parent). This asserts it now resolves in that pass.
+func TestEngineDelegationDeferredDedupResolvesContinuation(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "g1", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "g2", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "a", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "b", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "g1", Agent: "g1", Action: "review", Prompt: "gate 1"},
+				{ID: "g2", Agent: "g2", Action: "review", Prompt: "gate 2"},
+				{ID: "a", Agent: "a", Action: "review", Prompt: "shared work", Deps: []string{"g1"}, Fingerprint: "shared-fp"},
+				{ID: "b", Agent: "b", Action: "review", Prompt: "shared work dup", Deps: []string{"g2"}, Fingerprint: "shared-fp"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent): %v", err)
+	}
+	if !jobExists(t, store, "parent-job/delegation/g1") || !jobExists(t, store, "parent-job/delegation/g2") {
+		t.Fatal("both dep-free gates should be enqueued")
+	}
+	if jobExists(t, store, "parent-job/delegation/a") || jobExists(t, store, "parent-job/delegation/b") {
+		t.Fatal("a and b are deferred behind their deps and must not enqueue yet")
+	}
+
+	// g1 succeeds first: a (the fingerprint winner) enqueues and succeeds.
+	completeDelegationChild(t, store, "parent-job/delegation/g1", JobSucceeded, AgentResult{Decision: "approved", Summary: "g1 ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/g1"); err != nil {
+		t.Fatalf("AdvanceJob(g1): %v", err)
+	}
+	if !jobExists(t, store, "parent-job/delegation/a") {
+		t.Fatal("a should enqueue once g1 succeeds")
+	}
+	completeDelegationChild(t, store, "parent-job/delegation/a", JobSucceeded, AgentResult{Decision: "approved", Summary: "a ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/a"); err != nil {
+		t.Fatalf("AdvanceJob(a): %v", err)
+	}
+
+	// g2 succeeds LAST: b's dep clears and b is deduped against a in this same
+	// pass. The continuation must still fire.
+	completeDelegationChild(t, store, "parent-job/delegation/g2", JobSucceeded, AgentResult{Decision: "approved", Summary: "g2 ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/g2"); err != nil {
+		t.Fatalf("AdvanceJob(g2): %v", err)
+	}
+	if jobExists(t, store, "parent-job/delegation/b") {
+		t.Fatal("b shares a's fingerprint and must be deduped (no child)")
+	}
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("continuation must enqueue in the same pass that deferred-dedups b against its winner")
+	}
+}
+
+// TestEngineDelegationDepthCapStopsDispatch covers the runaway-recursion safety
+// net surfaced by the live E2E smoke: a coordinator whose continuation
+// re-delegates (e.g. a static shell agent) would otherwise spawn jobs forever
+// because the continuation reused the parent's depth. At/over MaxDelegationDepth
+// dispatch is refused with a delegation_depth_exceeded event; just under it,
+// dispatch still proceeds.
+func TestEngineDelegationDepthCapStopsDispatch(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	result := func() *AgentResult {
+		return &AgentResult{
+			Decision:    "approved",
+			Summary:     "delegating",
+			Delegations: []Delegation{{ID: "w1", Agent: "w", Action: "ask", Prompt: "do work"}},
+		}
+	}
+
+	// At the cap: dispatch is refused and a delegation_depth_exceeded event fires.
+	insertCompletedJob(t, store, db.Job{ID: "deep-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
+		DelegationDepth: MaxDelegationDepth, Result: result(),
+	})
+	if err := engine.AdvanceJob(ctx, "deep-job"); err != nil {
+		t.Fatalf("AdvanceJob(deep): %v", err)
+	}
+	if jobExists(t, store, "deep-job/delegation/w1") {
+		t.Fatal("delegation must NOT be dispatched at the depth cap")
+	}
+	events, err := store.ListJobEvents(ctx, "deep-job")
+	if err != nil {
+		t.Fatalf("ListJobEvents: %v", err)
+	}
+	capped := false
+	for _, ev := range events {
+		if ev.Kind == "delegation_depth_exceeded" {
+			capped = true
+		}
+	}
+	if !capped {
+		t.Fatal("expected a delegation_depth_exceeded event at the cap")
+	}
+
+	// Just under the cap: dispatch still proceeds.
+	insertCompletedJob(t, store, db.Job{ID: "shallow-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
+		DelegationDepth: MaxDelegationDepth - 1, Result: result(),
+	})
+	if err := engine.AdvanceJob(ctx, "shallow-job"); err != nil {
+		t.Fatalf("AdvanceJob(shallow): %v", err)
+	}
+	if !jobExists(t, store, "shallow-job/delegation/w1") {
+		t.Fatal("delegation just under the depth cap must still dispatch")
+	}
+}
+
+// TestEngineDelegationEscalateThenBlockParentFoldsIntoContinuation pins the
+// contradictory-state fix: once an escalate failure has enqueued the
+// continuation, a later block_parent sibling failure must NOT also block the
+// shared parent task; the block folds into the already-enqueued continuation.
+func TestEngineDelegationEscalateThenBlockParentFoldsIntoContinuation(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", FailurePolicy: "escalate"},
+				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui", FailurePolicy: "block_parent"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// api fails under escalate: the continuation is enqueued immediately.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobFailed, AgentResult{Decision: "failed", Summary: "api broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("escalate must enqueue the continuation immediately")
+	}
+
+	// ui then fails under block_parent: because a continuation is already in
+	// flight, the parent task must NOT be blocked (that would contradict the
+	// continuation). AdvanceJob must not return a BlockedError.
+	completeDelegationChild(t, store, "parent-job/delegation/ui", JobFailed, AgentResult{Decision: "failed", Summary: "ui broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/ui"); err != nil {
+		var blocked BlockedError
+		if errors.As(err, &blocked) {
+			t.Fatalf("block_parent must not block the parent after a continuation was enqueued: %v", err)
+		}
+		t.Fatalf("AdvanceJob(ui) returned error: %v", err)
+	}
+	if state, _ := store.GetTask(ctx, "task-5"); state.State == string(TaskBlocked) {
+		t.Fatal("parent task must not be blocked once a continuation has been enqueued")
+	}
+}
+
+// TestEngineDelegationTransitiveChainGatesAndContinues exercises a 3-level
+// transitive dependency chain a -> b(deps a) -> c(deps b): b gates until a
+// succeeds, c gates until b succeeds, and the continuation fires only after c
+// terminates. This is the most fragile gating path (a deferred dependent that is
+// itself the dep of another deferred dependent) and was previously untested.
+func TestEngineDelegationTransitiveChainGatesAndContinues(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "wa", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "wb", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "wc", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "a", Agent: "wa", Action: "review", Prompt: "step a"},
+				{ID: "b", Agent: "wb", Action: "review", Prompt: "step b", Deps: []string{"a"}},
+				{ID: "c", Agent: "wc", Action: "review", Prompt: "step c", Deps: []string{"b"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+	// Only a is enqueued; b and c are both gated.
+	if !jobExists(t, store, "parent-job/delegation/a") {
+		t.Fatal("a should be enqueued immediately")
+	}
+	if jobExists(t, store, "parent-job/delegation/b") {
+		t.Fatal("b must gate until a succeeds")
+	}
+	if jobExists(t, store, "parent-job/delegation/c") {
+		t.Fatal("c must gate until b succeeds")
+	}
+
+	// a succeeds: b enqueues, c is still gated on b.
+	completeDelegationChild(t, store, "parent-job/delegation/a", JobSucceeded, AgentResult{Decision: "approved", Summary: "a ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/a"); err != nil {
+		t.Fatalf("AdvanceJob(a) returned error: %v", err)
+	}
+	if !jobExists(t, store, "parent-job/delegation/b") {
+		t.Fatal("b must enqueue once a succeeds")
+	}
+	if jobExists(t, store, "parent-job/delegation/c") {
+		t.Fatal("c must still gate until b succeeds")
+	}
+	if jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("continuation must not fire while the chain is in flight")
+	}
+
+	// b succeeds: c enqueues, continuation still gated on c.
+	completeDelegationChild(t, store, "parent-job/delegation/b", JobSucceeded, AgentResult{Decision: "approved", Summary: "b ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/b"); err != nil {
+		t.Fatalf("AdvanceJob(b) returned error: %v", err)
+	}
+	if !jobExists(t, store, "parent-job/delegation/c") {
+		t.Fatal("c must enqueue once b succeeds")
+	}
+	if jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("continuation must not fire until c terminates")
+	}
+
+	// c terminates: continuation fires.
+	completeDelegationChild(t, store, "parent-job/delegation/c", JobSucceeded, AgentResult{Decision: "approved", Summary: "c ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/c"); err != nil {
+		t.Fatalf("AdvanceJob(c) returned error: %v", err)
+	}
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("continuation must fire after the full chain terminates")
+	}
+}
+
+// TestEngineAdvanceDelegationsConcurrentContinuationExactlyOnce drives the real
+// concurrency the daemon exposes with --workers>1: both leaf children finish and
+// AdvanceJob is called for each in parallel goroutines. Exactly one continuation
+// job must exist and neither AdvanceJob may error. Run with -race.
+func TestEngineAdvanceDelegationsConcurrentContinuationExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api"},
+				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// Both leaf children finish before either is advanced, so both parallel
+	// AdvanceJob passes observe an all-terminal batch and race to enqueue.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobSucceeded, AgentResult{Decision: "approved", Summary: "api ok"})
+	completeDelegationChild(t, store, "parent-job/delegation/ui", JobSucceeded, AgentResult{Decision: "approved", Summary: "ui ok"})
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, childID := range []string{"parent-job/delegation/api", "parent-job/delegation/ui"} {
+		wg.Add(1)
+		go func(idx int, id string) {
+			defer wg.Done()
+			errs[idx] = engine.AdvanceJob(ctx, id)
+		}(i, childID)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent AdvanceJob[%d] returned error: %v", i, err)
+		}
+	}
+
+	continuationCount := 0
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListJobs returned error: %v", err)
+	}
+	for _, job := range jobs {
+		if job.ID == delegationContinuationID("parent-job") {
+			continuationCount++
+		}
+	}
+	if continuationCount != 1 {
+		t.Fatalf("continuation job count = %d, want exactly 1", continuationCount)
+	}
+}
+
+func TestEngineDelegationSynthesisRuleVoteBlocksOnFailure(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", FailurePolicy: "continue", SynthesisRule: "vote"},
+				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui", FailurePolicy: "continue", SynthesisRule: "vote"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// api succeeds, ui fails: the vote is not unanimous, so the continuation is
+	// gated and the parent task is blocked instead of being enqueued.
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobSucceeded, AgentResult{Decision: "approved", Summary: "api ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	completeDelegationChild(t, store, "parent-job/delegation/ui", JobFailed, AgentResult{Decision: "failed", Summary: "ui broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/ui"); err != nil {
+		var blocked BlockedError
+		if !errors.As(err, &blocked) {
+			t.Fatalf("AdvanceJob(ui) error = %v, want BlockedError from vote", err)
+		}
+	}
+	if jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("vote failure must not enqueue the continuation")
+	}
+	assertTaskState(t, store, "task-5", TaskBlocked)
+}
+
+func TestEngineDelegationSynthesisRuleVotePassesWhenAllApproved(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", SynthesisRule: "vote"},
+				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui", SynthesisRule: "vote"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+	completeDelegationChild(t, store, "parent-job/delegation/api", JobSucceeded, AgentResult{Decision: "approved", Summary: "api ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/api"); err != nil {
+		t.Fatalf("AdvanceJob(api) returned error: %v", err)
+	}
+	completeDelegationChild(t, store, "parent-job/delegation/ui", JobSucceeded, AgentResult{Decision: "approved", Summary: "ui ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/ui"); err != nil {
+		t.Fatalf("AdvanceJob(ui) returned error: %v", err)
+	}
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("a unanimous vote must enqueue the continuation")
+	}
+	if state, _ := store.GetTask(ctx, "task-5"); state.State == string(TaskBlocked) {
+		t.Fatal("a unanimous vote must not block the parent")
+	}
 }
 
 type fakeImplementationFinalizer struct {
