@@ -2445,6 +2445,78 @@ func TestEngineDelegationDedupedResolvesContinuationAndDependent(t *testing.T) {
 	}
 }
 
+// TestEngineDelegationDeferredDedupResolvesContinuation covers the narrower
+// deferred-dedup ordering: two same-fingerprint delegations are BOTH deferred
+// behind different deps, so the loser is deduped lazily inside the same
+// advanceDelegations pass that clears its dep. Before re-reading events at the
+// recompute points, the just-deduped delegation was invisible to
+// allDelegationsResolved and the coordinator continuation stalled forever (no
+// child ever re-triggers the parent). This asserts it now resolves in that pass.
+func TestEngineDelegationDeferredDedupResolvesContinuation(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "g1", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "g2", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "a", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "b", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "g1", Agent: "g1", Action: "review", Prompt: "gate 1"},
+				{ID: "g2", Agent: "g2", Action: "review", Prompt: "gate 2"},
+				{ID: "a", Agent: "a", Action: "review", Prompt: "shared work", Deps: []string{"g1"}, Fingerprint: "shared-fp"},
+				{ID: "b", Agent: "b", Action: "review", Prompt: "shared work dup", Deps: []string{"g2"}, Fingerprint: "shared-fp"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent): %v", err)
+	}
+	if !jobExists(t, store, "parent-job/delegation/g1") || !jobExists(t, store, "parent-job/delegation/g2") {
+		t.Fatal("both dep-free gates should be enqueued")
+	}
+	if jobExists(t, store, "parent-job/delegation/a") || jobExists(t, store, "parent-job/delegation/b") {
+		t.Fatal("a and b are deferred behind their deps and must not enqueue yet")
+	}
+
+	// g1 succeeds first: a (the fingerprint winner) enqueues and succeeds.
+	completeDelegationChild(t, store, "parent-job/delegation/g1", JobSucceeded, AgentResult{Decision: "approved", Summary: "g1 ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/g1"); err != nil {
+		t.Fatalf("AdvanceJob(g1): %v", err)
+	}
+	if !jobExists(t, store, "parent-job/delegation/a") {
+		t.Fatal("a should enqueue once g1 succeeds")
+	}
+	completeDelegationChild(t, store, "parent-job/delegation/a", JobSucceeded, AgentResult{Decision: "approved", Summary: "a ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/a"); err != nil {
+		t.Fatalf("AdvanceJob(a): %v", err)
+	}
+
+	// g2 succeeds LAST: b's dep clears and b is deduped against a in this same
+	// pass. The continuation must still fire.
+	completeDelegationChild(t, store, "parent-job/delegation/g2", JobSucceeded, AgentResult{Decision: "approved", Summary: "g2 ok"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/g2"); err != nil {
+		t.Fatalf("AdvanceJob(g2): %v", err)
+	}
+	if jobExists(t, store, "parent-job/delegation/b") {
+		t.Fatal("b shares a's fingerprint and must be deduped (no child)")
+	}
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("continuation must enqueue in the same pass that deferred-dedups b against its winner")
+	}
+}
+
 // TestEngineDelegationEscalateThenBlockParentFoldsIntoContinuation pins the
 // contradictory-state fix: once an escalate failure has enqueued the
 // continuation, a later block_parent sibling failure must NOT also block the

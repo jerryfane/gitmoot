@@ -113,6 +113,12 @@ func validateAgentResult(result AgentResult) error {
 		if strings.TrimSpace(d.ID) == "" {
 			return errors.New("delegation id is required")
 		}
+		// The engine keys child jobs, the dedup map, and the DAG on the raw id
+		// while deps are matched trimmed; a surrounding-whitespace id would make
+		// those disagree and silently drop the delegation. Require them equal.
+		if d.ID != strings.TrimSpace(d.ID) {
+			return fmt.Errorf("delegation id %q must not have leading or trailing whitespace", d.ID)
+		}
 		if strings.TrimSpace(d.Agent) == "" {
 			return errors.New("delegation agent is required")
 		}

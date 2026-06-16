@@ -740,6 +740,13 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 		if err != nil {
 			return err
 		}
+		// Re-read events too: a delegation deduped during this pass emits a new
+		// delegation_deduped event, and dedupedDelegationWinners derives the
+		// deduped set from events. Reusing the stale snapshot would hide it.
+		parentEvents, err = e.Store.ListJobEvents(ctx, parentJob.ID)
+		if err != nil {
+			return err
+		}
 		dedupWinners = dedupedDelegationWinners(parentResult.Delegations, children, parentEvents)
 	}
 
@@ -796,9 +803,16 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 			if err := e.enqueueDelegation(ctx, parentJob, parentPayload, d, artifactDir, ref); err != nil {
 				return err
 			}
-			// Re-read children so a second satisfied dependent in the same pass
-			// is not mistaken for still-pending.
+			// Re-read children AND events so a second satisfied dependent in the
+			// same pass is not mistaken for still-pending, and a delegation
+			// deduped by the enqueueDelegation call above (which emits a fresh
+			// delegation_deduped event) is observed by the final
+			// allDelegationsResolved check below rather than stalling forever.
 			children, err = e.childDelegationJobs(ctx, parentJob.ID)
+			if err != nil {
+				return err
+			}
+			parentEvents, err = e.Store.ListJobEvents(ctx, parentJob.ID)
 			if err != nil {
 				return err
 			}
