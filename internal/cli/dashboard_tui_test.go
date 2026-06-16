@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/jerryfane/gitmoot/internal/cli/tui"
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/workflow"
@@ -87,6 +89,106 @@ func TestBuildDelegationTreeActionFallsBackToType(t *testing.T) {
 	}
 	if uiSatisfied {
 		t.Fatalf("ui deps should be pending while api is still running")
+	}
+}
+
+func TestBuildDelegationTreeCollapsesRetriedDelegation(t *testing.T) {
+	// A Phase 2 retry creates an additional child row sharing the DelegationID
+	// (only the job ID and RetryCount differ). The tree must show ONE node per
+	// delegation -- the latest attempt -- not a duplicate row per attempt.
+	parent := workflow.JobPayload{
+		Result: &workflow.AgentResult{
+			Delegations: []workflow.Delegation{
+				{ID: "api", Agent: "coder", Action: "implement api"},
+				{ID: "ui", Agent: "coder", Action: "implement ui", Deps: []string{"api"}},
+			},
+		},
+	}
+	mustPayload := func(p workflow.JobPayload) string {
+		t.Helper()
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		return string(raw)
+	}
+	// api's first attempt failed; the retry (RetryCount=1) succeeded.
+	apiAttempt0 := workflow.JobPayload{ParentJobID: "p", DelegationID: "api", RetryCount: 0}
+	apiAttempt1 := workflow.JobPayload{ParentJobID: "p", DelegationID: "api", RetryCount: 1}
+	children := []db.Job{
+		{ID: "p/delegation/api", Agent: "coder", Type: "implement", State: "failed", ParentJobID: "p", DelegationID: "api", Payload: mustPayload(apiAttempt0)},
+		{ID: "p/delegation/api/retry/1", Agent: "coder", Type: "implement", State: "succeeded", ParentJobID: "p", DelegationID: "api", Payload: mustPayload(apiAttempt1)},
+		{ID: "p/delegation/ui", Agent: "coder", Type: "implement", State: "running", ParentJobID: "p", DelegationID: "ui", Payload: mustPayload(workflow.JobPayload{ParentJobID: "p", DelegationID: "ui"})},
+	}
+
+	got, _, _ := buildDelegationTree(parent, children)
+
+	byDelegation := map[string]tui.JobChild{}
+	for _, c := range got {
+		if _, dup := byDelegation[c.DelegationID]; dup {
+			t.Fatalf("delegation %q rendered as a duplicate row: %+v", c.DelegationID, got)
+		}
+		byDelegation[c.DelegationID] = c
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d delegation rows, want 2 (api collapsed, ui): %+v", len(got), got)
+	}
+	api := byDelegation["api"]
+	// Latest attempt (the retry) wins, so the node shows succeeded, not the
+	// stale failed first attempt.
+	if api.State != "succeeded" || api.ID != "p/delegation/api/retry/1" {
+		t.Fatalf("api node = (id=%q state=%q), want latest retry (p/delegation/api/retry/1, succeeded)", api.ID, api.State)
+	}
+	// ui depends on api; api's LATEST attempt succeeded, so deps are satisfied
+	// (computed from the latest attempt, not the stale failed first attempt).
+	ui := byDelegation["ui"]
+	if !ui.DepsSatisfied {
+		t.Fatalf("ui deps should be satisfied: api's latest attempt succeeded, got %+v", ui)
+	}
+}
+
+func TestBuildDelegationTreeRetryFailureLeavesDepsPending(t *testing.T) {
+	// The inverse: api's first attempt "succeeded" but a later retry attempt is
+	// still running. DepsSatisfied must reflect the LATEST attempt (running ->
+	// pending), not the stale first attempt, regardless of row ordering.
+	parent := workflow.JobPayload{
+		Result: &workflow.AgentResult{
+			Delegations: []workflow.Delegation{
+				{ID: "api", Agent: "coder", Action: "implement api"},
+				{ID: "ui", Agent: "coder", Action: "implement ui", Deps: []string{"api"}},
+			},
+		},
+	}
+	mustPayload := func(p workflow.JobPayload) string {
+		t.Helper()
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		return string(raw)
+	}
+	children := []db.Job{
+		{ID: "p/delegation/api", Agent: "coder", Type: "implement", State: "succeeded", ParentJobID: "p", DelegationID: "api", Payload: mustPayload(workflow.JobPayload{ParentJobID: "p", DelegationID: "api", RetryCount: 0})},
+		{ID: "p/delegation/api/retry/1", Agent: "coder", Type: "implement", State: "running", ParentJobID: "p", DelegationID: "api", Payload: mustPayload(workflow.JobPayload{ParentJobID: "p", DelegationID: "api", RetryCount: 1})},
+		{ID: "p/delegation/ui", Agent: "coder", Type: "implement", State: "queued", ParentJobID: "p", DelegationID: "ui", Payload: mustPayload(workflow.JobPayload{ParentJobID: "p", DelegationID: "ui"})},
+	}
+
+	got, _, _ := buildDelegationTree(parent, children)
+	var ui tui.JobChild
+	apiCount := 0
+	for _, c := range got {
+		switch c.DelegationID {
+		case "api":
+			apiCount++
+		case "ui":
+			ui = c
+		}
+	}
+	if apiCount != 1 {
+		t.Fatalf("api should collapse to one node, got %d", apiCount)
+	}
+	if ui.DepsSatisfied {
+		t.Fatalf("ui deps should be PENDING: api's latest attempt is still running, got %+v", ui)
 	}
 }
 

@@ -2926,10 +2926,45 @@ func (w jobWorker) handleRunJobError(ctx context.Context, jobID string, cause er
 		}
 		return nil
 	}
+	if payloadErr == nil && strings.TrimSpace(payload.ParentJobID) != "" {
+		// A delegation child killed by its per-delegation timeout (or any runtime
+		// failure that yields no parseable gitmoot_result) lands here still
+		// JobRunning, or JobFailed/JobBlocked WITHOUT a stored result: Mailbox.Run
+		// errored, so RunJob returned before AdvanceJob and the parent's
+		// advanceDelegations never ran. Finalize it as a terminal failed child and
+		// drive the parent DAG so the delegation's retry/failure_policy/continuation
+		// actually fire instead of the child stranding until the 30m stale-running
+		// recovery blindly re-queues it.
+		finalized, finalizeErr := w.finalizeTimedOutDelegationChild(ctx, latest, cause)
+		if finalizeErr != nil {
+			var blocked workflow.BlockedError
+			if errors.As(finalizeErr, &blocked) {
+				// block_parent failure_policy blocked the shared parent task; the
+				// child is finalized and the DAG advanced, so this is the expected
+				// terminal outcome rather than an error to propagate.
+				return nil
+			}
+			return finalizeErr
+		}
+		if finalized {
+			return nil
+		}
+	}
 	if latest.State == string(workflow.JobFailed) || latest.State == string(workflow.JobBlocked) {
 		return nil
 	}
 	return cause
+}
+
+// finalizeTimedOutDelegationChild bridges the daemon run-error path into the
+// engine's delegation DAG: it converts a timed-out/runtime-failed delegation
+// child with no stored result into a terminal failed child and advances the
+// parent. It builds a checkout-less engine because only DB/DAG operations run
+// here (no git/worktree work). Returns whether the child was finalized.
+func (w jobWorker) finalizeTimedOutDelegationChild(ctx context.Context, job db.Job, cause error) (bool, error) {
+	reason := fmt.Sprintf("delegation child %s ended without a result: %v", job.ID, cause)
+	engine := w.WorkflowFactory("")
+	return engine.FinalizeTimedOutDelegationChild(ctx, job.ID, reason)
 }
 
 func (w jobWorker) recordPostDeliveryWorkflowError(ctx context.Context, job db.Job, cause error) error {

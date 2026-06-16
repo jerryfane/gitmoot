@@ -4132,3 +4132,334 @@ func TestEffectiveJobTimeout(t *testing.T) {
 		t.Fatalf("effectiveJobTimeout(unmanaged, payload) = %v, want 45s", got)
 	}
 }
+
+// seedDelegationCoordinator inserts a completed coordinator parent job whose
+// result carries the given delegations and advances it so the engine dispatches
+// the top-level delegation children. It returns the worker wired to the same
+// store. The coordinator runs an "ask" job; delegations use "review" so dispatch
+// stays on the shared-checkout path (no per-delegation worktree allocation).
+func seedDelegationCoordinator(t *testing.T, store *db.Store, parentID string, delegations []workflow.Delegation) jobWorker {
+	t.Helper()
+	ctx := context.Background()
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "coord", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
+	seenAgents := map[string]bool{"coord": true}
+	for _, d := range delegations {
+		if seenAgents[d.Agent] {
+			continue
+		}
+		seenAgents[d.Agent] = true
+		seedDaemonWorkerAgent(t, store, d.Agent, runtime.ShellRuntime, "unused", []string{d.Action}, "owner/repo")
+	}
+
+	if err := store.CreateJob(ctx, db.Job{ID: parentID, Agent: "coord", Type: "ask", State: string(workflow.JobRunning)}); err != nil {
+		t.Fatalf("CreateJob(parent) returned error: %v", err)
+	}
+	payload := workflow.JobPayload{
+		Repo:      "owner/repo",
+		Branch:    "task-1",
+		TaskID:    "task-1",
+		TaskTitle: "Coordinator",
+		Sender:    "coord",
+		Result: &workflow.AgentResult{
+			Decision:    "approved",
+			Summary:     "delegated",
+			Delegations: delegations,
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal parent payload returned error: %v", err)
+	}
+	if err := store.UpdateJobPayload(ctx, parentID, string(encoded)); err != nil {
+		t.Fatalf("UpdateJobPayload(parent) returned error: %v", err)
+	}
+	if err := store.UpdateJobState(ctx, parentID, string(workflow.JobSucceeded)); err != nil {
+		t.Fatalf("UpdateJobState(parent) returned error: %v", err)
+	}
+
+	worker := defaultJobWorker(store, io.Discard)
+	worker.WorkflowFactory = func(checkout string) workflow.Engine {
+		return daemonWorkflowEngine(store, github.NoopClient{}, checkout, "")
+	}
+	engine := worker.WorkflowFactory("")
+	if err := engine.AdvanceJob(ctx, parentID); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+	return worker
+}
+
+// markDelegationChildTimedOut simulates a per-delegation timeout kill: the child
+// is left JobRunning with no stored result, exactly as Mailbox.Run leaves it when
+// the run context deadline fires mid-delivery (the cancelled context aborts its
+// own fail write).
+func markDelegationChildTimedOut(t *testing.T, store *db.Store, childID string) {
+	t.Helper()
+	if err := store.UpdateJobState(context.Background(), childID, string(workflow.JobRunning)); err != nil {
+		t.Fatalf("UpdateJobState(%s, running) returned error: %v", childID, err)
+	}
+}
+
+func TestHandleRunJobErrorTimedOutDelegationChildTriggersRetry(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	worker := seedDelegationCoordinator(t, store, "parent-job", []workflow.Delegation{
+		{ID: "api", Agent: "api", Action: "review", Prompt: "build api", Retry: 1},
+	})
+
+	childID := "parent-job/delegation/api"
+	markDelegationChildTimedOut(t, store, childID)
+	child, err := store.GetJob(ctx, childID)
+	if err != nil {
+		t.Fatalf("GetJob(child) returned error: %v", err)
+	}
+
+	// The daemon's run-error path must turn the timeout kill into a terminal
+	// failed child AND drive the parent DAG so the delegation's retry fires.
+	if err := worker.handleRunJobError(ctx, childID, context.DeadlineExceeded); err != nil {
+		t.Fatalf("handleRunJobError returned error: %v", err)
+	}
+
+	// The timed-out child is now terminal failed (not stranded in running).
+	finalized, err := store.GetJob(ctx, childID)
+	if err != nil {
+		t.Fatalf("GetJob(child after) returned error: %v", err)
+	}
+	if finalized.State != string(workflow.JobFailed) {
+		t.Fatalf("timed-out child state = %q, want failed", finalized.State)
+	}
+
+	// Retry budget (Retry:1) is consumed by the timeout: a retry job is enqueued.
+	retry, err := store.GetJob(ctx, "parent-job/delegation/api/retry/1")
+	if err != nil {
+		t.Fatalf("retry job not enqueued after timeout: %v", err)
+	}
+	if retry.State != string(workflow.JobQueued) || retry.DelegationID != "api" {
+		t.Fatalf("retry job = %+v, want queued review of delegation api", retry)
+	}
+	events, err := store.ListJobEvents(ctx, "parent-job")
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	if !daemonWorkerHasEvent(events, "delegation_retry") {
+		t.Fatalf("parent events = %+v, want delegation_retry", events)
+	}
+	_ = child
+}
+
+func TestHandleRunJobErrorTimedOutDelegationChildBlocksParentWhenNoRetry(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	worker := seedDelegationCoordinator(t, store, "parent-job", []workflow.Delegation{
+		// Retry:0 + default block_parent failure_policy: a timeout must block the
+		// shared parent task, not strand the child.
+		{ID: "api", Agent: "api", Action: "review", Prompt: "build api"},
+	})
+
+	childID := "parent-job/delegation/api"
+	markDelegationChildTimedOut(t, store, childID)
+
+	// handleRunJobError swallows the BlockedError (the child is finalized and the
+	// DAG advanced), returning nil for a clean terminal outcome.
+	if err := worker.handleRunJobError(ctx, childID, context.DeadlineExceeded); err != nil {
+		t.Fatalf("handleRunJobError returned error: %v", err)
+	}
+
+	finalized, err := store.GetJob(ctx, childID)
+	if err != nil {
+		t.Fatalf("GetJob(child) returned error: %v", err)
+	}
+	if finalized.State != string(workflow.JobFailed) {
+		t.Fatalf("timed-out child state = %q, want failed", finalized.State)
+	}
+	// No retry: the failure_policy (block_parent) fired on the shared task.
+	if _, err := store.GetJob(ctx, "parent-job/delegation/api/retry/1"); err == nil {
+		t.Fatal("no retry job should be enqueued when Retry=0")
+	}
+	task, err := store.GetTask(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("GetTask returned error: %v", err)
+	}
+	if task.State != string(workflow.TaskBlocked) {
+		t.Fatalf("task state = %q, want blocked by block_parent failure_policy", task.State)
+	}
+}
+
+func TestHandleRunJobErrorTimedOutDelegationChildEnqueuesContinuationOnContinuePolicy(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	worker := seedDelegationCoordinator(t, store, "parent-job", []workflow.Delegation{
+		// continue failure_policy: a timed-out child must resolve the delegation so
+		// the coordinator continuation is enqueued once every sibling is terminal.
+		{ID: "api", Agent: "api", Action: "review", Prompt: "build api", FailurePolicy: "continue"},
+	})
+
+	childID := "parent-job/delegation/api"
+	markDelegationChildTimedOut(t, store, childID)
+
+	if err := worker.handleRunJobError(ctx, childID, context.DeadlineExceeded); err != nil {
+		t.Fatalf("handleRunJobError returned error: %v", err)
+	}
+
+	// The coordinator continuation job is enqueued (the timeout failure resolved
+	// the only delegation under the continue policy).
+	if _, err := store.GetJob(ctx, "parent-job/continuation"); err != nil {
+		t.Fatalf("continuation job not enqueued after timed-out child under continue policy: %v", err)
+	}
+	events, err := store.ListJobEvents(ctx, "parent-job")
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	if !daemonWorkerHasEvent(events, "delegation_continuation_enqueued") {
+		t.Fatalf("parent events = %+v, want delegation_continuation_enqueued", events)
+	}
+}
+
+func TestTaskWorktreeCheckoutPrefersDelegationPayloadWorktree(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	worker := defaultJobWorker(store, io.Discard)
+
+	// The task table records a DIFFERENT worktree; a delegated implement child must
+	// run in its own payload.WorktreePath, never the shared task checkout.
+	taskCheckout := t.TempDir()
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-1", RepoFullName: "owner/repo", Branch: "task-1", WorktreePath: taskCheckout}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	delegationCheckout := t.TempDir()
+	payload := workflow.JobPayload{
+		Repo:         "owner/repo",
+		Branch:       "gitmoot-delegation-api",
+		TaskID:       "task-1",
+		DelegationID: "api",
+		ParentJobID:  "parent-job",
+		WorktreePath: delegationCheckout,
+	}
+
+	checkout, ok, err := worker.taskWorktreeCheckout(ctx, payload)
+	if err != nil {
+		t.Fatalf("taskWorktreeCheckout returned error: %v", err)
+	}
+	wantCheckout, err := normalizeTaskWorktreePath(delegationCheckout)
+	if err != nil {
+		t.Fatalf("normalizeTaskWorktreePath returned error: %v", err)
+	}
+	if !ok || checkout != wantCheckout {
+		t.Fatalf("taskWorktreeCheckout = (%q,%v), want (%q,true) from payload worktree, not task table", checkout, ok, wantCheckout)
+	}
+	if checkout == taskCheckout {
+		t.Fatal("checkout resolved to the shared task worktree instead of the delegation worktree")
+	}
+
+	// queuedJobTaskWorktreePath keys the scheduler off the same delegation path so
+	// siblings sharing a task id get distinct checkout keys and run in parallel.
+	path, keyed := queuedJobTaskWorktreePath(ctx, store, payload)
+	if !keyed || path != wantCheckout {
+		t.Fatalf("queuedJobTaskWorktreePath = (%q,%v), want (%q,true) from payload worktree", path, keyed, wantCheckout)
+	}
+}
+
+func TestRunQueuedJobsFansOutDelegationsAndEnqueuesContinuation(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "coord", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
+	seedDaemonWorkerAgent(t, store, "api", runtime.ShellRuntime, "unused", []string{"review"}, "owner/repo")
+	seedDaemonWorkerAgent(t, store, "ui", runtime.ShellRuntime, "unused", []string{"review"}, "owner/repo")
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{
+		ID:     "coordinator",
+		Agent:  "coord",
+		Action: "ask",
+		Repo:   "owner/repo",
+		Branch: "task-1",
+		TaskID: "task-1",
+		Sender: "coord",
+	})
+
+	// Acceptance criterion #1: a coordinator returning delegations fans out one
+	// child per delegation. Each subsequent reviewer approves, and the last sibling
+	// to finish triggers the auto-created continuation (acceptance criterion #4).
+	outputs := map[string]string{
+		"coordinator": `{"gitmoot_result":{"decision":"approved","summary":"split the work","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[{"id":"api","agent":"api","action":"review","prompt":"review the api"},{"id":"ui","agent":"ui","action":"review","prompt":"review the ui"}]}}`,
+	}
+	defaultOutput := `{"gitmoot_result":{"decision":"approved","summary":"looks good","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`
+	adapter := &cliWorkerDelegationAdapter{outputs: outputs, defaultOutput: defaultOutput}
+
+	worker := defaultJobWorker(store, io.Discard)
+	worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		return t.TempDir(), nil
+	}
+	worker.AdapterFactory = func(runtime.Agent, string) (workflow.DeliveryAdapter, error) {
+		return adapter, nil
+	}
+	worker.WorkflowFactory = func(checkout string) workflow.Engine {
+		return daemonWorkflowEngine(store, github.NoopClient{}, checkout, "")
+	}
+
+	// Drain the DAG: coordinator -> two reviewer children -> continuation.
+	for range 5 {
+		if err := runQueuedJobs(ctx, worker, 2); err != nil {
+			t.Fatalf("runQueuedJobs returned error: %v", err)
+		}
+	}
+
+	// Both delegation children were fanned out and succeeded.
+	for _, id := range []string{"coordinator/delegation/api", "coordinator/delegation/ui"} {
+		child, err := store.GetJob(ctx, id)
+		if err != nil {
+			t.Fatalf("delegation child %s not created: %v", id, err)
+		}
+		if child.State != string(workflow.JobSucceeded) {
+			t.Fatalf("child %s state = %q, want succeeded", id, child.State)
+		}
+		if child.ParentJobID != "coordinator" {
+			t.Fatalf("child %s parent = %q, want coordinator", id, child.ParentJobID)
+		}
+	}
+
+	// The continuation job was auto-created after the children finished.
+	cont, err := store.GetJob(ctx, "coordinator/continuation")
+	if err != nil {
+		t.Fatalf("continuation job not auto-created: %v", err)
+	}
+	if cont.ParentJobID != "coordinator" || strings.TrimSpace(cont.DelegationID) != "" {
+		t.Fatalf("continuation job = %+v, want parent=coordinator and empty delegation id", cont)
+	}
+	events, err := store.ListJobEvents(ctx, "coordinator")
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	if !daemonWorkerHasEvent(events, "delegation_continuation_enqueued") {
+		t.Fatalf("coordinator events = %+v, want delegation_continuation_enqueued", events)
+	}
+}
+
+// cliWorkerDelegationAdapter returns a per-job-id canned gitmoot_result, so a
+// fan-out test can give the coordinator a delegating result and each child a
+// plain approval.
+type cliWorkerDelegationAdapter struct {
+	mu            sync.Mutex
+	outputs       map[string]string
+	defaultOutput string
+	delivered     []string
+}
+
+func (a *cliWorkerDelegationAdapter) Name() string { return "fake-delegation" }
+
+func (a *cliWorkerDelegationAdapter) Validate(context.Context, runtime.Agent) error { return nil }
+
+func (a *cliWorkerDelegationAdapter) Deliver(_ context.Context, _ runtime.Agent, job runtime.Job) (runtime.Result, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.delivered = append(a.delivered, job.ID)
+	if out, ok := a.outputs[job.ID]; ok {
+		return runtime.Result{Raw: out}, nil
+	}
+	return runtime.Result{Raw: a.defaultOutput}, nil
+}
+
+func (a *cliWorkerDelegationAdapter) Health(context.Context, runtime.Agent) error { return nil }
+
+func (a *cliWorkerDelegationAdapter) Capabilities(context.Context) ([]string, error) {
+	return nil, nil
+}

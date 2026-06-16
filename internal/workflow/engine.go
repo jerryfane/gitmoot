@@ -221,6 +221,81 @@ func (e Engine) RunJob(ctx context.Context, jobID string, agent runtime.Agent, a
 	return result, nil
 }
 
+// FinalizeTimedOutDelegationChild turns a delegation child that was killed by its
+// per-delegation timeout (or any runtime failure that left it JobRunning with no
+// parseable gitmoot_result) into a terminal FAILED child carrying a synthetic
+// failed result, then runs AdvanceJob so the parent's advanceDelegations applies
+// the delegation's retry/failure_policy/continuation. Without this a timeout kill
+// strands the child in JobRunning forever (Mailbox.Run errored, so RunJob returned
+// before AdvanceJob), and only the blind 30m stale-running recovery would re-queue
+// it, bypassing delegation.Retry and failure_policy.
+//
+// It is a no-op (returns false) for a non-delegation job, a job that already left
+// JobRunning, or a job that already stored a result, so it is safe to call from
+// the daemon's run-error handler and idempotent under concurrent recovery. When
+// the synthetic failure blocks the parent task under block_parent, AdvanceJob
+// returns a BlockedError, which is propagated like the result-bearing path.
+func (e Engine) FinalizeTimedOutDelegationChild(ctx context.Context, jobID string, reason string) (bool, error) {
+	if err := e.validate(); err != nil {
+		return false, err
+	}
+	job, payload, err := e.jobPayload(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(payload.ParentJobID) == "" {
+		return false, nil
+	}
+	// Already has a result -> the normal RunJob/AdvanceJob path handled it; nothing
+	// to recover. A deadline can leave the child either still JobRunning (the
+	// cancelled context aborted Mailbox.Run's own fail write) or already
+	// JobFailed/JobBlocked but WITHOUT a stored result (so the parent's
+	// advanceDelegations never ran). Recover both, but never touch a succeeded or
+	// cancelled child.
+	if payload.Result != nil {
+		return false, nil
+	}
+	switch job.State {
+	case string(JobRunning), string(JobFailed), string(JobBlocked):
+	default:
+		return false, nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "delegation child timed out before returning a result"
+	}
+	payload.Result = &AgentResult{
+		Decision: "failed",
+		Summary:  reason,
+	}
+	mailbox := Mailbox{Store: e.Store}
+	if job.State == string(JobRunning) {
+		if err := mailbox.finishWithPayload(ctx, jobID, JobFailed, reason, payload); err != nil {
+			return false, err
+		}
+	} else {
+		// Already terminal-failed/blocked: only attach the synthetic result so
+		// AdvanceJob (which requires a non-nil Result) can drive the parent DAG.
+		if err := mailbox.savePayload(ctx, jobID, payload); err != nil {
+			return false, err
+		}
+	}
+	if err := e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   jobID,
+		Kind:    "delegation_timeout_finalized",
+		Message: reason,
+	}); err != nil {
+		return false, err
+	}
+	if err := e.AdvanceJob(ctx, jobID); err != nil {
+		return true, err
+	}
+	if err := e.Store.AddJobEvent(ctx, db.JobEvent{JobID: jobID, Kind: "advance_completed", Message: "workflow advancement completed"}); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 func (e Engine) refreshJobPayload(ctx context.Context, jobID string) error {
 	job, payload, err := e.jobPayload(ctx, jobID)
 	if err != nil {

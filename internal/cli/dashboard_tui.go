@@ -538,16 +538,16 @@ func buildDelegationTree(parent workflow.JobPayload, children []db.Job) ([]tui.J
 			meta[d.ID] = delegationMeta{action: d.Action, deps: d.Deps}
 		}
 	}
-	// Child state by delegation id, for resolving DepsSatisfied.
-	stateByDelegation := map[string]string{}
-	for _, child := range children {
-		if id := strings.TrimSpace(child.DelegationID); id != "" {
-			stateByDelegation[id] = child.State
-		}
-	}
 
+	// Phase 2 retries create additional child rows that share a DelegationID
+	// (only the job ID differs, ".../retry/<n>"). Collapse them by delegation id
+	// keeping the latest attempt (highest RetryCount), mirroring the engine's
+	// childDelegationJobs/delegationJobRetryCount latest-attempt logic, so the
+	// DAG shows one node per delegation instead of a row per attempt.
 	var (
-		out               []tui.JobChild
+		order             []string
+		latest            = map[string]db.Job{}
+		latestRetry       = map[string]int{}
 		continuationID    string
 		continuationState string
 	)
@@ -559,6 +559,29 @@ func buildDelegationTree(parent workflow.JobPayload, children []db.Job) ([]tui.J
 			continuationState = child.State
 			continue
 		}
+		attempt := childRetryCount(child)
+		if _, ok := latest[delegationID]; ok {
+			if attempt < latestRetry[delegationID] {
+				continue
+			}
+		} else {
+			order = append(order, delegationID)
+		}
+		latest[delegationID] = child
+		latestRetry[delegationID] = attempt
+	}
+
+	// Child state by delegation id, resolved from the latest attempt only (not
+	// last-write-wins over ListJobsByParent's "delegation_id, id" ordering), so
+	// DepsSatisfied reflects the current attempt's outcome.
+	stateByDelegation := make(map[string]string, len(latest))
+	for id, child := range latest {
+		stateByDelegation[id] = child.State
+	}
+
+	out := make([]tui.JobChild, 0, len(order))
+	for _, delegationID := range order {
+		child := latest[delegationID]
 		m := meta[delegationID]
 		action := m.action
 		if strings.TrimSpace(action) == "" {
@@ -575,6 +598,17 @@ func buildDelegationTree(parent workflow.JobPayload, children []db.Job) ([]tui.J
 		})
 	}
 	return out, continuationID, continuationState
+}
+
+// childRetryCount reads a delegation child's RetryCount from its stored payload,
+// returning 0 when the payload is missing or cannot be parsed. Mirrors the
+// engine's delegationJobRetryCount so the dashboard dedups attempts identically.
+func childRetryCount(child db.Job) int {
+	payload, err := workflow.ParseJobPayload(child.Payload)
+	if err != nil {
+		return 0
+	}
+	return payload.RetryCount
 }
 
 // delegationDepsSatisfied reports whether every dep delegation has a sibling
