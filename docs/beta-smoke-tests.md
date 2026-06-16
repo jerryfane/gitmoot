@@ -165,7 +165,7 @@ the test would silently pass with zero child jobs.
    fan-out terminates and does not recurse).
 
    ```sh
-   gitmoot setup --repo owner/project --path . --agent coordinator --runtime shell --session "printf '%s\n' '{\"gitmoot_result\":{\"decision\":\"approved\",\"summary\":\"coordinator delegating ui and api\",\"findings\":[],\"changes_made\":[],\"tests_run\":[],\"needs\":[],\"delegations\":[{\"id\":\"ui\",\"agent\":\"ui-worker\",\"action\":\"ask\",\"prompt\":\"propose the ui changes\"},{\"id\":\"api\",\"agent\":\"api-worker\",\"action\":\"review\",\"prompt\":\"review the api contract\"}]}}'"
+   gitmoot setup --repo owner/project --path . --agent coordinator --runtime shell --session "printf '%s\n' '{\"gitmoot_result\":{\"decision\":\"approved\",\"summary\":\"coordinator delegating ui and api\",\"findings\":[],\"changes_made\":[],\"tests_run\":[],\"needs\":[],\"delegations\":[{\"id\":\"ui\",\"agent\":\"ui-worker\",\"action\":\"ask\",\"prompt\":\"propose the ui changes\"},{\"id\":\"api\",\"agent\":\"api-worker\",\"action\":\"ask\",\"prompt\":\"review the api contract\"}]}}'"
    gitmoot agent subscribe ui-worker --runtime shell --session "printf '%s\n' '{\"gitmoot_result\":{\"decision\":\"approved\",\"summary\":\"ui worker done\",\"findings\":[],\"changes_made\":[],\"tests_run\":[\"shell smoke\"],\"needs\":[],\"delegations\":[]}}'" --role reviewer --repo owner/project --capability ask --capability review
    gitmoot agent subscribe api-worker --runtime shell --session "printf '%s\n' '{\"gitmoot_result\":{\"decision\":\"approved\",\"summary\":\"api worker done\",\"findings\":[],\"changes_made\":[],\"tests_run\":[\"shell smoke\"],\"needs\":[],\"delegations\":[]}}'" --role reviewer --repo owner/project --capability ask --capability review
    gitmoot agent repos coordinator
@@ -204,6 +204,18 @@ Expected signals:
   `delegation_continuation_enqueued` event and `gitmoot job list` shows a
   coordinator continuation job `<coordinator-job-id>/continuation` queued for
   `coordinator`.
+
+> Note: the continuation job runs the **same** coordinator agent. A real LLM
+> coordinator ends the loop by returning no `delegations` on the continuation,
+> but a *static* shell agent returns the same delegations every time, so the
+> continuation re-delegates each generation. This is bounded by
+> `MaxDelegationDepth` (8): once a coordinator/continuation at that depth would
+> dispatch, Gitmoot refuses and records a `delegation_depth_exceeded` event
+> instead of spawning jobs forever. To keep this smoke test fast, run
+> `gitmoot daemon stop` once you have observed the first continuation rather than
+> waiting for the depth cap to halt the chain. Also note delegated `action:
+> review` requires a pull request / head SHA; use `action: ask` for PR-less
+> smoke agents (a no-PR review fails with "job for <branch> has no head SHA").
 
 5. (Optional) Verify dependency gating. Re-run with a coordinator whose result
    adds a third delegation that depends on the first two; it must stay queued
