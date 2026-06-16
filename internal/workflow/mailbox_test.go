@@ -51,6 +51,45 @@ func TestMailboxEnqueueCreatesQueuedJobAndEvent(t *testing.T) {
 	}
 }
 
+func TestMailboxEnqueuePersistsDelegationMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+
+	job, err := mailbox.Enqueue(ctx, JobRequest{
+		ID:              "job-child",
+		Agent:           "audit",
+		Action:          "ask",
+		Repo:            "jerryfane/gitmoot",
+		Branch:          "task-005",
+		ParentJobID:     "job-parent",
+		DelegationID:    "delegation-1",
+		DelegationDepth: 2,
+		DelegatedBy:     "lead",
+	})
+	if err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+	if job.ParentJobID != "job-parent" || job.DelegationID != "delegation-1" || job.DelegationDepth != 2 || job.DelegatedBy != "lead" {
+		t.Fatalf("returned job metadata = %+v", job)
+	}
+
+	stored, err := store.GetJob(ctx, "job-child")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	if stored.ParentJobID != "job-parent" || stored.DelegationID != "delegation-1" || stored.DelegationDepth != 2 || stored.DelegatedBy != "lead" {
+		t.Fatalf("stored job metadata = %+v", stored)
+	}
+	payload, err := unmarshalPayload(stored.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.ParentJobID != "job-parent" || payload.DelegationID != "delegation-1" || payload.DelegationDepth != 2 || payload.DelegatedBy != "lead" {
+		t.Fatalf("payload metadata = %+v", payload)
+	}
+}
+
 func TestMailboxEnqueueSnapshotsAgentTemplate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

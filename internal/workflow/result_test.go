@@ -4,7 +4,7 @@ import "testing"
 
 func TestExtractAgentResultFromFencedOutput(t *testing.T) {
 	output := "done\n```json\n" +
-		`{"gitmoot_result":{"decision":"approved","summary":"looks good","findings":[],"changes_made":[],"tests_run":["go test ./..."],"needs":[],"next_agents":[]}}` +
+		`{"gitmoot_result":{"decision":"approved","summary":"looks good","findings":[],"changes_made":[],"tests_run":["go test ./..."],"needs":[],"delegations":[]}}` +
 		"\n```"
 
 	result, err := ExtractAgentResult(output)
@@ -34,14 +34,14 @@ func TestExtractAgentResultNormalizesMissingArrays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractAgentResult returned error: %v", err)
 	}
-	if result.Findings == nil || result.ChangesMade == nil || result.TestsRun == nil || result.Needs == nil || result.NextAgents == nil {
+	if result.Findings == nil || result.ChangesMade == nil || result.TestsRun == nil || result.Needs == nil || result.Delegations == nil {
 		t.Fatalf("result arrays were not normalized: %+v", result)
 	}
 }
 
 func TestExtractAgentResultSkipsDecoyJSONCandidate(t *testing.T) {
 	output := `{"note":"mentions gitmoot_result but is not the envelope"}` + "\n" +
-		`{"gitmoot_result":{"decision":"approved","summary":"real result","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}`
+		`{"gitmoot_result":{"decision":"approved","summary":"real result","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`
 
 	result, err := ExtractAgentResult(output)
 
@@ -54,7 +54,7 @@ func TestExtractAgentResultSkipsDecoyJSONCandidate(t *testing.T) {
 }
 
 func TestExtractAgentResultRejectsUnsupportedDecision(t *testing.T) {
-	output := `{"gitmoot_result":{"decision":"maybe","summary":"unclear","findings":[],"changes_made":[],"tests_run":[],"needs":[],"next_agents":[]}}`
+	output := `{"gitmoot_result":{"decision":"maybe","summary":"unclear","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`
 
 	if _, err := ExtractAgentResult(output); err == nil {
 		t.Fatal("ExtractAgentResult accepted unsupported decision")

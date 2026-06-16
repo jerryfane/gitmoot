@@ -9,14 +9,32 @@ import (
 
 const resultKey = `"gitmoot_result"`
 
+// Delegation describes a child job that an agent wants Gitmoot to enqueue on
+// its behalf. It is the richer replacement for the legacy next_agents list.
+type Delegation struct {
+	ID            string   `json:"id"`
+	Agent         string   `json:"agent"`
+	Action        string   `json:"action"`
+	Worktree      string   `json:"worktree,omitempty"`
+	Prompt        string   `json:"prompt"`
+	Artifacts     []string `json:"artifacts,omitempty"`
+	Deps          []string `json:"deps,omitempty"`
+	Timeout       string   `json:"timeout,omitempty"`
+	Retry         int      `json:"retry,omitempty"`
+	FailurePolicy string   `json:"failure_policy,omitempty"`
+	Fingerprint   string   `json:"fingerprint,omitempty"`
+	SynthesisRule string   `json:"synthesis_rule,omitempty"`
+}
+
 type AgentResult struct {
-	Decision    string            `json:"decision"`
-	Summary     string            `json:"summary"`
-	Findings    []json.RawMessage `json:"findings"`
-	ChangesMade []string          `json:"changes_made"`
-	TestsRun    []string          `json:"tests_run"`
-	Needs       []string          `json:"needs"`
-	NextAgents  []string          `json:"next_agents"`
+	Decision     string            `json:"decision"`
+	Summary      string            `json:"summary"`
+	Findings     []json.RawMessage `json:"findings"`
+	ChangesMade  []string          `json:"changes_made"`
+	TestsRun     []string          `json:"tests_run"`
+	Needs        []string          `json:"needs"`
+	Delegations  []Delegation      `json:"delegations"`
+	ArtifactBody string            `json:"artifact_body,omitempty"`
 }
 
 func ExtractAgentResult(output string) (AgentResult, error) {
@@ -34,6 +52,16 @@ func ExtractAgentResult(output string) (AgentResult, error) {
 		if err := json.Unmarshal(raw, &result); err != nil {
 			if validationErr == nil {
 				validationErr = err
+			}
+			continue
+		}
+		var legacy struct {
+			NextAgents []string `json:"next_agents"`
+		}
+		_ = json.Unmarshal(raw, &legacy)
+		if len(legacy.NextAgents) > 0 {
+			if validationErr == nil {
+				validationErr = fmt.Errorf("legacy next_agents is no longer supported; use delegations")
 			}
 			continue
 		}
@@ -61,6 +89,23 @@ func validateAgentResult(result AgentResult) error {
 	if strings.TrimSpace(result.Summary) == "" {
 		return errors.New("gitmoot_result summary is required")
 	}
+	for _, d := range result.Delegations {
+		if strings.TrimSpace(d.ID) == "" {
+			return errors.New("delegation id is required")
+		}
+		if strings.TrimSpace(d.Agent) == "" {
+			return errors.New("delegation agent is required")
+		}
+		if strings.TrimSpace(d.Action) == "" {
+			return errors.New("delegation action is required")
+		}
+		if strings.TrimSpace(d.Prompt) == "" {
+			return errors.New("delegation prompt is required")
+		}
+		if len(d.Deps) > 0 {
+			return fmt.Errorf("delegation %q uses dependencies, which are not yet supported", d.ID)
+		}
+	}
 	return nil
 }
 
@@ -77,8 +122,8 @@ func normalizeAgentResult(result *AgentResult) {
 	if result.Needs == nil {
 		result.Needs = []string{}
 	}
-	if result.NextAgents == nil {
-		result.NextAgents = []string{}
+	if result.Delegations == nil {
+		result.Delegations = []Delegation{}
 	}
 }
 

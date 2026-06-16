@@ -934,7 +934,7 @@ func TestRunQueuedJobsPostsAttributedResultComment(t *testing.T) {
 	}
 	worker.AdapterFactory = func(runtime.Agent, string) (workflow.DeliveryAdapter, error) {
 		return &cliWorkerFakeAdapter{
-			output: `{"gitmoot_result":{"decision":"approved","summary":"done with token=ghp_abcdefghijklmnopqrstuvwxyz123456","findings":[{"severity":"low","body":"ok"}],"changes_made":["commented"],"tests_run":["go test ./..."],"needs":["none"],"next_agents":["lead"]}}`,
+			output: `{"gitmoot_result":{"decision":"approved","summary":"done with token=ghp_abcdefghijklmnopqrstuvwxyz123456","findings":[{"severity":"low","body":"ok"}],"changes_made":["commented"],"tests_run":["go test ./..."],"needs":["none"],"delegations":[{"id":"follow-up","agent":"lead","action":"ask","prompt":"coordinate next steps"}]}}`,
 		}, nil
 	}
 	worker.CommenterFactory = func(string) github.Client {
@@ -959,7 +959,8 @@ func TestRunQueuedJobsPostsAttributedResultComment(t *testing.T) {
 		"**Changes Made**",
 		"**Tests Run**",
 		"**Needs**",
-		"**Next Agents**",
+		"**Delegations**",
+		"- lead",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("comment body missing %q:\n%s", want, body)
