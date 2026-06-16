@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -60,6 +61,94 @@ func TestEngineAdvanceJobDispatchesDelegations(t *testing.T) {
 	// Idempotent: advancing the same parent again must not duplicate the child.
 	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
 		t.Fatalf("second AdvanceJob returned error: %v", err)
+	}
+}
+
+func TestEngineAdvanceJobWritesDelegationArtifacts(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	root := t.TempDir()
+	engine.ArtifactRoot = root
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision:     "approved",
+			Summary:      "done",
+			ArtifactBody: "# Shared brief\n\nDo the work.\n",
+			Delegations: []Delegation{
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Artifacts: []string{"brief.md"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	wantDir := filepath.Join(root, "delegations", "parent-job")
+	briefBytes, err := os.ReadFile(filepath.Join(wantDir, "brief.md"))
+	if err != nil {
+		t.Fatalf("read brief.md: %v", err)
+	}
+	if string(briefBytes) != "# Shared brief\n\nDo the work.\n" {
+		t.Fatalf("brief.md = %q", string(briefBytes))
+	}
+	if _, err := os.Stat(filepath.Join(wantDir, "context-manifest.json")); err != nil {
+		t.Fatalf("context-manifest.json missing: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/del-1")
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.DelegationArtifactDir != wantDir {
+		t.Fatalf("child DelegationArtifactDir = %q, want %q", payload.DelegationArtifactDir, wantDir)
+	}
+}
+
+func TestEngineAdvanceJobSkipsArtifactsWithoutRoot(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision:     "approved",
+			Summary:      "done",
+			ArtifactBody: "brief",
+			Delegations: []Delegation{
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Artifacts: []string{"brief.md"}},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/del-1")
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.DelegationArtifactDir != "" {
+		t.Fatalf("child DelegationArtifactDir = %q, want empty when no artifact root", payload.DelegationArtifactDir)
 	}
 }
 

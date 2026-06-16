@@ -19,30 +19,31 @@ type Mailbox struct {
 }
 
 type JobRequest struct {
-	ID               string
-	Agent            string
-	Action           string
-	Repo             string
-	Branch           string
-	PullRequest      int
-	HeadSHA          string
-	GoalID           string
-	TaskID           string
-	TaskTitle        string
-	LeadAgent        string
-	Reviewers        []string
-	ReviewRound      string
-	Sender           string
-	Instructions     string
-	Constraints      []string
-	ParentJobID      string
-	DelegationID     string
-	DelegationDepth  int
-	DelegatedBy      string
-	WorktreePath     string
-	OriginalAgent    string
-	DelegatedAgent   string
-	DelegationReason string
+	ID                    string
+	Agent                 string
+	Action                string
+	Repo                  string
+	Branch                string
+	PullRequest           int
+	HeadSHA               string
+	GoalID                string
+	TaskID                string
+	TaskTitle             string
+	LeadAgent             string
+	Reviewers             []string
+	ReviewRound           string
+	Sender                string
+	Instructions          string
+	Constraints           []string
+	ParentJobID           string
+	DelegationID          string
+	DelegationDepth       int
+	DelegatedBy           string
+	DelegationArtifactDir string
+	WorktreePath          string
+	OriginalAgent         string
+	DelegatedAgent        string
+	DelegationReason      string
 }
 
 type JobPayload struct {
@@ -63,6 +64,7 @@ type JobPayload struct {
 	DelegationID           string       `json:"delegation_id,omitempty"`
 	DelegationDepth        int          `json:"delegation_depth,omitempty"`
 	DelegatedBy            string       `json:"delegated_by,omitempty"`
+	DelegationArtifactDir  string       `json:"delegation_artifact_dir,omitempty"`
 	WorktreePath           string       `json:"worktree_path,omitempty"`
 	TemplateID             string       `json:"template_id,omitempty"`
 	TemplateResolvedCommit string       `json:"template_resolved_commit,omitempty"`
@@ -109,6 +111,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		DelegationID:           request.DelegationID,
 		DelegationDepth:        request.DelegationDepth,
 		DelegatedBy:            request.DelegatedBy,
+		DelegationArtifactDir:  request.DelegationArtifactDir,
 		WorktreePath:           request.WorktreePath,
 		TemplateID:             snapshot.ID,
 		TemplateResolvedCommit: snapshot.ResolvedCommit,
@@ -357,6 +360,7 @@ func (p JobPayload) prompt(action string) prompts.JobPrompt {
 		Action:                 action,
 		Instructions:           p.Instructions,
 		Constraints:            p.Constraints,
+		DelegationArtifactDir:  p.DelegationArtifactDir,
 		TemplateID:             p.TemplateID,
 		TemplateResolvedCommit: p.TemplateResolvedCommit,
 		TemplateInstructions:   agenttemplate.InstructionsForContent(p.TemplateContent),

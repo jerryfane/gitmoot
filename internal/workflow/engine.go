@@ -28,6 +28,14 @@ type Engine struct {
 	Home                string
 	DelegationWorktrees WorktreeManager
 	DelegationCheckout  string
+	// ArtifactRoot is the filesystem root under which delegation artifacts
+	// (delegations/<parent-job-id>/brief.md and context-manifest.json) are
+	// written when a coordinator returns delegations that request artifacts.
+	// It is the resolved GITMOOT_HOME root (already ending in .gitmoot), kept
+	// outside any repo checkout so generated briefs are never committed. When
+	// empty, artifact writing is skipped (ask-path and tests that build an
+	// Engine without it keep their existing behavior).
+	ArtifactRoot string
 }
 
 type PullRequestEvent struct {
@@ -410,6 +418,27 @@ func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload Job
 		}
 		requests[i].Branch = result.Branch
 		requests[i].WorktreePath = result.Path
+	}
+
+	// Write the shared coordinator brief and context manifest once, fully,
+	// before enqueueing any child job so a child that starts immediately reads a
+	// complete directory. Every child of a parent that produced artifacts is
+	// pointed at the same directory so its prompt can reference brief.md and
+	// context-manifest.json. Writing is skipped when the engine has no artifact
+	// root or no delegation requested artifacts.
+	artifactDir, err := writeDelegationArtifacts(e.ArtifactRoot, job.ID, payload.Result)
+	if err != nil {
+		return e.block(ctx, ref, fmt.Sprintf("write delegation artifacts: %v", err))
+	}
+	if artifactDir != "" {
+		for i := range requests {
+			requests[i].DelegationArtifactDir = artifactDir
+		}
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "delegation_artifacts_written",
+			Message: fmt.Sprintf("delegation artifacts written to %s", artifactDir),
+		})
 	}
 
 	for _, request := range requests {

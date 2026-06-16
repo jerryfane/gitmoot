@@ -2329,6 +2329,12 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, ho
 			return refreshDaemonJobPayload(ctx, store, checkout, job, payload)
 		},
 	}
+	if strings.TrimSpace(home) != "" {
+		// Root delegation artifacts under GITMOOT_HOME (alongside worktrees)
+		// rather than inside the repo checkout, so generated briefs stay out of
+		// the tracked tree and are never committed.
+		engine.ArtifactRoot = home
+	}
 	if strings.TrimSpace(home) != "" && strings.TrimSpace(checkout) != "" {
 		engine.Home = home
 		engine.DelegationCheckout = checkout
