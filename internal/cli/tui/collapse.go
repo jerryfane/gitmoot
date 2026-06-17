@@ -136,12 +136,13 @@ func renderListRows(b *strings.Builder, rows []listRow, cursor int) {
 				collapseMark = "[+] "
 			}
 			label := r.text
-			if !selected {
-				if r.depth == 0 {
-					label = headerStyle.Render(label)
-				} else {
-					label = mutedStyle.Render(label)
-				}
+			switch {
+			case selected:
+				label = selectedRowStyle.Render(label)
+			case r.depth == 0:
+				label = headerStyle.Render(label)
+			default:
+				label = mutedStyle.Render(label)
 			}
 			b.WriteString(indent + marker + collapseMark + label + "\n")
 		case r.static:
@@ -153,7 +154,11 @@ func renderListRows(b *strings.Builder, rows []listRow, cursor int) {
 			}
 			b.WriteString(indent + "  " + label + "\n")
 		default:
-			b.WriteString(indent + marker + r.text + "\n")
+			text := r.text
+			if selected {
+				text = selectedRowStyle.Render(text)
+			}
+			b.WriteString(indent + marker + text + "\n")
 		}
 		if r.selectable() {
 			sel++

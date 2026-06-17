@@ -218,7 +218,7 @@ func TestTrainLineageBase(t *testing.T) {
 		{"officeqa-treasury-skillopt-v1", "officeqa-treasury-skillopt", true},
 		{"officeqa-treasury-skillopt-v8", "officeqa-treasury-skillopt", true},
 		{"run-v12", "run", true},
-		{"run-12", "run-12", false},     // bare numeric is NOT a version lineage
+		{"run-12", "run-12", false},                         // bare numeric is NOT a version lineage
 		{"train-x-20260611-1", "train-x-20260611-1", false}, // timestamp tail, not a version
 		{"plain-name", "plain-name", false},
 		{"train-aaa", "train-aaa", false},
@@ -327,9 +327,9 @@ func TestTrainsGroupByRepoWithinSection(t *testing.T) {
 	snap := Snapshot{
 		Daemon: Daemon{Running: true},
 		Trains: []TrainSession{
-			{ID: "a-v1", Phase: "items_ready", Repo: "o/alpha"},        // Active, alpha, lineage
-			{ID: "b1", Phase: "generating_options", Repo: "o/beta"},    // Active, beta, lone
-			{ID: "a-v2", Phase: "review_published", Repo: "o/alpha"},   // Active, alpha, lineage
+			{ID: "a-v1", Phase: "items_ready", Repo: "o/alpha"},      // Active, alpha, lineage
+			{ID: "b1", Phase: "generating_options", Repo: "o/beta"},  // Active, beta, lone
+			{ID: "a-v2", Phase: "review_published", Repo: "o/alpha"}, // Active, alpha, lineage
 		},
 	}
 	deps := Deps{Load: func() (Snapshot, error) { return snap, nil }}

@@ -216,13 +216,6 @@ func answerCmd(deps Deps, id, value string) tea.Cmd {
 	}
 }
 
-// attentionContent renders the Attention page. The daemon-down and
-// required-health-failed banners are pinned at the top, then the actionable
-// items are grouped under display-only section headers — "Prompts" (selectable),
-// "Blocked & failed jobs" (selectable) — followed by "Stale locks" and
-// "Branch locks". Section headers carry no cursor index: the selectable items
-// (prompts then reportable jobs) keep the exact flat ordering and indices of
-// attentionItems(), which m.promptCursor indexes into.
 // attentionListRows builds the Attention page's collapsible row tree: a
 // "Prompts" section, a "Blocked & failed jobs" section grouped by repo, and the
 // "Stale locks" / "Branch locks" sections. Leaf itemIdx indexes attentionItems()
@@ -246,6 +239,10 @@ func (m Model) attentionListRows() []listRow {
 	// Blocked & failed jobs: a static section title with collapsible repo groups.
 	if jobN := len(items) - promptN; jobN > 0 {
 		rows = append(rows, staticRow(0, "Blocked & failed jobs ("+strconv.Itoa(jobN)+")"))
+		repoCount := map[string]int{} // per-repo job count for the header ("×N")
+		for i := promptN; i < len(items); i++ {
+			repoCount[attentionRepoLabel(items[i].job.Repo)]++
+		}
 		curRepo := "\x00" // sentinel so the first repo header always prints
 		repoKey := ""
 		for i := promptN; i < len(items); i++ {
@@ -253,7 +250,7 @@ func (m Model) attentionListRows() []listRow {
 			if label := attentionRepoLabel(j.Repo); label != curRepo {
 				curRepo = label
 				repoKey = "attn:jobrepo:" + label
-				rows = append(rows, headerRow(repoKey, 1, label))
+				rows = append(rows, headerRow(repoKey, 1, label+"  ×"+strconv.Itoa(repoCount[label])))
 			}
 			line := "job " + j.ID + "  " + j.Type + "  " + jobStateColor(j.State)
 			if j.LatestEvent != "" {
@@ -317,7 +314,9 @@ func (m Model) attentionContent() string {
 
 	// When only non-actionable context (locks) is present, say so explicitly so
 	// the page does not read as if those locks need an answer.
-	actionable := len(m.attentionItems())
+	items := m.attentionItems()
+	actionable := len(items)
+	hasJobs := actionable-countPrompts(items) > 0 // every attention job is reportable
 	rows := m.attentionVisibleRows()
 	if actionable == 0 && len(rows) > 0 {
 		b.WriteString(headerStyle.Render("Needs attention") + "\n" + mutedStyle.Render("none") + "\n\n")
@@ -326,9 +325,11 @@ func (m Model) attentionContent() string {
 	if len(rows) > 0 {
 		renderListRows(&b, rows, m.promptCursor)
 		if actionable > 0 {
-			help := "↑/↓ move · space open/close repo   prompts: a answer · d dismiss   jobs: enter detail · R retry"
-			if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
-				help += " · B report bug"
+			// Job actions are shown whenever jobs exist (not only when the cursor is
+			// on one), since groups start folded and the cursor may rest on a header.
+			help := "↑/↓ move · space open/close repo   prompts: a answer · d dismiss"
+			if hasJobs {
+				help += "   jobs: enter detail · R retry · B report bug"
 			}
 			b.WriteString("\n" + mutedStyle.Render(help) + "\n")
 		}

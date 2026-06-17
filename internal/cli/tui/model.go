@@ -87,11 +87,13 @@ type Model struct {
 	inFlight bool
 
 	// expanded records explicit user open(true)/close(false) decisions for
-	// collapsible group headers (Attention / Trains), keyed by a stable
-	// page-qualified group key; it overrides collapseByDefault and persists across
-	// refresh ticks. collapseByDefault is the state for groups the user has not
-	// touched — the live dashboard sets it true so groups start folded.
-	expanded         map[string]bool
+	// collapsible group headers (Attention / Trains), keyed by a page-qualified
+	// group key; it overrides collapseByDefault and persists across refresh ticks
+	// while the key is stable (a Trains group's key includes its status section,
+	// so a session changing section moves to that section's group). collapseByDefault
+	// is the state for groups the user has not touched — the live dashboard sets it
+	// true so groups start folded.
+	expanded          map[string]bool
 	collapseByDefault bool
 
 	// Attention / Trains page interaction state.
@@ -177,11 +179,11 @@ type Model struct {
 // Init issues the first Load and arms the refresh tick.
 func New(deps Deps) Model {
 	m := Model{
-		deps:       deps,
-		width:      100,
-		height:     30,
-		viewport:   viewport.New(80, 20),
-		inFlight:   true,
+		deps:              deps,
+		width:             100,
+		height:            30,
+		viewport:          viewport.New(80, 20),
+		inFlight:          true,
 		cancelling:        map[string]struct{}{},
 		expanded:          map[string]bool{},
 		collapseByDefault: deps.CollapseGroupsByDefault,
@@ -1049,12 +1051,40 @@ func (m *Model) toggleCurrentGroup() bool {
 		m.expanded[r.key] = true
 	case !r.header && r.groupKey != "":
 		m.expanded[r.groupKey] = false
+		// Folding from a leaf removes that leaf (and its siblings) from the
+		// selectable set; move the cursor onto the now-collapsed header so the
+		// highlight follows the group instead of clamping onto an unrelated row.
+		m.focusHeader(r.groupKey)
 	default:
 		return false
 	}
 	m.clampPromptCursor()
 	m.clampTrainCursor()
 	return true
+}
+
+// focusHeader points the current page's cursor at the selectable header whose
+// group key matches, after that group was just collapsed.
+func (m *Model) focusHeader(key string) {
+	rows, ok := m.currentListRows()
+	if !ok {
+		return
+	}
+	cursor, _ := m.pageCursor()
+	if cursor == nil {
+		return
+	}
+	sel := 0
+	for _, row := range rows {
+		if !row.selectable() {
+			continue
+		}
+		if row.header && row.key == key {
+			*cursor = sel
+			return
+		}
+		sel++
+	}
 }
 
 // clampJobCursor keeps the Jobs cursor within the current job list.

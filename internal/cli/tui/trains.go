@@ -418,6 +418,10 @@ func (m Model) trainListRows() []listRow {
 		title := trainSectionTitles[cat]
 		rows = append(rows, staticRow(0, title)) // status section: display-only
 		for _, rb := range repos {
+			// Key by (section, repo) so the same repo in two sections folds
+			// independently (matching the two visually separate groups). The fold
+			// state holds while a session's section is stable; if a session changes
+			// section its row moves to that section's group (collapsed by default).
 			repoKey := "trains:" + title + ":" + rb.repo
 			rows = append(rows, headerRow(repoKey, 1, rb.repo+"  ×"+strconv.Itoa(bucketMemberCount(rb))))
 			for _, g := range rb.groups {
