@@ -439,7 +439,7 @@ func (m Model) trainListRows() []listRow {
 // trainVisibleRows is the Trains tree filtered by the collapse state — the rows
 // rendered, and the index space m.trainCursor walks.
 func (m Model) trainVisibleRows() []listRow {
-	return visibleListRows(m.trainListRows(), m.collapsed)
+	return visibleListRows(m.trainListRows(), m.groupCollapsed)
 }
 
 func (m Model) trainsContent() string {
@@ -451,7 +451,7 @@ func (m Model) trainsContent() string {
 	}
 	var b strings.Builder
 	renderListRows(&b, m.trainVisibleRows(), m.trainCursor)
-	b.WriteString("\n" + mutedStyle.Render("↑/↓ move · space fold repo · enter open · s stop · d delete") + "\n")
+	b.WriteString("\n" + mutedStyle.Render("↑/↓ move · space open/close repo · enter open · s stop · d delete") + "\n")
 	return b.String()
 }
 

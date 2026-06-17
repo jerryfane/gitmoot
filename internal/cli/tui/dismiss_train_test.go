@@ -392,3 +392,31 @@ func TestTrainsCollapseRepoFoldsSessions(t *testing.T) {
 		t.Fatalf("expanding o/alpha should restore a1:\n%s", m.View())
 	}
 }
+
+// TestTrainsCollapsedByDefault verifies the live default (CollapseGroupsByDefault)
+// folds repo groups on first show, and space on a [+] header expands one.
+func TestTrainsCollapsedByDefault(t *testing.T) {
+	snap := Snapshot{
+		Daemon: Daemon{Running: true},
+		Trains: []TrainSession{{ID: "s1", Phase: "items_ready", Repo: "o/alpha"}},
+	}
+	deps := Deps{Load: func() (Snapshot, error) { return snap, nil }, CollapseGroupsByDefault: true}
+	m := sizedModel(deps)
+	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // → Trains
+	m = next.(Model)
+	view := m.View()
+	if strings.Contains(view, "s1") {
+		t.Fatalf("sessions should be folded by default:\n%s", view)
+	}
+	if !strings.Contains(view, "[+]") {
+		t.Fatalf("collapsed repo should show a [+] marker:\n%s", view)
+	}
+	// Space on the collapsed repo header expands it.
+	next, _ = m.Update(key(" "))
+	m = next.(Model)
+	if !strings.Contains(m.View(), "s1") {
+		t.Fatalf("space should expand the repo and reveal s1:\n%s", m.View())
+	}
+}

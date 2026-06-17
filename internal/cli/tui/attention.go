@@ -282,7 +282,7 @@ func (m Model) attentionListRows() []listRow {
 // attentionVisibleRows is the Attention tree filtered by the collapse state — the
 // exact rows rendered, and the index space m.promptCursor walks.
 func (m Model) attentionVisibleRows() []listRow {
-	return visibleListRows(m.attentionListRows(), m.collapsed)
+	return visibleListRows(m.attentionListRows(), m.groupCollapsed)
 }
 
 func (m Model) attentionContent() string {
@@ -326,7 +326,7 @@ func (m Model) attentionContent() string {
 	if len(rows) > 0 {
 		renderListRows(&b, rows, m.promptCursor)
 		if actionable > 0 {
-			help := "↑/↓ move · space fold repo   prompts: a answer · d dismiss   jobs: enter detail · R retry"
+			help := "↑/↓ move · space open/close repo   prompts: a answer · d dismiss   jobs: enter detail · R retry"
 			if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
 				help += " · B report bug"
 			}

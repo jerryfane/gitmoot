@@ -50,10 +50,12 @@ func (r listRow) selectable() bool {
 	return !r.static
 }
 
-// visibleListRows returns the rows visible given the collapsed set: a row is
-// hidden when an ancestor header (a shallower header before it) is collapsed.
+// visibleListRows returns the rows visible given the collapse predicate: a row
+// is hidden when an ancestor header (a shallower header before it) is collapsed.
 // Header rows stay visible and are stamped with their collapse state.
-func visibleListRows(rows []listRow, collapsed map[string]bool) []listRow {
+// isCollapsed(key) decides each header's state — groups are collapsed by default,
+// so it returns true unless the user has explicitly expanded the group.
+func visibleListRows(rows []listRow, isCollapsed func(key string) bool) []listRow {
 	out := make([]listRow, 0, len(rows))
 	hideDepth := -1 // when >=0, hide rows deeper than this until we return to it
 	for _, r := range rows {
@@ -63,11 +65,13 @@ func visibleListRows(rows []listRow, collapsed map[string]bool) []listRow {
 			}
 			hideDepth = -1
 		}
+		collapsed := false
 		if r.header {
-			r.collapsed = collapsed[r.key]
+			collapsed = isCollapsed(r.key)
+			r.collapsed = collapsed
 		}
 		out = append(out, r)
-		if r.header && collapsed[r.key] {
+		if collapsed {
 			hideDepth = r.depth
 		}
 	}

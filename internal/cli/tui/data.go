@@ -248,6 +248,11 @@ type Deps struct {
 	Dismiss  func(id string) error
 	Interval time.Duration
 
+	// CollapseGroupsByDefault folds collapsible repo groups (Attention / Trains)
+	// on first show, so the live dashboard opens uncluttered; the user expands
+	// what they want with space. Tests leave it false (groups start expanded).
+	CollapseGroupsByDefault bool
+
 	// OpenTrain, when set, builds the embedded train-run model for a session;
 	// the Trains page pushes it onto the Root stack instead of the inline
 	// detail view.

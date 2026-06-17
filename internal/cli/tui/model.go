@@ -86,10 +86,13 @@ type Model struct {
 	loadErr  string
 	inFlight bool
 
-	// collapsed tracks which collapsible group headers (Attention / Trains /
-	// Jobs) are collapsed, keyed by a stable page-qualified group key. An absent
-	// key means expanded. It persists across refresh ticks for the session.
-	collapsed map[string]bool
+	// expanded records explicit user open(true)/close(false) decisions for
+	// collapsible group headers (Attention / Trains), keyed by a stable
+	// page-qualified group key; it overrides collapseByDefault and persists across
+	// refresh ticks. collapseByDefault is the state for groups the user has not
+	// touched — the live dashboard sets it true so groups start folded.
+	expanded         map[string]bool
+	collapseByDefault bool
 
 	// Attention / Trains page interaction state.
 	mode         mode
@@ -179,8 +182,9 @@ func New(deps Deps) Model {
 		height:     30,
 		viewport:   viewport.New(80, 20),
 		inFlight:   true,
-		cancelling: map[string]struct{}{},
-		collapsed:  map[string]bool{},
+		cancelling:        map[string]struct{}{},
+		expanded:          map[string]bool{},
+		collapseByDefault: deps.CollapseGroupsByDefault,
 	}
 	m.resizeViewport()
 	m.viewport.SetContent(m.content())
@@ -1016,22 +1020,35 @@ func (m Model) cursorOnHeader() bool {
 	return ok && r.header
 }
 
-// toggleCurrentGroup folds or unfolds a repo group: on a collapsed header it
-// expands; on a leaf it collapses that leaf's group. Returns true when it
-// changed something (the caller re-renders and suppresses any leaf action).
+// groupCollapsed reports whether a group is collapsed. An explicit user
+// open/close (stored in m.expanded) wins; otherwise the page default applies
+// (collapseByDefault — the live dashboard starts groups folded to reduce
+// clutter, while tests default to expanded).
+func (m Model) groupCollapsed(key string) bool {
+	if v, ok := m.expanded[key]; ok {
+		return !v
+	}
+	return m.collapseByDefault
+}
+
+// toggleCurrentGroup opens or closes a repo group: on a collapsed header it
+// expands; on a leaf it collapses that leaf's group. The state is stored
+// explicitly (not as a delete), so it holds regardless of the default. Since the
+// cursor stays in place, pressing space on a just-opened group's first row
+// closes it again. Returns true when it changed something.
 func (m *Model) toggleCurrentGroup() bool {
 	r, ok := m.selectedListRow()
 	if !ok {
 		return false
 	}
-	if m.collapsed == nil {
-		m.collapsed = map[string]bool{}
+	if m.expanded == nil {
+		m.expanded = map[string]bool{}
 	}
 	switch {
 	case r.header && r.collapsed:
-		m.collapsed[r.key] = false
+		m.expanded[r.key] = true
 	case !r.header && r.groupKey != "":
-		m.collapsed[r.groupKey] = true
+		m.expanded[r.groupKey] = false
 	default:
 		return false
 	}
