@@ -2843,6 +2843,137 @@ items:
 	}
 }
 
+func TestSkillOptTrainGenerationStampsCorrelationIDs(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/workspace.git")
+	t.Chdir(repoDir)
+	itemsPath := writeSkillOptTrainItemsFile(t)
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if err := store.UpsertAgentTemplate(context.Background(), cliSkillOptTemplate("planner", "Plan the work.")); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after template seed returned error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{
+		"agent", "type", "set", "skillopt-generator",
+		"--home", home,
+		"--runtime", "codex",
+		"--role", "generator",
+		"--max-background", "1",
+		"--capability", "ask",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("agent type set exit code = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{
+		"skillopt", "train", "start",
+		"--home", home,
+		"--template", "planner",
+		"--repo", "owner/product",
+		"--session", "landing-train",
+		"--workspace-repo", "owner/workspace",
+		"--request", "Train landing page plans.",
+		"--task-kind", "design",
+		"--mode", "explore",
+		"--options", "2",
+		"--items-file", itemsPath,
+		"--yes",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("train start exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	runner := &agentStartRunner{results: []subprocess.Result{
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440501"}` + "\n"},
+		{Stdout: `{"gitmoot_result":{"decision":"implemented","summary":"# Option A\n\nHero with strong product narrative.","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}` + "\n"},
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440502"}` + "\n"},
+		{Stdout: `{"gitmoot_result":{"decision":"implemented","summary":"# Option B\n\nDashboard-led layout with proof metrics.","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}` + "\n"},
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440503"}` + "\n"},
+		{Stdout: `{"gitmoot_result":{"decision":"implemented","summary":"# Option A\n\nCheckout analytics proof block.","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}` + "\n"},
+		{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440504"}` + "\n"},
+		{Stdout: `{"gitmoot_result":{"decision":"implemented","summary":"# Option B\n\nLifecycle commerce story with motion notes.","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}` + "\n"},
+	}}
+	restoreFactory := replaceRuntimeFactory(runtime.Factory{Runner: runner})
+	defer restoreFactory()
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"skillopt", "train", "continue", "--home", home, "--session", "landing-train"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("train continue exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	store = openCLIJobStore(t, home)
+	defer store.Close()
+
+	const runID = "landing-train-review-001"
+	parentJobID := skillOptTrainGenerationParentJobID(runID)
+	if parentJobID != "skillopt-train-generation:"+runID {
+		t.Fatalf("parent job id = %q", parentJobID)
+	}
+
+	children, err := store.ListJobsByParent(context.Background(), parentJobID)
+	if err != nil {
+		t.Fatalf("ListJobsByParent returned error: %v", err)
+	}
+	if len(children) != 4 {
+		t.Fatalf("ListJobsByParent(%q) returned %d jobs, want 4: %+v", parentJobID, len(children), children)
+	}
+
+	// Every generation child must be discoverable via the run-scoped parent id and
+	// carry the structured correlation ids: parent and root both point at the run
+	// parent, and the per-option TaskID encodes (run, item, label, attempt).
+	wantTaskIDs := map[string]bool{
+		skillOptTrainGenerationTaskID(runID, "hero-saas", "a", 0):       false,
+		skillOptTrainGenerationTaskID(runID, "hero-saas", "b", 0):       false,
+		skillOptTrainGenerationTaskID(runID, "ecommerce-proof", "a", 0): false,
+		skillOptTrainGenerationTaskID(runID, "ecommerce-proof", "b", 0): false,
+	}
+	for _, job := range children {
+		if job.ParentJobID != parentJobID {
+			t.Fatalf("job %s parent_job_id = %q, want %q", job.ID, job.ParentJobID, parentJobID)
+		}
+		payload, err := daemonJobPayload(job)
+		if err != nil {
+			t.Fatalf("daemonJobPayload returned error: %v", err)
+		}
+		if payload.ParentJobID != parentJobID {
+			t.Fatalf("job %s payload parent_job_id = %q, want %q", job.ID, payload.ParentJobID, parentJobID)
+		}
+		if payload.RootJobID != parentJobID {
+			t.Fatalf("job %s payload root_job_id = %q, want %q", job.ID, payload.RootJobID, parentJobID)
+		}
+		if payload.DelegationID != "" {
+			t.Fatalf("job %s payload delegation_id = %q, want empty", job.ID, payload.DelegationID)
+		}
+		seen, ok := wantTaskIDs[payload.TaskID]
+		if !ok {
+			t.Fatalf("job %s has unexpected task_id %q", job.ID, payload.TaskID)
+		}
+		if seen {
+			t.Fatalf("duplicate generation task_id %q", payload.TaskID)
+		}
+		wantTaskIDs[payload.TaskID] = true
+	}
+	for taskID, seen := range wantTaskIDs {
+		if !seen {
+			t.Fatalf("generation task_id %q was not stamped on any child job", taskID)
+		}
+	}
+}
+
 func TestSkillOptTrainContinueGeneratesRequiredVuePreviewBundles(t *testing.T) {
 	home := t.TempDir()
 	repoDir := t.TempDir()

@@ -5394,6 +5394,21 @@ func skillOptTrainGenerationLockKey(sessionID string, iterationID string) string
 	return "skillopt-train-generation:" + sessionID + ":" + iterationID
 }
 
+// skillOptTrainGenerationParentJobID is the stable correlation id stamped on
+// every generation child job for a run as both ParentJobID and RootJobID, so the
+// generation jobs can be found via ListJobsByParent. It is keyed on the eval run
+// (not the time-based lock owner id) so it stays stable across resumes.
+func skillOptTrainGenerationParentJobID(runID string) string {
+	return "skillopt-train-generation:" + strings.TrimSpace(runID)
+}
+
+// skillOptTrainGenerationTaskID is the per-option TaskID stamped on each
+// generation child job, uniquely identifying the (run, item, label, attempt)
+// option it produced.
+func skillOptTrainGenerationTaskID(runID string, itemID string, label string, attempt int) string {
+	return fmt.Sprintf("skillopt-train-generation:%s:%s:%s:%d", strings.TrimSpace(runID), strings.TrimSpace(itemID), strings.TrimSpace(label), attempt)
+}
+
 // skillOptTrainGenerationProgress emits human-facing, one-line-per-option
 // progress to a writer (typically stderr) while option jobs run concurrently.
 // A nil receiver or nil writer is a no-op, so automated callers (the review
@@ -5800,6 +5815,8 @@ func generateSkillOptTrainSingleOption(ctx context.Context, store *db.Store, ses
 }
 
 func dispatchSkillOptTrainGenerationJob(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, item db.EvalReviewItem, role string, attempt int, request skillOptTrainContinueRequest, dispatch skillOptTrainGenerationDispatch, prompt string) (localAgentJobOutput, error) {
+	parentJobID := skillOptTrainGenerationParentJobID(run.ID)
+	taskID := skillOptTrainGenerationTaskID(run.ID, item.ItemID, role, attempt)
 	if dispatch.Mode != skillOptTrainGenerationModeTargetSkill {
 		return dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
 			RepoFlag:         skillOptTrainGenerationRepo(session),
@@ -5809,6 +5826,9 @@ func dispatchSkillOptTrainGenerationJob(ctx context.Context, store *db.Store, se
 			Type:             dispatch.Type,
 			Home:             request.Home,
 			AllowManagedSync: dispatch.Type != "",
+			TaskID:           taskID,
+			ParentJobID:      parentJobID,
+			RootJobID:        parentJobID,
 		})
 	}
 	agentName, err := startSkillOptTrainTargetSkillAgent(ctx, store, session, iteration, run, item, role, attempt, request, dispatch)
@@ -5822,6 +5842,9 @@ func dispatchSkillOptTrainGenerationJob(ctx context.Context, store *db.Store, se
 		Instructions: prompt,
 		Home:         request.Home,
 		JobTimeout:   skillOptTrainGenerationJobTimeoutHint(request, dispatch.Type),
+		TaskID:       taskID,
+		ParentJobID:  parentJobID,
+		RootJobID:    parentJobID,
 	})
 }
 
