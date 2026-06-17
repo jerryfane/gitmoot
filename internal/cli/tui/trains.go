@@ -18,12 +18,18 @@ func (m *Model) openTrainDetail() {
 	}
 }
 
-// trainUnderCursor returns the session under the Trains cursor, if any.
+// trainUnderCursor returns the session under the Trains cursor, if any. The
+// cursor indexes the display-ordered list (orderedTrains), not raw snapshot
+// order, so it resolves to the row the user sees highlighted.
 func (m Model) trainUnderCursor() (TrainSession, bool) {
-	if pages[m.selected].page != pageTrains || len(m.snap.Trains) == 0 {
+	if pages[m.selected].page != pageTrains {
 		return TrainSession{}, false
 	}
-	return m.snap.Trains[m.trainCursor], true
+	ordered := m.orderedTrains()
+	if m.trainCursor < 0 || m.trainCursor >= len(ordered) {
+		return TrainSession{}, false
+	}
+	return ordered[m.trainCursor], true
 }
 
 // openTrainStop enters the stop-reason overlay for a live session.
@@ -262,11 +268,14 @@ func trainStatusCategory(phase string) int {
 	return trainCatActive
 }
 
-var trainLineageSuffix = regexp.MustCompile(`-(v?\d+)$`)
+// Only an explicit "-vN" suffix marks a version lineage. A bare "-N" (e.g. a
+// timestamp tail or an independently named run) is NOT treated as a version, so
+// unrelated sessions like nightly-1/nightly-2 do not collapse together.
+var trainLineageSuffix = regexp.MustCompile(`-v\d+$`)
 
-// trainLineageBase strips a trailing version suffix ("-v3", "-12") from a
-// session id, returning the shared base name and whether a suffix was present.
-// Sessions that share a base collapse under one lineage parent line.
+// trainLineageBase strips an explicit version suffix ("-v3") from a session id,
+// returning the shared base name and whether a suffix was present. Sessions in
+// the same status section that share a base collapse under one lineage line.
 func trainLineageBase(id string) (string, bool) {
 	loc := trainLineageSuffix.FindStringIndex(id)
 	if loc == nil {
@@ -275,12 +284,67 @@ func trainLineageBase(id string) (string, bool) {
 	return id[:loc[0]], true
 }
 
-// trainRow is one displayed session paired with its index into snap.Trains. The
-// index — not the visual position — is what the cursor selects, so grouping and
-// lineage collapsing only reorder rows visually; selection stays index-based.
-type trainRow struct {
-	idx int
-	t   TrainSession
+// trainGroup is one unit of the Trains display: either a lone session
+// (len(members)==1, base "") or a collapsed lineage (members share base).
+type trainGroup struct {
+	base    string
+	members []TrainSession
+}
+
+// trainSectionGroups returns the display-ordered groups for one status category.
+// Sessions are taken in snapshot order; a base shared by more than one session
+// in the category collapses into a single group whose members stay contiguous
+// (in snapshot order), emitted at the position of its first member. This keeps
+// every lineage child under its own parent even when members are not adjacent
+// in the snapshot.
+func (m Model) trainSectionGroups(cat int) []trainGroup {
+	var rows []TrainSession
+	for _, t := range m.snap.Trains {
+		if trainStatusCategory(t.Phase) == cat {
+			rows = append(rows, t)
+		}
+	}
+	counts := map[string]int{}
+	for _, t := range rows {
+		if base, ok := trainLineageBase(t.ID); ok {
+			counts[base]++
+		}
+	}
+	emitted := map[string]bool{}
+	var groups []trainGroup
+	for _, t := range rows {
+		base, ok := trainLineageBase(t.ID)
+		if ok && counts[base] > 1 {
+			if emitted[base] {
+				continue
+			}
+			emitted[base] = true
+			g := trainGroup{base: base}
+			for _, u := range rows {
+				if b, o := trainLineageBase(u.ID); o && b == base {
+					g.members = append(g.members, u)
+				}
+			}
+			groups = append(groups, g)
+			continue
+		}
+		groups = append(groups, trainGroup{members: []TrainSession{t}})
+	}
+	return groups
+}
+
+// orderedTrains is the flat, display-ordered list of sessions — the exact
+// top-to-bottom order rows render in (sections Active→Blocked→Done, lineages
+// contiguous). The Trains cursor indexes into THIS slice, so ↑/↓ steps through
+// the visible list in order and selection matches the highlighted row.
+func (m Model) orderedTrains() []TrainSession {
+	var out []TrainSession
+	for _, cat := range []int{trainCatActive, trainCatBlocked, trainCatDone} {
+		for _, g := range m.trainSectionGroups(cat) {
+			out = append(out, g.members...)
+		}
+	}
+	return out
 }
 
 func (m Model) trainsContent() string {
@@ -292,28 +356,35 @@ func (m Model) trainsContent() string {
 	}
 	var b strings.Builder
 
-	// Bucket sessions into the three sections, preserving original index so the
-	// cursor (an index into snap.Trains) still highlights the right row.
-	sections := map[int][]trainRow{}
-	for i, t := range m.snap.Trains {
-		cat := trainStatusCategory(t.Phase)
-		sections[cat] = append(sections[cat], trainRow{idx: i, t: t})
-	}
-
+	// pos is the display position of the next selectable session row; it must
+	// advance in lockstep with orderedTrains() so the cursor highlights and
+	// selects the same row. Section headers and lineage parents are display-only
+	// and consume no position.
+	pos := 0
 	first := true
 	for _, cat := range []int{trainCatActive, trainCatBlocked, trainCatDone} {
-		rows := sections[cat]
-		if len(rows) == 0 {
+		groups := m.trainSectionGroups(cat)
+		if len(groups) == 0 {
 			continue
 		}
 		if !first {
 			b.WriteByte('\n')
 		}
 		first = false
-		// Section header is display-only: it consumes no cursor position.
 		b.WriteString(headerStyle.Render(trainSectionTitles[cat]))
 		b.WriteByte('\n')
-		m.writeTrainSection(&b, rows)
+		for _, g := range groups {
+			if len(g.members) > 1 {
+				b.WriteString("  " + g.base + "  " + mutedStyle.Render("×"+strconv.Itoa(len(g.members))) + "\n")
+				for _, t := range g.members {
+					m.writeTrainRow(&b, t, pos == m.trainCursor, "    ")
+					pos++
+				}
+				continue
+			}
+			m.writeTrainRow(&b, g.members[0], pos == m.trainCursor, "  ")
+			pos++
+		}
 	}
 
 	b.WriteString(mutedStyle.Render("enter open  s stop  d delete"))
@@ -321,50 +392,20 @@ func (m Model) trainsContent() string {
 	return b.String()
 }
 
-// writeTrainSection renders one section's rows, collapsing lineages (same base
-// name with a trailing version suffix) under a single display-only parent line
-// with the children indented beneath it. Lone sessions render flat. The lineage
-// parent line is non-selectable; only the underlying sessions are, and each is
-// highlighted by its original snap.Trains index so the cursor maps correctly.
-func (m Model) writeTrainSection(b *strings.Builder, rows []trainRow) {
-	// Count how many rows in this section share each lineage base. A base seen
-	// more than once becomes a collapsed group; everything else stays flat.
-	counts := map[string]int{}
-	for _, r := range rows {
-		if base, ok := trainLineageBase(r.t.ID); ok {
-			counts[base]++
-		}
-	}
-	rendered := map[string]bool{}
-	for _, r := range rows {
-		base, hasSuffix := trainLineageBase(r.t.ID)
-		if hasSuffix && counts[base] > 1 {
-			// Emit the lineage parent once, at the position of its first child.
-			if !rendered[base] {
-				rendered[base] = true
-				parent := base + "  " + mutedStyle.Render("×"+strconv.Itoa(counts[base]))
-				b.WriteString("  " + parent + "\n")
-			}
-			m.writeTrainRow(b, r, "    ")
-			continue
-		}
-		m.writeTrainRow(b, r, "  ")
-	}
-}
-
 // writeTrainRow renders a single selectable session row at the given indent.
-// indent is the text written for a non-cursor row; the cursor row replaces the
-// trailing two spaces with the "▸ " marker so columns stay aligned.
-func (m Model) writeTrainRow(b *strings.Builder, r trainRow, indent string) {
-	phase := r.t.Phase
-	if deadTrainPhase(r.t.Phase) {
-		phase = mutedStyle.Render(r.t.Phase)
+// selected is true when this row's display position is under the cursor; the
+// cursor row replaces the trailing two spaces of indent with the "▸ " marker so
+// columns stay aligned.
+func (m Model) writeTrainRow(b *strings.Builder, t TrainSession, selected bool, indent string) {
+	phase := t.Phase
+	if deadTrainPhase(t.Phase) {
+		phase = mutedStyle.Render(t.Phase)
 	}
-	if r.idx == m.trainCursor {
-		b.WriteString(indent[:len(indent)-2] + "▸ " + selectedRowStyle.Render(r.t.ID) + "  " + phase + "\n")
+	if selected {
+		b.WriteString(indent[:len(indent)-2] + "▸ " + selectedRowStyle.Render(t.ID) + "  " + phase + "\n")
 		return
 	}
-	b.WriteString(indent + r.t.ID + "  " + phase + "\n")
+	b.WriteString(indent + t.ID + "  " + phase + "\n")
 }
 
 func (m Model) trainDetail() string {

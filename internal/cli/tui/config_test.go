@@ -229,13 +229,33 @@ func TestConfigInlineEditWriteErrorKeepsOverlay(t *testing.T) {
 }
 
 func TestConfigDurationFieldValidation(t *testing.T) {
-	if validateConfigValue(ConfigDuration, "10m") != "" {
+	if validateConfigValue(ConfigField{Kind: ConfigDuration}, "10m") != "" {
 		t.Fatal("10m should be a valid duration")
 	}
-	if validateConfigValue(ConfigDuration, "nope") == "" {
+	if validateConfigValue(ConfigField{Kind: ConfigDuration}, "nope") == "" {
 		t.Fatal("nope should be rejected as a duration")
 	}
-	if validateConfigValue(ConfigInt, "0") == "" {
+	if validateConfigValue(ConfigField{Kind: ConfigInt}, "0") == "" {
 		t.Fatal("0 should be rejected (must be >= 1)")
+	}
+}
+
+func TestConfigEnumAndListValidation(t *testing.T) {
+	enum := ConfigField{Kind: ConfigText, Allowed: []string{"queue", "fork_temp_session"}}
+	if validateConfigValue(enum, "queue") != "" {
+		t.Fatal("queue should be allowed")
+	}
+	if validateConfigValue(enum, "nonsense") == "" {
+		t.Fatal("a value outside the allowed set should be rejected")
+	}
+	list := ConfigField{Kind: ConfigStringList, Allowed: []string{"ask", "review", "implement"}}
+	if validateConfigValue(list, `["ask", "review"]`) != "" {
+		t.Fatal("a list of allowed actions should pass")
+	}
+	if validateConfigValue(list, `["ask", "deploy"]`) == "" {
+		t.Fatal("a list with a disallowed action should be rejected")
+	}
+	if validateConfigValue(list, "ask, review") == "" {
+		t.Fatal("a non-bracketed value should be rejected for a list field")
 	}
 }

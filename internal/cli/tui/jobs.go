@@ -227,17 +227,6 @@ func daemonStartCmd(deps Deps) tea.Cmd {
 	}
 }
 
-// clampLines preserves newlines (unlike truncate, which collapses whitespace)
-// but caps the block to maxLines, appending an elision marker when it overflows.
-func clampLines(value string, maxLines int) string {
-	lines := strings.Split(strings.TrimRight(value, "\n"), "\n")
-	if len(lines) <= maxLines {
-		return strings.Join(lines, "\n")
-	}
-	kept := lines[:maxLines]
-	return strings.Join(kept, "\n") + "\n" + mutedStyle.Render("… "+strconv.Itoa(len(lines)-maxLines)+" more lines")
-}
-
 // jobDecisionColor colors a gitmoot_result decision: blocked/failed red,
 // changes_requested neutral, everything else (approved/implemented) green.
 func jobDecisionColor(decision string) string {

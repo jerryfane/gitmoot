@@ -217,7 +217,9 @@ func TestTrainLineageBase(t *testing.T) {
 	}{
 		{"officeqa-treasury-skillopt-v1", "officeqa-treasury-skillopt", true},
 		{"officeqa-treasury-skillopt-v8", "officeqa-treasury-skillopt", true},
-		{"run-12", "run", true},
+		{"run-v12", "run", true},
+		{"run-12", "run-12", false},     // bare numeric is NOT a version lineage
+		{"train-x-20260611-1", "train-x-20260611-1", false}, // timestamp tail, not a version
 		{"plain-name", "plain-name", false},
 		{"train-aaa", "train-aaa", false},
 	}
@@ -267,6 +269,13 @@ func TestTrainsListGroupsAndCollapses(t *testing.T) {
 			t.Fatalf("expected session %q in view:\n%s", id, view)
 		}
 	}
+	// Lineage children are contiguous under their parent: v2 follows v1, and both
+	// come before the unrelated flat 'lonely' row (snapshot order is v1, lonely,
+	// v2 — grouping must keep the lineage together regardless).
+	v1i, v2i, lonelyi := strings.Index(view, "skillopt-v1"), strings.Index(view, "skillopt-v2"), strings.Index(view, "lonely")
+	if !(v1i < v2i && v2i < lonelyi) {
+		t.Fatalf("lineage children must be contiguous (v1 < v2 < lonely): v1=%d v2=%d lonely=%d\n%s", v1i, v2i, lonelyi, view)
+	}
 	// Sections render in order: Active before Blocked before Done.
 	ai, bi, di := strings.Index(view, "Active"), strings.Index(view, "Blocked"), strings.Index(view, "Done")
 	if !(ai < bi && bi < di) {
@@ -274,16 +283,16 @@ func TestTrainsListGroupsAndCollapses(t *testing.T) {
 	}
 }
 
-// TestTrainCursorSelectsSessionDespiteGrouping proves the cursor still indexes
-// into snap.Trains regardless of the grouped/collapsed visual layout: a session
-// that sorts late visually (Done) but sits at an early snap index is reachable
-// by its index, and the action overlay opens for the right session.
-func TestTrainCursorSelectsSessionDespiteGrouping(t *testing.T) {
+// TestTrainCursorFollowsDisplayOrder proves the cursor steps through the visible
+// (grouped) order, not raw snapshot order: an Active session at a late snap index
+// is selected first because the Active section renders before Done, so ↑/↓ always
+// move the highlight to the visually adjacent row.
+func TestTrainCursorFollowsDisplayOrder(t *testing.T) {
 	snap := Snapshot{
 		Daemon: Daemon{Running: true},
 		Trains: []TrainSession{
-			{ID: "done-early", Phase: "run_abandoned", Repo: "o/r"}, // idx 0 → Done section
-			{ID: "live-late", Phase: "items_ready", Repo: "o/r"},    // idx 1 → Active section
+			{ID: "done-early", Phase: "run_abandoned", Repo: "o/r"}, // idx 0 → Done section (renders last)
+			{ID: "live-late", Phase: "items_ready", Repo: "o/r"},    // idx 1 → Active section (renders first)
 		},
 	}
 	deps := Deps{Load: func() (Snapshot, error) { return snap, nil }}
@@ -292,17 +301,17 @@ func TestTrainCursorSelectsSessionDespiteGrouping(t *testing.T) {
 	m = next.(Model)
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = next.(Model)
-	// Cursor 0 selects snap.Trains[0] = done-early, even though it renders last.
-	if got, _ := m.trainUnderCursor(); got.ID != "done-early" {
-		t.Fatalf("cursor 0 should select snap index 0 (done-early), got %q", got.ID)
+	// Cursor 0 selects the first VISIBLE row = live-late (Active renders before Done).
+	if got, _ := m.trainUnderCursor(); got.ID != "live-late" {
+		t.Fatalf("cursor 0 should select the first visible row (live-late), got %q", got.ID)
 	}
-	// Down moves to snap index 1 = live-late.
+	// Down moves to the next visible row = done-early (Done section).
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(Model)
 	if m.trainCursor != 1 {
 		t.Fatalf("down should move cursor to 1, got %d", m.trainCursor)
 	}
-	if got, _ := m.trainUnderCursor(); got.ID != "live-late" {
-		t.Fatalf("cursor 1 should select snap index 1 (live-late), got %q", got.ID)
+	if got, _ := m.trainUnderCursor(); got.ID != "done-early" {
+		t.Fatalf("cursor 1 should select the next visible row (done-early), got %q", got.ID)
 	}
 }

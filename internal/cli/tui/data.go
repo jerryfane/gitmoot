@@ -69,9 +69,10 @@ type ConfigSection struct {
 type ConfigKind int
 
 const (
-	ConfigText     ConfigKind = iota // free text (e.g. owner/repo, checked by Validate)
-	ConfigInt                        // integer ≥ 1
-	ConfigDuration                   // Go duration string (10m, 45m)
+	ConfigText       ConfigKind = iota // free text (e.g. owner/repo, checked by Validate)
+	ConfigInt                          // integer ≥ 1
+	ConfigDuration                     // Go duration string (10m, 45m)
+	ConfigStringList                   // bracketed list literal, e.g. ["ask", "review"]
 )
 
 // ConfigField is one inline-editable scalar on the Config page.
@@ -80,6 +81,11 @@ type ConfigField struct {
 	KeyPath []string   // full dotted path for the writer, e.g. {agents, planner, max_background}
 	Kind    ConfigKind //
 	Value   string     // current value (prefilled in the editor)
+	// Allowed, when non-empty, is the closed set of permitted tokens. For
+	// ConfigText the whole value must be one of them; for ConfigStringList every
+	// list item must be. Validated inline so a bad value re-asks in the overlay
+	// instead of writing then reverting.
+	Allowed []string
 }
 
 // ConfigEditedMsg is delivered when the external editor (Deps.EditConfig) exits.

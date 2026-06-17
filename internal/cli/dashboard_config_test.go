@@ -92,7 +92,7 @@ func TestBuildDashboardConfigView(t *testing.T) {
 		"parallel_sessions · same_session":                tui.ConfigText,
 		"parallel_sessions · merge_back":                  tui.ConfigText,
 		"parallel_sessions · max_temp_sessions_per_agent": tui.ConfigInt,
-		"parallel_sessions · eligible_actions":            tui.ConfigText,
+		"parallel_sessions · eligible_actions":            tui.ConfigStringList,
 	}
 	if len(sessions.Editable) != len(wantEditable) {
 		t.Fatalf("parallel sessions editable count = %d, want %d: %+v", len(sessions.Editable), len(wantEditable), sessions.Editable)
@@ -161,10 +161,16 @@ func TestConfigScalarForKind(t *testing.T) {
 	intVal := configScalarForKind(tui.ConfigInt, "8")
 	strVal := configScalarForKind(tui.ConfigDuration, "15m")
 	repoVal := configScalarForKind(tui.ConfigText, "owner/x")
-	// A bracketed ConfigText value is written as a TOML string array, while a
-	// plain ConfigText scalar (the session enums) stays a string.
-	listVal := configScalarForKind(tui.ConfigText, `["ask", "review"]`)
+	// A ConfigStringList value is written as a TOML string array; a ConfigText
+	// scalar (the session enums) stays a string.
+	listVal := configScalarForKind(tui.ConfigStringList, `["ask", "review"]`)
 	sessionVal := configScalarForKind(tui.ConfigText, "queue")
+	// Finding-10 guard: a ConfigText value that happens to look bracketed must
+	// still be written as a string, not silently promoted to an array.
+	bracketedText := configScalarForKind(tui.ConfigText, `["x"]`)
+	if err := config.SetConfigScalar(writeConfig(t, sampleConfigTOML), []string{"feedback", "repo"}, bracketedText); err != nil {
+		t.Fatalf("bracketed ConfigText should write as a string, got: %v", err)
+	}
 	// Apply each to a fixture and confirm the stored TOML type round-trips.
 	paths := writeConfig(t, sampleConfigTOML)
 	if err := config.SetConfigScalar(paths, []string{"agents", "planner", "max_background"}, intVal); err != nil {

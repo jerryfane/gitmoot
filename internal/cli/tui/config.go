@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +48,7 @@ func (m Model) updateConfigOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		value := strings.TrimSpace(m.input.Value())
-		if problem := validateConfigValue(m.configField.Kind, value); problem != "" {
+		if problem := validateConfigValue(m.configField, value); problem != "" {
 			m.configActionErr = problem
 			m.viewport.SetContent(m.content())
 			return m, nil
@@ -63,10 +64,11 @@ func (m Model) updateConfigOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// validateConfigValue checks a value's shape before the write attempt, so a
-// typo re-asks in the overlay instead of round-tripping through the writer.
-func validateConfigValue(kind ConfigKind, value string) string {
-	switch kind {
+// validateConfigValue checks a value's shape (and closed-set membership) before
+// the write attempt, so a typo re-asks in the overlay instead of round-tripping
+// through the writer and reverting with a generic error.
+func validateConfigValue(field ConfigField, value string) string {
+	switch field.Kind {
 	case ConfigInt:
 		if n, err := strconv.Atoi(value); err != nil || n < 1 {
 			return "must be an integer ≥ 1"
@@ -76,12 +78,51 @@ func validateConfigValue(kind ConfigKind, value string) string {
 		if err != nil || d <= 0 {
 			return "must be a positive duration like 10m or 45m"
 		}
+	case ConfigStringList:
+		items, ok := parseConfigListLiteral(value)
+		if !ok {
+			return `must be a list like ["ask", "review"]`
+		}
+		if len(items) == 0 {
+			return "value is required"
+		}
+		for _, it := range items {
+			if it == "" {
+				return "list items cannot be empty"
+			}
+			if len(field.Allowed) > 0 && !slices.Contains(field.Allowed, it) {
+				return "allowed: " + strings.Join(field.Allowed, ", ")
+			}
+		}
 	case ConfigText:
 		if value == "" {
 			return "value is required"
 		}
+		if len(field.Allowed) > 0 && !slices.Contains(field.Allowed, value) {
+			return "allowed: " + strings.Join(field.Allowed, ", ")
+		}
 	}
 	return ""
+}
+
+// parseConfigListLiteral parses a bracketed TOML-ish list literal into its
+// trimmed, unquoted tokens. It is the validation-side counterpart of the
+// writer's parser; the empty list "[]" parses to an empty slice.
+func parseConfigListLiteral(value string) ([]string, bool) {
+	s := strings.TrimSpace(value)
+	if !strings.HasPrefix(s, "[") || !strings.HasSuffix(s, "]") {
+		return nil, false
+	}
+	inner := strings.TrimSpace(s[1 : len(s)-1])
+	if inner == "" {
+		return []string{}, true
+	}
+	parts := strings.Split(inner, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, strings.TrimSpace(strings.Trim(strings.TrimSpace(p), `"'`)))
+	}
+	return out, true
 }
 
 func configWriteCmd(deps Deps, keyPath []string, value string, kind ConfigKind) tea.Cmd {

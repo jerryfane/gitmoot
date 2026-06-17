@@ -107,9 +107,10 @@ func TestAgentsPageGroupsByTemplate(t *testing.T) {
 	if nIdx > strings.Index(view, "drifter") {
 		t.Fatalf("the (no template) header should precede its agent:\n%s", view)
 	}
-	// Cursor still indexes the flat visible order: planner, reviewer, scout,
-	// drifter. Grouping is display-only and must not reorder selection.
-	wants := []string{"planner", "reviewer", "scout", "drifter"}
+	// Cursor follows the on-screen (grouped) order, so ↑/↓ step through rows in
+	// the order they render: the planner-tpl group (planner, scout) first, then
+	// reviewer-tpl (reviewer), then the (no template) group (drifter).
+	wants := []string{"planner", "scout", "reviewer", "drifter"}
 	for i, want := range wants {
 		a, ok := m.agentUnderCursor()
 		if !ok || a.Name != want {

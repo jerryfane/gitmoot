@@ -67,13 +67,18 @@ func buildDashboardConfigView(paths config.Paths, daemon dashboardDaemonDetail) 
 
 	// Sessions: parallel-session policy. The scalar fields are inline-editable,
 	// mirroring feedback.repo / the agent timeouts; same_session and merge_back
-	// are short enums (ConfigText) and max_temp_sessions_per_agent is an int.
-	// eligible_actions is a string array: its editable Value is the bracketed
-	// TOML literal so configScalarForKind round-trips it back as a list and the
-	// re-parse in SetConfigScalar keeps accepting it.
+	// are short enums and max_temp_sessions_per_agent is an int. eligible_actions
+	// is a string list (ConfigStringList): its editable Value is the bracketed
+	// TOML literal so configScalarForKind round-trips it back as a list.
+	//
+	// LoadParallelSessionPolicy returns populated defaults (with a nil error) even
+	// when the file has no [parallel_sessions] section, so the read-only Rows
+	// always show the effective policy. But the inline-edit writer cannot create a
+	// missing key (section creation is reserved for the $EDITOR path), so the
+	// Editable affordance is only attached when the section actually exists —
+	// otherwise an edit would fail with a confusing "key not found".
 	if policy, err := config.LoadParallelSessionPolicy(paths); err == nil {
-		eligibleLiteral := configStringArrayLiteral(policy.EligibleActions)
-		view.Sections = append(view.Sections, tui.ConfigSection{
+		section := tui.ConfigSection{
 			Title: "parallel sessions (session policy)",
 			Rows: [][]string{
 				{"same_session", policy.SameSession},
@@ -81,13 +86,16 @@ func buildDashboardConfigView(paths config.Paths, daemon dashboardDaemonDetail) 
 				{"max_temp_sessions_per_agent", strconv.Itoa(policy.MaxTempSessionsPerAgent)},
 				{"eligible_actions", strings.Join(policy.EligibleActions, ", ")},
 			},
-			Editable: []tui.ConfigField{
-				{Label: "parallel_sessions · same_session", KeyPath: []string{"parallel_sessions", "same_session"}, Kind: tui.ConfigText, Value: policy.SameSession},
-				{Label: "parallel_sessions · merge_back", KeyPath: []string{"parallel_sessions", "merge_back"}, Kind: tui.ConfigText, Value: policy.MergeBack},
+		}
+		if configFileHasSection(paths, "parallel_sessions") {
+			section.Editable = []tui.ConfigField{
+				{Label: "parallel_sessions · same_session", KeyPath: []string{"parallel_sessions", "same_session"}, Kind: tui.ConfigText, Value: policy.SameSession, Allowed: []string{config.ParallelSessionQueue, config.ParallelSessionForkTempSession}},
+				{Label: "parallel_sessions · merge_back", KeyPath: []string{"parallel_sessions", "merge_back"}, Kind: tui.ConfigText, Value: policy.MergeBack, Allowed: []string{config.ParallelSessionMergeBackOff, config.ParallelSessionMergeBackSummary}},
 				{Label: "parallel_sessions · max_temp_sessions_per_agent", KeyPath: []string{"parallel_sessions", "max_temp_sessions_per_agent"}, Kind: tui.ConfigInt, Value: strconv.Itoa(policy.MaxTempSessionsPerAgent)},
-				{Label: "parallel_sessions · eligible_actions", KeyPath: []string{"parallel_sessions", "eligible_actions"}, Kind: tui.ConfigText, Value: eligibleLiteral},
-			},
-		})
+				{Label: "parallel_sessions · eligible_actions", KeyPath: []string{"parallel_sessions", "eligible_actions"}, Kind: tui.ConfigStringList, Value: configStringArrayLiteral(policy.EligibleActions), Allowed: []string{"ask", "review", "implement"}},
+			}
+		}
+		view.Sections = append(view.Sections, section)
 	}
 
 	// Feedback: default feedback repo.
@@ -116,26 +124,46 @@ func buildDashboardConfigView(paths config.Paths, daemon dashboardDaemonDetail) 
 	return view
 }
 
-// configScalarForKind types the value for the writer from the field's own
-// classification (the single source of truth), so a new int field cannot be
-// mis-written as a string. Durations and repos are stored as TOML strings.
-//
-// ConfigText covers both plain strings (repo, the session enums) and the
-// eligible_actions array. The TUI's edit overlay only carries a kind, not the
-// target's TOML shape, so a bracketed value ("[\"ask\", \"review\"]") is the
-// signal to write a string list; everything else is a plain string. None of the
-// scalar ConfigText values (owner/repo, queue/fork_temp_session, off/summary)
-// is ever bracketed, so this can't misclassify them.
+// configScalarForKind types the value for the writer from the field's own kind
+// (the single source of truth), so the target's TOML shape never depends on the
+// value's syntax. Only ConfigStringList writes a TOML array; ConfigText (repo,
+// the session enums) always writes a plain string even if the user typed
+// brackets, and ConfigInt writes an int. This avoids mistyping a string field as
+// an array when its value happens to look bracketed.
 func configScalarForKind(kind tui.ConfigKind, value string) config.ConfigScalar {
-	if kind == tui.ConfigInt {
+	switch kind {
+	case tui.ConfigInt:
 		if n, err := strconv.Atoi(value); err == nil {
 			return config.IntScalar(n)
 		}
-	}
-	if items, ok := parseConfigStringArrayLiteral(value); ok {
-		return config.StringListScalar(items)
+	case tui.ConfigStringList:
+		if items, ok := parseConfigStringArrayLiteral(value); ok {
+			return config.StringListScalar(items)
+		}
 	}
 	return config.StringScalar(value)
+}
+
+// configFileHasSection reports whether the config file declares the given
+// [section] header. Inline edits cannot create a missing section (that is
+// reserved for the $EDITOR path), so the Config page only offers inline edits
+// for keys whose section already exists.
+func configFileHasSection(paths config.Paths, section string) bool {
+	content, err := os.ReadFile(paths.ConfigFile)
+	if err != nil {
+		return false
+	}
+	header := "[" + section + "]"
+	for _, raw := range strings.Split(string(content), "\n") {
+		line := strings.TrimSpace(raw)
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if line == header {
+			return true
+		}
+	}
+	return false
 }
 
 // configStringArrayLiteral renders a string slice as the bracketed TOML literal

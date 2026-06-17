@@ -750,14 +750,3 @@ func TestDepsLabel(t *testing.T) {
 		t.Fatalf("depsLabel(pending) = %q", got)
 	}
 }
-
-func TestJobDetailClampLines(t *testing.T) {
-	got := clampLines("a\nb\nc\nd\ne", 3)
-	if !strings.Contains(got, "a\nb\nc") || !strings.Contains(got, "2 more lines") {
-		t.Fatalf("clampLines = %q", got)
-	}
-	// Within the cap, newlines are preserved verbatim (not collapsed).
-	if clampLines("one\ntwo", 5) != "one\ntwo" {
-		t.Fatalf("clampLines should preserve newlines under the cap")
-	}
-}
