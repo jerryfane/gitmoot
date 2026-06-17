@@ -331,3 +331,43 @@ func TestDashboardCreateAgentWithPrompt(t *testing.T) {
 		t.Fatalf("template content = %q, want the edited prompt", tpl.Content)
 	}
 }
+
+func TestBuildDashboardActivity(t *testing.T) {
+	mustPayload := func(p workflow.JobPayload) string {
+		t.Helper()
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		return string(raw)
+	}
+	jobs := []db.Job{
+		// Active root coordinator (no RootJobID → its own id is the root); its
+		// result names the two delegations.
+		{ID: "root-1", Agent: "planner", Type: "implement", State: "running", UpdatedAt: "2026-01-02T00:00:00Z",
+			Payload: mustPayload(workflow.JobPayload{Repo: "o/r", Result: &workflow.AgentResult{
+				Delegations: []workflow.Delegation{{ID: "d1", Action: "build"}, {ID: "d2", Action: "test"}},
+			}})},
+		{ID: "root-1/delegation/d1", Agent: "impl-a", Type: "implement", State: "running", ParentJobID: "root-1", DelegationID: "d1",
+			Payload: mustPayload(workflow.JobPayload{RootJobID: "root-1", ParentJobID: "root-1", DelegationID: "d1"})},
+		{ID: "root-1/delegation/d2", Agent: "impl-b", Type: "implement", State: "succeeded", ParentJobID: "root-1", DelegationID: "d2",
+			Payload: mustPayload(workflow.JobPayload{RootJobID: "root-1", ParentJobID: "root-1", DelegationID: "d2"})},
+		// A fully-settled tree (no active member) must be excluded.
+		{ID: "root-2", Agent: "planner", Type: "ask", State: "succeeded", UpdatedAt: "2026-01-01T00:00:00Z",
+			Payload: mustPayload(workflow.JobPayload{Repo: "o/x"})},
+	}
+	roots := buildDashboardActivity(jobs)
+	if len(roots) != 1 {
+		t.Fatalf("expected 1 active root, got %d: %+v", len(roots), roots)
+	}
+	r := roots[0]
+	if r.JobID != "root-1" || r.Repo != "o/r" || r.State != "running" {
+		t.Fatalf("root fields wrong: %+v", r)
+	}
+	if r.Total != 2 || r.Running != 1 || r.Blocked != 0 || r.Done != 1 {
+		t.Fatalf("progress counts wrong: total=%d running=%d blocked=%d done=%d", r.Total, r.Running, r.Blocked, r.Done)
+	}
+	if len(r.Children) != 2 {
+		t.Fatalf("expected 2 delegation children, got %d", len(r.Children))
+	}
+}

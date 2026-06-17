@@ -30,7 +30,28 @@ type Snapshot struct {
 	ResourceLocks  []ResourceLock
 	Prompts        []db.InteractivePrompt
 	JobRows        []JobRow
+	Activity       []ActivityRoot
 	Config         ConfigView
+}
+
+// ActivityRoot is one live delegation tree on the Activity page: a root
+// coordinator job that has queued/running work somewhere in its tree, its direct
+// delegation children (which agent is doing what, and their state), the
+// coordinator continuation job, and a progress summary.
+type ActivityRoot struct {
+	JobID             string
+	Agent             string
+	Action            string
+	State             string
+	Repo              string
+	UpdatedAt         string
+	Children          []JobChild
+	ContinuationID    string
+	ContinuationState string
+	Total             int // direct delegation children
+	Running           int // queued/running children
+	Blocked           int
+	Done              int // terminal children (succeeded/failed/cancelled)
 }
 
 // Daemon mirrors cli.dashboardDaemon.

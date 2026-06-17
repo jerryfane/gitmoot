@@ -122,9 +122,7 @@ func trainsModel(t *testing.T) Model {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: trainSnapshot(), at: time.Unix(1, 0)})
 	m = next.(Model)
-	// Tab from Attention to Trains.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	return next.(Model)
+	return tabToPage(t, m, pageTrains)
 }
 
 func TestTrainDetailShowsSessionLocksOnly(t *testing.T) {
@@ -248,11 +246,7 @@ func TestTrainsListGroupsAndCollapses(t *testing.T) {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
 	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // Attention → Trains
-	m = next.(Model)
-	if pages[m.selected].page != pageTrains {
-		t.Fatalf("expected Trains page")
-	}
+	m = tabToPage(t, m, pageTrains)
 	view := m.View()
 	for _, want := range []string{"Active", "Blocked", "Done"} {
 		if !strings.Contains(view, want) {
@@ -303,8 +297,7 @@ func TestTrainCursorFollowsDisplayOrder(t *testing.T) {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
 	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = next.(Model)
+	m = tabToPage(t, m, pageTrains)
 	// Cursor 0 selects the first VISIBLE row = live-late (Active renders before Done).
 	if got, _ := m.trainUnderCursor(); got.ID != "live-late" {
 		t.Fatalf("cursor 0 should select the first visible row (live-late), got %q", got.ID)
@@ -336,8 +329,7 @@ func TestTrainsGroupByRepoWithinSection(t *testing.T) {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
 	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // Attention → Trains
-	m = next.(Model)
+	m = tabToPage(t, m, pageTrains)
 	view := m.View()
 	for _, want := range []string{"Active", "o/alpha", "o/beta", "a-v1", "a-v2", "b1"} {
 		if !strings.Contains(view, want) {
@@ -374,8 +366,7 @@ func TestTrainsCollapseRepoFoldsSessions(t *testing.T) {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
 	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // → Trains
-	m = next.(Model)
+	m = tabToPage(t, m, pageTrains)
 	// Cursor 0 = a1 (o/alpha). Space folds o/alpha.
 	next, _ = m.Update(key(" "))
 	m = next.(Model)
@@ -408,8 +399,7 @@ func TestTrainsCollapsedByDefault(t *testing.T) {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
 	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // → Trains
-	m = next.(Model)
+	m = tabToPage(t, m, pageTrains)
 	view := m.View()
 	if strings.Contains(view, "s1") {
 		t.Fatalf("sessions should be folded by default:\n%s", view)

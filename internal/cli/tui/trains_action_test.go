@@ -27,12 +27,7 @@ func trainsActionModel(t *testing.T, deps Deps, snap Snapshot) Model {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
 	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // Attention → Trains
-	m = next.(Model)
-	if pages[m.selected].page != pageTrains {
-		t.Fatalf("expected Trains page, got %v", pages[m.selected].page)
-	}
-	return m
+	return tabToPage(t, m, pageTrains)
 }
 
 func typeText(t *testing.T, m Model, text string) Model {

@@ -110,6 +110,8 @@ func (m Model) content() string {
 		switch pages[m.selected].page {
 		case pageAttention:
 			b.WriteString(m.attentionContent())
+		case pageActivity:
+			b.WriteString(m.activityContent())
 		case pageTrains:
 			b.WriteString(m.trainsContent())
 		case pageAgents:
@@ -145,6 +147,12 @@ func (m Model) helpContent() string {
 			b.WriteString("B    report bug for the selected job\n")
 		}
 		b.WriteString("s    start the daemon when it is stopped\n")
+	case pageActivity:
+		b.WriteString("live delegation trees with queued/running work (newest first)\n")
+		b.WriteString("each root shows the coordinator, a progress summary, and the\n")
+		b.WriteString("delegation children (which agent is doing what, and its state)\n")
+		b.WriteString("↑/↓  select an active root\n")
+		b.WriteString("enter open the root's full detail (request + delegation tree)\n")
 	case pageTrains:
 		b.WriteString("↑/↓  select a train session\n")
 		b.WriteString("enter open the session (live phase view; esc returns)\n")
@@ -246,6 +254,8 @@ func (m Model) footerHelp() string {
 			help += "  B report bug"
 		}
 		return help + "  ? help  q quit"
+	case pageActivity:
+		return "tab/←→ page  ↑/↓ select  enter open root  ? help  q quit"
 	case pageTrains:
 		return "tab/←→ page  ↑/↓ select  enter open  s stop  d delete  ? help  q quit"
 	case pageAgents:

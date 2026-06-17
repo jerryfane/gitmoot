@@ -53,7 +53,8 @@ func driveRoot(t *testing.T, root Root, msg tea.Msg) Root {
 func TestRootPushesTrainViewOnTrainsEnter(t *testing.T) {
 	root := rootWithDashboard(t)
 	// Tab to Trains, then enter.
-	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab})
+	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab}) // Attention → Activity
+	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab}) // Activity → Trains
 	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyEnter})
 	if len(root.stack) != 2 {
 		t.Fatalf("enter on Trains should push the train view, stack=%d", len(root.stack))
@@ -65,7 +66,8 @@ func TestRootPushesTrainViewOnTrainsEnter(t *testing.T) {
 
 func TestRootPopsBackToDashboard(t *testing.T) {
 	root := rootWithDashboard(t)
-	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab})
+	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab}) // Attention → Activity
+	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab}) // Activity → Trains
 	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyEnter})
 	if len(root.stack) != 2 {
 		t.Fatalf("setup: stack=%d", len(root.stack))
@@ -82,7 +84,8 @@ func TestRootPopsBackToDashboard(t *testing.T) {
 
 func TestRootCtrlCQuitsFromChild(t *testing.T) {
 	root := rootWithDashboard(t)
-	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab})
+	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab}) // Attention → Activity
+	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab}) // Activity → Trains
 	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyEnter})
 	_, cmd := root.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd == nil {
@@ -95,7 +98,8 @@ func TestRootCtrlCQuitsFromChild(t *testing.T) {
 
 func TestRootBroadcastsWindowSize(t *testing.T) {
 	root := rootWithDashboard(t)
-	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab})
+	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab}) // Attention → Activity
+	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyTab}) // Activity → Trains
 	root = driveRoot(t, root, tea.KeyMsg{Type: tea.KeyEnter})
 	next, _ := root.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
 	root = next.(Root)

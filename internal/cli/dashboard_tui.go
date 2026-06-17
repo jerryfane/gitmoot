@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -506,6 +507,7 @@ func toTUISnapshot(s dashboardSnapshot) tui.Snapshot {
 		out.ResourceLocks = append(out.ResourceLocks, tui.ResourceLock{Key: l.Key, Owner: l.Owner, Stale: l.Stale})
 	}
 	out.Config = s.configView
+	jobs := make([]db.Job, 0, len(s.jobRows))
 	for _, row := range s.jobRows {
 		out.JobRows = append(out.JobRows, tui.JobRow{
 			ID:          row.ID,
@@ -516,7 +518,9 @@ func toTUISnapshot(s dashboardSnapshot) tui.Snapshot {
 			LatestEvent: row.LatestEvent,
 			Repo:        row.Repo,
 		})
+		jobs = append(jobs, row.Job)
 	}
+	out.Activity = buildDashboardActivity(jobs)
 	return out
 }
 
@@ -600,6 +604,94 @@ func buildDelegationTree(parent workflow.JobPayload, children []db.Job) ([]tui.J
 		})
 	}
 	return out, continuationID, continuationState
+}
+
+// activityJobActive reports whether a job state counts as live (in-progress) work.
+func activityJobActive(state string) bool {
+	return state == "queued" || state == "running"
+}
+
+// buildDashboardActivity groups jobs into delegation trees keyed by root job and
+// returns the roots that have any queued/running work, newest first — the
+// Activity page's live "what are agents working on" view. Each job's root is read
+// from its payload RootJobID (falling back to its own id for an originating
+// coordinator); the root's direct delegation children come from the same
+// buildDelegationTree used by the job-detail view.
+func buildDashboardActivity(jobs []db.Job) []tui.ActivityRoot {
+	jobByID := make(map[string]db.Job, len(jobs))
+	payloadOf := make(map[string]workflow.JobPayload, len(jobs))
+	rootOf := make(map[string]string, len(jobs))
+	childrenByParent := map[string][]db.Job{}
+	for _, j := range jobs {
+		jobByID[j.ID] = j
+		payload, err := workflow.ParseJobPayload(j.Payload)
+		if err != nil {
+			payload = workflow.JobPayload{}
+		}
+		payloadOf[j.ID] = payload
+		root := strings.TrimSpace(payload.RootJobID)
+		if root == "" {
+			root = j.ID
+		}
+		rootOf[j.ID] = root
+		if parent := strings.TrimSpace(j.ParentJobID); parent != "" {
+			childrenByParent[parent] = append(childrenByParent[parent], j)
+		}
+	}
+
+	membersByRoot := map[string][]db.Job{}
+	for _, j := range jobs {
+		membersByRoot[rootOf[j.ID]] = append(membersByRoot[rootOf[j.ID]], j)
+	}
+
+	var roots []tui.ActivityRoot
+	for rootID, members := range membersByRoot {
+		active := false
+		for _, m := range members {
+			if activityJobActive(m.State) {
+				active = true
+				break
+			}
+		}
+		if !active {
+			continue
+		}
+		rootJob, ok := jobByID[rootID]
+		if !ok {
+			continue
+		}
+		children, contID, contState := buildDelegationTree(payloadOf[rootID], childrenByParent[rootID])
+		root := tui.ActivityRoot{
+			JobID:             rootJob.ID,
+			Agent:             rootJob.Agent,
+			Action:            rootJob.Type,
+			State:             rootJob.State,
+			Repo:              strings.TrimSpace(payloadOf[rootID].Repo),
+			UpdatedAt:         rootJob.UpdatedAt,
+			Children:          children,
+			ContinuationID:    contID,
+			ContinuationState: contState,
+			Total:             len(children),
+		}
+		for _, c := range children {
+			switch {
+			case activityJobActive(c.State):
+				root.Running++
+			case c.State == "blocked":
+				root.Blocked++
+			case c.State == "succeeded" || c.State == "failed" || c.State == "cancelled":
+				root.Done++
+			}
+		}
+		roots = append(roots, root)
+	}
+	sort.SliceStable(roots, func(i, j int) bool {
+		if roots[i].UpdatedAt != roots[j].UpdatedAt {
+			return roots[i].UpdatedAt > roots[j].UpdatedAt // newest activity first (ISO lexical)
+		}
+		return roots[i].JobID < roots[j].JobID
+	})
+	return roots
 }
 
 // childRetryCount reads a delegation child's RetryCount from its stored payload,

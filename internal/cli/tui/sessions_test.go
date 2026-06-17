@@ -16,14 +16,7 @@ func sessionsPageModel(t *testing.T, snap Snapshot) Model {
 	m := sizedModel(Deps{Load: func() (Snapshot, error) { return snap, nil }})
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1_700_000_000, 0)})
 	m = next.(Model)
-	for i := 0; i < 3; i++ {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-		m = next.(Model)
-	}
-	if pages[m.selected].page != pageSessions {
-		t.Fatalf("expected Sessions page, got %v", pages[m.selected].page)
-	}
-	return m
+	return tabToPage(t, m, pageSessions)
 }
 
 func sessionDetailSnapshot() Snapshot {
@@ -108,14 +101,7 @@ func sessionsPageModelWithDeps(t *testing.T, snap Snapshot, deps Deps) Model {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1_700_000_000, 0)})
 	m = next.(Model)
-	for i := 0; i < 3; i++ {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-		m = next.(Model)
-	}
-	if pages[m.selected].page != pageSessions {
-		t.Fatalf("expected Sessions page, got %v", pages[m.selected].page)
-	}
-	return m
+	return tabToPage(t, m, pageSessions)
 }
 
 func TestSessionStopSingleConfirms(t *testing.T) {
@@ -192,13 +178,7 @@ func TestLocksPageShowsGuidance(t *testing.T) {
 	m := sizedModel(Deps{Load: func() (Snapshot, error) { return snap, nil }})
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1_700_000_000, 0)})
 	m = next.(Model)
-	for i := 0; i < 5; i++ { // Attention → … → Locks (6th page)
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-		m = next.(Model)
-	}
-	if pages[m.selected].page != pageLocks {
-		t.Fatalf("expected Locks page, got %v", pages[m.selected].page)
-	}
+	m = tabToPage(t, m, pageLocks)
 	view := m.View()
 	for _, want := range []string{"what to do: usually nothing", "gitmoot lock release"} {
 		if !strings.Contains(view, want) {

@@ -31,13 +31,7 @@ func agentsModel(t *testing.T, deps Deps, snap Snapshot) Model {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
 	m = next.(Model)
-	for i := 0; i < 2; i++ { // Attention → Trains → Agents
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-		m = next.(Model)
-	}
-	if pages[m.selected].page != pageAgents {
-		t.Fatalf("expected Agents page, got %v", pages[m.selected].page)
-	}
+	m = tabToPage(t, m, pageAgents)
 	return m
 }
 

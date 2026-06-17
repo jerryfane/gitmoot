@@ -30,15 +30,7 @@ func jobsModel(t *testing.T, deps Deps, snap Snapshot) Model {
 	m := sizedModel(deps)
 	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
 	m = next.(Model)
-	// Tab to the Jobs page (Attention → Trains → Agents → Sessions → Jobs).
-	for i := 0; i < 4; i++ {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-		m = next.(Model)
-	}
-	if pages[m.selected].page != pageJobs {
-		t.Fatalf("expected Jobs page, got %v", pages[m.selected].page)
-	}
-	return m
+	return tabToPage(t, m, pageJobs)
 }
 
 func TestFormatJobTime(t *testing.T) {

@@ -57,10 +57,27 @@ func loadedModel(t *testing.T) Model {
 	return next.(Model)
 }
 
+// tabToPage tabs forward until the given page is selected, running any cmd a
+// landing dispatches (e.g. Health's lazy load). Robust to page-order changes.
+func tabToPage(t *testing.T, m Model, p page) Model {
+	t.Helper()
+	for i := 0; i < len(pages) && pages[m.selected].page != p; i++ {
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = next.(Model)
+		if cmd != nil {
+			cmd()
+		}
+	}
+	if pages[m.selected].page != p {
+		t.Fatalf("could not reach page %v", p)
+	}
+	return m
+}
+
 func TestPagesRenderExpectedContent(t *testing.T) {
 	m := loadedModel(t)
-	// Page order: Attention, Trains, Agents, Sessions, Jobs, Locks, Health, Config.
-	wants := []string{"Prompts (1)", "train-s1", "planner", "skillopt-generator", "failed", "branch locks", "environment", "edit in $EDITOR"}
+	// Page order: Attention, Activity, Trains, Agents, Workers, Jobs, Locks, Health, Config.
+	wants := []string{"Prompts (1)", "No active jobs", "train-s1", "planner", "skillopt-generator", "failed", "branch locks", "environment", "edit in $EDITOR"}
 	for i, want := range wants {
 		if i > 0 {
 			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -109,12 +126,8 @@ func TestLoadErrorKeepsStaleData(t *testing.T) {
 	m := loadedModel(t)
 	next, _ := m.Update(snapshotMsg{err: errors.New("db locked"), at: time.Unix(2, 0)})
 	m = next.(Model)
-	// Move to the Agents page (Attention → Trains → Agents) where the stale
-	// data is visible.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = next.(Model)
+	// Move to the Agents page where the stale data is visible.
+	m = tabToPage(t, m, pageAgents)
 	view := m.View()
 	if !strings.Contains(view, "refresh error: db locked") {
 		t.Fatalf("expected error banner, got:\n%s", view)
