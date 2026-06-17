@@ -403,9 +403,10 @@ func trainRowContent(t TrainSession) string {
 }
 
 // trainListRows builds the Trains page's collapsible row tree:
-// status section (Active/Blocked/Done) → repo → lineage → session. Leaf itemIdx
-// indexes orderedTrains() (built in the same order), so the cursor resolves to
-// the right session.
+// status section (Active/Blocked/Done) → repo → session. The repo is the only
+// collapsible group; sessions list directly under it (lineage versions stay
+// contiguous via rb.groups ordering, but without a separate sub-group line).
+// Leaf itemIdx indexes orderedTrains() (built in the same order).
 func (m Model) trainListRows() []listRow {
 	var rows []listRow
 	idx := 0
@@ -420,16 +421,10 @@ func (m Model) trainListRows() []listRow {
 			repoKey := "trains:" + title + ":" + rb.repo
 			rows = append(rows, headerRow(repoKey, 1, rb.repo+"  ×"+strconv.Itoa(bucketMemberCount(rb))))
 			for _, g := range rb.groups {
-				if len(g.members) > 1 {
-					rows = append(rows, staticRow(2, g.base+"  ×"+strconv.Itoa(len(g.members)))) // lineage: display-only
-					for _, t := range g.members {
-						rows = append(rows, leafRow(3, trainRowContent(t), idx, repoKey))
-						idx++
-					}
-					continue
+				for _, t := range g.members {
+					rows = append(rows, leafRow(2, trainRowContent(t), idx, repoKey))
+					idx++
 				}
-				rows = append(rows, leafRow(2, trainRowContent(g.members[0]), idx, repoKey))
-				idx++
 			}
 		}
 	}

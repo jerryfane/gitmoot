@@ -259,11 +259,15 @@ func TestTrainsListGroupsAndCollapses(t *testing.T) {
 			t.Fatalf("expected section header %q:\n%s", want, view)
 		}
 	}
-	// Two skillopt-v* sessions collapse under one lineage parent line.
-	if !strings.Contains(view, "skillopt  ") || !strings.Contains(view, "×2") {
-		t.Fatalf("expected collapsed lineage parent 'skillopt ×2':\n%s", view)
+	// Repo is the only group: the repo header carries the count, and there is NO
+	// separate lineage sub-group line (e.g. "skillopt  ×2") inside it.
+	if !strings.Contains(view, "o/r") {
+		t.Fatalf("expected the repo group header:\n%s", view)
 	}
-	// All individual session ids still render (children + flat rows).
+	if strings.Contains(view, "skillopt  ×") {
+		t.Fatalf("lineage sub-group line should be gone (only the repo group remains):\n%s", view)
+	}
+	// All individual session ids still render directly under the repo.
 	for _, id := range []string{"skillopt-v1", "skillopt-v2", "lonely", "stalled", "gone"} {
 		if !strings.Contains(view, id) {
 			t.Fatalf("expected session %q in view:\n%s", id, view)
