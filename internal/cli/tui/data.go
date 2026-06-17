@@ -149,7 +149,9 @@ type Jobs struct {
 }
 
 // JobRow is one job the Jobs page can act on. LatestEvent is filled for
-// blocked/failed jobs (the "why" shown in the attention list).
+// blocked/failed jobs (the "why" shown in the attention list). Repo is filled
+// for reportable (blocked/failed/cancelled) jobs so the Attention page can group
+// them by repository.
 type JobRow struct {
 	ID          string
 	Agent       string
@@ -157,6 +159,7 @@ type JobRow struct {
 	State       string
 	UpdatedAt   string
 	LatestEvent string
+	Repo        string
 }
 
 // JobDetail is the job's parsed payload, loaded lazily when its detail opens

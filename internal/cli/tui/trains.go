@@ -291,19 +291,26 @@ type trainGroup struct {
 	members []TrainSession
 }
 
-// trainSectionGroups returns the display-ordered groups for one status category.
-// Sessions are taken in snapshot order; a base shared by more than one session
-// in the category collapses into a single group whose members stay contiguous
-// (in snapshot order), emitted at the position of its first member. This keeps
-// every lineage child under its own parent even when members are not adjacent
-// in the snapshot.
-func (m Model) trainSectionGroups(cat int) []trainGroup {
-	var rows []TrainSession
-	for _, t := range m.snap.Trains {
-		if trainStatusCategory(t.Phase) == cat {
-			rows = append(rows, t)
-		}
+// trainRepoBucket is one repository's lineage groups within a status section.
+type trainRepoBucket struct {
+	repo   string
+	groups []trainGroup
+}
+
+// trainRepoLabel is a session's target repo, or "(no repo)" when it has none.
+func trainRepoLabel(repo string) string {
+	if strings.TrimSpace(repo) == "" {
+		return "(no repo)"
 	}
+	return repo
+}
+
+// lineageGroups buckets sessions into display groups: a base shared by more than
+// one session collapses into a single group whose members stay contiguous (in
+// the given order, emitted at the first member's position); everything else is a
+// lone group in place. This keeps every lineage child under its own parent even
+// when members are not adjacent.
+func lineageGroups(rows []TrainSession) []trainGroup {
 	counts := map[string]int{}
 	for _, t := range rows {
 		if base, ok := trainLineageBase(t.ID); ok {
@@ -333,15 +340,52 @@ func (m Model) trainSectionGroups(cat int) []trainGroup {
 	return groups
 }
 
+// trainSectionRepos returns the display-ordered repo buckets for one status
+// category: the category's sessions (snapshot order) bucketed by repo in
+// first-appearance order, each with its lineage groups.
+func (m Model) trainSectionRepos(cat int) []trainRepoBucket {
+	var rows []TrainSession
+	for _, t := range m.snap.Trains {
+		if trainStatusCategory(t.Phase) == cat {
+			rows = append(rows, t)
+		}
+	}
+	order := []string{}
+	byRepo := map[string][]TrainSession{}
+	for _, t := range rows {
+		label := trainRepoLabel(t.Repo)
+		if _, ok := byRepo[label]; !ok {
+			order = append(order, label)
+		}
+		byRepo[label] = append(byRepo[label], t)
+	}
+	out := make([]trainRepoBucket, 0, len(order))
+	for _, label := range order {
+		out = append(out, trainRepoBucket{repo: label, groups: lineageGroups(byRepo[label])})
+	}
+	return out
+}
+
+// bucketMemberCount is the total sessions across a repo bucket's lineage groups.
+func bucketMemberCount(rb trainRepoBucket) int {
+	n := 0
+	for _, g := range rb.groups {
+		n += len(g.members)
+	}
+	return n
+}
+
 // orderedTrains is the flat, display-ordered list of sessions — the exact
-// top-to-bottom order rows render in (sections Active→Blocked→Done, lineages
-// contiguous). The Trains cursor indexes into THIS slice, so ↑/↓ steps through
-// the visible list in order and selection matches the highlighted row.
+// top-to-bottom order rows render in (sections Active→Blocked→Done, then by repo,
+// then lineages contiguous). The Trains cursor indexes into THIS slice, so ↑/↓
+// steps through the visible list in order and selection matches the highlight.
 func (m Model) orderedTrains() []TrainSession {
 	var out []TrainSession
 	for _, cat := range []int{trainCatActive, trainCatBlocked, trainCatDone} {
-		for _, g := range m.trainSectionGroups(cat) {
-			out = append(out, g.members...)
+		for _, rb := range m.trainSectionRepos(cat) {
+			for _, g := range rb.groups {
+				out = append(out, g.members...)
+			}
 		}
 	}
 	return out
@@ -363,8 +407,8 @@ func (m Model) trainsContent() string {
 	pos := 0
 	first := true
 	for _, cat := range []int{trainCatActive, trainCatBlocked, trainCatDone} {
-		groups := m.trainSectionGroups(cat)
-		if len(groups) == 0 {
+		repos := m.trainSectionRepos(cat)
+		if len(repos) == 0 {
 			continue
 		}
 		if !first {
@@ -373,17 +417,22 @@ func (m Model) trainsContent() string {
 		first = false
 		b.WriteString(headerStyle.Render(trainSectionTitles[cat]))
 		b.WriteByte('\n')
-		for _, g := range groups {
-			if len(g.members) > 1 {
-				b.WriteString("  " + g.base + "  " + mutedStyle.Render("×"+strconv.Itoa(len(g.members))) + "\n")
-				for _, t := range g.members {
-					m.writeTrainRow(&b, t, pos == m.trainCursor, "    ")
-					pos++
+		for _, rb := range repos {
+			// Repo sub-header (display-only); sessions of this repo follow, with
+			// lineages collapsed beneath it.
+			b.WriteString("  " + rb.repo + "  " + mutedStyle.Render("×"+strconv.Itoa(bucketMemberCount(rb))) + "\n")
+			for _, g := range rb.groups {
+				if len(g.members) > 1 {
+					b.WriteString("    " + g.base + "  " + mutedStyle.Render("×"+strconv.Itoa(len(g.members))) + "\n")
+					for _, t := range g.members {
+						m.writeTrainRow(&b, t, pos == m.trainCursor, "      ")
+						pos++
+					}
+					continue
 				}
-				continue
+				m.writeTrainRow(&b, g.members[0], pos == m.trainCursor, "    ")
+				pos++
 			}
-			m.writeTrainRow(&b, g.members[0], pos == m.trainCursor, "  ")
-			pos++
 		}
 	}
 

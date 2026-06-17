@@ -315,3 +315,42 @@ func TestTrainCursorFollowsDisplayOrder(t *testing.T) {
 		t.Fatalf("cursor 1 should select the next visible row (done-early), got %q", got.ID)
 	}
 }
+
+// TestTrainsGroupByRepoWithinSection verifies that within a status section,
+// sessions are sub-grouped by repo (first-appearance order) with lineage
+// collapse inside each repo, and the cursor follows that display order.
+func TestTrainsGroupByRepoWithinSection(t *testing.T) {
+	snap := Snapshot{
+		Daemon: Daemon{Running: true},
+		Trains: []TrainSession{
+			{ID: "a-v1", Phase: "items_ready", Repo: "o/alpha"},        // Active, alpha, lineage
+			{ID: "b1", Phase: "generating_options", Repo: "o/beta"},    // Active, beta, lone
+			{ID: "a-v2", Phase: "review_published", Repo: "o/alpha"},   // Active, alpha, lineage
+		},
+	}
+	deps := Deps{Load: func() (Snapshot, error) { return snap, nil }}
+	m := sizedModel(deps)
+	next, _ := m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // Attention → Trains
+	m = next.(Model)
+	view := m.View()
+	for _, want := range []string{"Active", "o/alpha", "o/beta", "a-v1", "a-v2", "b1"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("trains view missing %q:\n%s", want, view)
+		}
+	}
+	// Repos in first-appearance order: alpha before beta.
+	if strings.Index(view, "o/alpha") > strings.Index(view, "o/beta") {
+		t.Fatalf("repos out of order (alpha before beta):\n%s", view)
+	}
+	// alpha's lineage collapses; its members precede beta's session.
+	v1, v2, b := strings.Index(view, "a-v1"), strings.Index(view, "a-v2"), strings.Index(view, "b1")
+	if !(v1 < v2 && v2 < b) {
+		t.Fatalf("repo/lineage order wrong (want a-v1<a-v2<b1): %d %d %d\n%s", v1, v2, b, view)
+	}
+	// Cursor 0 selects the first display row (a-v1 under alpha).
+	if got, _ := m.trainUnderCursor(); got.ID != "a-v1" {
+		t.Fatalf("cursor 0 should select a-v1, got %q", got.ID)
+	}
+}

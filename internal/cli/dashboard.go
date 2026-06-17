@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -73,6 +74,7 @@ type dashboardDaemonDetail struct {
 type dashboardJobRow struct {
 	db.Job
 	LatestEvent string
+	Repo        string // parsed from the payload for reportable jobs (attention grouping)
 }
 
 type dashboardResourceLock struct {
@@ -431,6 +433,17 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 			row := dashboardJobRow{Job: job}
 			if job.State == "blocked" || job.State == "failed" {
 				row.LatestEvent = latestEvents[job.ID].Message
+			}
+			// Reportable jobs surface on the Attention page grouped by repo; the
+			// repo lives in the payload, so parse it only for that small subset to
+			// keep the refresh tick cheap.
+			if job.State == "blocked" || job.State == "failed" || job.State == "cancelled" {
+				var p struct {
+					Repo string `json:"repo"`
+				}
+				if err := json.Unmarshal([]byte(job.Payload), &p); err == nil {
+					row.Repo = strings.TrimSpace(p.Repo)
+				}
 			}
 			snapshot.jobRows = append(snapshot.jobRows, row)
 		}

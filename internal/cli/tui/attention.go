@@ -17,18 +17,51 @@ type attnItem struct {
 }
 
 // attentionItems lists the actionable attention rows: pending prompts first,
-// then blocked/failed/cancelled jobs.
+// then blocked/failed/cancelled jobs ordered by repo (so the render can group
+// them under repo sub-headers while the cursor still walks them in view order).
 func (m Model) attentionItems() []attnItem {
 	items := make([]attnItem, 0, len(m.snap.Prompts))
 	for i := range m.snap.Prompts {
 		items = append(items, attnItem{prompt: &m.snap.Prompts[i]})
 	}
+	var jobs []*JobRow
 	for i := range m.snap.JobRows {
 		if jobReportable(m.snap.JobRows[i].State) {
-			items = append(items, attnItem{job: &m.snap.JobRows[i]})
+			jobs = append(jobs, &m.snap.JobRows[i])
 		}
 	}
+	for _, j := range orderJobsByRepo(jobs) {
+		items = append(items, attnItem{job: j})
+	}
 	return items
+}
+
+// attentionRepoLabel is the repo a reportable job belongs to, or "(no repo)" for
+// jobs whose payload carried none.
+func attentionRepoLabel(repo string) string {
+	if strings.TrimSpace(repo) == "" {
+		return "(no repo)"
+	}
+	return repo
+}
+
+// orderJobsByRepo groups jobs by repo in first-appearance order (preserving each
+// job's order within its repo), so same-repo jobs are contiguous.
+func orderJobsByRepo(jobs []*JobRow) []*JobRow {
+	order := []string{}
+	buckets := map[string][]*JobRow{}
+	for _, j := range jobs {
+		label := attentionRepoLabel(j.Repo)
+		if _, ok := buckets[label]; !ok {
+			order = append(order, label)
+		}
+		buckets[label] = append(buckets[label], j)
+	}
+	out := make([]*JobRow, 0, len(jobs))
+	for _, label := range order {
+		out = append(out, buckets[label]...)
+	}
+	return out
 }
 
 // attentionPrompt returns the prompt under the attention cursor, if the
@@ -220,8 +253,8 @@ func (m Model) attentionContent() string {
 	// reportable jobs). i is the global cursor index for every selectable row;
 	// section headers are display-only and never advance it.
 	items := m.attentionItems()
-	renderRow := func(i int, item attnItem) {
-		cursor := "  "
+	renderRow := func(i int, item attnItem, indent string) {
+		marker := "  "
 		var line string
 		switch {
 		case item.prompt != nil:
@@ -233,10 +266,10 @@ func (m Model) attentionContent() string {
 			}
 		}
 		if i == m.promptCursor {
-			cursor = "▸ "
+			marker = "▸ "
 			line = selectedRowStyle.Render("• ") + line
 		}
-		b.WriteString(cursor + line + "\n")
+		b.WriteString(indent + marker + line + "\n")
 	}
 
 	wrotePrompts := false
@@ -248,10 +281,14 @@ func (m Model) attentionContent() string {
 			b.WriteString(headerStyle.Render("Prompts ("+strconv.Itoa(countPrompts(items))+")") + "\n")
 			wrotePrompts = true
 		}
-		renderRow(i, item)
+		renderRow(i, item, "")
 	}
 
+	// Blocked & failed jobs, grouped under repo sub-headers (display-only). The
+	// jobs are already repo-ordered in attentionItems, so a repo header is
+	// emitted whenever the repo changes; rows indent under their repo.
 	wroteJobs := false
+	curRepo := ""
 	for i, item := range items {
 		if item.job == nil {
 			continue
@@ -262,8 +299,13 @@ func (m Model) attentionContent() string {
 			}
 			b.WriteString(redStyle.Render("Blocked & failed jobs ("+strconv.Itoa(len(items)-countPrompts(items))+")") + "\n")
 			wroteJobs = true
+			curRepo = "\x00" // sentinel so the first repo header always prints
 		}
-		renderRow(i, item)
+		if label := attentionRepoLabel(item.job.Repo); label != curRepo {
+			curRepo = label
+			b.WriteString("  " + mutedStyle.Render(label) + "\n")
+		}
+		renderRow(i, item, "  ")
 	}
 
 	if len(items) == 0 {

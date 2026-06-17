@@ -513,6 +513,7 @@ func toTUISnapshot(s dashboardSnapshot) tui.Snapshot {
 			State:       row.State,
 			UpdatedAt:   row.UpdatedAt,
 			LatestEvent: row.LatestEvent,
+			Repo:        row.Repo,
 		})
 	}
 	return out
