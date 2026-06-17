@@ -5394,6 +5394,23 @@ func skillOptTrainGenerationLockKey(sessionID string, iterationID string) string
 	return "skillopt-train-generation:" + sessionID + ":" + iterationID
 }
 
+// skillOptTrainGenerationCorrelationPrefix is the stable TaskID prefix shared by
+// every generation child job for a run, so the jobs can be found by TaskID
+// prefix. It is NOT used as ParentJobID/RootJobID: those are delegation-engine
+// fields and AdvanceJob dereferences ParentJobID as a real job row, so stamping
+// a synthetic value there would make a requeued generation job fail advancement
+// permanently. Keyed on the eval run so it stays stable across resumes.
+func skillOptTrainGenerationCorrelationPrefix(runID string) string {
+	return "skillopt-train-generation:" + strings.TrimSpace(runID)
+}
+
+// skillOptTrainGenerationTaskID is the per-option TaskID stamped on each
+// generation child job, uniquely identifying the (run, item, label, attempt)
+// option it produced.
+func skillOptTrainGenerationTaskID(runID string, itemID string, label string, attempt int) string {
+	return fmt.Sprintf("skillopt-train-generation:%s:%s:%s:%d", strings.TrimSpace(runID), strings.TrimSpace(itemID), strings.TrimSpace(label), attempt)
+}
+
 // skillOptTrainGenerationProgress emits human-facing, one-line-per-option
 // progress to a writer (typically stderr) while option jobs run concurrently.
 // A nil receiver or nil writer is a no-op, so automated callers (the review
@@ -5485,21 +5502,35 @@ func generateSkillOptTrainOptions(ctx context.Context, paths config.Paths, store
 		return skillOptTrainGenerationResult{}, fmt.Errorf("eval run %s expects at least 2 options", run.ID)
 	}
 	existingGenerated := 0
-	completeExistingItems := 0
+	// Count already-persisted options per item in ONE run-scoped query instead of
+	// one query per item (the single-conn store would otherwise serialize N
+	// round-trips on resume of a large run).
+	existingOptionCount := map[string]int{}
+	if rankedRun {
+		allOptions, err := store.ListEvalReviewOptions(ctx, run.ID, "")
+		if err != nil {
+			return skillOptTrainGenerationResult{}, err
+		}
+		for _, opt := range allOptions {
+			existingOptionCount[opt.ItemID]++
+		}
+	}
+	// toGenerate holds only the items that still need generation; complete items
+	// are skipped so resume regenerates nothing already persisted. A mix of
+	// complete and incomplete items is the normal resume state (per-item commits),
+	// so it is not an error — only a partially generated single item is.
+	toGenerate := make([]db.EvalReviewItem, 0, len(items))
 	for _, item := range items {
 		if rankedRun {
-			existing, err := store.ListEvalReviewOptions(ctx, run.ID, item.ItemID)
-			if err != nil {
-				return skillOptTrainGenerationResult{}, err
-			}
-			if len(existing) > 0 {
-				if len(existing) == len(roles) {
-					existingGenerated += len(existing)
-					completeExistingItems++
+			existing := existingOptionCount[item.ItemID]
+			if existing > 0 {
+				if existing == len(roles) {
+					existingGenerated += existing
 					continue
 				}
 				return skillOptTrainGenerationResult{}, fmt.Errorf("item %s has partial generated options; inspect or clear review options before continuing", item.ItemID)
 			}
+			toGenerate = append(toGenerate, item)
 			continue
 		}
 		hasBaseline := strings.TrimSpace(item.BaselineArtifactID) != ""
@@ -5507,26 +5538,23 @@ func generateSkillOptTrainOptions(ctx context.Context, paths config.Paths, store
 		if hasBaseline || hasCandidate {
 			if hasBaseline && hasCandidate {
 				existingGenerated += 2
-				completeExistingItems++
 				continue
 			}
 			return skillOptTrainGenerationResult{}, fmt.Errorf("item %s has partial generated A/B artifacts; inspect or clear review item artifacts before continuing", item.ItemID)
 		}
+		toGenerate = append(toGenerate, item)
 	}
-	if completeExistingItems > 0 {
-		if completeExistingItems == len(items) {
-			metadata := map[string]any{
-				"status":            "recovered",
-				"generated_options": existingGenerated,
-				"strategy":          skillOptTrainGenerationStrategy(run),
-				"completed_at":      time.Now().UTC().Format(time.RFC3339Nano),
-			}
-			return skillOptTrainGenerationResult{
-				GeneratedOptions: existingGenerated,
-				Metadata:         metadata,
-			}, nil
+	if len(toGenerate) == 0 {
+		metadata := map[string]any{
+			"status":            "recovered",
+			"generated_options": existingGenerated,
+			"strategy":          skillOptTrainGenerationStrategy(run),
+			"completed_at":      time.Now().UTC().Format(time.RFC3339Nano),
 		}
-		return skillOptTrainGenerationResult{}, fmt.Errorf("eval run %s has partial generated items; inspect or clear review artifacts before continuing", run.ID)
+		return skillOptTrainGenerationResult{
+			GeneratedOptions: existingGenerated,
+			Metadata:         metadata,
+		}, nil
 	}
 	dispatch, err := skillOptTrainGeneratorSelection(ctx, store, session, iteration, run, request)
 	if err != nil {
@@ -5540,13 +5568,15 @@ func generateSkillOptTrainOptions(ctx context.Context, paths config.Paths, store
 	if err := ensureSkillOptTrainGenerationRepoReady(ctx, store, skillOptTrainGenerationRepo(session)); err != nil {
 		return skillOptTrainGenerationResult{}, err
 	}
-	progress := newSkillOptTrainGenerationProgress(request.Progress, len(items)*len(roles), request.GenerationLockExtend)
-	progress.start(len(items), len(roles), skillOptTrainGenerationRuntimeLabel(request))
-	generatedItems, err := generateSkillOptTrainItemOptions(ctx, store, blobStore, session, iteration, run, items, roles, rankedRun, request, dispatch, concurrency, progress)
+	progress := newSkillOptTrainGenerationProgress(request.Progress, len(toGenerate)*len(roles), request.GenerationLockExtend)
+	progress.start(len(toGenerate), len(roles), skillOptTrainGenerationRuntimeLabel(request))
+	generatedItems, err := generateSkillOptTrainItemOptions(ctx, store, blobStore, session, iteration, run, toGenerate, roles, rankedRun, request, dispatch, concurrency, progress)
 	if err != nil {
 		return skillOptTrainGenerationResult{}, err
 	}
-	writes := make([]db.EvalReviewGenerationWrite, 0, len(generatedItems))
+	// Each generated item was persisted atomically the moment it completed
+	// (see generateSkillOptTrainItemOptions), so there is no end-of-phase batch
+	// write here. This loop only aggregates metadata across the items.
 	generated := 0
 	jobIDs := []string{}
 	var generatorAgent string
@@ -5562,19 +5592,10 @@ func generateSkillOptTrainOptions(ctx context.Context, paths config.Paths, store
 			generatorRuntime = item.Runtime
 		}
 		promptRecords = append(promptRecords, item.Prompts...)
-		writes = append(writes, db.EvalReviewGenerationWrite{
-			ItemID:     item.ItemID,
-			ReviewItem: item.ReviewItem,
-			Artifacts:  item.Artifacts,
-			Options:    item.Options,
-		})
-	}
-	if err := store.ReplaceGeneratedEvalReviewArtifacts(ctx, run.ID, writes); err != nil {
-		return skillOptTrainGenerationResult{}, err
 	}
 	metadata := map[string]any{
 		"status":              "succeeded",
-		"generated_options":   generated,
+		"generated_options":   existingGenerated + generated,
 		"jobs":                jobIDs,
 		"agent":               generatorAgent,
 		"runtime":             generatorRuntime,
@@ -5588,7 +5609,7 @@ func generateSkillOptTrainOptions(ctx context.Context, paths config.Paths, store
 		"completed_at":        time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	return skillOptTrainGenerationResult{
-		GeneratedOptions: generated,
+		GeneratedOptions: existingGenerated + generated,
 		JobIDs:           jobIDs,
 		AgentName:        generatorAgent,
 		Runtime:          generatorRuntime,
@@ -5605,6 +5626,17 @@ type skillOptTrainGeneratedItemOptions struct {
 	AgentName  string
 	Runtime    string
 	Prompts    []map[string]any
+}
+
+// skillOptTrainGenerationWriteForItem projects a generated item onto the store's
+// per-item write shape (artifacts + review item + options).
+func skillOptTrainGenerationWriteForItem(item skillOptTrainGeneratedItemOptions) db.EvalReviewGenerationWrite {
+	return db.EvalReviewGenerationWrite{
+		ItemID:     item.ItemID,
+		ReviewItem: item.ReviewItem,
+		Artifacts:  item.Artifacts,
+		Options:    item.Options,
+	}
 }
 
 type skillOptTrainGeneratedOption struct {
@@ -5650,6 +5682,15 @@ func generateSkillOptTrainItemOptions(ctx context.Context, store *db.Store, blob
 			}
 			result, err := generateSkillOptTrainSingleItemOptions(ctx, store, blobStore, session, iteration, run, item, roles, rankedRun, request, dispatch, progress)
 			if err != nil {
+				errs[index] = err
+				return
+			}
+			// Persist the completed item immediately so neither a later item's
+			// failure nor a mid-run cancellation can lose it. Artifacts + item row
+			// + options commit in one transaction (a partial item is never
+			// written), using a non-cancellable context so a fully-generated item
+			// is durable even if ctx is cancelled at this instant.
+			if err := store.ReplaceGeneratedEvalReviewArtifactsForItem(context.WithoutCancel(ctx), run.ID, skillOptTrainGenerationWriteForItem(result)); err != nil {
 				errs[index] = err
 				return
 			}
@@ -5800,6 +5841,7 @@ func generateSkillOptTrainSingleOption(ctx context.Context, store *db.Store, ses
 }
 
 func dispatchSkillOptTrainGenerationJob(ctx context.Context, store *db.Store, session db.SkillOptTrainSession, iteration db.SkillOptTrainIteration, run db.EvalRun, item db.EvalReviewItem, role string, attempt int, request skillOptTrainContinueRequest, dispatch skillOptTrainGenerationDispatch, prompt string) (localAgentJobOutput, error) {
+	taskID := skillOptTrainGenerationTaskID(run.ID, item.ItemID, role, attempt)
 	if dispatch.Mode != skillOptTrainGenerationModeTargetSkill {
 		return dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
 			RepoFlag:         skillOptTrainGenerationRepo(session),
@@ -5809,6 +5851,7 @@ func dispatchSkillOptTrainGenerationJob(ctx context.Context, store *db.Store, se
 			Type:             dispatch.Type,
 			Home:             request.Home,
 			AllowManagedSync: dispatch.Type != "",
+			TaskID:           taskID,
 		})
 	}
 	agentName, err := startSkillOptTrainTargetSkillAgent(ctx, store, session, iteration, run, item, role, attempt, request, dispatch)
@@ -5822,6 +5865,7 @@ func dispatchSkillOptTrainGenerationJob(ctx context.Context, store *db.Store, se
 		Instructions: prompt,
 		Home:         request.Home,
 		JobTimeout:   skillOptTrainGenerationJobTimeoutHint(request, dispatch.Type),
+		TaskID:       taskID,
 	})
 }
 

@@ -452,6 +452,18 @@ func configureWritableSQLite(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 		return fmt.Errorf("configure sqlite WAL: %w", err)
 	}
+	// synchronous=NORMAL is the WAL-recommended setting: it fsyncs only at WAL
+	// checkpoints instead of on every commit (the FULL default), making the
+	// per-item generation commits cheap. The bounded tradeoff is that an OS
+	// crash or power loss can lose transactions committed since the last WAL
+	// checkpoint (not merely the last commit); WAL still guarantees the database
+	// is never corrupted. This is safe for generation because resume regenerates
+	// any item whose commit did not survive. The wal_autocheckpoint default
+	// (1000 pages) is left in place so long-lived read connections do not let the
+	// WAL grow unbounded.
+	if _, err := db.ExecContext(ctx, `PRAGMA synchronous=NORMAL`); err != nil {
+		return fmt.Errorf("configure sqlite synchronous: %w", err)
+	}
 	return nil
 }
 
@@ -3174,6 +3186,108 @@ func upsertEvalReviewItemExec(ctx context.Context, exec sqlExecer, item EvalRevi
 	return err
 }
 
+// normalizeEvalReviewGenerationWrite validates and canonicalizes a single
+// generation write, scoping its review item and options to runID, normalizing
+// each artifact/option, and rejecting duplicate option labels for the item.
+func normalizeEvalReviewGenerationWrite(runID string, write EvalReviewGenerationWrite) (EvalReviewGenerationWrite, error) {
+	itemID := strings.TrimSpace(write.ItemID)
+	if itemID == "" && write.ReviewItem != nil {
+		itemID = strings.TrimSpace(write.ReviewItem.ItemID)
+	}
+	if itemID == "" {
+		return EvalReviewGenerationWrite{}, errors.New("eval review generation item id is required")
+	}
+	next := EvalReviewGenerationWrite{ItemID: itemID}
+	for _, artifact := range write.Artifacts {
+		artifact, err := normalizeEvalArtifact(artifact)
+		if err != nil {
+			return EvalReviewGenerationWrite{}, err
+		}
+		next.Artifacts = append(next.Artifacts, artifact)
+	}
+	if write.ReviewItem != nil {
+		item := *write.ReviewItem
+		item.RunID = runID
+		item.ItemID = itemID
+		if strings.TrimSpace(item.ID) == "" {
+			item.ID = item.RunID + "/" + item.ItemID
+		}
+		if strings.TrimSpace(item.RunID) == "" {
+			return EvalReviewGenerationWrite{}, errors.New("eval review item run id is required")
+		}
+		if strings.TrimSpace(item.ItemID) == "" {
+			return EvalReviewGenerationWrite{}, errors.New("eval review item id is required")
+		}
+		next.ReviewItem = &item
+	}
+	seen := map[string]struct{}{}
+	for _, option := range write.Options {
+		option.RunID = runID
+		option.ItemID = itemID
+		option, err := normalizeEvalReviewOption(option)
+		if err != nil {
+			return EvalReviewGenerationWrite{}, err
+		}
+		if _, ok := seen[option.Label]; ok {
+			return EvalReviewGenerationWrite{}, fmt.Errorf("eval review option label %q is duplicated for item %q", option.Label, itemID)
+		}
+		seen[option.Label] = struct{}{}
+		next.Options = append(next.Options, option)
+	}
+	return next, nil
+}
+
+// writeGeneratedEvalReviewArtifactsTx persists one normalized generation write
+// inside tx: upserts artifacts, upserts the review item, and replaces the item's
+// options (DELETE-then-INSERT scoped to run_id/item_id). The caller owns the
+// transaction lifecycle. The write must already be normalized.
+func writeGeneratedEvalReviewArtifactsTx(ctx context.Context, tx *sql.Tx, runID string, write EvalReviewGenerationWrite) error {
+	for _, artifact := range write.Artifacts {
+		if err := upsertEvalArtifactTx(ctx, tx, artifact); err != nil {
+			return err
+		}
+	}
+	if write.ReviewItem != nil {
+		item := *write.ReviewItem
+		if _, err := tx.ExecContext(ctx, `INSERT INTO eval_review_items(
+				id, run_id, item_id, title, source_artifact_id, baseline_artifact_id, candidate_artifact_id,
+				preview_artifact_id, diff_artifact_id, metadata_json, created_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT(id) DO UPDATE SET
+				run_id = excluded.run_id,
+				item_id = excluded.item_id,
+				title = excluded.title,
+				source_artifact_id = excluded.source_artifact_id,
+				baseline_artifact_id = excluded.baseline_artifact_id,
+				candidate_artifact_id = excluded.candidate_artifact_id,
+				preview_artifact_id = excluded.preview_artifact_id,
+				diff_artifact_id = excluded.diff_artifact_id,
+				metadata_json = excluded.metadata_json,
+				updated_at = CURRENT_TIMESTAMP`,
+			item.ID, item.RunID, item.ItemID, item.Title, item.SourceArtifactID, item.BaselineArtifactID, item.CandidateArtifactID,
+			item.PreviewArtifactID, item.DiffArtifactID, item.MetadataJSON); err != nil {
+			return err
+		}
+	}
+	if len(write.Options) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM eval_review_options WHERE run_id = ? AND item_id = ?`, runID, write.ItemID); err != nil {
+		return err
+	}
+	for _, option := range write.Options {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO eval_review_options(
+				id, run_id, item_id, label, artifact_id, role, metadata_json, created_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+			option.ID, option.RunID, option.ItemID, option.Label, option.ArtifactID, option.Role, option.MetadataJSON); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) ReplaceGeneratedEvalReviewArtifacts(ctx context.Context, runID string, writes []EvalReviewGenerationWrite) error {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
@@ -3181,49 +3295,9 @@ func (s *Store) ReplaceGeneratedEvalReviewArtifacts(ctx context.Context, runID s
 	}
 	normalized := make([]EvalReviewGenerationWrite, 0, len(writes))
 	for _, write := range writes {
-		itemID := strings.TrimSpace(write.ItemID)
-		if itemID == "" && write.ReviewItem != nil {
-			itemID = strings.TrimSpace(write.ReviewItem.ItemID)
-		}
-		if itemID == "" {
-			return errors.New("eval review generation item id is required")
-		}
-		next := EvalReviewGenerationWrite{ItemID: itemID}
-		for _, artifact := range write.Artifacts {
-			artifact, err := normalizeEvalArtifact(artifact)
-			if err != nil {
-				return err
-			}
-			next.Artifacts = append(next.Artifacts, artifact)
-		}
-		if write.ReviewItem != nil {
-			item := *write.ReviewItem
-			item.RunID = runID
-			item.ItemID = itemID
-			if strings.TrimSpace(item.ID) == "" {
-				item.ID = item.RunID + "/" + item.ItemID
-			}
-			if strings.TrimSpace(item.RunID) == "" {
-				return errors.New("eval review item run id is required")
-			}
-			if strings.TrimSpace(item.ItemID) == "" {
-				return errors.New("eval review item id is required")
-			}
-			next.ReviewItem = &item
-		}
-		seen := map[string]struct{}{}
-		for _, option := range write.Options {
-			option.RunID = runID
-			option.ItemID = itemID
-			option, err := normalizeEvalReviewOption(option)
-			if err != nil {
-				return err
-			}
-			if _, ok := seen[option.Label]; ok {
-				return fmt.Errorf("eval review option label %q is duplicated for item %q", option.Label, itemID)
-			}
-			seen[option.Label] = struct{}{}
-			next.Options = append(next.Options, option)
+		next, err := normalizeEvalReviewGenerationWrite(runID, write)
+		if err != nil {
+			return err
 		}
 		normalized = append(normalized, next)
 	}
@@ -3233,49 +3307,35 @@ func (s *Store) ReplaceGeneratedEvalReviewArtifacts(ctx context.Context, runID s
 	}
 	defer tx.Rollback()
 	for _, write := range normalized {
-		for _, artifact := range write.Artifacts {
-			if err := upsertEvalArtifactTx(ctx, tx, artifact); err != nil {
-				return err
-			}
-		}
-		if write.ReviewItem != nil {
-			item := *write.ReviewItem
-			if _, err := tx.ExecContext(ctx, `INSERT INTO eval_review_items(
-					id, run_id, item_id, title, source_artifact_id, baseline_artifact_id, candidate_artifact_id,
-					preview_artifact_id, diff_artifact_id, metadata_json, created_at, updated_at
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-				ON CONFLICT(id) DO UPDATE SET
-					run_id = excluded.run_id,
-					item_id = excluded.item_id,
-					title = excluded.title,
-					source_artifact_id = excluded.source_artifact_id,
-					baseline_artifact_id = excluded.baseline_artifact_id,
-					candidate_artifact_id = excluded.candidate_artifact_id,
-					preview_artifact_id = excluded.preview_artifact_id,
-					diff_artifact_id = excluded.diff_artifact_id,
-					metadata_json = excluded.metadata_json,
-					updated_at = CURRENT_TIMESTAMP`,
-				item.ID, item.RunID, item.ItemID, item.Title, item.SourceArtifactID, item.BaselineArtifactID, item.CandidateArtifactID,
-				item.PreviewArtifactID, item.DiffArtifactID, item.MetadataJSON); err != nil {
-				return err
-			}
-		}
-		if len(write.Options) == 0 {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM eval_review_options WHERE run_id = ? AND item_id = ?`, runID, write.ItemID); err != nil {
+		if err := writeGeneratedEvalReviewArtifactsTx(ctx, tx, runID, write); err != nil {
 			return err
 		}
-		for _, option := range write.Options {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO eval_review_options(
-					id, run_id, item_id, label, artifact_id, role, metadata_json, created_at, updated_at
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-				option.ID, option.RunID, option.ItemID, option.Label, option.ArtifactID, option.Role, option.MetadataJSON); err != nil {
-				return err
-			}
-		}
+	}
+	return tx.Commit()
+}
+
+// ReplaceGeneratedEvalReviewArtifactsForItem atomically persists the generated
+// artifacts, review item, and options for a single item in one transaction so a
+// completed item is durable on its own (artifacts + item row + options commit
+// together). Options are replaced DELETE-then-INSERT scoped to (run_id,item_id),
+// so re-writing the same item is idempotent and writing one item leaves others
+// untouched.
+func (s *Store) ReplaceGeneratedEvalReviewArtifactsForItem(ctx context.Context, runID string, write EvalReviewGenerationWrite) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return errors.New("eval review generation run id is required")
+	}
+	normalized, err := normalizeEvalReviewGenerationWrite(runID, write)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := writeGeneratedEvalReviewArtifactsTx(ctx, tx, runID, normalized); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

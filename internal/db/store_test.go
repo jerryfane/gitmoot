@@ -98,6 +98,33 @@ func TestOpenConfiguresSQLiteContentionPragmas(t *testing.T) {
 	}
 }
 
+func TestOpenConfiguresSynchronousNormal(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	// synchronous=NORMAL reads back as 1 on the writable connection.
+	var synchronous int
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA synchronous`).Scan(&synchronous); err != nil {
+		t.Fatalf("PRAGMA synchronous returned error: %v", err)
+	}
+	if synchronous != 1 {
+		t.Fatalf("synchronous = %d, want 1 (NORMAL)", synchronous)
+	}
+
+	// wal_autocheckpoint stays at the sane SQLite default so long-lived read
+	// connections do not let the WAL grow unbounded.
+	var autocheckpoint int
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&autocheckpoint); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint returned error: %v", err)
+	}
+	if autocheckpoint <= 0 {
+		t.Fatalf("wal_autocheckpoint = %d, want a positive default", autocheckpoint)
+	}
+}
+
 func TestInteractivePromptStorageAndAnswerValidation(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
@@ -965,6 +992,174 @@ func TestReplaceGeneratedEvalReviewArtifactsRollsBackBatch(t *testing.T) {
 	}
 	if len(options) != 0 {
 		t.Fatalf("options after rollback = %+v", options)
+	}
+}
+
+func TestReplaceGeneratedEvalReviewArtifactsForItemPersists(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	write := EvalReviewGenerationWrite{
+		ItemID:     "item-001",
+		ReviewItem: &EvalReviewItem{ItemID: "item-001", Title: "Item One"},
+		Artifacts: []EvalArtifact{{
+			ID:        "run-generated/item-001/option-a",
+			Hash:      "sha256:aaa",
+			MediaType: "text/markdown",
+			SizeBytes: 12,
+			Driver:    "text",
+		}},
+		Options: []EvalReviewOption{{
+			Label:      "a",
+			ArtifactID: "run-generated/item-001/option-a",
+			Role:       "option",
+		}},
+	}
+	if err := store.ReplaceGeneratedEvalReviewArtifactsForItem(ctx, "run-generated", write); err != nil {
+		t.Fatalf("ReplaceGeneratedEvalReviewArtifactsForItem error = %v", err)
+	}
+
+	if _, err := store.GetEvalArtifact(ctx, "run-generated/item-001/option-a"); err != nil {
+		t.Fatalf("GetEvalArtifact error = %v", err)
+	}
+	items, err := store.ListEvalReviewItems(ctx, "run-generated")
+	if err != nil {
+		t.Fatalf("ListEvalReviewItems returned error: %v", err)
+	}
+	if len(items) != 1 || items[0].ItemID != "item-001" || items[0].Title != "Item One" {
+		t.Fatalf("items after persist = %+v", items)
+	}
+	options, err := store.ListEvalReviewOptions(ctx, "run-generated", "item-001")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions returned error: %v", err)
+	}
+	if len(options) != 1 || options[0].Label != "a" {
+		t.Fatalf("options after persist = %+v", options)
+	}
+}
+
+func TestReplaceGeneratedEvalReviewArtifactsForItemRollsBack(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	// A valid artifact alongside an option missing its artifact id: the whole
+	// per-item write must fail and leave nothing persisted.
+	write := EvalReviewGenerationWrite{
+		ItemID:     "item-001",
+		ReviewItem: &EvalReviewItem{ItemID: "item-001"},
+		Artifacts: []EvalArtifact{{
+			ID:        "run-generated/item-001/option-a",
+			Hash:      "sha256:aaa",
+			MediaType: "text/markdown",
+			SizeBytes: 12,
+			Driver:    "text",
+		}},
+		Options: []EvalReviewOption{{
+			Label: "a",
+			Role:  "option",
+		}},
+	}
+	err = store.ReplaceGeneratedEvalReviewArtifactsForItem(ctx, "run-generated", write)
+	if err == nil || !strings.Contains(err.Error(), "artifact id is required") {
+		t.Fatalf("ReplaceGeneratedEvalReviewArtifactsForItem error = %v, want artifact id is required", err)
+	}
+	if _, err := store.GetEvalArtifact(ctx, "run-generated/item-001/option-a"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetEvalArtifact after rollback error = %v, want sql.ErrNoRows", err)
+	}
+	items, err := store.ListEvalReviewItems(ctx, "run-generated")
+	if err != nil {
+		t.Fatalf("ListEvalReviewItems returned error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items after rollback = %+v", items)
+	}
+	options, err := store.ListEvalReviewOptions(ctx, "run-generated", "item-001")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions returned error: %v", err)
+	}
+	if len(options) != 0 {
+		t.Fatalf("options after rollback = %+v", options)
+	}
+}
+
+func TestReplaceGeneratedEvalReviewArtifactsForItemNoClobber(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	writeItem := func(itemID, hash string) EvalReviewGenerationWrite {
+		artifactID := "run-generated/" + itemID + "/option-a"
+		return EvalReviewGenerationWrite{
+			ItemID:     itemID,
+			ReviewItem: &EvalReviewItem{ItemID: itemID},
+			Artifacts: []EvalArtifact{{
+				ID:        artifactID,
+				Hash:      hash,
+				MediaType: "text/markdown",
+				SizeBytes: 12,
+				Driver:    "text",
+			}},
+			Options: []EvalReviewOption{{
+				Label:      "a",
+				ArtifactID: artifactID,
+				Role:       "option",
+			}},
+		}
+	}
+
+	if err := store.ReplaceGeneratedEvalReviewArtifactsForItem(ctx, "run-generated", writeItem("item-001", "sha256:aaa")); err != nil {
+		t.Fatalf("ReplaceGeneratedEvalReviewArtifactsForItem item-001 error = %v", err)
+	}
+	// Writing item-002 must not clobber item-001.
+	if err := store.ReplaceGeneratedEvalReviewArtifactsForItem(ctx, "run-generated", writeItem("item-002", "sha256:bbb")); err != nil {
+		t.Fatalf("ReplaceGeneratedEvalReviewArtifactsForItem item-002 error = %v", err)
+	}
+
+	items, err := store.ListEvalReviewItems(ctx, "run-generated")
+	if err != nil {
+		t.Fatalf("ListEvalReviewItems returned error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items after writing two = %+v", items)
+	}
+	for _, itemID := range []string{"item-001", "item-002"} {
+		opts, err := store.ListEvalReviewOptions(ctx, "run-generated", itemID)
+		if err != nil {
+			t.Fatalf("ListEvalReviewOptions %s returned error: %v", itemID, err)
+		}
+		if len(opts) != 1 || opts[0].Label != "a" {
+			t.Fatalf("options for %s = %+v", itemID, opts)
+		}
+	}
+
+	// Re-writing item-001 is idempotent: no duplicate labels, item-002 intact.
+	if err := store.ReplaceGeneratedEvalReviewArtifactsForItem(ctx, "run-generated", writeItem("item-001", "sha256:ccc")); err != nil {
+		t.Fatalf("ReplaceGeneratedEvalReviewArtifactsForItem rewrite item-001 error = %v", err)
+	}
+	opts1, err := store.ListEvalReviewOptions(ctx, "run-generated", "item-001")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions item-001 returned error: %v", err)
+	}
+	if len(opts1) != 1 || opts1[0].Label != "a" {
+		t.Fatalf("options for item-001 after rewrite = %+v", opts1)
+	}
+	opts2, err := store.ListEvalReviewOptions(ctx, "run-generated", "item-002")
+	if err != nil {
+		t.Fatalf("ListEvalReviewOptions item-002 returned error: %v", err)
+	}
+	if len(opts2) != 1 || opts2[0].Label != "a" {
+		t.Fatalf("options for item-002 after item-001 rewrite = %+v", opts2)
 	}
 }
 
