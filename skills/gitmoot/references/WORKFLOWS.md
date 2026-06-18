@@ -390,7 +390,13 @@ gitmoot status --repo owner/project-a
 gitmoot status --repo owner/project-b
 ```
 
-## Multi-Model Delegation
+## Multi-Model Delegation (Orchestra)
+
+Orchestra is gitmoot's name for structured multi-agent delegation: a conductor
+(coordinator) returns a `delegations[]` score, the players (child agents) run in
+parallel or in dependency order, and a finale (continuation) reconvenes and
+synthesizes the results. This is how you orchestrate an orchestra of agents
+across different runtimes.
 
 A coordinator agent can fan work out to other agents running on different
 runtimes by returning a `delegations` array in its `gitmoot_result`. Gitmoot

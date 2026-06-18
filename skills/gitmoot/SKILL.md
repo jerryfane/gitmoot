@@ -85,7 +85,15 @@ locks, commits, pushes, PRs, and workflow advancement. Use
 analysis, planning, or questions. Use `gitmoot agent review <agent> --repo
 owner/repo --pr <number> "..."` for PR review decisions and `gitmoot agent
 implement <agent> --repo owner/repo --task <task-id> "..."` for file changes.
-Add `--background` only when the user wants a queued background job. Use
+Add `--background` only when the user wants a queued background job.
+
+Orchestrate (Orchestra): when the user says "orchestrate …" or "spin up an
+orchestra of agents", run a background coordinator that returns a `delegations[]`
+score so the players (child agents) run and a finale (continuation) reconvenes
+and synthesizes. `gitmoot orchestrate <agent> "..." [--repo R]` is sugar for
+`gitmoot agent run <agent> --background "..."`. See
+[RESULT_CONTRACT.md](references/RESULT_CONTRACT.md) for the delegation fields and
+termination bounds. Use
 `gitmoot plugin doctor` when checking whether Codex, Claude Code, or Kimi Code
 can discover Gitmoot through an installed runtime plugin. Use
 `gitmoot plugin codex-launch --repo <path>` to print a Codex launch command that

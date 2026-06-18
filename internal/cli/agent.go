@@ -281,6 +281,59 @@ func runAgentRun(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runOrchestrate is the top-level `gitmoot orchestrate` command: sugar for
+// `gitmoot agent run <agent> --background "<message>"`. The named agent is the
+// conductor (coordinator) that returns a delegations[] score; the players
+// (child agents) run in parallel or in dependency order, and a finale
+// (continuation) reconvenes and synthesizes the results. It forwards to the
+// SAME dispatch as `agent run` with the run action and Background forced on, so
+// the engine and the delegations schema are untouched.
+func runOrchestrate(args []string, stdout, stderr io.Writer) int {
+	if containsHelpFlag(args) || len(args) == 0 {
+		printOrchestrateUsage(stdout)
+		if len(args) == 0 {
+			fmt.Fprintln(stderr, "orchestrate requires exactly one agent and one message")
+			return 2
+		}
+		return 0
+	}
+	options, ok := parseAgentRunOptions("orchestrate", args, stderr)
+	if !ok {
+		return 2
+	}
+	// Force the background run path: orchestrate always fans out delegations.
+	options.background = true
+	selected, reason := selectOrchestrateAction(options)
+	output, exit := dispatchAgentCommand(options, selected, reason, "orchestrate", stdout, stderr)
+	if exit != 0 {
+		return exit
+	}
+	if options.jsonOutput {
+		if err := writeJSON(stdout, output); err != nil {
+			fmt.Fprintf(stderr, "orchestrate: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	printLocalAgentJobOutput(stdout, output)
+	printQueuedDaemonHint(stdout, output, options.background, options.home)
+	return 0
+}
+
+func printOrchestrateUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  gitmoot orchestrate <agent> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--type type] [--home path] [--json]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Orchestrate work across agents (a coordinator that fans out delegations).")
+	fmt.Fprintln(w, "Sugar for `gitmoot agent run <agent> --background`: the named agent is the")
+	fmt.Fprintln(w, "conductor (coordinator) that returns a delegations[] score; the players (child")
+	fmt.Fprintln(w, "agents) run in parallel or in dependency order, and a finale (continuation)")
+	fmt.Fprintln(w, "reconvenes and synthesizes the results.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Example:")
+	fmt.Fprintln(w, "  gitmoot orchestrate planner \"audit the auth flow and fan out fixes\" --repo owner/repo")
+}
+
 func runAgentReview(args []string, stdout, stderr io.Writer) int {
 	options, ok := parseAgentRunOptions("review", args, stderr)
 	if !ok {
@@ -338,6 +391,12 @@ func runAgentImplement(args []string, stdout, stderr io.Writer) int {
 }
 
 func dispatchAgentCommand(options agentRunOptions, action string, reason string, executionPath string, stdout, stderr io.Writer) (localAgentJobOutput, int) {
+	// Error prefix names the invoked surface: the orchestrate alias names itself;
+	// the agent subcommands keep "agent <action>".
+	errLabel := "agent " + action
+	if executionPath == "orchestrate" {
+		errLabel = "orchestrate"
+	}
 	var output localAgentJobOutput
 	if err := withStore(options.home, func(store *db.Store) error {
 		var err error
@@ -359,14 +418,14 @@ func dispatchAgentCommand(options agentRunOptions, action string, reason string,
 		})
 		return err
 	}); err != nil {
-		fmt.Fprintf(stderr, "agent %s: %v\n", action, err)
+		fmt.Fprintf(stderr, "%s: %v\n", errLabel, err)
 		return localAgentJobOutput{}, 1
 	}
 	if options.background {
 		output.WatchCommand = jobWatchCommand(output.JobID, options.home)
 		running, err := daemonIsRunning(options.home)
 		if err != nil {
-			fmt.Fprintf(stderr, "agent %s: %v\n", action, err)
+			fmt.Fprintf(stderr, "%s: %v\n", errLabel, err)
 			return localAgentJobOutput{}, 1
 		}
 		output.DaemonRunning = running
@@ -374,11 +433,22 @@ func dispatchAgentCommand(options agentRunOptions, action string, reason string,
 	return output, 0
 }
 
+// agentRunCommandLabel is how a parse/usage error names the command. The agent
+// subcommands read as "agent run/review/implement"; the top-level orchestrate
+// alias names itself, not "agent orchestrate".
+func agentRunCommandLabel(command string) string {
+	if command == "orchestrate" {
+		return "orchestrate"
+	}
+	return "agent " + command
+}
+
 func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agentRunOptions, bool) {
+	label := agentRunCommandLabel(command)
 	if len(args) == 0 || containsHelpFlag(args) {
 		printAgentRunUsage(stderr, command)
 		if len(args) == 0 {
-			fmt.Fprintf(stderr, "agent %s requires exactly one agent and one message\n", command)
+			fmt.Fprintf(stderr, "%s requires exactly one agent and one message\n", label)
 		}
 		return agentRunOptions{}, false
 	}
@@ -393,7 +463,7 @@ func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agen
 			options.jsonOutput = true
 		case arg == "--type" || arg == "--repo" || arg == "--home" || arg == "--task" || arg == "--pr" || arg == "--head-sha" || arg == "--branch":
 			if index+1 >= len(args) {
-				fmt.Fprintf(stderr, "agent %s requires a value for %s\n", command, arg)
+				fmt.Fprintf(stderr, "%s requires a value for %s\n", label, arg)
 				return agentRunOptions{}, false
 			}
 			index++
@@ -417,20 +487,20 @@ func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agen
 		case strings.HasPrefix(arg, "--branch="):
 			options.branch = strings.TrimPrefix(arg, "--branch=")
 		case strings.HasPrefix(arg, "-") && len(positionals) >= 2:
-			fmt.Fprintf(stderr, "unknown agent %s flag %q\n", command, arg)
+			fmt.Fprintf(stderr, "unknown %s flag %q\n", label, arg)
 			return agentRunOptions{}, false
 		default:
 			positionals = append(positionals, arg)
 		}
 	}
 	if len(positionals) != 2 {
-		fmt.Fprintf(stderr, "agent %s requires exactly one agent and one message\n", command)
+		fmt.Fprintf(stderr, "%s requires exactly one agent and one message\n", label)
 		return agentRunOptions{}, false
 	}
 	options.agent = strings.TrimSpace(positionals[0])
 	options.message = strings.TrimSpace(positionals[1])
 	if options.agent == "" || options.message == "" {
-		fmt.Fprintf(stderr, "agent %s requires exactly one agent and one message\n", command)
+		fmt.Fprintf(stderr, "%s requires exactly one agent and one message\n", label)
 		return agentRunOptions{}, false
 	}
 	return options, true
@@ -465,6 +535,8 @@ func setAgentRunOption(options *agentRunOptions, flagName string, value string, 
 func printAgentRunUsage(w io.Writer, command string) {
 	fmt.Fprintln(w, "Usage:")
 	switch command {
+	case "orchestrate":
+		fmt.Fprintln(w, "  gitmoot orchestrate <agent> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--type type] [--home path] [--json]")
 	case "review":
 		fmt.Fprintln(w, "  gitmoot agent review <name> \"message\" --repo owner/repo --pr number [--head-sha sha] [--branch branch] [--background] [--type type] [--home path] [--json]")
 	case "implement":
@@ -472,6 +544,25 @@ func printAgentRunUsage(w io.Writer, command string) {
 	default:
 		fmt.Fprintln(w, "  gitmoot agent run <name> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--background] [--type type] [--home path] [--json]")
 	}
+}
+
+// selectOrchestrateAction routes an orchestrate job by EXPLICIT FLAGS only
+// (--task → implement, --pr/--head-sha → review), defaulting to the background
+// coordinator ("ask") path. Unlike selectAgentRunAction it ignores message
+// keywords, so a natural orchestration prompt that happens to mention
+// "review"/"refactor" still queues a coordinator that fans out delegations
+// instead of erroring on a missing --pr/--task.
+func selectOrchestrateAction(options agentRunOptions) (string, string) {
+	if strings.TrimSpace(options.taskID) != "" {
+		return "implement", "--task selects implementation workflow"
+	}
+	if options.prNumber > 0 {
+		return "review", "--pr selects review workflow"
+	}
+	if strings.TrimSpace(options.headSHA) != "" {
+		return "review", "--head-sha selects review workflow"
+	}
+	return "ask", "orchestrate runs a background coordinator that fans out delegations"
 }
 
 func selectAgentRunAction(options agentRunOptions) (string, string) {

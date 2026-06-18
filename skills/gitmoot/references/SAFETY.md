@@ -45,8 +45,10 @@ real contract with local commands and/or official documentation before editing.
 
 ## Delegation Termination Bounds
 
-Delegation and coordinator-continuation chains are bounded so they cannot recurse
-or fan out forever:
+These bounds keep an orchestra finite: when you orchestrate an orchestra of
+agents, the conductor's score and the players it spawns cannot recurse or fan out
+forever. Delegation and coordinator-continuation chains are bounded so they
+cannot recurse or fan out forever:
 
 - Depth cap `MaxDelegationDepth = 8`: each delegation child and each coordinator
   continuation increments `delegation_depth`. A job at or beyond this depth may
