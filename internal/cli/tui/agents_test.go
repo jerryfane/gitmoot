@@ -495,6 +495,100 @@ func TestAgentDetailRecentJobOpensAndReturns(t *testing.T) {
 	}
 }
 
+// TestAgentDetailJobActionsReturnToDetail covers the retry-confirm and
+// bug-report sub-flows from a job drilled in from the agent detail: each must
+// land back on the job detail (and then the agent detail) rather than dropping
+// to the agents list.
+func TestAgentDetailJobActionsReturnToDetail(t *testing.T) {
+	retried := ""
+	deps := Deps{
+		TemplateVersions: func(string) ([]TemplateVersion, error) { return nil, nil },
+		RetryJob:         func(id string) error { retried = id; return nil },
+		BugReportPreview: func(id string) (BugReportPreview, error) { return BugReportPreview{Title: "t"}, nil },
+	}
+	snap := agentsSnapshot()
+	// Give planner a single failed (retryable + reportable) recent job so the
+	// detail cursor lands on it.
+	snap.JobRows = []JobRow{{ID: "job-f", Agent: "planner", Type: "ask", State: "failed"}}
+	m := agentsModel(t, deps, snap)
+
+	open := func() Model {
+		// Unwind any open overlay back to the agents page first so the helper
+		// can be reused after a prior sub-flow.
+		for i := 0; i < 4 && m.mode != modeNormal; i++ {
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			m = next.(Model)
+		}
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // agents page -> agent detail
+		m = next.(Model)
+		if cmd != nil {
+			next, _ = m.Update(cmd())
+			m = next.(Model)
+		}
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // agent detail -> job detail
+		m = next.(Model)
+		if m.mode != modeJobDetail || m.activeJob.ID != "job-f" {
+			t.Fatalf("enter should open job-f detail, mode=%v job=%q", m.mode, m.activeJob.ID)
+		}
+		return m
+	}
+
+	// R then y: retry dispatches and returns to the job detail, then esc to the
+	// agent detail.
+	m = open()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = next.(Model)
+	if m.mode != modeConfirmJobRetry {
+		t.Fatalf("R should open the retry confirm, got %v", m.mode)
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(Model)
+	if cmd != nil {
+		next, _ = m.Update(cmd())
+		m = next.(Model)
+	}
+	if retried != "job-f" {
+		t.Fatalf("retry should dispatch for job-f, got %q", retried)
+	}
+	if m.mode != modeJobDetail {
+		t.Fatalf("retry confirm should return to the job detail, got %v", m.mode)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.mode != modeAgentDetail {
+		t.Fatalf("esc after retry should return to the agent detail, got %v", m.mode)
+	}
+
+	// R then n (dismiss) also returns to the job detail.
+	m = open()
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m = next.(Model)
+	if m.mode != modeJobDetail {
+		t.Fatalf("dismissing the retry confirm should return to the job detail, got %v", m.mode)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+
+	// B then esc: bug-report preview returns to the job detail.
+	m = open()
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
+	m = next.(Model)
+	if cmd != nil {
+		next, _ = m.Update(cmd())
+		m = next.(Model)
+	}
+	if m.mode != modeBugReportPreview {
+		t.Fatalf("B should open the bug report preview, got %v", m.mode)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.mode != modeJobDetail {
+		t.Fatalf("esc from bug preview should return to the job detail, got %v", m.mode)
+	}
+}
+
 // TestAgentDetailRecentJobsWindow guards that a busy agent's recent-jobs list
 // windows around the cursor so the detail stays scrollable.
 func TestAgentDetailRecentJobsWindow(t *testing.T) {

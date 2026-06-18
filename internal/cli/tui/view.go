@@ -235,7 +235,14 @@ func (m Model) footerHelp() string {
 	case modeConfirmTrainRepoCleanup:
 		return "y delete repos  n/esc keep them"
 	case modeAgentDetail:
-		return "v revert  D delete  esc back"
+		help := "D delete  esc back"
+		if len(m.revertableVersions()) > 0 {
+			help = "v revert  " + help
+		}
+		if m.agentDetailSelectableCount() > 0 {
+			help = "↑/↓ select  enter open  " + help
+		}
+		return help
 	case modeAgentRevertPick:
 		return "↑/↓ pick  enter confirm  esc back"
 	case modeAgentRuntimePick:

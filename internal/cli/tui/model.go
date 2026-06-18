@@ -170,6 +170,7 @@ type Model struct {
 	revertVersion       TemplateVersion   // version being confirmed for revert
 	agentDetailCursor   int               // selected row in the agent detail (recent jobs then versions)
 	jobDetailReturn     mode              // mode to return to when a job detail closes (modeNormal, or modeAgentDetail when opened from the agent detail)
+	jobActionReturn     mode              // mode to return to when a retry/cancel confirm or bug-report preview closes (captures whether it was opened from the page or a job detail)
 	runtimePickCursor   int               // selected runtime in the switch-runtime overlay
 	activeAgentVersion  TemplateVersion   // version shown in the content pager
 	versionView         viewport.Model    // pager for a version's content
@@ -865,7 +866,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.actionErr = msg.err.Error()
 			} else {
-				m.mode = modeNormal
+				// Return to wherever the confirm was opened from: the page
+				// (modeNormal), or the job detail when drilled in from there.
+				m.mode = m.jobActionReturn
+				m.jobActionReturn = modeNormal
 				m.actionErr = ""
 			}
 		}

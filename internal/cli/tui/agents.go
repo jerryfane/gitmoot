@@ -237,6 +237,14 @@ func (m Model) updateAgentOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "D":
 			m.openAgentDelete(m.activeAgent)
+		default:
+			// Forward unmapped keys (pgup/pgdn, space, u/d, wheel) to the viewport
+			// so a tall agent detail (a full recent-jobs window plus many template
+			// versions) can be scrolled past what ↑/↓ selection reaches.
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			m.viewport.SetContent(m.content())
+			return m, cmd
 		}
 		m.viewport.SetContent(m.content())
 		return m, nil

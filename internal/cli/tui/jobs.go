@@ -30,6 +30,8 @@ func (m *Model) openJobDetail(job JobRow) tea.Cmd {
 
 // openBugReportPreview enters the redacted report preview for a reportable job.
 func (m *Model) openBugReportPreview(job JobRow) tea.Cmd {
+	// Remember where we came from (the page, or a job detail) so esc returns there.
+	m.jobActionReturn = m.mode
 	m.activeJob = job
 	m.bugReport = BugReportPreview{}
 	m.bugReportLoaded = false
@@ -44,6 +46,9 @@ func (m *Model) openBugReportPreview(job JobRow) tea.Cmd {
 
 // openJobConfirm enters the retry or cancel confirmation for the given job.
 func (m *Model) openJobConfirm(job JobRow, cancel bool) {
+	// Remember where we came from (the page, or a job detail) so the confirm
+	// returns there whether it is accepted or dismissed.
+	m.jobActionReturn = m.mode
 	m.activeJob = job
 	m.actionErr = ""
 	m.actionBusy = false
@@ -107,7 +112,7 @@ func (m Model) updateJobOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.jobDetailReturn = modeNormal
 		case "R":
 			if jobRetryable(m.activeJob.State) {
-				m.mode = modeConfirmJobRetry
+				m.openJobConfirm(m.activeJob, false)
 			}
 		case "B":
 			if jobReportable(m.activeJob.State) {
@@ -117,7 +122,7 @@ func (m Model) updateJobOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "c":
 			if jobCancelable(m.activeJob.State) {
-				m.mode = modeConfirmJobCancel
+				m.openJobConfirm(m.activeJob, true)
 			}
 		default:
 			// Forward unmapped keys (↑/↓, pgup/pgdn, space, u/d) to the viewport
@@ -135,7 +140,10 @@ func (m Model) updateJobOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.actionBusy {
 				return m, nil
 			}
-			m.mode = modeNormal
+			// Return to wherever the preview was opened from (the page, or the
+			// job detail when drilled in from there).
+			m.mode = m.jobActionReturn
+			m.jobActionReturn = modeNormal
 			m.actionErr = ""
 			m.actionBusy = false
 		case "g":
@@ -176,7 +184,10 @@ func (m Model) updateJobOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.actionBusy {
 				return m, nil
 			}
-			m.mode = modeNormal
+			// Dismissed: return to wherever the confirm was opened from (the
+			// page, or the job detail when drilled in from there).
+			m.mode = m.jobActionReturn
+			m.jobActionReturn = modeNormal
 			m.actionErr = ""
 		}
 		m.viewport.SetContent(m.content())
