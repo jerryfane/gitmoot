@@ -340,8 +340,109 @@ func (m Model) updateAgentOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.viewport.SetContent(m.content())
 		return m, nil
+	case modeConfirmAgentGroupDelete:
+		switch msg.String() {
+		case "y", "Y":
+			if m.actionBusy {
+				return m, nil
+			}
+			m.actionBusy = true
+			m.actionErr = ""
+			m.viewport.SetContent(m.content())
+			return m, agentGroupDeleteCmd(m.deps, m.groupDeleteNames)
+		default:
+			if m.actionBusy {
+				return m, nil
+			}
+			m.mode = modeNormal
+			m.actionErr = ""
+		}
+		m.viewport.SetContent(m.content())
+		return m, nil
 	}
 	return m, nil
+}
+
+// openAgentGroupDelete opens the bulk-delete confirm for the template group of
+// the agent under the cursor.
+func (m *Model) openAgentGroupDelete() {
+	a, ok := m.agentUnderCursor()
+	if !ok {
+		return
+	}
+	var names []string
+	for _, g := range groupAgentsByTemplate(m.visibleAgents()) {
+		if g.templateID == a.TemplateID {
+			for _, ga := range g.agents {
+				names = append(names, ga.Name)
+			}
+			break
+		}
+	}
+	m.groupDeleteLabel = agentGroupLabel(a.TemplateID)
+	m.groupDeleteNames = names
+	m.actionErr = ""
+	m.actionBusy = false
+	m.mode = modeConfirmAgentGroupDelete
+}
+
+// agentsWithActiveJobs counts how many of the named agents currently have a
+// queued/running job in the snapshot — a best-effort heads-up before a bulk
+// delete (the store is authoritative and skips them).
+func (m Model) agentsWithActiveJobs(names []string) int {
+	active := map[string]bool{}
+	for _, j := range m.snap.JobRows {
+		if j.State == "queued" || j.State == "running" {
+			active[j.Agent] = true
+		}
+	}
+	n := 0
+	for _, name := range names {
+		if active[name] {
+			n++
+		}
+	}
+	return n
+}
+
+func (m Model) agentGroupDeleteConfirmView() string {
+	var b strings.Builder
+	n := len(m.groupDeleteNames)
+	b.WriteString(headerStyle.Render("Delete " + strconv.Itoa(n) + " agents in group \"" + m.groupDeleteLabel + "\""))
+	b.WriteString("\n\n")
+	const showMax = 8
+	for i, name := range m.groupDeleteNames {
+		if i >= showMax {
+			b.WriteString(mutedStyle.Render("… and "+strconv.Itoa(n-showMax)+" more") + "\n")
+			break
+		}
+		b.WriteString("  " + name + "\n")
+	}
+	b.WriteByte('\n')
+	if k := m.agentsWithActiveJobs(m.groupDeleteNames); k > 0 {
+		b.WriteString(mutedStyle.Render(strconv.Itoa(k)+" have active jobs and will be skipped.") + "\n")
+	}
+	b.WriteString("Unregister the whole group? (y/n)\n")
+	if m.actionErr != "" {
+		b.WriteString("\n" + errorStyle.Render(m.actionErr) + "\n")
+	}
+	b.WriteByte('\n')
+	if m.actionBusy {
+		b.WriteString(mutedStyle.Render("deleting…"))
+	} else {
+		b.WriteString(mutedStyle.Render("y delete all  n/esc cancel"))
+	}
+	return b.String()
+}
+
+func agentGroupDeleteCmd(deps Deps, names []string) tea.Cmd {
+	return func() tea.Msg {
+		if deps.DeleteAgents == nil {
+			return agentGroupDeleteMsg{}
+		}
+		deleted, skipped, err := deps.DeleteAgents(names)
+		return agentGroupDeleteMsg{deleted: deleted, skipped: skipped, err: err}
+	}
 }
 
 func agentVersionsCmd(deps Deps, templateID string) tea.Cmd {
@@ -659,7 +760,7 @@ func (m Model) agentsContentInteractive() string {
 	if m.optimizeBusy {
 		b.WriteString("\n" + mutedStyle.Render("starting optimization…") + "\n")
 	}
-	b.WriteString(mutedStyle.Render("enter detail  n new  o optimize  D delete  a show all/hide"))
+	b.WriteString(mutedStyle.Render("enter detail  n new  o optimize  D delete  X delete group  a show all/hide"))
 	b.WriteByte('\n')
 	return b.String()
 }

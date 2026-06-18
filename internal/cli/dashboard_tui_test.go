@@ -332,6 +332,48 @@ func TestDashboardCreateAgentWithPrompt(t *testing.T) {
 	}
 }
 
+// TestDashboardTUIDeleteAgentsSkipsActive exercises the bulk-delete dep: it
+// deletes the agents it can and skips any with a queued/running job.
+func TestDashboardTUIDeleteAgentsSkipsActive(t *testing.T) {
+	home := dashboardTestHome(t)
+	store, err := db.Open(config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ctx := context.Background()
+	for _, n := range []string{"a1", "a2"} {
+		if err := store.UpsertAgent(ctx, db.Agent{Name: n, Runtime: "codex"}); err != nil {
+			t.Fatalf("upsert %s: %v", n, err)
+		}
+	}
+	// a2 has a running job → must be skipped, not deleted.
+	if err := store.CreateJob(ctx, db.Job{ID: "j1", Agent: "a2", Type: "ask", State: "running"}); err != nil {
+		t.Fatalf("job: %v", err)
+	}
+	store.Close()
+
+	deps := dashboardTUIDeps(home, 0)
+	deleted, skipped, err := deps.DeleteAgents([]string{"a1", "a2"})
+	if err != nil {
+		t.Fatalf("DeleteAgents: %v", err)
+	}
+	if deleted != 1 || len(skipped) != 1 || skipped[0] != "a2" {
+		t.Fatalf("deleted=%d skipped=%v, want 1 / [a2]", deleted, skipped)
+	}
+
+	store2, err := db.Open(config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer store2.Close()
+	if _, err := store2.GetAgent(ctx, "a1"); err == nil {
+		t.Fatalf("a1 should be deleted")
+	}
+	if _, err := store2.GetAgent(ctx, "a2"); err != nil {
+		t.Fatalf("a2 should remain (had an active job): %v", err)
+	}
+}
+
 func TestBuildDashboardActivity(t *testing.T) {
 	mustPayload := func(p workflow.JobPayload) string {
 		t.Helper()

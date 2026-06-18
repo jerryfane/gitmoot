@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +68,7 @@ const (
 	modeAgentRevertPick
 	modeConfirmAgentRevert
 	modeConfirmAgentDelete
+	modeConfirmAgentGroupDelete
 	modeAgentVersionView
 	modeAgentRuntimePick
 	modeConfigEdit
@@ -158,6 +160,8 @@ type Model struct {
 	// Agents page interaction state.
 	agentCursor         int               // selected row in snap.Agents
 	showAllAgents       bool              // Agents page: include hidden skillopt-* training agents
+	groupDeleteLabel    string            // template-group label being bulk-deleted (confirm)
+	groupDeleteNames    []string          // agent names in the group being bulk-deleted
 	activeAgent         Agent             // agent shown in detail / being confirmed
 	agentVersions       []TemplateVersion // lazy-loaded template version history
 	agentVersionsLoaded bool              // the version load has returned (possibly empty)
@@ -239,7 +243,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			return m.updateTrainOverlay(msg)
-		case modeAgentDetail, modeAgentRevertPick, modeConfirmAgentRevert, modeConfirmAgentDelete, modeAgentVersionView, modeAgentRuntimePick:
+		case modeAgentDetail, modeAgentRevertPick, modeConfirmAgentRevert, modeConfirmAgentDelete, modeConfirmAgentGroupDelete, modeAgentVersionView, modeAgentRuntimePick:
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
 			}
@@ -458,6 +462,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.openAgentDelete(agent)
 				m.viewport.SetContent(m.content())
 				return m, tea.Batch(cmds...)
+			}
+		case "X":
+			if pages[m.selected].page == pageAgents && m.deps.DeleteAgents != nil {
+				if _, ok := m.agentUnderCursor(); ok {
+					m.openAgentGroupDelete()
+					m.viewport.SetContent(m.content())
+					return m, tea.Batch(cmds...)
+				}
 			}
 		case "o":
 			if agent, ok := m.agentUnderCursor(); ok && agent.TemplateID != "" &&
@@ -796,6 +808,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			if cmd := m.queueLoad(); cmd != nil {
 				cmds = append(cmds, cmd)
+			}
+		}
+	case agentGroupDeleteMsg:
+		if m.mode == modeConfirmAgentGroupDelete {
+			m.actionBusy = false
+			if msg.err != nil {
+				m.actionErr = msg.err.Error()
+			} else {
+				m.mode = modeNormal
+				m.actionErr = ""
+				note := "deleted " + strconv.Itoa(msg.deleted) + " agent(s)"
+				if len(msg.skipped) > 0 {
+					note += " · " + strconv.Itoa(len(msg.skipped)) + " skipped (active jobs)"
+				}
+				m.agentNotice = note
+				m.agentCursor = clampCursor(m.agentCursor, len(m.visibleAgents()))
+				if cmd := m.queueLoad(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			}
 		}
 	case daemonStartMsg:

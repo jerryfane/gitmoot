@@ -313,6 +313,27 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 				return store.DeleteAgentChecked(context.Background(), name)
 			})
 		},
+		DeleteAgents: func(names []string) (int, []string, error) {
+			deleted := 0
+			var skipped []string
+			err := withStore(home, func(store *db.Store) error {
+				for _, n := range names {
+					e := store.DeleteAgentChecked(context.Background(), n)
+					if e == nil {
+						deleted++
+						continue
+					}
+					// Skip agents still referenced by active jobs; surface anything else.
+					if strings.Contains(e.Error(), "queued or running") {
+						skipped = append(skipped, n)
+						continue
+					}
+					return e
+				}
+				return nil
+			})
+			return deleted, skipped, err
+		},
 		RevertTemplate: func(templateID, versionID string) error {
 			return withStore(home, func(store *db.Store) error {
 				_, err := store.RevertAgentTemplateVersion(context.Background(), templateID, versionID)
