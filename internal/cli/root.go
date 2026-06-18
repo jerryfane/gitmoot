@@ -68,8 +68,14 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot <command> [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
+	width := 0
 	for _, cmd := range rootCommands {
-		fmt.Fprintf(w, "  %-11s %s\n", cmd.name, cmd.summary)
+		if len(cmd.name) > width {
+			width = len(cmd.name)
+		}
+	}
+	for _, cmd := range rootCommands {
+		fmt.Fprintf(w, "  %-*s  %s\n", width, cmd.name, cmd.summary)
 	}
 }
 

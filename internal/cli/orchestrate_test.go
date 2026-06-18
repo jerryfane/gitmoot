@@ -111,3 +111,60 @@ func TestRunOrchestrateRequiresAgentAndMessage(t *testing.T) {
 		t.Fatalf("orchestrate stderr = %q", stderr.String())
 	}
 }
+
+// TestRunOrchestrateIgnoresMessageKeywords locks the flag-only routing: a message
+// with review keywords but no --pr still enqueues a background coordinator
+// (action "ask") rather than erroring the way `agent run` would.
+func TestRunOrchestrateIgnoresMessageKeywords(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	t.Chdir(repoDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{
+		"agent", "subscribe", "conductor", "--home", home, "--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440099", "--role", "planner",
+		"--repo", "owner/repo", "--capability", "ask",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("subscribe exit = %d, stderr=%s", code, stderr.String())
+	}
+	restore := replaceRuntimeFactory(runtime.Factory{Runner: &agentStartRunner{}})
+	defer restore()
+
+	stdout.Reset()
+	stderr.Reset()
+	// "audit pull request" would route `agent run` to review (which needs --pr).
+	code := Run([]string{"orchestrate", "conductor", "audit pull request and fan out the fixes", "--home", home, "--repo", "owner/repo", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("review-keyword orchestrate should still enqueue, exit=%d stderr=%s", code, stderr.String())
+	}
+	var decoded localAgentJobOutput
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout.String())
+	}
+	if decoded.SelectedAction != "ask" {
+		t.Fatalf("selected action = %q, want ask (flag-only routing ignores message keywords)", decoded.SelectedAction)
+	}
+	if decoded.State != string(workflow.JobQueued) {
+		t.Fatalf("state = %q, want queued", decoded.State)
+	}
+}
+
+// TestRunOrchestrateBadArgsLabel asserts malformed orchestrate args are reported
+// under "orchestrate", not the underlying "agent run".
+func TestRunOrchestrateBadArgsLabel(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"orchestrate", "conductor"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("malformed orchestrate exit = %d, want 2", code)
+	}
+	s := stderr.String()
+	if !strings.Contains(s, "orchestrate requires exactly one agent and one message") {
+		t.Fatalf("stderr should name orchestrate: %q", s)
+	}
+	if strings.Contains(s, "agent run") {
+		t.Fatalf("stderr must not leak 'agent run': %q", s)
+	}
+}
