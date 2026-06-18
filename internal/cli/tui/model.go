@@ -973,7 +973,7 @@ func (m *Model) pageCursor() (*int, int) {
 	case pageSessions:
 		return &m.sessionCursor, len(m.sessionRows())
 	case pageJobs:
-		return &m.jobCursor, len(m.snap.JobRows)
+		return &m.jobCursor, selectableCount(m.jobsVisibleRows())
 	case pageConfig:
 		return &m.configCursor, len(m.configEditableFields())
 	}
@@ -1010,6 +1010,8 @@ func (m Model) currentListRows() ([]listRow, bool) {
 		return m.attentionVisibleRows(), true
 	case pageTrains:
 		return m.trainVisibleRows(), true
+	case pageJobs:
+		return m.jobsVisibleRows(), true
 	}
 	return nil, false
 }
@@ -1100,9 +1102,9 @@ func (m *Model) focusHeader(key string) {
 	}
 }
 
-// clampJobCursor keeps the Jobs cursor within the current job list.
+// clampJobCursor keeps the Jobs cursor within the current selectable rows.
 func (m *Model) clampJobCursor() {
-	m.jobCursor = clampCursor(m.jobCursor, len(m.snap.JobRows))
+	m.jobCursor = clampCursor(m.jobCursor, selectableCount(m.jobsVisibleRows()))
 }
 
 func loadSnapshot(deps Deps) tea.Cmd {

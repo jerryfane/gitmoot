@@ -117,6 +117,49 @@ func selectedItemIndex(rows []listRow, cursor int) int {
 	return r.itemIdx
 }
 
+// windowListRows keeps the page within `capacity` rendered rows by returning the
+// slice around the cursor's selected row, the cursor re-based to that slice, and
+// the count of rows hidden above/below. When the rows already fit it returns them
+// unchanged. This lets a collapsible list whose expanded groups can overflow the
+// viewport (e.g. Jobs) stay scrollable with the selection always visible, the
+// same window-around-cursor pattern the flat lists use.
+func windowListRows(rows []listRow, cursor, capacity int) (windowed []listRow, relCursor, above, below int) {
+	if capacity < 1 {
+		capacity = 1
+	}
+	if len(rows) <= capacity {
+		return rows, cursor, 0, 0
+	}
+	// Absolute index of the cursor-th selectable row.
+	selIdx, n := 0, 0
+	for i, r := range rows {
+		if !r.selectable() {
+			continue
+		}
+		if n == cursor {
+			selIdx = i
+			break
+		}
+		n++
+	}
+	start := selIdx - capacity/2
+	if start < 0 {
+		start = 0
+	}
+	if start > len(rows)-capacity {
+		start = len(rows) - capacity
+	}
+	end := start + capacity
+	// Re-base the cursor: subtract the selectable rows hidden before the window.
+	hidden := 0
+	for _, r := range rows[:start] {
+		if r.selectable() {
+			hidden++
+		}
+	}
+	return rows[start:end], cursor - hidden, start, len(rows) - end
+}
+
 // renderListRows writes the visible rows into b. cursor is the index among the
 // SELECTABLE rows of the highlighted row. Headers show a [-]/[+] collapse marker;
 // the selected row gets the "▸ " cursor marker. Indent follows depth.

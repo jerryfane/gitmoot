@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,10 +56,15 @@ func (m *Model) openJobConfirm(job JobRow, cancel bool) {
 func (m Model) jobUnderCursor() (JobRow, bool) {
 	switch pages[m.selected].page {
 	case pageJobs:
-		if len(m.snap.JobRows) == 0 {
+		idx := selectedItemIndex(m.jobsVisibleRows(), m.jobCursor)
+		if idx < 0 {
 			return JobRow{}, false
 		}
-		return m.snap.JobRows[m.jobCursor], true
+		ordered := m.jobsOrdered()
+		if idx < len(ordered) {
+			return ordered[idx], true
+		}
+		return JobRow{}, false
 	case pageAttention:
 		idx := selectedItemIndex(m.attentionVisibleRows(), m.promptCursor)
 		if idx < 0 {
@@ -257,8 +263,87 @@ func depsLabel(c JobChild) string {
 	return strings.Join(c.Deps, ",") + suffix
 }
 
-// jobsContentInteractive renders the Jobs page as a selectable list. Job
-// overlays (detail/confirm) are dispatched once in content(), not here.
+// jobStatusGroupOrder lists job states in the order the Jobs page groups them —
+// active work first, the settled pile last. States outside this list (defensive)
+// are appended in sorted order.
+var jobStatusGroupOrder = []string{"running", "queued", "blocked", "failed", "succeeded", "cancelled"}
+
+// jobStatusGroup is one status section of the Jobs page: a state and its jobs in
+// snapshot order.
+type jobStatusGroup struct {
+	state string
+	jobs  []JobRow
+}
+
+// jobsByStatusGroup buckets the snapshot jobs by state into display-ordered
+// groups (active first). Both jobsOrdered and jobsListRows derive from this, so
+// the cursor's item index and the rendered rows can never drift apart.
+func (m Model) jobsByStatusGroup() []jobStatusGroup {
+	byState := map[string][]JobRow{}
+	for _, j := range m.snap.JobRows {
+		byState[j.State] = append(byState[j.State], j)
+	}
+	var groups []jobStatusGroup
+	used := map[string]bool{}
+	for _, st := range jobStatusGroupOrder {
+		if jobs := byState[st]; len(jobs) > 0 {
+			groups = append(groups, jobStatusGroup{st, jobs})
+			used[st] = true
+		}
+	}
+	var rest []string
+	for st := range byState {
+		if !used[st] {
+			rest = append(rest, st)
+		}
+	}
+	sort.Strings(rest)
+	for _, st := range rest {
+		groups = append(groups, jobStatusGroup{st, byState[st]})
+	}
+	return groups
+}
+
+// jobsOrdered is the jobs flattened in status-group order — the index space the
+// Jobs cursor resolves through (leaf itemIdx in jobsListRows points here).
+func (m Model) jobsOrdered() []JobRow {
+	var out []JobRow
+	for _, g := range m.jobsByStatusGroup() {
+		out = append(out, g.jobs...)
+	}
+	return out
+}
+
+// jobsListRows builds the collapsible Jobs tree: one header per status group
+// (×count) with its jobs as leaves. The state lives in the header, so leaves omit
+// it — except a job being cancelled, which shows a transient inline label.
+func (m Model) jobsListRows() []listRow {
+	var rows []listRow
+	idx := 0
+	for _, g := range m.jobsByStatusGroup() {
+		key := "jobs:status:" + g.state
+		rows = append(rows, headerRow(key, 0, g.state+"  ×"+strconv.Itoa(len(g.jobs))))
+		for _, j := range g.jobs {
+			line := j.ID + "  " + j.Agent + "  " + j.Type + "  " + mutedStyle.Render(formatJobTime(j.UpdatedAt))
+			if _, pending := m.cancelling[j.ID]; pending && jobCancelable(j.State) {
+				line += "  " + "cancelling…"
+			}
+			rows = append(rows, leafRow(1, line, idx, key))
+			idx++
+		}
+	}
+	return rows
+}
+
+// jobsVisibleRows is the Jobs tree filtered by collapse state — the rows rendered
+// and the index space m.jobCursor walks.
+func (m Model) jobsVisibleRows() []listRow {
+	return visibleListRows(m.jobsListRows(), m.groupCollapsed)
+}
+
+// jobsContentInteractive renders the Jobs page as a collapsible list grouped by
+// status, windowed so the selection stays visible even when a status group has
+// hundreds of jobs. Job overlays (detail/confirm) are dispatched in content().
 func (m Model) jobsContentInteractive() string {
 	if len(m.snap.JobRows) == 0 {
 		return m.loadingOr("No jobs.", !m.loadedAt.IsZero())
@@ -270,49 +355,21 @@ func (m Model) jobsContentInteractive() string {
 	}
 	b.WriteString(mutedStyle.Render(strconv.Itoa(m.snap.Jobs.Total)+" total") + "  " + strings.Join(summary, "  "))
 	b.WriteString("\n\n")
-	// Window the list so the cursor stays on-screen even with hundreds of jobs;
-	// the cursor is kept roughly centered (stateless — derived from jobCursor).
-	rows := m.snap.JobRows
-	n := len(rows)
-	capacity := jobsWindowCap(m.height)
-	start := 0
-	if n > capacity {
-		start = m.jobCursor - capacity/2
-		if start < 0 {
-			start = 0
-		}
-		if start > n-capacity {
-			start = n - capacity
-		}
+
+	windowed, rel, above, below := windowListRows(m.jobsVisibleRows(), m.jobCursor, jobsWindowCap(m.height))
+	if above > 0 {
+		b.WriteString(mutedStyle.Render("↑ "+strconv.Itoa(above)+" more rows above") + "\n")
 	}
-	end := start + capacity
-	if end > n {
-		end = n
+	renderListRows(&b, windowed, rel)
+	if below > 0 {
+		b.WriteString(mutedStyle.Render("↓ "+strconv.Itoa(below)+" more rows below") + "\n")
 	}
-	if start > 0 {
-		b.WriteString(mutedStyle.Render("↑ "+strconv.Itoa(start)+" earlier") + "\n")
-	}
-	for i := start; i < end; i++ {
-		job := rows[i]
-		cursor, id := "  ", job.ID
-		state := job.State
-		if _, pending := m.cancelling[job.ID]; pending && jobCancelable(job.State) {
-			state = "cancelling…"
-		}
-		if i == m.jobCursor {
-			cursor, id = "▸ ", selectedRowStyle.Render(job.ID)
-		}
-		b.WriteString(cursor + id + "  " + job.Agent + "  " + job.Type + "  " + jobStateColor(state) +
-			"  " + mutedStyle.Render(formatJobTime(job.UpdatedAt)) + "\n")
-	}
-	if end < n {
-		b.WriteString(mutedStyle.Render("↓ "+strconv.Itoa(n-end)+" more") + "\n")
-	}
-	help := "enter detail  R retry  c cancel"
+
+	help := "↑/↓ select · space open/close · enter detail · R retry · c cancel"
 	if job, ok := m.jobUnderCursor(); ok && jobReportable(job.State) {
-		help += "  B report bug"
+		help += " · B report bug"
 	}
-	b.WriteString(mutedStyle.Render(help))
+	b.WriteString("\n" + mutedStyle.Render(help))
 	b.WriteByte('\n')
 	return b.String()
 }
