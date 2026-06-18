@@ -166,7 +166,9 @@ Use `gitmoot agent prompt <agent-or-template>` when the user wants to reuse a
 Gitmoot agent prompt in the current chat. Use `gitmoot agent run` for
 coordinator delegation through a registered Gitmoot agent; Gitmoot will route to
 ask, review, or implement and own worktrees, branch locks, commits, pushes, PRs,
-and workflow advancement. Use `gitmoot agent ask` only for analysis, planning,
+and workflow advancement. To orchestrate an orchestra of agents,
+`gitmoot orchestrate <agent> "..." [--repo R]` is sugar for `gitmoot agent run
+<agent> --background "..."`. Use `gitmoot agent ask` only for analysis, planning,
 or questions. Add `--background` only when the user wants a queued background
 job. This is the same agent registry and runtime adapter path used by PR-comment
 jobs; the plugin only helps the runtime discover this skill and does not replace
