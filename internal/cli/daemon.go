@@ -1577,6 +1577,26 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 	if err != nil {
 		return w.finishQueuedJob(ctx, job.ID, workflow.JobFailed, err)
 	}
+	// An ephemeral child carries an inline worker spec instead of a
+	// pre-registered agent. Materialize a throwaway agent + runtime session
+	// from the spec before the normal flow runs (which assumes the agent
+	// already exists via GetAgent below), and register a cleanup defer so the
+	// worker is auto-disposed on every exit path — success, failure, or block.
+	if payload.Ephemeral != nil {
+		if err := w.startEphemeralWorker(ctx, job, payload); err != nil {
+			if eventErr := w.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "ephemeral_worker_failed", Message: err.Error()}); eventErr != nil {
+				return eventErr
+			}
+			if finishErr := w.finishQueuedJob(ctx, job.ID, workflow.JobFailed, err); finishErr != nil {
+				return finishErr
+			}
+			_ = w.postJobResultComment(ctx, job.ID, runtime.Agent{Name: job.Agent}, "", err)
+			return nil
+		}
+		// Idempotent removal of the agent row + instance regardless of how run
+		// returns; uses a background context so cleanup survives ctx cancel.
+		defer w.cleanupTempWorker(context.Background(), job.Agent)
+	}
 	dbAgent, err := w.Store.GetAgent(ctx, job.Agent)
 	if err != nil {
 		if finishErr := w.finishQueuedJob(ctx, job.ID, workflow.JobFailed, err); finishErr != nil {
@@ -1725,6 +1745,11 @@ func (w jobWorker) parallelSessionPolicy() (config.ParallelSessionPolicy, error)
 }
 
 func tempWorkerEligible(ctx context.Context, store *db.Store, job db.Job, payload workflow.JobPayload, agent runtime.Agent, policy config.ParallelSessionPolicy, now time.Time) tempWorkerEligibility {
+	if payload.Ephemeral != nil {
+		// An ephemeral job already runs directly on its own throwaway worker;
+		// forking it into a second temp worker would double-spawn.
+		return tempWorkerEligibility{Reason: "ephemeral worker runs directly"}
+	}
 	if payload.DelegationReason == "temp_worker_merge_back" {
 		return tempWorkerEligibility{Reason: "merge-back waits for original runtime session"}
 	}
@@ -2058,6 +2083,131 @@ func (w jobWorker) startTempWorker(ctx context.Context, job db.Job, payload work
 	}
 	return tempWorkerStartResult{Agent: tempAgent, IdleTimeout: idleTimeout, JobTimeout: jobTimeout}, nil
 }
+
+// startEphemeralWorker materializes a throwaway agent for a job whose payload
+// carries an inline worker spec, generalizing the temp-worker machinery from
+// "fork an existing agent" to "spawn from a spec". It persists the agent (so the
+// rest of run's flow — GetAgent, the engine's executor checks — finds it),
+// associates payload.Repo via the agent's RepoScope, and reserves + starts a
+// runtime session (mirroring startTempWorker). The agent name on the job is
+// already the engine-assigned "-ephemeral-" name; callers register a deferred
+// cleanupTempWorker to auto-dispose the worker on every exit path. The worker
+// runs read-only unless the spec opts into a writable autonomy policy.
+func (w jobWorker) startEphemeralWorker(ctx context.Context, job db.Job, payload workflow.JobPayload) (err error) {
+	spec := payload.Ephemeral
+	if spec == nil {
+		return errors.New("ephemeral worker requires a spec")
+	}
+	capabilities := spec.Capabilities
+	if len(capabilities) == 0 {
+		capabilities = []string{job.Type}
+	}
+	// Least privilege: default read-only, except an implement must be able to
+	// write. The spec may still opt into a different (validated) policy.
+	defaultPolicy := runtime.AutonomyPolicyReadOnly
+	if job.Type == "implement" {
+		defaultPolicy = runtime.AutonomyPolicyWorkspaceWrite
+	}
+	policy := firstNonEmpty(strings.TrimSpace(spec.AutonomyPolicy), defaultPolicy)
+	// Role is required by runtime.ValidateAgent but optional on the spec; fall
+	// back to the job action (e.g. "review"/"implement"), then a generic role.
+	role := firstNonEmpty(strings.TrimSpace(spec.Role), strings.TrimSpace(job.Type), "worker")
+	ephemeralAgent := runtime.Agent{
+		Name:           job.Agent,
+		Role:           role,
+		Runtime:        spec.Runtime,
+		Model:          spec.Model,
+		TemplateID:     spec.Template,
+		Capabilities:   capabilities,
+		AutonomyPolicy: policy,
+		RepoScope:      payload.Repo,
+	}
+	// Persisting with RepoScope set associates the worker with payload.Repo
+	// (agent_repos), mirroring how a normal agent gains repo access.
+	if err := w.Store.UpsertAgent(ctx, dbAgent(ephemeralAgent)); err != nil {
+		return err
+	}
+	// The agent row (and, below, its instance + a live runtime session) now
+	// exist. Dispose them if any later bring-up step fails so a partial
+	// materialization cannot leak an agent/instance/session — mirroring
+	// startTempWorker's cleanup-on-error. (The named return err is set by the
+	// `return err` paths below.)
+	defer func() {
+		if err != nil {
+			w.cleanupTempWorker(context.Background(), ephemeralAgent.Name)
+		}
+	}()
+	// Normalize the stored policy back onto the in-memory agent so the runtime
+	// session is started with the same sandbox the rest of run will use.
+	ephemeralAgent.AutonomyPolicy = runtime.NormalizeStoredAutonomyPolicy(ephemeralAgent.AutonomyPolicy)
+	checkout, err := w.CheckoutValidator(ctx, job, payload, ephemeralAgent)
+	if err != nil {
+		return err
+	}
+	var cachedTemplate db.AgentTemplate
+	if ephemeralAgent.TemplateID != "" {
+		cachedTemplate, err = loadInstalledTemplate(ctx, w.Store, ephemeralAgent.TemplateID)
+		if err != nil {
+			return err
+		}
+	}
+	now := time.Now().UTC()
+	reserved := db.AgentInstance{
+		Name:    ephemeralAgent.Name,
+		Type:    tempWorkerAgentType(ephemeralWorkerInstanceOrigin),
+		Runtime: ephemeralAgent.Runtime,
+		// "starting:" placeholder ref keeps the reserved row valid before the
+		// adapter returns the real runtime ref.
+		RuntimeRef:     "starting:" + ephemeralAgent.Name,
+		RepoFullName:   payload.Repo,
+		Role:           ephemeralAgent.Role,
+		TemplateID:     ephemeralAgent.TemplateID,
+		Model:          ephemeralAgent.Model,
+		Capabilities:   ephemeralAgent.Capabilities,
+		AutonomyPolicy: ephemeralAgent.AutonomyPolicy,
+		State:          "starting",
+		CreatedAt:      formatManagedAgentTime(now),
+		LastUsedAt:     formatManagedAgentTime(now),
+		ExpiresAt:      formatManagedAgentTime(now.Add(daemonRunningJobStaleAfter)),
+	}
+	if err := w.Store.UpsertAgentInstance(ctx, reserved); err != nil {
+		return err
+	}
+	adapter, err := w.StartAdapterFactory(ephemeralAgent.Runtime, checkout)
+	if err != nil {
+		return err
+	}
+	started, err := adapter.Start(ctx, runtime.StartRequest{Agent: ephemeralAgent, Prompt: agentStartupPrompt(ephemeralAgent, cachedTemplate)})
+	if err != nil {
+		return err
+	}
+	ephemeralAgent.RuntimeRef = strings.TrimSpace(started.RuntimeRef)
+	if err := runtime.ValidateAgent(ephemeralAgent); err != nil {
+		return err
+	}
+	// Persist the live runtime_ref on both the agent row (so GetAgent below
+	// resolves a runnable session) and the instance.
+	if err := w.Store.UpsertAgent(ctx, dbAgent(ephemeralAgent)); err != nil {
+		return err
+	}
+	instance := reserved
+	instance.RuntimeRef = ephemeralAgent.RuntimeRef
+	instance.State = "idle"
+	if err := w.Store.UpsertAgentInstance(ctx, instance); err != nil {
+		return err
+	}
+	if err := w.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "ephemeral_worker_started", Message: fmt.Sprintf("materialized %s worker %s", ephemeralAgent.Runtime, ephemeralAgent.Name)}); err != nil {
+		return err
+	}
+	writeLine(w.Stdout, "materialized ephemeral worker %s (%s) for job %s in %s", ephemeralAgent.Name, ephemeralAgent.Runtime, job.ID, payload.Repo)
+	return nil
+}
+
+// ephemeralWorkerInstanceOrigin is the synthetic "original" agent name used in an
+// ephemeral worker's instance type. It has no registered instance, so
+// managedJobConfig treats the worker as unmanaged (no agent-type config), which
+// is correct for a spec-spawned worker that does not belong to a managed pool.
+const ephemeralWorkerInstanceOrigin = "gitmoot-ephemeral-spec"
 
 func (w jobWorker) cleanupTempWorker(ctx context.Context, agentName string) {
 	if err := w.Store.DeleteAgentInstance(ctx, agentName); err != nil {

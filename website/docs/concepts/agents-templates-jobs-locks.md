@@ -51,6 +51,55 @@ agents) run in parallel or in dependency order, and a finale (continuation)
 reconvenes and synthesizes the results. It is a naming layer on top of the same
 `delegations` mechanics described above.
 
+## Choosing a worker: registered agent vs. ephemeral worker
+
+There are only **two** kinds of worker you deliberately create — a **registered
+agent** and an **ephemeral worker**. A third, the **temp worker**, is created
+*automatically* by the daemon and is never something you make by hand.
+
+| | Registered agent | Ephemeral worker | Temp worker |
+|---|---|---|---|
+| Who creates it | You (`gitmoot agent start` / `subscribe` / `type set`) | A coordinator (a `delegations[]` entry with an `ephemeral` spec) | The daemon, automatically |
+| Persists | Yes — lives in the registry | No — auto-disposed after its job | No — auto-disposed after its job |
+| Identity / name | Stable, addressable | Synthetic, hidden from the registry | Synthetic, hidden from the registry |
+| Reusable | Across many jobs and PR subscriptions | One job, then gone | One job, then gone |
+| Built from | Your config (runtime / model / template / capabilities) | An inline spec on the delegation | A **fork of an existing registered agent** |
+| Purpose | A durable role | A one-off delegated task | **Concurrency** — run a registered agent's jobs in parallel |
+
+A temp worker is just *"this registered agent is busy; clone it to run another
+job in parallel, then drop the clone."* You influence it only through a managed
+agent type's `max_background` — you never create one directly.
+
+**Create a registered agent when the role is durable and addressable:**
+
+- You will reuse it (a repo's `reviewer`, a `planner` you invoke repeatedly).
+- It needs a stable name — PR-comment subscriptions, `gitmoot agent ask <name>`,
+  the dashboard, job history and accountability.
+- It carries managed state: a versioned, SkillOpt-trained template, a resumable
+  runtime session, repo scope / capabilities / autonomy you tune.
+- You want a pool that auto-scales under load — a managed *agent type* with
+  `max_background` (the daemon forks temp workers from it).
+- It needs to **itself delegate** — ephemeral workers are leaf-only and cannot
+  return their own delegations.
+
+**Spawn an ephemeral worker (via a coordinator's delegation) when the work is
+one-off and disposable:**
+
+- Dynamic fan-out you do not know ahead of time ("three workers each draft an
+  option", "a cheap gate plus a strong verifier").
+- No reuse, no identity, no subscription — it exists only for that delegation.
+- The coordinator wants to choose the runtime and model *per task* (model
+  tiering).
+- You want zero setup and zero cleanup — no pre-registration, auto-disposed,
+  never clutters the registry.
+
+**Rule of thumb:** *durable and named → register an agent; one-off and
+coordinator-spawned → ephemeral; concurrency of a registered agent → temp
+workers happen for you.* The trade-off: registered agents have setup cost but are
+reusable, addressable, trainable, and resume a warm session; ephemeral workers
+are zero-setup and self-cleaning but cold-spawn each time and carry no
+accumulated identity.
+
 ## Locks
 
 Gitmoot uses separate locks for separate resources:

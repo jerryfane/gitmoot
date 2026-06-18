@@ -67,6 +67,36 @@ func TestEngineAdvanceJobDispatchesDelegations(t *testing.T) {
 	}
 }
 
+func TestEngineEphemeralWorkerCannotDelegate(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	// A job that is itself an ephemeral worker (payload.Ephemeral set) returns a
+	// delegation. The engine must NOT dispatch it (an ephemeral worker is a leaf
+	// that is auto-disposed; a continuation to its synthetic agent would strand).
+	insertCompletedJob(t, store, db.Job{ID: "eph-job", Agent: "x-ephemeral-abc", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		Sender:    "x-ephemeral-abc",
+		Ephemeral: &EphemeralSpec{Runtime: "codex"},
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this"},
+			},
+		},
+	})
+	if err := engine.AdvanceJob(ctx, "eph-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+	if jobExists(t, store, "eph-job/delegation/del-1") {
+		t.Fatalf("ephemeral worker's delegation must not be dispatched")
+	}
+}
+
 func TestEngineAdvanceJobWritesDelegationArtifacts(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
@@ -2284,6 +2314,89 @@ func TestEngineDelegationRequestCopiesModel(t *testing.T) {
 	)
 	if request.Model != "opus" {
 		t.Fatalf("request.Model = %q, want %q", request.Model, "opus")
+	}
+}
+
+func TestEngineDelegationRequestThreadsEphemeralSpec(t *testing.T) {
+	engine := Engine{}
+	spec := &EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4"}
+	request := engine.delegationRequest(
+		db.Job{ID: "parent-job", Agent: "audit"},
+		JobPayload{Repo: "jerryfane/gitmoot"},
+		Delegation{ID: "worker", Ephemeral: spec, Action: "implement", Prompt: "hi"},
+	)
+	if request.Ephemeral != spec {
+		t.Fatalf("request.Ephemeral = %+v, want the delegation spec", request.Ephemeral)
+	}
+	// The synthetic agent name replaces the (empty) delegation agent and carries
+	// the TUI filter infix.
+	if !strings.Contains(request.Agent, "-ephemeral-") {
+		t.Fatalf("request.Agent = %q, want it to contain %q", request.Agent, "-ephemeral-")
+	}
+	if request.Agent != ephemeralAgentName("worker", "parent-job") {
+		t.Fatalf("request.Agent = %q, want the deterministic ephemeral name", request.Agent)
+	}
+
+	// A non-ephemeral delegation keeps routing to its named agent unchanged.
+	plain := engine.delegationRequest(
+		db.Job{ID: "parent-job", Agent: "audit"},
+		JobPayload{Repo: "jerryfane/gitmoot"},
+		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go"},
+	)
+	if plain.Ephemeral != nil {
+		t.Fatalf("non-ephemeral request carried a spec: %+v", plain.Ephemeral)
+	}
+	if plain.Agent != "helper" {
+		t.Fatalf("non-ephemeral request.Agent = %q, want %q", plain.Agent, "helper")
+	}
+}
+
+func TestEngineDispatchesEphemeralDelegationWithoutRegisteredAgent(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	// The coordinator is registered; the ephemeral worker deliberately is NOT, so
+	// this exercises the engine's bypass of the registered-agent existence,
+	// repo-access, and capability checks for an ephemeral delegation.
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "worker", Ephemeral: &EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4"}, Action: "review", Prompt: "hi"},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/worker")
+	if !strings.Contains(child.Agent, "-ephemeral-") {
+		t.Fatalf("child agent = %q, want it to contain %q", child.Agent, "-ephemeral-")
+	}
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.Ephemeral == nil {
+		t.Fatalf("child payload missing ephemeral spec: %+v", payload)
+	}
+	if payload.Ephemeral.Runtime != runtime.CodexRuntime || payload.Ephemeral.Model != "gpt-5.4" {
+		t.Fatalf("child payload ephemeral spec = %+v", payload.Ephemeral)
+	}
+	// The stored payload JSON must carry the ephemeral key so downstream consumers
+	// (daemon worker materialization, dashboard) can read it back.
+	if !strings.Contains(child.Payload, `"ephemeral"`) {
+		t.Fatalf("stored payload missing ephemeral key: %s", child.Payload)
 	}
 }
 

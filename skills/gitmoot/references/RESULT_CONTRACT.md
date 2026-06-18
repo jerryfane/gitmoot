@@ -78,6 +78,36 @@ Delegation fields:
   job (for example a Codex, Claude Code, or Kimi Code model name). When omitted,
   the delegated agent's configured default model is used. There is no allow-list;
   Gitmoot passes the value through to the runtime as-is.
+- `ephemeral` (optional): an inline worker spec that spawns a throwaway child
+  agent on demand instead of routing to a pre-registered one. It is **mutually
+  exclusive** with `agent`: a delegation must set exactly one of `agent` or
+  `ephemeral`. When `ephemeral` is set, no agent needs to be registered first —
+  Gitmoot materializes a worker from the spec, runs the child job, and disposes
+  of the worker once the job finishes. The ephemeral child inherits the
+  coordinator's allowed repo scope. Fields:
+  - `runtime` (required): the runtime that backs the worker, one of `codex`,
+    `claude`, or `kimi`. It is never `shell`.
+  - `model` (optional): a runtime-scoped model string, as for the delegation
+    `model` field above.
+  - `template` (optional): an agent-template id to seed the worker's prompt.
+  - `role` (optional): a human-readable role label for the worker.
+  - `capabilities` (optional): an array of capability strings advertised by the
+    worker.
+  - `autonomy_policy` (optional): the worker's sandbox autonomy. Defaults to
+    `read-only`.
+
+  Ephemeral delegations are bounded by the same delegation limits as any other
+  delegation (see [Termination bounds](#termination-bounds)); they do not relax
+  the depth cap, per-root job budget, or loop detection.
+
+  **`agent` vs `ephemeral` — which to use:** delegate to a registered `agent`
+  when the work needs a specific, durable, addressable worker (a tuned/trained
+  template, a resumable session, accountable history) or when the worker must
+  itself delegate — **ephemeral workers are leaf-only and cannot return their own
+  delegations**. Use `ephemeral` for one-off, disposable, dynamically-sized
+  fan-out where you just need "a runtime + model + prompt" with no
+  pre-registration and no cleanup (e.g. N workers each producing one result, or a
+  cheap gate plus a strong verifier with per-worker models).
 
 A delegation with no `deps` dispatches immediately and runs in parallel with
 other dep-free siblings. Once every top-level delegation reaches a terminal

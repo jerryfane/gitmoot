@@ -111,6 +111,27 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
   (for example a Codex, Claude Code, or Kimi Code model name). When omitted, the
   delegated agent's configured default model is used. There is no allow-list;
   Gitmoot passes the value through to the runtime as-is.
+- `ephemeral` (optional): an inline worker spec that spawns a throwaway child
+  agent on demand instead of routing to a pre-registered one. It is **mutually
+  exclusive** with `agent` — a delegation must set exactly one of `agent` or
+  `ephemeral`. When `ephemeral` is set, the coordinator does not need to register
+  an agent first: Gitmoot creates a worker from the spec, runs the child job, and
+  auto-disposes of the worker once the job finishes. The ephemeral child inherits
+  the coordinator's allowed repo scope. The spec has these fields:
+  - `runtime` (required): the runtime that backs the worker — one of `codex`,
+    `claude`, or `kimi`. It is never `shell`.
+  - `model` (optional): a runtime-scoped model string, exactly like the
+    delegation `model` field above.
+  - `template` (optional): an agent-template id used to seed the worker's prompt.
+  - `role` (optional): a human-readable role label for the worker.
+  - `capabilities` (optional): an array of capability strings the worker
+    advertises.
+  - `autonomy_policy` (optional): the worker's sandbox autonomy. Defaults to
+    `read-only`.
+
+  Ephemeral delegations are bounded by the same delegation limits as every other
+  delegation (see [Termination bounds](#termination-bounds)): they do not relax
+  the depth cap, the per-root job budget, or loop detection.
 
 ### How delegations run
 

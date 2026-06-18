@@ -486,9 +486,21 @@ func (e Engine) rootJobID(job db.Job, payload JobPayload) string {
 // advanceDelegations (deferred enqueue once deps clear) so both paths produce
 // identical, idempotent requests for the same delegation ID.
 func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) JobRequest {
+	// An ephemeral delegation has no pre-registered agent: synthesize a stable
+	// agent name (carrying the "-ephemeral-" infix the TUI filters on) and thread
+	// the worker spec through so the daemon can materialize the worker and the
+	// engine can skip the registered-agent checks. A non-ephemeral delegation
+	// keeps routing to its named agent unchanged.
+	agent := d.Agent
+	var ephemeral *EphemeralSpec
+	if d.Ephemeral != nil {
+		agent = ephemeralAgentName(d.ID, job.ID)
+		ephemeral = d.Ephemeral
+	}
 	return JobRequest{
 		ID:              job.ID + "/delegation/" + d.ID,
-		Agent:           d.Agent,
+		Agent:           agent,
+		Ephemeral:       ephemeral,
 		Action:          d.Action,
 		Repo:            payload.Repo,
 		Branch:          payload.Branch,
@@ -570,7 +582,14 @@ func canonicalDelegationSetHash(dels []Delegation) string {
 	for _, d := range sorted {
 		deps := compactStrings(d.Deps)
 		sort.Strings(deps)
-		fields := []string{d.ID, d.Agent, d.Action, strings.TrimSpace(d.Prompt), strings.Join(deps, ",")}
+		// For an ephemeral delegation, d.Agent is empty; fold the spec identity
+		// (runtime/model/template/role) into the hash so two distinct ephemeral
+		// specs are not mistaken for the same work by loop detection / dedup.
+		eph := ""
+		if d.Ephemeral != nil {
+			eph = strings.Join([]string{d.Ephemeral.Runtime, d.Ephemeral.Model, d.Ephemeral.Template, d.Ephemeral.Role}, "|")
+		}
+		fields := []string{d.ID, d.Agent, eph, d.Action, strings.TrimSpace(d.Prompt), strings.Join(deps, ",")}
 		builder.WriteString(strings.Join(fields, "\x1f"))
 		builder.WriteString("\x1e")
 	}
@@ -629,6 +648,18 @@ func (e Engine) countRootDelegationJobs(ctx context.Context, rootID string) (int
 
 func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload JobPayload, ref taskRef) error {
 	if payload.Result == nil || len(payload.Result.Delegations) == 0 {
+		return nil
+	}
+
+	// Ephemeral workers are leaf executors: they are auto-disposed when their job
+	// completes, so a continuation enqueued to their (now-deleted) synthetic agent
+	// would strand. Do not dispatch delegations returned by an ephemeral worker.
+	if payload.Ephemeral != nil {
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "delegation_ignored_ephemeral",
+			Message: fmt.Sprintf("ephemeral workers cannot delegate; ignoring %d delegation(s)", len(payload.Result.Delegations)),
+		})
 		return nil
 	}
 
@@ -1607,6 +1638,14 @@ func delegationDecisionApproves(decision string) bool {
 }
 
 func (e Engine) preflightDelegation(ctx context.Context, request JobRequest) error {
+	// An ephemeral delegation routes to an on-demand worker that no agent row
+	// backs, so the registered-agent existence, repo-access, and capability checks
+	// do not apply: the ephemeral child inherits the coordinator's allowed repo
+	// scope. Only validate that the spec runtime is a real agent runtime (never
+	// shell); the daemon materializes the worker from the spec.
+	if request.Ephemeral != nil {
+		return validateEphemeralSpec(request.DelegationID, request.Ephemeral)
+	}
 	agent, err := e.Store.GetAgent(ctx, request.Agent)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1981,14 +2020,33 @@ func (e Engine) ensureJobExecutorAllowed(ctx context.Context, job db.Job, payloa
 		payload.DelegationReason == "temp_worker_merge_back" &&
 		payload.OriginalAgent == job.Agent
 	return e.ensureAgentAllowedWithBranchOwner(ctx, JobRequest{
-		Agent:  authorizationAgent,
-		Action: job.Type,
-		Repo:   payload.Repo,
-		Branch: payload.Branch,
+		Agent:        authorizationAgent,
+		Action:       job.Type,
+		Repo:         payload.Repo,
+		Branch:       payload.Branch,
+		DelegationID: payload.DelegationID,
+		// Carry the worker spec so an ephemeral child's executor check inherits the
+		// coordinator's repo scope (skip the registered-agent checks) instead of
+		// blocking on a synthetic agent name that no agent row backs.
+		Ephemeral: payload.Ephemeral,
 	}, branchOwner, ref, allowMissingCapability)
 }
 
 func (e Engine) ensureAgentAllowedWithBranchOwner(ctx context.Context, request JobRequest, branchOwner string, ref taskRef, allowMissingCapability bool) error {
+	// An ephemeral worker has no registered agent row: it inherits the
+	// coordinator's allowed repo scope, so the existence, repo-access, and
+	// capability checks are skipped. Validate only that the spec runtime is a real
+	// agent runtime (never shell), then fall through to the shared branch-lock path
+	// so an ephemeral implement still serializes on its branch like any other.
+	if request.Ephemeral != nil {
+		if err := validateEphemeralSpec(request.DelegationID, request.Ephemeral); err != nil {
+			return e.block(ctx, ref, err.Error())
+		}
+		if request.Action == "implement" {
+			return e.ensureBranchLock(ctx, request.Repo, request.Branch, branchOwner, ref)
+		}
+		return nil
+	}
 	agent, err := e.Store.GetAgent(ctx, request.Agent)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

@@ -93,7 +93,9 @@ score so the players (child agents) run and a finale (continuation) reconvenes
 and synthesizes. `gitmoot orchestrate <agent> "..." [--repo R]` is sugar for
 `gitmoot agent run <agent> --background "..."`. See
 [RESULT_CONTRACT.md](references/RESULT_CONTRACT.md) for the delegation fields and
-termination bounds. An agent (via `--model` on start/subscribe/type set) and an
+termination bounds. A coordinator can also spawn throwaway, auto-disposed
+ephemeral workers on demand via a delegation's `ephemeral` spec (no
+pre-registration; mutually exclusive with `agent`). An agent (via `--model` on start/subscribe/type set) and an
 individual job or delegation (via `--model` on run/ask/review/implement or the
 delegation `model` field) can pin a runtime model, with the per-job/delegation
 value overriding the agent default. Use
