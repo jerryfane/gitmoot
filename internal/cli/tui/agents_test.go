@@ -117,6 +117,59 @@ func TestAgentsPageGroupsByTemplate(t *testing.T) {
 	}
 }
 
+// TestAgentDetailShowsLiveSessions verifies an agent's detail lists its live
+// runtime sessions (matched by session.Type == agent.Name) and that the agent
+// list shows the per-agent live count, while another agent's sessions don't leak.
+func TestAgentDetailShowsLiveSessions(t *testing.T) {
+	snap := agentsSnapshot()
+	snap.Sessions = []Session{
+		{Name: "claude-bg-9f2", Type: "planner", Runtime: "claude", Repo: "o/r", State: "running", Expires: "2026-06-18T10:09:00Z"},
+		{Name: "claude-bg-1a7", Type: "planner", Runtime: "claude", Repo: "o/r", State: "idle", Expires: "2026-06-18T10:04:00Z"},
+		{Name: "codex-bg-77", Type: "reviewer", Runtime: "codex", Repo: "o/x", State: "running"},
+	}
+	m := agentsModel(t, Deps{}, snap)
+	// The list shows the per-agent live count column.
+	if !strings.Contains(m.View(), "LIVE") {
+		t.Fatalf("agent list should have a LIVE column:\n%s", m.View())
+	}
+	// Open planner's detail (cursor 0).
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd != nil {
+		next, _ = m.Update(cmd())
+		m = next.(Model)
+	}
+	view := m.View()
+	for _, want := range []string{"live sessions", "claude-bg-9f2", "running", "claude-bg-1a7", "idle"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("planner detail missing %q:\n%s", want, view)
+		}
+	}
+	// reviewer's session must not appear under planner.
+	if strings.Contains(view, "codex-bg-77") {
+		t.Fatalf("another agent's session leaked into planner's detail:\n%s", view)
+	}
+}
+
+// TestAgentDetailNoLiveSessions shows the empty state when an agent has none.
+func TestAgentDetailNoLiveSessions(t *testing.T) {
+	m := agentsModel(t, Deps{}, agentsSnapshot()) // snapshot has no Sessions
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd != nil {
+		next, _ = m.Update(cmd())
+		m = next.(Model)
+	}
+	view := m.View()
+	idx := strings.Index(view, "live sessions")
+	if idx < 0 {
+		t.Fatalf("detail should have a live sessions section:\n%s", view)
+	}
+	if !strings.Contains(view[idx:], "none") {
+		t.Fatalf("an agent with no sessions should show none:\n%s", view[idx:])
+	}
+}
+
 func TestAgentDetailRendersVersionsAndJobs(t *testing.T) {
 	var asked string
 	deps := Deps{TemplateVersions: func(templateID string) ([]TemplateVersion, error) {

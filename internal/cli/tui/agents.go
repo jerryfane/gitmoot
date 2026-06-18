@@ -567,7 +567,7 @@ func (m Model) agentsContentInteractive() string {
 	// display order (orderedAgents), so pos advances per agent row in lockstep
 	// and the highlight matches the visible position. The column header prints
 	// once at the top; template labels are display-only and consume no position.
-	b.WriteString(renderRows([][]string{{"", "NAME", "RUNTIME", "ROLE", "HEALTH"}}))
+	b.WriteString(renderRows([][]string{{"", "NAME", "RUNTIME", "ROLE", "HEALTH", "LIVE"}}))
 	pos := 0
 	for _, g := range groupAgentsByTemplate(visible) {
 		b.WriteByte('\n')
@@ -579,7 +579,12 @@ func (m Model) agentsContentInteractive() string {
 			if pos == m.agentCursor {
 				cursor, name = "▸ ", selectedRowStyle.Render(a.Name)
 			}
-			rows = append(rows, []string{cursor, name, a.Runtime, dash(a.Role), dash(a.Health)})
+			// LIVE = warm runtime sessions for this agent (drill in for detail).
+			live := "-"
+			if n := len(agentSessions(m.snap.Sessions, a.Name)); n > 0 {
+				live = strconv.Itoa(n)
+			}
+			rows = append(rows, []string{cursor, name, a.Runtime, dash(a.Role), dash(a.Health), live})
 			pos++
 		}
 		b.WriteString(renderRows(rows))
@@ -613,6 +618,23 @@ func agentGroupLabel(templateID string) string {
 type agentGroup struct {
 	templateID string
 	agents     []Agent
+}
+
+// agentSessions returns the live runtime sessions belonging to an agent. A
+// session's Type is its agent-type name, which equals the registered agent's
+// Name, so that is the join key (the same warm process can serve any agent of
+// that type). Order is preserved from the snapshot.
+func agentSessions(sessions []Session, agentName string) []Session {
+	if strings.TrimSpace(agentName) == "" {
+		return nil
+	}
+	var out []Session
+	for _, s := range sessions {
+		if s.Type == agentName {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // groupAgentsByTemplate buckets visible agents by TemplateID for display. Groups
@@ -656,6 +678,27 @@ func (m Model) agentDetailView() string {
 	} else {
 		for _, job := range jobs {
 			b.WriteString(job.ID + "  " + job.Type + "  " + jobStateColor(job.State) + "\n")
+		}
+	}
+	b.WriteByte('\n')
+
+	// Live runtime sessions (warm processes) serving this agent. Ephemeral — they
+	// expire on idle — so they live here as a drill-in snapshot, not in the list.
+	b.WriteString(headerStyle.Render("live sessions"))
+	b.WriteByte('\n')
+	sessions := agentSessions(m.snap.Sessions, a.Name)
+	if len(sessions) == 0 {
+		b.WriteString(mutedStyle.Render("none") + "\n")
+	} else {
+		for _, s := range sessions {
+			line := s.Name + "  " + s.State
+			if s.Repo != "" {
+				line += "  " + s.Repo
+			}
+			if s.Expires != "" {
+				line += "  " + mutedStyle.Render("expires "+formatJobTime(s.Expires))
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 	b.WriteByte('\n')
