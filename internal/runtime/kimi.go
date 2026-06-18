@@ -70,10 +70,7 @@ func (a KimiAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result,
 		return Result{}, err
 	}
 	args := kimiPermissionArgs(agent)
-	model := job.Model
-	if model == "" {
-		model = agent.Model
-	}
+	model := effectiveModel(agent, job)
 	if model != "" {
 		args = append(args, "--model", model)
 	}

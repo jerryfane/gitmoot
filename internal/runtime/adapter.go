@@ -228,10 +228,7 @@ func (a CodexAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 	}
 	args := append([]string{"exec"}, codexSandboxArgs(agent)...)
 	args = append(args, "resume")
-	model := job.Model
-	if model == "" {
-		model = agent.Model
-	}
+	model := effectiveModel(agent, job)
 	if model != "" {
 		args = append(args, "--model", model)
 	}
@@ -290,6 +287,16 @@ func (a CodexAdapter) sessionResolver() CodexSessionResolver {
 	return CodexSessionIndex{}
 }
 
+// effectiveModel resolves which model a delivered job runs on: the per-job/
+// per-delegation override (job.Model) wins, falling back to the agent's default
+// (agent.Model). An empty result means "no --model arg" (runtime default).
+func effectiveModel(agent Agent, job Job) string {
+	if job.Model != "" {
+		return job.Model
+	}
+	return agent.Model
+}
+
 func codexSandboxArgs(agent Agent) []string {
 	switch NormalizeStoredAutonomyPolicy(agent.AutonomyPolicy) {
 	case AutonomyPolicyReadOnly:
@@ -339,10 +346,7 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 	if err := a.Validate(ctx, agent); err != nil {
 		return Result{}, err
 	}
-	model := job.Model
-	if model == "" {
-		model = agent.Model
-	}
+	model := effectiveModel(agent, job)
 	args := claudeArgs(agent, job.Prompt, true, model)
 	result, err := a.runner().Run(ctx, a.Dir, "claude", args...)
 	if err != nil && isClaudeJSONUnsupported(result) {
