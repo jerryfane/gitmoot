@@ -32,20 +32,71 @@ func (m Model) activityUnderCursor() (JobRow, bool) {
 	return sel[m.activityCursor], true
 }
 
-// activityContent renders the Activity page: every delegation tree with
+// activityTreeCap is how many delegation trees fit the Activity page, leaving
+// room for the title/intro, the more/earlier markers, and the footer. A tree is
+// roughly a root line + progress + up to ~5 children + spacing.
+func activityTreeCap(height int) int {
+	if n := (height - 7) / 8; n >= 1 {
+		return n
+	}
+	return 1
+}
+
+// activityContent renders the Activity page: delegation trees with
 // queued/running work, newest first. Each root shows the coordinator line, a
 // progress summary, and the delegation children (which agent is doing what, and
 // its state) plus the continuation job. The cursor walks roots AND children;
-// enter opens the selected job's detail (its request + result).
+// enter opens the selected job's detail (its request + result). Trees are
+// windowed around the cursor so the page always fits and the cursor stays
+// visible; "↑/↓ N more trees" markers show what is scrolled off.
 func (m Model) activityContent() string {
 	roots := m.snap.Activity
 	if len(roots) == 0 {
 		return m.loadingOr("No active jobs — nothing is running right now.", !m.loadedAt.IsZero())
 	}
+
+	// counts[i] = selectable rows in tree i (root + its children); find which
+	// tree the flat cursor falls in so we can window around it.
+	counts := make([]int, len(roots))
+	cursorTree := 0
+	cum := 0
+	for i, r := range roots {
+		counts[i] = 1 + len(r.Children)
+		if m.activityCursor >= cum && m.activityCursor < cum+counts[i] {
+			cursorTree = i
+		}
+		cum += counts[i]
+	}
+
+	capacity := activityTreeCap(m.height)
+	start := 0
+	if len(roots) > capacity {
+		start = cursorTree - capacity/2
+		if start < 0 {
+			start = 0
+		}
+		if start > len(roots)-capacity {
+			start = len(roots) - capacity
+		}
+	}
+	end := start + capacity
+	if end > len(roots) {
+		end = len(roots)
+	}
+
+	// pos = flat selectable position of the first row in the window.
+	pos := 0
+	for i := 0; i < start; i++ {
+		pos += counts[i]
+	}
+
 	var b strings.Builder
 	b.WriteString(mutedStyle.Render("Delegation trees with queued/running work (live, refreshes every 5s).") + "\n\n")
-	pos := 0 // flat selectable position; advances for the root then each child
-	for _, r := range roots {
+	if start > 0 {
+		b.WriteString(mutedStyle.Render("  ↑ "+strconv.Itoa(start)+" more trees") + "\n")
+	}
+	for ti := start; ti < end; ti++ {
+		r := roots[ti]
 		marker := "  "
 		id := r.JobID
 		if pos == m.activityCursor {
@@ -81,6 +132,9 @@ func (m Model) activityContent() string {
 			}
 		}
 		b.WriteByte('\n')
+	}
+	if end < len(roots) {
+		b.WriteString(mutedStyle.Render("  ↓ "+strconv.Itoa(len(roots)-end)+" more trees") + "\n")
 	}
 	b.WriteString(mutedStyle.Render("↑/↓ select root or delegate · enter open its detail (request + result)"))
 	b.WriteByte('\n')

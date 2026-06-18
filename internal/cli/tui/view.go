@@ -255,7 +255,7 @@ func (m Model) footerHelp() string {
 		}
 		return help + "  ? help  q quit"
 	case pageActivity:
-		return "tab/←→ page  ↑/↓ select  enter open root  ? help  q quit"
+		return "tab/←→ page  ↑/↓ select root or delegate  enter open detail  ? help  q quit"
 	case pageTrains:
 		return "tab/←→ page  ↑/↓ select  enter open  s stop  d delete  ? help  q quit"
 	case pageAgents:
