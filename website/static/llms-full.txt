@@ -6510,6 +6510,15 @@ Delegation fields:
   delegation (see [Termination bounds](#termination-bounds)); they do not relax
   the depth cap, per-root job budget, or loop detection.
 
+  **`agent` vs `ephemeral` — which to use:** delegate to a registered `agent`
+  when the work needs a specific, durable, addressable worker (a tuned/trained
+  template, a resumable session, accountable history) or when the worker must
+  itself delegate — **ephemeral workers are leaf-only and cannot return their own
+  delegations**. Use `ephemeral` for one-off, disposable, dynamically-sized
+  fan-out where you just need "a runtime + model + prompt" with no
+  pre-registration and no cleanup (e.g. N workers each producing one result, or a
+  cheap gate plus a strong verifier with per-worker models).
+
 A delegation with no `deps` dispatches immediately and runs in parallel with
 other dep-free siblings. Once every top-level delegation reaches a terminal
 state, Gitmoot enqueues exactly one coordinator "continuation" job — back to
