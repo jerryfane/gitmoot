@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +68,7 @@ const (
 	modeAgentRevertPick
 	modeConfirmAgentRevert
 	modeConfirmAgentDelete
+	modeConfirmAgentGroupDelete
 	modeAgentVersionView
 	modeAgentRuntimePick
 	modeConfigEdit
@@ -158,6 +160,8 @@ type Model struct {
 	// Agents page interaction state.
 	agentCursor         int               // selected row in snap.Agents
 	showAllAgents       bool              // Agents page: include hidden skillopt-* training agents
+	groupDeleteLabel    string            // template-group label being bulk-deleted (confirm)
+	groupDeleteNames    []string          // agent names in the group being bulk-deleted
 	activeAgent         Agent             // agent shown in detail / being confirmed
 	agentVersions       []TemplateVersion // lazy-loaded template version history
 	agentVersionsLoaded bool              // the version load has returned (possibly empty)
@@ -239,7 +243,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			return m.updateTrainOverlay(msg)
-		case modeAgentDetail, modeAgentRevertPick, modeConfirmAgentRevert, modeConfirmAgentDelete, modeAgentVersionView, modeAgentRuntimePick:
+		case modeAgentDetail, modeAgentRevertPick, modeConfirmAgentRevert, modeConfirmAgentDelete, modeConfirmAgentGroupDelete, modeAgentVersionView, modeAgentRuntimePick:
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
 			}
@@ -458,6 +462,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.openAgentDelete(agent)
 				m.viewport.SetContent(m.content())
 				return m, tea.Batch(cmds...)
+			}
+		case "X":
+			if pages[m.selected].page == pageAgents {
+				if agent, ok := m.agentUnderCursor(); ok {
+					// The "Standalone agents" bucket is a heterogeneous catch-all
+					// (every template-less agent), not a coherent set — bulk-deleting
+					// it would be a footgun, so fall back to single-agent delete.
+					if agent.TemplateID == "" {
+						m.openAgentDelete(agent)
+						m.viewport.SetContent(m.content())
+						return m, tea.Batch(cmds...)
+					}
+					if m.deps.DeleteAgents != nil {
+						m.openAgentGroupDelete()
+						m.viewport.SetContent(m.content())
+						return m, tea.Batch(cmds...)
+					}
+				}
 			}
 		case "o":
 			if agent, ok := m.agentUnderCursor(); ok && agent.TemplateID != "" &&
@@ -794,6 +816,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err == nil {
+			if cmd := m.queueLoad(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	case agentGroupDeleteMsg:
+		if m.mode == modeConfirmAgentGroupDelete {
+			// The deletes are already committed (each is its own tx), so always
+			// close the overlay, report what actually happened, and refresh — even
+			// on a partial error — so the list never shows already-deleted agents
+			// and a retry can't wedge re-deleting them.
+			m.actionBusy = false
+			m.mode = modeNormal
+			note := "deleted " + strconv.Itoa(msg.deleted) + " agent(s)"
+			if len(msg.skipped) > 0 {
+				note += " · " + strconv.Itoa(len(msg.skipped)) + " skipped (active jobs)"
+			}
+			m.agentNotice = note
+			if msg.err != nil {
+				m.agentErr = msg.err.Error()
+			} else {
+				m.agentErr = ""
+			}
+			m.agentCursor = clampCursor(m.agentCursor, len(m.visibleAgents()))
 			if cmd := m.queueLoad(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}

@@ -316,7 +316,11 @@ type Deps struct {
 	OpenAgentCreate        func() (tea.Model, error)
 	CreateAgent            func(name, runtime, template string) error
 	DeleteAgent            func(name string) error
-	RevertTemplate         func(templateID, versionID string) error
+	// DeleteAgents bulk-unregisters a set of agents (a template group). It deletes
+	// what it can and returns the names it skipped because they still have
+	// queued/running jobs, plus any unexpected error.
+	DeleteAgents   func(names []string) (deleted int, skipped []string, err error)
+	RevertTemplate func(templateID, versionID string) error
 	// SetAgentRuntime switches a registered agent's runtime (codex/claude/kimi),
 	// preserving its role/capabilities/repos and clearing the warm session.
 	SetAgentRuntime func(name, runtime string) error
@@ -485,6 +489,13 @@ type versionContentMsg struct {
 type agentActionMsg struct {
 	verb string // "create", "delete", "revert"
 	err  error
+}
+
+// agentGroupDeleteMsg carries the outcome of a bulk template-group delete.
+type agentGroupDeleteMsg struct {
+	deleted int
+	skipped []string
+	err     error
 }
 
 // agentFormResultMsg is delivered to the dashboard when the pushed

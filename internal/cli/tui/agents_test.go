@@ -36,6 +36,113 @@ func agentsModel(t *testing.T, deps Deps, snap Snapshot) Model {
 	return m
 }
 
+// TestAgentGroupDeleteFlow exercises X → confirm → y: it bulk-deletes the cursor
+// agent's whole template group, surfaces the active-job skip heads-up, calls
+// DeleteAgents with the group's names, and reports the deleted/skipped result.
+func TestAgentGroupDeleteFlow(t *testing.T) {
+	snap := agentsSnapshot()
+	snap.Agents = append(snap.Agents, Agent{Name: "planner-2", Runtime: "claude", TemplateID: "planner-tpl"})
+	snap.JobRows = append(snap.JobRows, JobRow{ID: "jx", Agent: "planner", Type: "ask", State: "running"})
+	var got []string
+	deps := Deps{DeleteAgents: func(names []string) (int, []string, error) {
+		got = names
+		return len(names) - 1, []string{"planner"}, nil // planner skipped (active job)
+	}}
+	m := agentsModel(t, deps, snap)
+	// Cursor 0 = planner (planner-tpl group). X opens the group-delete confirm.
+	next, _ := m.Update(key("X"))
+	m = next.(Model)
+	if m.mode != modeConfirmAgentGroupDelete {
+		t.Fatalf("X should open the group-delete confirm, mode=%v", m.mode)
+	}
+	view := m.View()
+	for _, want := range []string{"planner-tpl", "planner-2", "have active jobs"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("confirm missing %q:\n%s", want, view)
+		}
+	}
+	// y runs the bulk delete with the whole group's names.
+	next, cmd := m.Update(key("y"))
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("y should dispatch the bulk delete")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if len(got) != 2 || got[0] != "planner" || got[1] != "planner-2" {
+		t.Fatalf("DeleteAgents called with %v, want [planner planner-2]", got)
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("success should close the confirm, mode=%v", m.mode)
+	}
+	if !strings.Contains(m.agentNotice, "deleted 1") || !strings.Contains(m.agentNotice, "1 skipped") {
+		t.Fatalf("notice should report deleted/skipped: %q", m.agentNotice)
+	}
+}
+
+// TestAgentGroupDeleteStandaloneFallsBackToSingle guards the safety rule: X on a
+// template-less agent opens the single-agent delete (not a bulk delete of the
+// whole heterogeneous "Standalone agents" catch-all).
+func TestAgentGroupDeleteStandaloneFallsBackToSingle(t *testing.T) {
+	snap := agentsSnapshot()
+	snap.Agents = append(snap.Agents, Agent{Name: "drifter", Runtime: "codex"}) // TemplateID ""
+	called := false
+	deps := Deps{DeleteAgents: func(names []string) (int, []string, error) { called = true; return 0, nil, nil }}
+	m := agentsModel(t, deps, snap)
+	for i := 0; i < 6; i++ {
+		if a, ok := m.agentUnderCursor(); ok && a.Name == "drifter" {
+			break
+		}
+		next, _ := m.Update(key("j"))
+		m = next.(Model)
+	}
+	next, _ := m.Update(key("X"))
+	m = next.(Model)
+	if m.mode != modeConfirmAgentDelete {
+		t.Fatalf("X on a standalone agent should open single delete, mode=%v", m.mode)
+	}
+	if called {
+		t.Fatal("standalone X must not bulk-delete the catch-all group")
+	}
+}
+
+// TestAgentGroupDeletePartialErrorReported guards that a partial-error bulk delete
+// still closes the overlay, reports the committed deletes, and surfaces the error
+// (so the stale list/retry-wedge can't happen).
+func TestAgentGroupDeletePartialErrorReported(t *testing.T) {
+	snap := agentsSnapshot()
+	snap.Agents = append(snap.Agents, Agent{Name: "planner-2", Runtime: "claude", TemplateID: "planner-tpl"})
+	deps := Deps{DeleteAgents: func(names []string) (int, []string, error) {
+		return 1, nil, errors.New("db locked") // one committed, then failed
+	}}
+	m := agentsModel(t, deps, snap)
+	next, _ := m.Update(key("X"))
+	m = next.(Model)
+	next, cmd := m.Update(key("y"))
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.mode != modeNormal {
+		t.Fatalf("a partial-error delete should still close the overlay, mode=%v", m.mode)
+	}
+	if !strings.Contains(m.agentNotice, "deleted 1") {
+		t.Fatalf("should still report the committed deletes: %q", m.agentNotice)
+	}
+	if !strings.Contains(m.agentErr, "db locked") {
+		t.Fatalf("should surface the error: %q", m.agentErr)
+	}
+}
+
+// TestAgentGroupDeleteNoDepInert verifies X is inert without a DeleteAgents dep.
+func TestAgentGroupDeleteNoDepInert(t *testing.T) {
+	m := agentsModel(t, Deps{}, agentsSnapshot())
+	next, _ := m.Update(key("X"))
+	m = next.(Model)
+	if m.mode != modeNormal {
+		t.Fatalf("X without a DeleteAgents dep should be a no-op, mode=%v", m.mode)
+	}
+}
+
 // TestAgentsListWindowsLongList guards that a long agent list (e.g. with 'a'
 // showing many training agents) windows around the cursor so the selection stays
 // visible and the scroll markers appear — rather than overflowing unscrollably.

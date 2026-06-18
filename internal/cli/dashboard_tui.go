@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -312,6 +313,37 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 			return withStore(home, func(store *db.Store) error {
 				return store.DeleteAgentChecked(context.Background(), name)
 			})
+		},
+		DeleteAgents: func(names []string) (int, []string, error) {
+			deleted := 0
+			var skipped, failed []string
+			var firstErr error
+			openErr := withStore(home, func(store *db.Store) error {
+				for _, n := range names {
+					switch e := store.DeleteAgentChecked(context.Background(), n); {
+					case e == nil:
+						deleted++
+					case errors.Is(e, db.ErrAgentHasActiveJobs):
+						// Still referenced by active jobs — skip, don't abort the batch.
+						skipped = append(skipped, n)
+					default:
+						// Unexpected: record and keep going so the caller learns the full
+						// outcome (each delete already committed in its own tx).
+						failed = append(failed, n)
+						if firstErr == nil {
+							firstErr = e
+						}
+					}
+				}
+				return nil
+			})
+			if openErr != nil {
+				return deleted, skipped, openErr
+			}
+			if len(failed) > 0 {
+				return deleted, skipped, fmt.Errorf("%d agent(s) could not be deleted (e.g. %s: %v)", len(failed), failed[0], firstErr)
+			}
+			return deleted, skipped, nil
 		},
 		RevertTemplate: func(templateID, versionID string) error {
 			return withStore(home, func(store *db.Store) error {
