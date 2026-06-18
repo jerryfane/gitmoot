@@ -19,6 +19,15 @@ truthful, and tied to work that actually happened.
 
 ## Delegations
 
+Orchestra is gitmoot's name for structured multi-agent delegation: a conductor
+(coordinator) returns a `delegations[]` score, the players (child agents) run in
+parallel or in dependency order, and a finale (continuation) reconvenes and
+synthesizes the results.
+
+Vocabulary: the conductor is the coordinator agent; the players are the delegated
+child agents; the score is the `delegations[]` DAG (its `deps` are the cues); the
+finale is the continuation job that reconvenes and synthesizes.
+
 Use `delegations` to request follow-up work by named Gitmoot agents. Each
 delegation describes a child job:
 

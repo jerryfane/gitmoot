@@ -81,6 +81,13 @@ plan and goal file are complete.
 
 ## Coordinator Delegations
 
+When you run as a managed coordinator agent, you orchestrate an orchestra of
+agents: as the conductor you return a `delegations[]` score, the players (child
+agents) run in parallel or in dependency order, and a finale (continuation)
+reconvenes and synthesizes the results. The conductor is this coordinator agent;
+the players are the delegated child agents; the score is the `delegations[]` DAG
+(its `deps` are the cues); the finale is the continuation job.
+
 When you run as a managed coordinator agent and want Gitmoot to fan work out to
 other named agents, return a top-level `delegations` array in your
 `gitmoot_result`. Gitmoot enqueues one child job per delegation and records a
