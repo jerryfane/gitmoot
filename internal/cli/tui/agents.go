@@ -601,16 +601,22 @@ func (m Model) agentsContentInteractive() string {
 	// and the highlight matches the visible position. The column header prints
 	// once at the top; template labels are display-only and consume no position.
 	b.WriteString(renderRows([][]string{{"", "NAME", "RUNTIME", "ROLE", "HEALTH", "LIVE"}}))
+
+	// Build the group + agent lines once, then window them around the cursor so a
+	// long list (e.g. 'a' showing the training agents) stays scrollable with the
+	// selection on-screen. The column header above is always shown; agentCursor
+	// indexes the flat agent order.
+	var lines []string
+	cursorLine := 0
 	pos := 0
 	for _, g := range groupAgentsByTemplate(visible) {
-		b.WriteByte('\n')
-		b.WriteString(headerStyle.Render(agentGroupLabel(g.templateID)))
-		b.WriteByte('\n')
+		lines = append(lines, "", headerStyle.Render(agentGroupLabel(g.templateID)))
 		rows := [][]string{}
 		for _, a := range g.agents {
 			cursor, name := "  ", a.Name
 			if pos == m.agentCursor {
 				cursor, name = "▸ ", selectedRowStyle.Render(a.Name)
+				cursorLine = len(lines) + len(rows)
 			}
 			live := "-"
 			if n := liveByAgent[a.Name]; n > 0 {
@@ -619,7 +625,29 @@ func (m Model) agentsContentInteractive() string {
 			rows = append(rows, []string{cursor, name, a.Runtime, dash(a.Role), dash(a.Health), live})
 			pos++
 		}
-		b.WriteString(renderRows(rows))
+		lines = append(lines, strings.Split(strings.TrimRight(renderRows(rows), "\n"), "\n")...)
+	}
+
+	capacity := agentsWindowCap(m.height)
+	start, end := 0, len(lines)
+	if len(lines) > capacity {
+		start = cursorLine - capacity/2
+		if start < 0 {
+			start = 0
+		}
+		if start > len(lines)-capacity {
+			start = len(lines) - capacity
+		}
+		end = start + capacity
+	}
+	if start > 0 {
+		b.WriteString(mutedStyle.Render("  ↑ "+strconv.Itoa(start)+" more above") + "\n")
+	}
+	for i := start; i < end; i++ {
+		b.WriteString(lines[i] + "\n")
+	}
+	if end < len(lines) {
+		b.WriteString(mutedStyle.Render("  ↓ "+strconv.Itoa(len(lines)-end)+" more below") + "\n")
 	}
 	if m.agentErr != "" {
 		b.WriteString("\n" + errorStyle.Render(m.agentErr) + "\n")
@@ -634,6 +662,16 @@ func (m Model) agentsContentInteractive() string {
 	b.WriteString(mutedStyle.Render("enter detail  n new  o optimize  D delete  a show all/hide"))
 	b.WriteByte('\n')
 	return b.String()
+}
+
+// agentsWindowCap is how many group/agent lines fit the Agents page, leaving
+// room for the viewport chrome (title, column header, scroll markers, the
+// hidden/all line, and the footer) so the windowed body stays on-screen.
+func agentsWindowCap(height int) int {
+	if height-12 < 3 {
+		return 3
+	}
+	return height - 12
 }
 
 // agentGroupLabel is the section header for a template group; agents without a

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,49 @@ func agentsModel(t *testing.T, deps Deps, snap Snapshot) Model {
 	m = next.(Model)
 	m = tabToPage(t, m, pageAgents)
 	return m
+}
+
+// TestAgentsListWindowsLongList guards that a long agent list (e.g. with 'a'
+// showing many training agents) windows around the cursor so the selection stays
+// visible and the scroll markers appear — rather than overflowing unscrollably.
+func TestAgentsListWindowsLongList(t *testing.T) {
+	snap := Snapshot{Daemon: Daemon{Running: true}}
+	for i := 0; i < 80; i++ {
+		snap.Agents = append(snap.Agents, Agent{
+			Name: "agent-" + strconv.Itoa(i), Runtime: "codex", Role: "impl", Health: "ok", TemplateID: "tpl",
+		})
+	}
+	m := sizedModel(Deps{Load: func() (Snapshot, error) { return snap, nil }})
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = next.(Model)
+	next, _ = m.Update(snapshotMsg{snap: snap, at: time.Unix(1, 0)})
+	m = next.(Model)
+	m = tabToPage(t, m, pageAgents)
+
+	cap := agentsWindowCap(m.height)
+	if cap >= 80 {
+		t.Fatalf("test needs a window smaller than the list; cap=%d", cap)
+	}
+	// At the top: a "below" marker, no "above", and the far end hidden.
+	view := m.View()
+	if !strings.Contains(view, "more below") || strings.Contains(view, "more above") {
+		t.Fatalf("top of a long list should show only a 'below' marker:\n%s", view)
+	}
+	if strings.Contains(view, "agent-79 ") {
+		t.Fatalf("the far end should not render while the cursor is at the top:\n%s", view)
+	}
+	// Drive the cursor to the last agent; it must stay visible (window follows).
+	for i := 0; i < 79; i++ {
+		next, _ := m.Update(key("j"))
+		m = next.(Model)
+	}
+	view = m.View()
+	if !strings.Contains(view, "agent-79") {
+		t.Fatalf("the selected last agent must be visible after scrolling:\n%s", view)
+	}
+	if !strings.Contains(view, "more above") {
+		t.Fatalf("the bottom of a long list should show an 'above' marker:\n%s", view)
+	}
 }
 
 // TestAgentsHiddenLineShowsLiveCount verifies the hidden-agents line annotates how
