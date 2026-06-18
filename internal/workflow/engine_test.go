@@ -2199,6 +2199,54 @@ func TestEngineDelegationTimeoutPlumbedToChildPayload(t *testing.T) {
 	}
 }
 
+func TestEngineDelegationModelPlumbedToChildPayload(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Model: "  opus  "},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/del-1")
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.Model != "opus" {
+		t.Fatalf("child payload Model = %q, want trimmed %q", payload.Model, "opus")
+	}
+}
+
+func TestEngineDelegationRequestCopiesModel(t *testing.T) {
+	engine := Engine{}
+	request := engine.delegationRequest(
+		db.Job{ID: "parent-job", Agent: "audit"},
+		JobPayload{Repo: "jerryfane/gitmoot"},
+		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go", Model: "opus"},
+	)
+	if request.Model != "opus" {
+		t.Fatalf("request.Model = %q, want %q", request.Model, "opus")
+	}
+}
+
 func TestEngineDelegationInvalidLifecycleRejectedAtExtraction(t *testing.T) {
 	// Each invalid lifecycle control must be rejected when the agent result is
 	// extracted, so a malformed delegation never reaches the dispatcher.

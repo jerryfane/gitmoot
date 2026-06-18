@@ -513,6 +513,7 @@ func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) 
 		Fingerprint:     strings.TrimSpace(d.Fingerprint),
 		FailurePolicy:   strings.TrimSpace(d.FailurePolicy),
 		SynthesisRule:   strings.TrimSpace(d.SynthesisRule),
+		Model:           strings.TrimSpace(d.Model),
 	}
 }
 
