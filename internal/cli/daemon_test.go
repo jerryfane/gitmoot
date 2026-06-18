@@ -1957,6 +1957,146 @@ func TestRunQueuedJobsCleansTempWorkerWhenDelegationRaceLoses(t *testing.T) {
 	}
 }
 
+// TestRunQueuedJobsMaterializesAndDisposesEphemeralWorker proves a queued child
+// carrying an inline EphemeralSpec (no pre-registered agent) gets a throwaway
+// agent materialized from the spec, runs the job (Start + Deliver invoked), and
+// is auto-disposed afterwards — both the agent row and its instance are gone.
+func TestRunQueuedJobsMaterializesAndDisposesEphemeralWorker(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	checkout := t.TempDir()
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	ephemeralName := "reviewer-ephemeral-abc1234567"
+	// No agent row is seeded: the worker must be materialized from the spec.
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{
+		ID:        "job-eph",
+		Agent:     ephemeralName,
+		Action:    "ask",
+		Repo:      "owner/repo",
+		Branch:    "main",
+		Ephemeral: &workflow.EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4"},
+	})
+
+	startAdapter := &cliWorkerFakeAdapter{startRuntimeRef: "550e8400-e29b-41d4-a716-446655440555"}
+	deliveryAdapter := &cliWorkerFakeAdapter{
+		output: `{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
+	}
+	var deliveredModel string
+	startCheckouts := []string{}
+	worker := defaultJobWorker(store, io.Discard)
+	worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		return checkout, nil
+	}
+	worker.StartAdapterFactory = func(_ string, path string) (runtime.Adapter, error) {
+		startCheckouts = append(startCheckouts, path)
+		return startAdapter, nil
+	}
+	worker.AdapterFactory = func(agent runtime.Agent, _ string) (workflow.DeliveryAdapter, error) {
+		deliveredModel = agent.Model
+		return deliveryAdapter, nil
+	}
+	worker.WorkflowFactory = func(string) workflow.Engine {
+		return workflow.Engine{Store: store}
+	}
+
+	if err := runQueuedJobs(ctx, worker, 1); err != nil {
+		t.Fatalf("runQueuedJobs returned error: %v", err)
+	}
+
+	job, err := store.GetJob(ctx, "job-eph")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	if job.State != string(workflow.JobSucceeded) {
+		t.Fatalf("job state = %q, want succeeded", job.State)
+	}
+	if startAdapter.startCalls != 1 || deliveryAdapter.calls != 1 {
+		t.Fatalf("start calls=%d delivery calls=%d, want 1 each", startAdapter.startCalls, deliveryAdapter.calls)
+	}
+	if deliveredModel != "gpt-5.4" {
+		t.Fatalf("delivered agent model = %q, want gpt-5.4", deliveredModel)
+	}
+	if len(startCheckouts) != 1 || startCheckouts[0] != checkout {
+		t.Fatalf("start checkouts = %+v, want %q", startCheckouts, checkout)
+	}
+	// The throwaway agent row and its instance must be gone after the run.
+	if _, err := store.GetAgentInstance(ctx, ephemeralName); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetAgentInstance after run error = %v, want no rows", err)
+	}
+	if _, err := store.GetAgent(ctx, ephemeralName); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetAgent after run error = %v, want no rows", err)
+	}
+	if !daemonWorkerHasEvent(mustListJobEvents(t, store, "job-eph"), "ephemeral_worker_started") {
+		t.Fatalf("missing ephemeral_worker_started event")
+	}
+}
+
+// TestRunQueuedJobsDisposesEphemeralWorkerOnFailure proves the throwaway agent
+// is auto-disposed even when delivery fails: the job reaches a terminal failed
+// state and neither the agent row nor its instance survives.
+func TestRunQueuedJobsDisposesEphemeralWorkerOnFailure(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	checkout := t.TempDir()
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	ephemeralName := "impl-ephemeral-def7654321"
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{
+		ID:        "job-eph-fail",
+		Agent:     ephemeralName,
+		Action:    "ask",
+		Repo:      "owner/repo",
+		Branch:    "main",
+		Ephemeral: &workflow.EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4"},
+	})
+
+	startAdapter := &cliWorkerFakeAdapter{startRuntimeRef: "550e8400-e29b-41d4-a716-446655440666"}
+	deliveryAdapter := &cliWorkerFakeAdapter{err: errors.New("delivery failed")}
+	worker := defaultJobWorker(store, io.Discard)
+	worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		return checkout, nil
+	}
+	worker.StartAdapterFactory = func(string, string) (runtime.Adapter, error) {
+		return startAdapter, nil
+	}
+	worker.AdapterFactory = func(runtime.Agent, string) (workflow.DeliveryAdapter, error) {
+		return deliveryAdapter, nil
+	}
+	worker.WorkflowFactory = func(string) workflow.Engine {
+		return workflow.Engine{Store: store}
+	}
+
+	if err := runQueuedJobs(ctx, worker, 1); err != nil {
+		t.Fatalf("runQueuedJobs returned error: %v", err)
+	}
+
+	job, err := store.GetJob(ctx, "job-eph-fail")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	if job.State != string(workflow.JobFailed) {
+		t.Fatalf("job state = %q, want failed", job.State)
+	}
+	if deliveryAdapter.calls != 1 {
+		t.Fatalf("delivery calls = %d, want 1", deliveryAdapter.calls)
+	}
+	// Cleanup must still run on the failure path.
+	if _, err := store.GetAgentInstance(ctx, ephemeralName); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetAgentInstance after failed run error = %v, want no rows", err)
+	}
+	if _, err := store.GetAgent(ctx, ephemeralName); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetAgent after failed run error = %v, want no rows", err)
+	}
+}
+
+func mustListJobEvents(t *testing.T, store *db.Store, jobID string) []db.JobEvent {
+	t.Helper()
+	events, err := store.ListJobEvents(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	return events
+}
+
 func TestRunQueuedJobsPreservesCreationOrderForSameRepo(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
