@@ -6608,6 +6608,15 @@ Delegation fields:
   pre-registration and no cleanup (e.g. N workers each producing one result, or a
   cheap gate plus a strong verifier with per-worker models).
 
+### Validation errors
+
+Each required-field failure is reported per entry as
+`delegations[<index>] (id "<id>"): <field> is required`, where `<index>` is the
+0-based position in `delegations[]` and `<id>` is the delegation's id (or
+`<missing>` when blank). All offending fields across the batch are reported
+together — not just the first — and the coordinator gets one repair retry to fix
+them all in a single round.
+
 A delegation with no `deps` dispatches immediately and runs in parallel with
 other dep-free siblings. Once every top-level delegation reaches a terminal
 state, Gitmoot enqueues exactly one coordinator "continuation" job — back to
