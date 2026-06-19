@@ -916,6 +916,18 @@ func (e Engine) enqueueFinalizeContinuation(ctx context.Context, job db.Job, pay
 	if err := e.enqueue(ctx, request); err != nil {
 		return fmt.Errorf("enqueue finalize continuation for %q: %w", job.ID, err)
 	}
+	// The finalize continuation IS the coordinator's single continuation, so it
+	// occupies the continuation slot: emit delegation_continuation_enqueued too.
+	// This makes continuationEnqueued() true, so if the tripped coordinator's
+	// advanceDelegations later runs (when this finalize child completes) it can
+	// never enqueue a *normal* continuation that would collide with the finalize
+	// job's deterministic id. The finalize-specific event below drives the
+	// once-guard above and keeps the backstop observable.
+	_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   job.ID,
+		Kind:    "delegation_continuation_enqueued",
+		Message: fmt.Sprintf("finalize continuation occupies the continuation slot for job %s", request.ID),
+	})
 	_ = e.Store.AddJobEvent(ctx, db.JobEvent{
 		JobID:   job.ID,
 		Kind:    "delegation_finalize_enqueued",

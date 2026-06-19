@@ -44,6 +44,21 @@ func TestEngineBackstopTripEnqueuesFinalizeContinuation(t *testing.T) {
 	if got := countJobEvents(t, store, "wide", "delegation_finalize_enqueued"); got != 1 {
 		t.Fatalf("delegation_finalize_enqueued events = %d, want 1", got)
 	}
+	// The finalize occupies the continuation slot so a later advanceDelegations on
+	// the tripped coordinator cannot enqueue a normal continuation that collides
+	// with the finalize job's deterministic id.
+	if got := countJobEvents(t, store, "wide", "delegation_continuation_enqueued"); got != 1 {
+		t.Fatalf("delegation_continuation_enqueued events = %d, want 1", got)
+	}
+
+	// Idempotent on re-advance: a second AdvanceJob must not enqueue a duplicate
+	// finalize continuation or re-emit the finalize event.
+	if err := engine.AdvanceJob(ctx, "wide"); err != nil {
+		t.Fatalf("second AdvanceJob returned error: %v", err)
+	}
+	if got := countJobEvents(t, store, "wide", "delegation_finalize_enqueued"); got != 1 {
+		t.Fatalf("after re-advance: delegation_finalize_enqueued events = %d, want 1", got)
+	}
 }
 
 // TestEngineFinalizeContinuationIsTerminal pins that a finalize continuation is
