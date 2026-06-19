@@ -2,12 +2,14 @@ package db
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -95,6 +97,25 @@ type AgentTemplateCandidateReview struct {
 	CreatedAt           string
 	UpdatedAt           string
 	DecidedAt           string
+}
+
+// SkillOptJudgeOutcome records a single human promote/reject decision on a
+// SkillOpt candidate alongside the LLM judge's signal for the same candidate,
+// so judge calibration (agreement, Cohen's kappa, per-dimension drift) can be
+// computed offline. The raw judge eval report is stored in JudgeScoreJSON so
+// the derived Direction can always be recomputed from source.
+type SkillOptJudgeOutcome struct {
+	ID                 string
+	CandidateVersionID string
+	TemplateID         string
+	JudgeScoreJSON     string
+	JudgePromptVersion string
+	JudgeEvaluatorID   string
+	JudgePromptHash    string
+	HumanDecision      string
+	Direction          string
+	Reason             string
+	CreatedAt          string
 }
 
 type AgentRepo struct {
@@ -1346,7 +1367,16 @@ func (s *Store) DecideSkillOptTrainCandidate(ctx context.Context, session SkillO
 	if target.State != "pending" {
 		return AgentTemplateVersion{}, fmt.Errorf("agent template version %s is %s, not pending", target.ID, target.State)
 	}
-	switch strings.TrimSpace(decision) {
+	// Snapshot the candidate's eval report inside the transaction so the
+	// judge-outcome captured after commit reflects the report the decision was
+	// made against. Best-effort: capture must never fail the decision.
+	normalizedDecision := strings.TrimSpace(decision)
+	var captureReason string
+	if normalizedDecision == "rejected" {
+		captureReason = iteration.DecisionReason
+	}
+	capturedEvalReport := candidateEvalReportJSONTx(ctx, tx, target.ID)
+	switch normalizedDecision {
 	case "promoted":
 		current, hasCurrent, err := getCurrentAgentTemplateVersion(ctx, tx, target.TemplateID)
 		if err != nil {
@@ -1417,7 +1447,21 @@ func (s *Store) DecideSkillOptTrainCandidate(ctx context.Context, session SkillO
 	if err := tx.Commit(); err != nil {
 		return AgentTemplateVersion{}, err
 	}
+	// Capture the judge-vs-human outcome only after the decision is durably
+	// committed, and never let a capture failure surface to the caller — the
+	// human's promote/reject must stand regardless. (#345)
+	if err := captureSkillOptJudgeOutcome(ctx, s.db, target, capturedEvalReport, normalizedDecision, captureReason); err != nil {
+		log.Printf("skillopt: capture judge outcome for candidate %s failed: %v", target.ID, err)
+	}
 	return s.GetAgentTemplateVersionByID(ctx, target.ID)
+}
+
+func candidateEvalReportJSONTx(ctx context.Context, tx *sql.Tx, versionID string) string {
+	var report string
+	if err := tx.QueryRowContext(ctx, `SELECT eval_report_json FROM agent_template_candidate_reviews WHERE version_id = ?`, strings.TrimSpace(versionID)).Scan(&report); err != nil {
+		return ""
+	}
+	return report
 }
 
 func (s *Store) AgentCanAccessRepo(ctx context.Context, agentName string, repoFullName string) (bool, error) {
@@ -4481,6 +4525,271 @@ func scanAgentTemplateCandidateReview(scanner agentTemplateScanner) (AgentTempla
 	return review, nil
 }
 
+// SkillOpt judge-outcome direction buckets. The four directions are the cells
+// of the human-vs-judge confusion matrix.
+const (
+	// SkillOptJudgeDirectionAgreeAccept: human promoted and judge accepted.
+	SkillOptJudgeDirectionAgreeAccept = "agree_accept"
+	// SkillOptJudgeDirectionAgreeReject: human rejected and judge rejected.
+	SkillOptJudgeDirectionAgreeReject = "agree_reject"
+	// SkillOptJudgeDirectionJudgeAcceptHumanReject: judge accepted but the human
+	// rejected (a judge false positive relative to the human).
+	SkillOptJudgeDirectionJudgeAcceptHumanReject = "judge_accept_human_reject"
+	// SkillOptJudgeDirectionJudgeRejectHumanAccept: judge rejected but the human
+	// promoted (a judge false negative relative to the human).
+	SkillOptJudgeDirectionJudgeRejectHumanAccept = "judge_reject_human_accept"
+)
+
+func (s *Store) InsertSkillOptJudgeOutcome(ctx context.Context, outcome SkillOptJudgeOutcome) error {
+	id := strings.TrimSpace(outcome.ID)
+	if id == "" {
+		generated, err := newSkillOptJudgeOutcomeID()
+		if err != nil {
+			return err
+		}
+		id = generated
+	}
+	if strings.TrimSpace(outcome.CandidateVersionID) == "" {
+		return errors.New("judge outcome candidate_version_id is required")
+	}
+	if strings.TrimSpace(outcome.HumanDecision) == "" {
+		return errors.New("judge outcome human_decision is required")
+	}
+	if strings.TrimSpace(outcome.Direction) == "" {
+		return errors.New("judge outcome direction is required")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO skillopt_judge_outcomes(
+			id, candidate_version_id, template_id, judge_score_json, judge_prompt_version,
+			judge_evaluator_id, judge_prompt_hash, human_decision, direction, reason
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id,
+		strings.TrimSpace(outcome.CandidateVersionID),
+		strings.TrimSpace(outcome.TemplateID),
+		strings.TrimSpace(outcome.JudgeScoreJSON),
+		strings.TrimSpace(outcome.JudgePromptVersion),
+		strings.TrimSpace(outcome.JudgeEvaluatorID),
+		strings.TrimSpace(outcome.JudgePromptHash),
+		strings.TrimSpace(outcome.HumanDecision),
+		strings.TrimSpace(outcome.Direction),
+		strings.TrimSpace(outcome.Reason))
+	return err
+}
+
+func (s *Store) ListSkillOptJudgeOutcomes(ctx context.Context, templateID string) ([]SkillOptJudgeOutcome, error) {
+	query := `SELECT id, candidate_version_id, template_id, judge_score_json, judge_prompt_version,
+			judge_evaluator_id, judge_prompt_hash, human_decision, direction, reason, created_at
+		FROM skillopt_judge_outcomes`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if templateID = strings.TrimSpace(templateID); templateID != "" {
+		query += ` WHERE template_id = ? ORDER BY created_at, id`
+		rows, err = s.db.QueryContext(ctx, query, templateID)
+	} else {
+		query += ` ORDER BY created_at, id`
+		rows, err = s.db.QueryContext(ctx, query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var outcomes []SkillOptJudgeOutcome
+	for rows.Next() {
+		outcome, err := scanSkillOptJudgeOutcome(rows)
+		if err != nil {
+			return nil, err
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	return outcomes, rows.Err()
+}
+
+func (s *Store) GetSkillOptJudgeOutcome(ctx context.Context, id string) (SkillOptJudgeOutcome, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, candidate_version_id, template_id, judge_score_json, judge_prompt_version,
+			judge_evaluator_id, judge_prompt_hash, human_decision, direction, reason, created_at
+		FROM skillopt_judge_outcomes WHERE id = ?`, strings.TrimSpace(id))
+	return scanSkillOptJudgeOutcome(row)
+}
+
+func scanSkillOptJudgeOutcome(row interface{ Scan(dest ...any) error }) (SkillOptJudgeOutcome, error) {
+	var outcome SkillOptJudgeOutcome
+	if err := row.Scan(&outcome.ID, &outcome.CandidateVersionID, &outcome.TemplateID, &outcome.JudgeScoreJSON,
+		&outcome.JudgePromptVersion, &outcome.JudgeEvaluatorID, &outcome.JudgePromptHash, &outcome.HumanDecision,
+		&outcome.Direction, &outcome.Reason, &outcome.CreatedAt); err != nil {
+		return SkillOptJudgeOutcome{}, err
+	}
+	return outcome, nil
+}
+
+func newSkillOptJudgeOutcomeID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return "judge-outcome-" + hex.EncodeToString(raw[:]), nil
+}
+
+// captureSkillOptJudgeOutcome records one judge-vs-human outcome row for a
+// candidate decision. It is best-effort: capture must never fail the decision,
+// so callers log and continue on error.
+//
+// The judge accept/reject signal is read generically from the candidate
+// review's eval_report_json (never from new typed struct fields) using
+// skillOptJudgeAcceptFromReport, and the four-way Direction is derived from the
+// human decision crossed with that signal. The raw eval report is persisted in
+// JudgeScoreJSON so Direction can be recomputed later if the heuristic evolves.
+func captureSkillOptJudgeOutcome(ctx context.Context, execer sqlExecer, version AgentTemplateVersion, evalReportJSON string, humanDecision string, reason string) error {
+	id, err := newSkillOptJudgeOutcomeID()
+	if err != nil {
+		return err
+	}
+	judgeAccept, hasSignal, promptVersion, evaluatorID, promptHash := skillOptJudgeAcceptFromReport(evalReportJSON)
+	if !hasSignal {
+		// No recognizable judge signal in the eval report (missing/empty/
+		// unrecognized): skip rather than record a misleading "judge rejected"
+		// outcome that would pollute the agreement dataset. Calibration excludes
+		// no-data decisions.
+		return nil
+	}
+	humanPromoted := strings.TrimSpace(humanDecision) == "promoted"
+	direction := skillOptJudgeDirection(humanPromoted, judgeAccept)
+	_, err = execer.ExecContext(ctx, `INSERT INTO skillopt_judge_outcomes(
+			id, candidate_version_id, template_id, judge_score_json, judge_prompt_version,
+			judge_evaluator_id, judge_prompt_hash, human_decision, direction, reason
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id,
+		strings.TrimSpace(version.ID),
+		strings.TrimSpace(version.TemplateID),
+		strings.TrimSpace(evalReportJSON),
+		promptVersion,
+		evaluatorID,
+		promptHash,
+		strings.TrimSpace(humanDecision),
+		direction,
+		strings.TrimSpace(reason))
+	return err
+}
+
+func skillOptJudgeDirection(humanPromoted bool, judgeAccept bool) string {
+	switch {
+	case humanPromoted && judgeAccept:
+		return SkillOptJudgeDirectionAgreeAccept
+	case !humanPromoted && !judgeAccept:
+		return SkillOptJudgeDirectionAgreeReject
+	case !humanPromoted && judgeAccept:
+		return SkillOptJudgeDirectionJudgeAcceptHumanReject
+	default: // humanPromoted && !judgeAccept
+		return SkillOptJudgeDirectionJudgeRejectHumanAccept
+	}
+}
+
+// skillOptJudgeAcceptFromReport derives a judge accept/reject signal plus the
+// judge prompt/evaluator identity from a candidate's eval report JSON, reading
+// everything generically (map[string]any) so it does not depend on any typed
+// struct fields that may be absent on older reports. The eval report may carry
+// the judge fields at the top level or nested under "evaluator_score" (the
+// EvaluatorScore object in internal/skillopt/contract.go), so both locations
+// are inspected.
+//
+// Judge-accept heuristic (most authoritative field wins):
+//  1. explicit boolean "promotable" — true => accept, false => reject;
+//  2. a recommendation string ("recommendation"/"recommended_action"):
+//     "promote"/"accept"/"approve"/"pass" => accept, "reject"/"decline"/"fail"
+//     => reject;
+//  3. a quality/contract status string ("quality_status"/"contract_status"):
+//     "pass"/"passed"/"promote"/"ok"/"accept"/"approved" => accept,
+//     "fail"/"failed"/"reject"/"rejected" => reject (other statuses like
+//     "not_run" are inconclusive and skipped);
+//  4. fall back to the soft score: soft >= 0.5 => accept.
+//
+// hasSignal reports whether any of the above produced a verdict. When it is
+// false (missing/empty/unrecognized report), callers should SKIP recording the
+// outcome rather than treat the absence of data as a "judge rejected" verdict,
+// which would pollute the calibration dataset.
+func skillOptJudgeAcceptFromReport(evalReportJSON string) (accept bool, hasSignal bool, promptVersion string, evaluatorID string, promptHash string) {
+	evalReportJSON = strings.TrimSpace(evalReportJSON)
+	if evalReportJSON == "" {
+		return false, false, "", "", ""
+	}
+	var report map[string]any
+	if err := json.Unmarshal([]byte(evalReportJSON), &report); err != nil {
+		return false, false, "", "", ""
+	}
+	// Search the report root and the nested evaluator_score object, preferring
+	// whichever supplies the most authoritative signal.
+	sources := []map[string]any{report}
+	if nested, ok := report["evaluator_score"].(map[string]any); ok {
+		sources = append(sources, nested)
+	}
+
+	promptVersion = firstSkillOptJudgeString(sources, "judge_prompt_version", "prompt_version")
+	evaluatorID = firstSkillOptJudgeString(sources, "judge_evaluator_id", "evaluator_id", "profile_id")
+	promptHash = firstSkillOptJudgeString(sources, "judge_prompt_hash", "prompt_hash")
+
+	// 1) explicit promotable boolean.
+	for _, source := range sources {
+		if value, ok := source["promotable"].(bool); ok {
+			return value, true, promptVersion, evaluatorID, promptHash
+		}
+	}
+	// 2) explicit recommendation.
+	if recommendation := firstSkillOptJudgeString(sources, "recommendation", "recommended_action"); recommendation != "" {
+		switch strings.ToLower(recommendation) {
+		case "promote", "accept", "approve", "pass":
+			return true, true, promptVersion, evaluatorID, promptHash
+		case "reject", "decline", "fail":
+			return false, true, promptVersion, evaluatorID, promptHash
+		}
+	}
+	// 3) quality / contract status.
+	if status := firstSkillOptJudgeString(sources, "quality_status", "contract_status"); status != "" {
+		switch strings.ToLower(status) {
+		case "pass", "passed", "promote", "ok", "accept", "approved":
+			return true, true, promptVersion, evaluatorID, promptHash
+		case "fail", "failed", "reject", "rejected":
+			return false, true, promptVersion, evaluatorID, promptHash
+		}
+	}
+	// 4) soft-score fallback.
+	for _, source := range sources {
+		if soft, ok := skillOptJudgeFloat(source["soft"]); ok {
+			return soft >= 0.5, true, promptVersion, evaluatorID, promptHash
+		}
+	}
+	return false, false, promptVersion, evaluatorID, promptHash
+}
+
+func firstSkillOptJudgeString(sources []map[string]any, keys ...string) string {
+	for _, source := range sources {
+		for _, key := range keys {
+			if value, ok := source[key].(string); ok {
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func skillOptJudgeFloat(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
+}
+
 func agentTemplateFromVersion(version AgentTemplateVersion) AgentTemplate {
 	return AgentTemplate{
 		ID:             version.TemplateID,
@@ -5079,5 +5388,23 @@ CREATE INDEX idx_jobs_delegation_id ON jobs(delegation_id);
 	`
 ALTER TABLE agents ADD COLUMN model TEXT NOT NULL DEFAULT '';
 ALTER TABLE agent_instances ADD COLUMN model TEXT NOT NULL DEFAULT '';
+	`,
+	`
+CREATE TABLE skillopt_judge_outcomes (
+	id TEXT PRIMARY KEY,
+	candidate_version_id TEXT NOT NULL,
+	template_id TEXT NOT NULL DEFAULT '',
+	judge_score_json TEXT NOT NULL DEFAULT '',
+	judge_prompt_version TEXT NOT NULL DEFAULT '',
+	judge_evaluator_id TEXT NOT NULL DEFAULT '',
+	judge_prompt_hash TEXT NOT NULL DEFAULT '',
+	human_decision TEXT NOT NULL,
+	direction TEXT NOT NULL,
+	reason TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_skillopt_judge_outcomes_template ON skillopt_judge_outcomes(template_id);
+CREATE INDEX idx_skillopt_judge_outcomes_candidate ON skillopt_judge_outcomes(candidate_version_id);
 	`,
 }
