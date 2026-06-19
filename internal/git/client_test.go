@@ -261,6 +261,52 @@ func TestClientMergeBranchesSmoke(t *testing.T) {
 	}
 }
 
+func TestClientCommitWorktreeSmoke(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-b", "main")
+	runGit(t, dir, "config", "user.email", "gitmoot@example.com")
+	runGit(t, dir, "config", "user.name", "Gitmoot")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# base\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	runGit(t, dir, "add", "README.md")
+	runGit(t, dir, "commit", "-m", "base")
+
+	client := Client{Dir: dir}
+	// Clean worktree -> no commit.
+	committed, err := client.CommitWorktree(context.Background(), dir, "noop")
+	if err != nil {
+		t.Fatalf("CommitWorktree(clean) returned error: %v", err)
+	}
+	if committed {
+		t.Fatal("CommitWorktree reported a commit for a clean worktree")
+	}
+	// Edit -> commit.
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile feature.txt returned error: %v", err)
+	}
+	committed, err = client.CommitWorktree(context.Background(), dir, "add feature")
+	if err != nil {
+		t.Fatalf("CommitWorktree(edit) returned error: %v", err)
+	}
+	if !committed {
+		t.Fatal("CommitWorktree did not commit a dirty worktree")
+	}
+	clean, err := client.WorktreeClean(context.Background())
+	if err != nil {
+		t.Fatalf("WorktreeClean returned error: %v", err)
+	}
+	if !clean {
+		t.Fatal("worktree should be clean after CommitWorktree")
+	}
+	if _, err := (Client{}).CommitWorktree(context.Background(), " ", "m"); err == nil {
+		t.Fatal("CommitWorktree accepted an empty dir")
+	}
+}
+
 func TestClientBranchExistsReturnsFalseForMissingBranch(t *testing.T) {
 	runner := &fakeRunner{errs: []error{errors.New("exit status 1")}}
 	exists, err := (Client{Runner: runner, Dir: "/repo"}).BranchExists(context.Background(), "missing")

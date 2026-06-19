@@ -2497,6 +2497,7 @@ var (
 	_ workflow.WorktreeManager            = gitutil.Client{}
 	_ workflow.ReadOnlyWorktreeManager    = gitutil.Client{}
 	_ workflow.IntegrationWorktreeManager = gitutil.Client{}
+	_ workflow.WorktreeCommitter          = gitutil.Client{}
 )
 
 func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, home string) workflow.Engine {

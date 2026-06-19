@@ -47,6 +47,14 @@ type IntegrationWorktreeManager interface {
 	MergeBranches(ctx context.Context, dir string, branches []string, message string) error
 }
 
+// WorktreeCommitter commits an implement delegation leg's work to its own branch
+// on success, so the leg's changes are available on its branch for a dependent
+// integration step (#332) even in a PR-less local orchestrate where the task/PR
+// finalizer never runs. The checkout-bound gitutil.Client satisfies it.
+type WorktreeCommitter interface {
+	CommitWorktree(ctx context.Context, dir string, message string) (bool, error)
+}
+
 type TaskWorktreeRequest struct {
 	Home       string
 	Repo       string

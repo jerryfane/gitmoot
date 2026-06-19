@@ -128,6 +128,44 @@ func TestIntegrationDepBranches(t *testing.T) {
 	}
 }
 
+func TestCommitDelegationLeg(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	engine := testEngine(store)
+	manager := &fakeWorktreeManager{commitMade: true}
+	engine.DelegationWorktrees = manager
+
+	insertCompletedJob(t, store, db.Job{ID: "p/delegation/legA", ParentJobID: "p", DelegationID: "legA", Type: "implement"},
+		JobPayload{Repo: "owner/repo", Branch: "branchA", DelegationID: "legA", WorktreePath: "/wt/legA"})
+	job := mustJob(t, store, "p/delegation/legA")
+	payload, err := unmarshalPayload(job.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+
+	if err := engine.commitDelegationLeg(ctx, job, payload); err != nil {
+		t.Fatalf("commitDelegationLeg returned error: %v", err)
+	}
+	if len(manager.committedDirs) != 1 || manager.committedDirs[0] != "/wt/legA" {
+		t.Fatalf("committedDirs = %v, want [/wt/legA]", manager.committedDirs)
+	}
+	if got := countJobEvents(t, store, "p/delegation/legA", "delegation_committed"); got != 1 {
+		t.Fatalf("delegation_committed events = %d, want 1", got)
+	}
+
+	// No-op for a job without a delegation worktree.
+	manager.committedDirs = nil
+	if err := engine.commitDelegationLeg(ctx, db.Job{ID: "x"}, JobPayload{WorktreePath: "/wt/x"}); err != nil {
+		t.Fatalf("commitDelegationLeg(non-delegation) returned error: %v", err)
+	}
+	if err := engine.commitDelegationLeg(ctx, db.Job{ID: "y", DelegationID: "y"}, JobPayload{DelegationID: "y"}); err != nil {
+		t.Fatalf("commitDelegationLeg(no worktree) returned error: %v", err)
+	}
+	if len(manager.committedDirs) != 0 {
+		t.Fatalf("commit must be a no-op without a delegation worktree: %v", manager.committedDirs)
+	}
+}
+
 func TestAllocateAndEnqueueDelegationRoutesVerifyToIntegrationWorktree(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)

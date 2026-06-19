@@ -424,6 +424,8 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 				return err
 			}
 			payload = finalized
+		} else if err := e.commitDelegationLeg(ctx, job, payload); err != nil {
+			return err
 		}
 		if payload.PullRequest <= 0 {
 			return e.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "advance_skipped_no_pr", Message: "no pull request is attached; skipping PR advancement"})
@@ -919,6 +921,34 @@ func (e Engine) integrationDepBranches(ctx context.Context, job db.Job, payload 
 		}
 	}
 	return branches, nil
+}
+
+// commitDelegationLeg commits an implement delegation leg's worktree changes to
+// its own branch when the leg has its own per-delegation worktree but no task/PR
+// finalizer (a PR-less local orchestrate, where the finalizer never runs and the
+// edits would otherwise stay uncommitted). This makes the leg's work available on
+// its branch for a dependent integration step (#332). It is a no-op for jobs with
+// no delegation worktree, a clean worktree, or a manager that cannot commit.
+func (e Engine) commitDelegationLeg(ctx context.Context, job db.Job, payload JobPayload) error {
+	if strings.TrimSpace(payload.DelegationID) == "" || strings.TrimSpace(payload.WorktreePath) == "" {
+		return nil
+	}
+	committer, ok := e.DelegationWorktrees.(WorktreeCommitter)
+	if !ok {
+		return nil
+	}
+	committed, err := committer.CommitWorktree(ctx, payload.WorktreePath, fmt.Sprintf("Gitmoot delegation %s implementation", payload.DelegationID))
+	if err != nil {
+		return err
+	}
+	if committed {
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "delegation_committed",
+			Message: fmt.Sprintf("delegation %q committed its implementation to branch %s", payload.DelegationID, payload.Branch),
+		})
+	}
+	return nil
 }
 
 // allocateAndEnqueueDelegation allocates the per-delegation worktree (or branch

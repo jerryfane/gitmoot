@@ -127,6 +127,35 @@ func (c Client) MergeBranches(ctx context.Context, dir string, branches []string
 	return nil
 }
 
+// CommitWorktree stages everything in the worktree at dir and commits it to that
+// worktree's current branch, returning whether a commit was made. It lets an
+// implement delegation leg persist its work to its own branch on success — even
+// in a PR-less local orchestrate where the task/PR finalizer never runs — so a
+// dependent integration step (#332) has committed branches to merge. A clean
+// worktree (nothing to commit) returns (false, nil). Unlike CommitAll it targets
+// an explicit dir and is a no-op (not an error) when there is nothing to commit.
+func (c Client) CommitWorktree(ctx context.Context, dir string, message string) (bool, error) {
+	dir, err := validateWorktreePath(dir)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "Gitmoot delegation commit"
+	}
+	git := Client{Dir: dir, Runner: c.Runner}
+	if _, err := git.run(ctx, "add", "-A"); err != nil {
+		return false, err
+	}
+	// `git diff --cached --quiet` exits 0 when nothing is staged.
+	if _, err := git.run(ctx, "diff", "--cached", "--quiet"); err == nil {
+		return false, nil
+	}
+	if _, err := git.run(ctx, "commit", "-m", message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (c Client) CurrentBranch(ctx context.Context) (string, error) {
 	result, err := c.run(ctx, "branch", "--show-current")
 	if err != nil {
