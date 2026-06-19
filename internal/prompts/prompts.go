@@ -85,13 +85,23 @@ const delegationSchemaHelp = "\nEach delegations[] entry is an object: " +
 	`{"id":"unique-id","agent":"gitmoot-agent-name","action":"ask|review|implement","prompt":"what the agent should do"}` +
 	"\n- id, agent, action, and prompt are ALL required. Use \"agent\" (the target Gitmoot agent's name), not \"to\".\n" +
 	"- Optional: \"deps\":[\"other-id\"] makes this delegation wait until those sibling delegations succeed.\n" +
-	"- Leave delegations empty ([]) when no follow-up agents are needed — that is how you signal the work is complete.\n"
+	"- Leave delegations empty ([]) when no follow-up agents are needed — that is how you signal the work is complete.\n" +
+	"- Validation errors name the offending entry as delegations[<index>] (id \"<id>\"); fix every listed field.\n"
 
 func RenderRepairPrompt(rawOutput string, parseError error) string {
 	var builder strings.Builder
 	builder.WriteString("Your previous response did not contain a valid gitmoot_result JSON object.\n")
 	if parseError != nil {
-		writeField(&builder, "Parse error", parseError.Error())
+		builder.WriteString("Validation errors (fix every line):\n")
+		for _, line := range strings.Split(parseError.Error(), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			builder.WriteString("- ")
+			builder.WriteString(line)
+			builder.WriteByte('\n')
+		}
 	}
 	builder.WriteString("\nReturn only one JSON object in this exact shape:\n")
 	builder.WriteString(`{"gitmoot_result":{"decision":"approved|changes_requested|blocked|implemented|failed","summary":"...","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`)

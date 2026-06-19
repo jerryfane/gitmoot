@@ -79,12 +79,55 @@ func TestRenderRepairPromptIncludesErrorAndRawOutput(t *testing.T) {
 
 	for _, want := range []string{
 		"did not contain a valid gitmoot_result",
-		"Parse error: missing gitmoot_result",
+		"Validation errors (fix every line):",
+		"- missing gitmoot_result",
 		"Return only one JSON object",
 		"not json",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("repair prompt missing %q:\n%s", want, prompt)
 		}
+	}
+	if strings.Contains(prompt, "Parse error:") {
+		t.Fatalf("repair prompt unexpectedly includes the old Parse error label:\n%s", prompt)
+	}
+}
+
+func TestRenderRepairPromptSurfacesJoinedFieldErrors(t *testing.T) {
+	// Simulate an errors.Join'd validation failure against the frozen contract:
+	// each per-field error renders as one line, joined with newlines.
+	joined := errors.New(`delegations[0] (id "<missing>"): id is required
+delegations[1] (id "build-api"): action is required`)
+	prompt := RenderRepairPrompt("bad output", joined)
+
+	for _, want := range []string{
+		"Validation errors (fix every line):",
+		`- delegations[0] (id "<missing>"): id is required`,
+		`- delegations[1] (id "build-api"): action is required`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("repair prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestRenderRepairPromptIncludesSchemaHelpHint(t *testing.T) {
+	prompt := RenderRepairPrompt("bad output", errors.New("missing gitmoot_result"))
+	want := `delegations[<index>] (id "<id>")`
+	if !strings.Contains(prompt, want) {
+		t.Fatalf("repair prompt missing schema-help hint %q:\n%s", want, prompt)
+	}
+}
+
+func TestRenderJobIncludesDelegationValidationHint(t *testing.T) {
+	prompt := RenderJob(JobPrompt{
+		Repo:         "jerryfane/gitmoot",
+		Branch:       "task-005",
+		Action:       "implement",
+		Instructions: "build the api",
+	})
+	want := `delegations[<index>] (id "<id>")`
+	if !strings.Contains(prompt, want) {
+		t.Fatalf("job prompt missing delegation validation hint %q:\n%s", want, prompt)
 	}
 }
