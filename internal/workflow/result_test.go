@@ -117,10 +117,10 @@ func TestValidateAgentResultRejectsDelegationMissingFields(t *testing.T) {
 		del  Delegation
 		want string
 	}{
-		{"missing id", Delegation{Agent: "impl", Action: "implement", Prompt: "do"}, "delegation id is required"},
+		{"missing id", Delegation{Agent: "impl", Action: "implement", Prompt: "do"}, `delegations[0] (id "<missing>"): id is required`},
 		{"missing agent", Delegation{ID: "a", Action: "implement", Prompt: "do"}, `delegation "a" must set exactly one of agent or ephemeral`},
-		{"missing action", Delegation{ID: "a", Agent: "impl", Prompt: "do"}, "delegation action is required"},
-		{"missing prompt", Delegation{ID: "a", Agent: "impl", Action: "implement"}, "delegation prompt is required"},
+		{"missing action", Delegation{ID: "a", Agent: "impl", Prompt: "do"}, `delegations[0] (id "a"): action is required`},
+		{"missing prompt", Delegation{ID: "a", Agent: "impl", Action: "implement"}, `delegations[0] (id "a"): prompt is required`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -131,6 +131,60 @@ func TestValidateAgentResultRejectsDelegationMissingFields(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateAgentResultAggregatesDelegationFieldErrors(t *testing.T) {
+	// Two delegations, each missing a different field, must surface BOTH failures
+	// in a single error so the one repair retry can fix the whole batch.
+	result := AgentResult{
+		Decision: "implemented",
+		Summary:  "x",
+		Delegations: []Delegation{
+			{Agent: "impl", Action: "implement", Prompt: "do"}, // missing id
+			{ID: "build-api", Agent: "impl", Prompt: "do"},     // missing action
+		},
+	}
+	err := validateAgentResult(result)
+	if err == nil {
+		t.Fatal("validateAgentResult accepted two delegations missing fields")
+	}
+	if !strings.Contains(err.Error(), `delegations[0] (id "<missing>"): id is required`) {
+		t.Fatalf("error missing delegations[0] line: %v", err)
+	}
+	if !strings.Contains(err.Error(), `delegations[1] (id "build-api"): action is required`) {
+		t.Fatalf("error missing delegations[1] line: %v", err)
+	}
+}
+
+func TestDelegationValidationErrorFormat(t *testing.T) {
+	cases := []struct {
+		name string
+		err  DelegationValidationError
+		want string
+	}{
+		{
+			name: "with id",
+			err:  DelegationValidationError{Index: 1, ID: "build-api", Field: "action", Msg: "is required"},
+			want: `delegations[1] (id "build-api"): action is required`,
+		},
+		{
+			name: "blank id renders as <missing>",
+			err:  DelegationValidationError{Index: 0, ID: "", Field: "id", Msg: "is required"},
+			want: `delegations[0] (id "<missing>"): id is required`,
+		},
+		{
+			name: "whitespace id renders as <missing>",
+			err:  DelegationValidationError{Index: 2, ID: "   ", Field: "id", Msg: "is required"},
+			want: `delegations[2] (id "<missing>"): id is required`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.Error(); got != tc.want {
+				t.Fatalf("Error() = %q, want %q", got, tc.want)
 			}
 		})
 	}

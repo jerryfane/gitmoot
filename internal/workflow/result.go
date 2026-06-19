@@ -122,6 +122,32 @@ func validateAgentResultFields(raw json.RawMessage) error {
 	return nil
 }
 
+// DelegationValidationError is a per-field validation failure on a single
+// delegation. It carries the delegation's 0-based position and id so that, when
+// multiple field errors are aggregated with errors.Join, the coordinator can see
+// exactly which entry and which field each failure refers to and repair the whole
+// batch in one round.
+type DelegationValidationError struct {
+	Index int    // 0-based position in delegations[]
+	ID    string // delegation id; "" when missing/blank
+	Field string // "id" | "action" | "prompt"
+	Msg   string // e.g. "is required"
+}
+
+func (e DelegationValidationError) Error() string {
+	id := e.ID
+	if strings.TrimSpace(id) == "" {
+		id = "<missing>"
+	}
+	return fmt.Sprintf("delegations[%d] (id %q): %s %s", e.Index, id, e.Field, e.Msg)
+}
+
+// delegationFieldError builds a DelegationValidationError for the delegation at
+// index i, annotated with its id and the offending field/message.
+func delegationFieldError(i int, d Delegation, field, msg string) error {
+	return DelegationValidationError{Index: i, ID: d.ID, Field: field, Msg: msg}
+}
+
 func validateAgentResult(result AgentResult) error {
 	switch result.Decision {
 	case "approved", "changes_requested", "blocked", "implemented", "failed":
@@ -131,28 +157,33 @@ func validateAgentResult(result AgentResult) error {
 	if strings.TrimSpace(result.Summary) == "" {
 		return errors.New("gitmoot_result summary is required")
 	}
-	for _, d := range result.Delegations {
+	var errs []error
+	for i, d := range result.Delegations {
 		if strings.TrimSpace(d.ID) == "" {
-			return errors.New("delegation id is required")
-		}
-		// The engine keys child jobs, the dedup map, and the DAG on the raw id
-		// while deps are matched trimmed; a surrounding-whitespace id would make
-		// those disagree and silently drop the delegation. Require them equal.
-		if d.ID != strings.TrimSpace(d.ID) {
-			return fmt.Errorf("delegation id %q must not have leading or trailing whitespace", d.ID)
+			errs = append(errs, delegationFieldError(i, d, "id", "is required"))
+		} else if d.ID != strings.TrimSpace(d.ID) {
+			// The engine keys child jobs, the dedup map, and the DAG on the raw id
+			// while deps are matched trimmed; a surrounding-whitespace id would make
+			// those disagree and silently drop the delegation. Require them equal.
+			errs = append(errs, delegationFieldError(i, d, "id", "must not have leading or trailing whitespace"))
 		}
 		if err := validateDelegationTarget(d); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 		if strings.TrimSpace(d.Action) == "" {
-			return errors.New("delegation action is required")
+			errs = append(errs, delegationFieldError(i, d, "action", "is required"))
 		}
 		if strings.TrimSpace(d.Prompt) == "" {
-			return errors.New("delegation prompt is required")
+			errs = append(errs, delegationFieldError(i, d, "prompt", "is required"))
 		}
 		if err := validateDelegationLifecycle(d); err != nil {
-			return err
+			errs = append(errs, err)
 		}
+	}
+	// Aggregate every per-delegation field failure before the graph check, which
+	// assumes well-formed ids.
+	if joined := errors.Join(errs...); joined != nil {
+		return joined
 	}
 	if err := validateDelegationGraph(result.Delegations); err != nil {
 		return err
