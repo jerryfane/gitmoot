@@ -57,8 +57,12 @@ gitmoot orchestrate review-panel "Review PR #123 in this repo." --repo owner/rep
    example, set "template": "thermo-nuclear-code-quality-review" only when you
    have run gitmoot agent template update for it).
 4. Set synthesis_rule summary on each delegation.
-5. Do not set agent on these delegations — agent and ephemeral are mutually
-   exclusive, and the panel is ephemeral.
+5. Every panelist is ephemeral. On each delegation set the `ephemeral` object
+   (`{"runtime": ..., "role": ..., "capabilities": [...]}`) and the `action`.
+   NEVER set the `agent` field and NEVER invent an agent name (do not put a name
+   like "ephemeral-codex-reviewer" in `agent`) — `agent` and `ephemeral` are
+   mutually exclusive, and there are no pre-registered agents to name. The `id`
+   is just the delegation label; it is not an agent.
 
 ## Coordinator Result
 

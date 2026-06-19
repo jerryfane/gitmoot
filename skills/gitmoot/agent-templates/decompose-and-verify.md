@@ -55,8 +55,12 @@ gitmoot orchestrate decompose-and-verify "Implement the export feature described
    every implementation delegation id. Set synthesis_rule summary on it.
 4. Pick runtimes per leg; a stronger model for the verify gate is reasonable.
    Ephemeral workers are leaf-only.
-5. Do not set agent on these delegations — agent and ephemeral are mutually
-   exclusive, and every leg here is ephemeral.
+5. Every leg here is ephemeral. On each delegation set the `ephemeral` object
+   (`{"runtime": ..., "role": ..., "capabilities": [...]}`) and the `action`.
+   NEVER set the `agent` field and NEVER invent an agent name (do not put a name
+   like "ephemeral-codex-worker" in `agent`) — `agent` and `ephemeral` are
+   mutually exclusive, and there are no pre-registered agents to name. The `id`
+   is just the delegation label; it is not an agent.
 
 ## Coordinator Result
 
