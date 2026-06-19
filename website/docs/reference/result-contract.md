@@ -149,6 +149,15 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
   For the longer comparison, including how temp workers fit in, see
   [Choosing a worker](../concepts/agents-templates-jobs-locks.md#choosing-a-worker-registered-agent-vs-ephemeral-worker).
 
+### Validation errors
+
+Each required-field failure is reported per entry as
+`delegations[<index>] (id "<id>"): <field> is required`, where `<index>` is the
+0-based position in `delegations[]` and `<id>` is the delegation's id (or
+`<missing>` when blank). All offending fields across the batch are reported
+together — not just the first — and the coordinator gets one repair retry to fix
+them all in a single round.
+
 ### How delegations run
 
 A delegation with no `deps` is dispatched immediately and runs in parallel with
