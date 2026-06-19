@@ -40,10 +40,12 @@ An agent's result can return a validated `delegations[]` DAG, and Gitmoot
 dispatches each entry as a child job. Dependency-free delegations run in
 parallel, and once every top-level delegation is terminal Gitmoot enqueues a
 single coordinator continuation job back to the delegating agent to synthesize
-the results. Delegation trees are bounded by a depth cap, a per-root job budget,
-and loop detection, so offending delegations are dropped rather than retried
-forever. See the [Result Contract](../reference/result-contract.md) for the full
-field reference.
+the results. Delegation trees are bounded by a depth cap, a per-root job budget, a
+per-root wall-clock budget, a per-coordinator width cap, and loop detection. When
+a bound trips, the offending delegations are not dropped silently — the engine
+enqueues one terminal coordinator continuation that synthesizes a best-effort
+result instead of recursing forever. See the
+[Result Contract](../reference/result-contract.md) for the full field reference.
 
 **Orchestra** is gitmoot's name for this structured multi-agent delegation: a
 conductor (coordinator) returns a `delegations[]` score, the players (child

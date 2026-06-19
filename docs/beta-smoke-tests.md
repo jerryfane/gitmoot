@@ -215,8 +215,10 @@ Expected signals:
 > but a *static* shell agent returns the same delegations every time, so the
 > continuation re-delegates each generation. This is bounded by
 > `MaxDelegationDepth` (8): once a coordinator/continuation at that depth would
-> dispatch, Gitmoot refuses and records a `delegation_depth_exceeded` event
-> instead of spawning jobs forever. To keep this smoke test fast, run
+> dispatch, Gitmoot refuses, records a `delegation_depth_exceeded` event, and
+> enqueues one terminal graceful-finalize continuation
+> (`delegation_finalize_enqueued`) instead of spawning jobs forever. To keep this
+> smoke test fast, run
 > `gitmoot daemon stop` once you have observed the first continuation rather than
 > waiting for the depth cap to halt the chain. Also note delegated `action:
 > review` requires a pull request / head SHA; use `action: ask` for PR-less

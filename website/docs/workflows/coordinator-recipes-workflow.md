@@ -68,7 +68,9 @@ mutually exclusive, and every panelist or leg here is ephemeral. Ephemeral worke
 are **leaf-only** — they return findings, never their own delegations — so a
 recipe's fan-out is exactly one level deep. The recipes run inside the same
 delegation [termination bounds](../reference/result-contract.md#termination-bounds)
-as any orchestra: a depth cap, a per-root job budget, and loop detection.
+as any orchestra: a depth cap, a per-root job budget, a per-root wall-clock
+budget, a per-coordinator width cap, and loop detection — all ending in one
+graceful finalize continuation.
 
 Inspect a run with the usual job and event commands:
 

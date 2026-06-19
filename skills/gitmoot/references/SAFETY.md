@@ -56,14 +56,27 @@ cannot recurse or fan out forever:
 - Per-root job budget `MaxDelegationTotalJobs = 64`: the whole delegation tree
   under one root (all children and continuations sharing that root) is capped.
   When a batch would exceed it, the delegations are not dispatched.
+- Per-root wall-clock budget `MaxDelegationWallClock = 2h`: the whole tree under
+  one root is bounded in duration (measured from the root job's creation); a
+  coordinator that tries to fan out after the tree has run this long is refused
+  with a `delegation_walltime_exceeded` event. A generous runaway backstop, not a
+  tight deadline.
+- Per-coordinator width `MaxDelegationWidth = 16`: a single coordinator result
+  may not fan out more than this many delegations in one generation; an over-wide
+  set is refused with a `delegation_width_exceeded` event.
 - Loop detection: a canonical windowed signature hash over recent delegation
   activity halts repeated or cyclic delegation chains well before the depth cap
   is reached, preventing oscillating A→B→A loops.
 
-When a bound trips, the offending delegations are dropped (not dispatched) and
-the parent receives a lifecycle/mailbox event explaining why (for example, the
-delegation tree for a root reached the job budget of 64). Work is bounded, not
-silently retried forever.
+When a bound trips, the offending delegations are not dispatched and the parent
+receives a typed lifecycle event explaining why (for example, the delegation tree
+for a root reached the job budget of 64). Rather than stopping silently, the
+engine then enqueues one **graceful finalize continuation**
+(`delegation_finalize_enqueued`) back to the coordinator — told it cannot
+delegate further and asked to synthesize a best-effort final result and return
+empty delegations. That continuation is terminal: any delegations it returns are
+ignored (`delegation_finalized`), so work is bounded and always ends in a clean
+synthesis, not a silent dead end.
 
 ## When To Stop
 

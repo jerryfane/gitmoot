@@ -34,8 +34,11 @@ trail. Gitmoot makes the repository and its pull requests the shared surface:
   dispatches as child jobs (the players), then enqueues one continuation job
   (the finale) to synthesize their results (replacing the old `next_agents`
   mechanism). Use `gitmoot orchestrate <agent> "..."` to start one.
-- Delegation trees are bounded by a depth cap, a per-root job budget, and loop
-  detection, so coordination halts instead of recursing forever.
+- Delegation trees are bounded by a depth cap, a per-root job budget, a per-root
+  wall-clock budget, a per-coordinator width cap, and loop detection. When a
+  bound trips, the engine enqueues one graceful finalize continuation so the
+  coordinator synthesizes a best-effort result instead of recursing forever or
+  dropping work silently.
 - Agent Templates and job snapshots make agent instructions explicit and reproducible.
 - Humans can follow progress from GitHub while agents keep working locally.
 

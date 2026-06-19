@@ -152,6 +152,10 @@ Delegation trees are bounded so they cannot run forever:
   coordinator that tries to fan out after the tree has run this long is refused
   with a `delegation_walltime_exceeded` event. A generous runaway backstop, not a
   tight deadline.
+- Per-coordinator width: `MaxDelegationWidth = 16`. A single coordinator result
+  may not fan out more than this many delegations in one generation; an over-wide
+  set is refused with a `delegation_width_exceeded` event and routes through the
+  finalize continuation.
 - Loop detection: a windowed signature over recent delegation activity halts
   repeated or cyclic delegation chains (e.g. oscillating A→B→A) well before the
   depth cap is reached.

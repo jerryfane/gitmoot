@@ -44,8 +44,11 @@ trail. Gitmoot makes the repository and its pull requests the shared surface:
   dispatches as child jobs (the players), then enqueues one continuation job
   (the finale) to synthesize their results (replacing the old `next_agents`
   mechanism). Use `gitmoot orchestrate <agent> "..."` to start one.
-- Delegation trees are bounded by a depth cap, a per-root job budget, and loop
-  detection, so coordination halts instead of recursing forever.
+- Delegation trees are bounded by a depth cap, a per-root job budget, a per-root
+  wall-clock budget, a per-coordinator width cap, and loop detection. When a
+  bound trips, the engine enqueues one graceful finalize continuation so the
+  coordinator synthesizes a best-effort result instead of recursing forever or
+  dropping work silently.
 - Agent Templates and job snapshots make agent instructions explicit and reproducible.
 - Humans can follow progress from GitHub while agents keep working locally.
 
@@ -3876,8 +3879,10 @@ Expected signals:
 > but a *static* shell agent returns the same delegations every time, so the
 > continuation re-delegates each generation. This is bounded by
 > `MaxDelegationDepth` (8): once a coordinator/continuation at that depth would
-> dispatch, Gitmoot refuses and records a `delegation_depth_exceeded` event
-> instead of spawning jobs forever. To keep this smoke test fast, run
+> dispatch, Gitmoot refuses, records a `delegation_depth_exceeded` event, and
+> enqueues one terminal graceful-finalize continuation
+> (`delegation_finalize_enqueued`) instead of spawning jobs forever. To keep this
+> smoke test fast, run
 > `gitmoot daemon stop` once you have observed the first continuation rather than
 > waiting for the depth cap to halt the chain. Also note delegated `action:
 > review` requires a pull request / head SHA; use `action: ask` for PR-less
@@ -6480,14 +6485,27 @@ cannot recurse or fan out forever:
 - Per-root job budget `MaxDelegationTotalJobs = 64`: the whole delegation tree
   under one root (all children and continuations sharing that root) is capped.
   When a batch would exceed it, the delegations are not dispatched.
+- Per-root wall-clock budget `MaxDelegationWallClock = 2h`: the whole tree under
+  one root is bounded in duration (measured from the root job's creation); a
+  coordinator that tries to fan out after the tree has run this long is refused
+  with a `delegation_walltime_exceeded` event. A generous runaway backstop, not a
+  tight deadline.
+- Per-coordinator width `MaxDelegationWidth = 16`: a single coordinator result
+  may not fan out more than this many delegations in one generation; an over-wide
+  set is refused with a `delegation_width_exceeded` event.
 - Loop detection: a canonical windowed signature hash over recent delegation
   activity halts repeated or cyclic delegation chains well before the depth cap
   is reached, preventing oscillating A→B→A loops.
 
-When a bound trips, the offending delegations are dropped (not dispatched) and
-the parent receives a lifecycle/mailbox event explaining why (for example, the
-delegation tree for a root reached the job budget of 64). Work is bounded, not
-silently retried forever.
+When a bound trips, the offending delegations are not dispatched and the parent
+receives a typed lifecycle event explaining why (for example, the delegation tree
+for a root reached the job budget of 64). Rather than stopping silently, the
+engine then enqueues one **graceful finalize continuation**
+(`delegation_finalize_enqueued`) back to the coordinator — told it cannot
+delegate further and asked to synthesize a best-effort final result and return
+empty delegations. That continuation is terminal: any delegations it returns are
+ignored (`delegation_finalized`), so work is bounded and always ends in a clean
+synthesis, not a silent dead end.
 
 ## When To Stop
 
@@ -6654,6 +6672,10 @@ Delegation trees are bounded so they cannot run forever:
   coordinator that tries to fan out after the tree has run this long is refused
   with a `delegation_walltime_exceeded` event. A generous runaway backstop, not a
   tight deadline.
+- Per-coordinator width: `MaxDelegationWidth = 16`. A single coordinator result
+  may not fan out more than this many delegations in one generation; an over-wide
+  set is refused with a `delegation_width_exceeded` event and routes through the
+  finalize continuation.
 - Loop detection: a windowed signature over recent delegation activity halts
   repeated or cyclic delegation chains (e.g. oscillating A→B→A) well before the
   depth cap is reached.

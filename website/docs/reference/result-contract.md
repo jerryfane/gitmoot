@@ -237,6 +237,10 @@ trips, the offending delegations are dropped rather than dispatched.
   `delegation_walltime_exceeded` event. This bounds an expensive-but-not-numerous
   tree (slow agents, long per-job work) that the depth/job-count caps miss. It is
   a generous runaway backstop, not a tight deadline.
+- **Per-coordinator width (`MaxDelegationWidth = 16`)**: a single coordinator
+  result may request at most this many delegations in one generation; a wider set
+  is refused with a `delegation_width_exceeded` event and routed through the same
+  graceful finalize continuation.
 - **Loop detection**: a canonical windowed signature over recent delegation
   activity halts repeated or cyclic delegation chains — for example an
   oscillating A→B→A loop — well before the depth cap is reached.
