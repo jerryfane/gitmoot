@@ -69,6 +69,8 @@ func runSkillOpt(args []string, stdout, stderr io.Writer) int {
 		return runSkillOptCandidate(args[1:], stdout, stderr)
 	case "feedback":
 		return runSkillOptFeedback(args[1:], stdout, stderr)
+	case "judge-report":
+		return runSkillOptJudgeReport(args[1:], stdout, stderr)
 	case "train":
 		return runSkillOptTrain(args[1:], stdout, stderr)
 	default:
@@ -94,6 +96,7 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt feedback markdown import --packet .gitmoot/evals/<run-id> [--reviewer name]")
 	fmt.Fprintln(w, "  gitmoot skillopt feedback github publish --run <run-id> [--repo owner/repo] [--pr <number>]")
 	fmt.Fprintln(w, "  gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issue <number>|--pr <number>)")
+	fmt.Fprintln(w, "  gitmoot skillopt judge-report [--template id]")
 	fmt.Fprintln(w, "  gitmoot skillopt train init --name <name> --template <id> --review-repo owner/repo --artifact-kind kind --preview kind (--request text|--request-file path)")
 	fmt.Fprintln(w, "  gitmoot skillopt train init templates --json")
 	fmt.Fprintln(w, "  gitmoot skillopt train start --config .gitmoot/skillopt/<name>/config.toml [--yes]")
@@ -11052,6 +11055,277 @@ func runSkillOptCandidateList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%-18s %-14s %-9s %-8s %s\n", version.ID, version.TemplateID, version.State, scoreText(review.Score), firstLine(review.PreferenceSummary))
 	}
 	return 0
+}
+
+// runSkillOptJudgeReport renders an offline calibration report comparing the
+// LLM judge's accept/reject signal against the human promote/reject decision
+// captured at decision time (#345). It is read-only: it lists the stored
+// judge-outcome rows and computes a confusion matrix, overall agreement,
+// Cohen's kappa, soft-score calibration bands, and per-dimension disagreement.
+func runSkillOptJudgeReport(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("skillopt judge-report", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	templateID := fs.String("template", "", "template id to filter")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "skillopt judge-report does not accept positional arguments")
+		return 2
+	}
+	var outcomes []db.SkillOptJudgeOutcome
+	if err := withStore(*home, func(store *db.Store) error {
+		var err error
+		outcomes, err = store.ListSkillOptJudgeOutcomes(context.Background(), *templateID)
+		return err
+	}); err != nil {
+		fmt.Fprintf(stderr, "skillopt judge-report: %v\n", err)
+		return 1
+	}
+	renderSkillOptJudgeReport(stdout, outcomes)
+	return 0
+}
+
+func renderSkillOptJudgeReport(stdout io.Writer, outcomes []db.SkillOptJudgeOutcome) {
+	if len(outcomes) == 0 {
+		writeLine(stdout, "no judge outcomes captured")
+		return
+	}
+	// Confusion matrix: count each of the four direction buckets.
+	counts := map[string]int{
+		db.SkillOptJudgeDirectionAgreeAccept:            0,
+		db.SkillOptJudgeDirectionAgreeReject:            0,
+		db.SkillOptJudgeDirectionJudgeAcceptHumanReject: 0,
+		db.SkillOptJudgeDirectionJudgeRejectHumanAccept: 0,
+	}
+	for _, outcome := range outcomes {
+		counts[outcome.Direction]++
+	}
+	total := len(outcomes)
+	agreeAccept := counts[db.SkillOptJudgeDirectionAgreeAccept]
+	agreeReject := counts[db.SkillOptJudgeDirectionAgreeReject]
+	judgeAcceptHumanReject := counts[db.SkillOptJudgeDirectionJudgeAcceptHumanReject]
+	judgeRejectHumanAccept := counts[db.SkillOptJudgeDirectionJudgeRejectHumanAccept]
+
+	fmt.Fprintf(stdout, "judge outcomes: %d\n", total)
+	writeLine(stdout, "")
+	writeLine(stdout, "confusion matrix (judge vs human)")
+	fmt.Fprintf(stdout, "  %-22s %-14s %-14s\n", "", "human promote", "human reject")
+	fmt.Fprintf(stdout, "  %-22s %-14d %-14d\n", "judge accept", agreeAccept, judgeAcceptHumanReject)
+	fmt.Fprintf(stdout, "  %-22s %-14d %-14d\n", "judge reject", judgeRejectHumanAccept, agreeReject)
+	writeLine(stdout, "")
+
+	// Overall agreement = (agree_accept + agree_reject) / total.
+	agreements := agreeAccept + agreeReject
+	fmt.Fprintf(stdout, "agreement rate: %.3f (%d/%d)\n", float64(agreements)/float64(total), agreements, total)
+
+	// Cohen's kappa for the 2x2 judge-vs-human table:
+	//   po = observed agreement; pe = chance agreement from the marginals.
+	//   kappa = (po - pe) / (1 - pe). Reported as 1.0 when pe == 1 (every
+	//   rater always picked the same label, so there is no chance disagreement).
+	po := float64(agreements) / float64(total)
+	judgeAcceptTotal := agreeAccept + judgeAcceptHumanReject
+	humanAcceptTotal := agreeAccept + judgeRejectHumanAccept
+	judgeRejectTotal := total - judgeAcceptTotal
+	humanRejectTotal := total - humanAcceptTotal
+	pe := (float64(judgeAcceptTotal)*float64(humanAcceptTotal) + float64(judgeRejectTotal)*float64(humanRejectTotal)) / (float64(total) * float64(total))
+	kappa := 1.0
+	if pe < 1 {
+		kappa = (po - pe) / (1 - pe)
+	}
+	fmt.Fprintf(stdout, "cohen's kappa: %.3f\n", kappa)
+	writeLine(stdout, "")
+
+	renderSkillOptJudgeCalibration(stdout, outcomes)
+	renderSkillOptJudgeDimensionDisagreement(stdout, outcomes)
+}
+
+// skillOptJudgeBands are the soft-score calibration bands, low edge inclusive.
+var skillOptJudgeBands = []struct {
+	label string
+	low   float64
+	high  float64
+}{
+	{"[0.00,0.25)", 0.00, 0.25},
+	{"[0.25,0.50)", 0.25, 0.50},
+	{"[0.50,0.75)", 0.50, 0.75},
+	{"[0.75,1.00]", 0.75, 1.01},
+}
+
+// renderSkillOptJudgeCalibration buckets outcomes by the judge's soft score and
+// reports the human promote rate within each band — a calibration curve showing
+// whether higher judge confidence tracks more human promotions.
+func renderSkillOptJudgeCalibration(stdout io.Writer, outcomes []db.SkillOptJudgeOutcome) {
+	type bandStat struct {
+		count    int
+		promoted int
+	}
+	stats := make([]bandStat, len(skillOptJudgeBands))
+	unscored := 0
+	for _, outcome := range outcomes {
+		soft, ok := skillOptJudgeSoftScore(outcome.JudgeScoreJSON)
+		if !ok {
+			unscored++
+			continue
+		}
+		humanPromoted := outcome.HumanDecision == "promoted"
+		for index, band := range skillOptJudgeBands {
+			if soft >= band.low && soft < band.high {
+				stats[index].count++
+				if humanPromoted {
+					stats[index].promoted++
+				}
+				break
+			}
+		}
+	}
+	writeLine(stdout, "calibration (judge soft-score band vs human promote rate)")
+	fmt.Fprintf(stdout, "  %-14s %-8s %s\n", "BAND", "N", "HUMAN PROMOTE RATE")
+	for index, band := range skillOptJudgeBands {
+		stat := stats[index]
+		rate := "-"
+		if stat.count > 0 {
+			rate = fmt.Sprintf("%.3f (%d/%d)", float64(stat.promoted)/float64(stat.count), stat.promoted, stat.count)
+		}
+		fmt.Fprintf(stdout, "  %-14s %-8d %s\n", band.label, stat.count, rate)
+	}
+	if unscored > 0 {
+		fmt.Fprintf(stdout, "  %-14s %-8d %s\n", "no soft score", unscored, "-")
+	}
+	writeLine(stdout, "")
+}
+
+// renderSkillOptJudgeDimensionDisagreement, when dimension_scores are present in
+// the captured eval reports, reports each dimension's mean score split by human
+// promote vs reject, plus the gap between them — surfacing dimensions where the
+// judge's per-dimension score diverges from the human decision.
+func renderSkillOptJudgeDimensionDisagreement(stdout io.Writer, outcomes []db.SkillOptJudgeOutcome) {
+	type dimStat struct {
+		promoteSum   float64
+		promoteCount int
+		rejectSum    float64
+		rejectCount  int
+	}
+	stats := map[string]*dimStat{}
+	for _, outcome := range outcomes {
+		dimensions := skillOptJudgeDimensionScores(outcome.JudgeScoreJSON)
+		humanPromoted := outcome.HumanDecision == "promoted"
+		for name, score := range dimensions {
+			stat := stats[name]
+			if stat == nil {
+				stat = &dimStat{}
+				stats[name] = stat
+			}
+			if humanPromoted {
+				stat.promoteSum += score
+				stat.promoteCount++
+			} else {
+				stat.rejectSum += score
+				stat.rejectCount++
+			}
+		}
+	}
+	if len(stats) == 0 {
+		return
+	}
+	names := make([]string, 0, len(stats))
+	for name := range stats {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	writeLine(stdout, "per-dimension disagreement (mean judge dimension score by human decision)")
+	fmt.Fprintf(stdout, "  %-22s %-16s %-16s %s\n", "DIMENSION", "PROMOTE MEAN", "REJECT MEAN", "GAP")
+	for _, name := range names {
+		stat := stats[name]
+		promoteMean, promoteOK := skillOptJudgeMean(stat.promoteSum, stat.promoteCount)
+		rejectMean, rejectOK := skillOptJudgeMean(stat.rejectSum, stat.rejectCount)
+		gap := "-"
+		if promoteOK && rejectOK {
+			gap = fmt.Sprintf("%+.3f", promoteMean-rejectMean)
+		}
+		fmt.Fprintf(stdout, "  %-22s %-16s %-16s %s\n", name, skillOptJudgeMeanText(promoteMean, promoteOK, stat.promoteCount), skillOptJudgeMeanText(rejectMean, rejectOK, stat.rejectCount), gap)
+	}
+	writeLine(stdout, "")
+}
+
+func skillOptJudgeMean(sum float64, count int) (float64, bool) {
+	if count == 0 {
+		return 0, false
+	}
+	return sum / float64(count), true
+}
+
+func skillOptJudgeMeanText(mean float64, ok bool, count int) string {
+	if !ok {
+		return "-"
+	}
+	return fmt.Sprintf("%.3f (n=%d)", mean, count)
+}
+
+// skillOptJudgeReportRoot decodes a captured judge eval report and returns the
+// candidate sources to inspect: the report root plus any nested evaluator_score
+// object (mirroring how the report is read at capture time).
+func skillOptJudgeReportRoot(judgeScoreJSON string) []map[string]any {
+	judgeScoreJSON = strings.TrimSpace(judgeScoreJSON)
+	if judgeScoreJSON == "" {
+		return nil
+	}
+	var report map[string]any
+	if err := json.Unmarshal([]byte(judgeScoreJSON), &report); err != nil {
+		return nil
+	}
+	sources := []map[string]any{report}
+	if nested := decodedSkillOptMetadataValue(report["evaluator_score"]); len(nested) > 0 {
+		sources = append(sources, nested)
+	}
+	return sources
+}
+
+func skillOptJudgeSoftScore(judgeScoreJSON string) (float64, bool) {
+	for _, source := range skillOptJudgeReportRoot(judgeScoreJSON) {
+		if value, ok := skillOptJudgeFloatValue(source["soft"]); ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func skillOptJudgeDimensionScores(judgeScoreJSON string) map[string]float64 {
+	for _, source := range skillOptJudgeReportRoot(judgeScoreJSON) {
+		raw := decodedSkillOptMetadataValue(source["dimension_scores"])
+		if len(raw) == 0 {
+			continue
+		}
+		scores := make(map[string]float64, len(raw))
+		for name, value := range raw {
+			if score, ok := skillOptJudgeFloatValue(value); ok {
+				scores[name] = score
+			}
+		}
+		if len(scores) > 0 {
+			return scores
+		}
+	}
+	return nil
+}
+
+func skillOptJudgeFloatValue(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
 }
 
 func runSkillOptCandidateShow(args []string, stdout, stderr io.Writer) int {
