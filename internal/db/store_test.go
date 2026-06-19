@@ -44,6 +44,7 @@ func TestOpenMigratesSchema(t *testing.T) {
 		"skillopt_train_sessions",
 		"skillopt_train_iterations",
 		"skillopt_review_watches",
+		"skillopt_judge_outcomes",
 		"interactive_prompts",
 	} {
 		ok, err := store.HasTable(ctx, table)
@@ -2835,4 +2836,202 @@ func TestUpsertAgentInstancePersistsModel(t *testing.T) {
 	if agent.Model != "claude-sonnet-4-5" {
 		t.Fatalf("GetAgent (instance fallback) model = %q, want %q", agent.Model, "claude-sonnet-4-5")
 	}
+}
+
+func TestSkillOptJudgeOutcomeCRUDRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	outcome := SkillOptJudgeOutcome{
+		ID:                 "judge-outcome-1",
+		CandidateVersionID: "planner@v2",
+		TemplateID:         "planner",
+		JudgeScoreJSON:     `{"soft":0.81,"quality_status":"pass"}`,
+		JudgePromptVersion: "jp-2026-01",
+		JudgeEvaluatorID:   "landing_page_v1",
+		JudgePromptHash:    "deadbeef",
+		HumanDecision:      "promoted",
+		Direction:          SkillOptJudgeDirectionAgreeAccept,
+		Reason:             "looks good",
+	}
+	if err := store.InsertSkillOptJudgeOutcome(ctx, outcome); err != nil {
+		t.Fatalf("InsertSkillOptJudgeOutcome returned error: %v", err)
+	}
+
+	got, err := store.GetSkillOptJudgeOutcome(ctx, "judge-outcome-1")
+	if err != nil {
+		t.Fatalf("GetSkillOptJudgeOutcome returned error: %v", err)
+	}
+	if got.CandidateVersionID != outcome.CandidateVersionID ||
+		got.TemplateID != outcome.TemplateID ||
+		got.JudgeScoreJSON != outcome.JudgeScoreJSON ||
+		got.JudgePromptVersion != outcome.JudgePromptVersion ||
+		got.JudgeEvaluatorID != outcome.JudgeEvaluatorID ||
+		got.JudgePromptHash != outcome.JudgePromptHash ||
+		got.HumanDecision != outcome.HumanDecision ||
+		got.Direction != outcome.Direction ||
+		got.Reason != outcome.Reason {
+		t.Fatalf("GetSkillOptJudgeOutcome = %+v, want %+v", got, outcome)
+	}
+	if strings.TrimSpace(got.CreatedAt) == "" {
+		t.Fatalf("expected created_at to be populated, got %+v", got)
+	}
+
+	// A second outcome on a different template, plus an auto-generated id.
+	other := SkillOptJudgeOutcome{
+		CandidateVersionID: "reviewer@v3",
+		TemplateID:         "reviewer",
+		HumanDecision:      "rejected",
+		Direction:          SkillOptJudgeDirectionAgreeReject,
+	}
+	if err := store.InsertSkillOptJudgeOutcome(ctx, other); err != nil {
+		t.Fatalf("InsertSkillOptJudgeOutcome (auto id) returned error: %v", err)
+	}
+
+	all, err := store.ListSkillOptJudgeOutcomes(ctx, "")
+	if err != nil {
+		t.Fatalf("ListSkillOptJudgeOutcomes(all) returned error: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("ListSkillOptJudgeOutcomes(all) = %d rows, want 2", len(all))
+	}
+
+	plannerOnly, err := store.ListSkillOptJudgeOutcomes(ctx, "planner")
+	if err != nil {
+		t.Fatalf("ListSkillOptJudgeOutcomes(planner) returned error: %v", err)
+	}
+	if len(plannerOnly) != 1 || plannerOnly[0].ID != "judge-outcome-1" {
+		t.Fatalf("ListSkillOptJudgeOutcomes(planner) = %+v, want only judge-outcome-1", plannerOnly)
+	}
+
+	// Required fields are validated.
+	if err := store.InsertSkillOptJudgeOutcome(ctx, SkillOptJudgeOutcome{HumanDecision: "promoted", Direction: SkillOptJudgeDirectionAgreeAccept}); err == nil {
+		t.Fatal("InsertSkillOptJudgeOutcome with empty candidate_version_id returned nil error")
+	}
+}
+
+func TestDecideSkillOptTrainCandidateCapturesJudgeOutcome(t *testing.T) {
+	tests := []struct {
+		name          string
+		evalReport    string
+		decision      string
+		reason        string
+		wantDirection string
+	}{
+		{
+			name:          "promote with judge accept agrees",
+			evalReport:    `{"evaluator_score":{"soft":0.9,"quality_status":"pass","judge_prompt_version":"jp-1","evaluator_id":"landing_page_v1","judge_prompt_hash":"abc123"}}`,
+			decision:      "promoted",
+			wantDirection: SkillOptJudgeDirectionAgreeAccept,
+		},
+		{
+			name:          "promote with judge reject is judge_reject_human_accept",
+			evalReport:    `{"soft":0.2,"quality_status":"fail"}`,
+			decision:      "promoted",
+			wantDirection: SkillOptJudgeDirectionJudgeRejectHumanAccept,
+		},
+		{
+			name:          "reject with judge reject agrees",
+			evalReport:    `{"promotable":false,"soft":0.1}`,
+			decision:      "rejected",
+			reason:        "not actionable",
+			wantDirection: SkillOptJudgeDirectionAgreeReject,
+		},
+		{
+			name:          "reject with judge accept is judge_accept_human_reject",
+			evalReport:    `{"promotable":true,"soft":0.95}`,
+			decision:      "rejected",
+			reason:        "style mismatch",
+			wantDirection: SkillOptJudgeDirectionJudgeAcceptHumanReject,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+			if err != nil {
+				t.Fatalf("Open returned error: %v", err)
+			}
+			defer store.Close()
+
+			candidate := seedSkillOptJudgeCandidate(t, store, tc.evalReport)
+			session := SkillOptTrainSession{ID: "session-1", TemplateID: "planner", State: "review_published"}
+			iteration := SkillOptTrainIteration{ID: "session-1-001", SessionID: "session-1", State: "review_published", DecisionReason: tc.reason}
+
+			if _, err := store.DecideSkillOptTrainCandidate(ctx, session, iteration, candidate.ID, tc.decision); err != nil {
+				t.Fatalf("DecideSkillOptTrainCandidate returned error: %v", err)
+			}
+
+			outcomes, err := store.ListSkillOptJudgeOutcomes(ctx, "planner")
+			if err != nil {
+				t.Fatalf("ListSkillOptJudgeOutcomes returned error: %v", err)
+			}
+			if len(outcomes) != 1 {
+				t.Fatalf("captured %d outcomes, want 1", len(outcomes))
+			}
+			outcome := outcomes[0]
+			if outcome.CandidateVersionID != candidate.ID {
+				t.Fatalf("captured candidate_version_id = %q, want %q", outcome.CandidateVersionID, candidate.ID)
+			}
+			if outcome.Direction != tc.wantDirection {
+				t.Fatalf("captured direction = %q, want %q", outcome.Direction, tc.wantDirection)
+			}
+			if outcome.HumanDecision != tc.decision {
+				t.Fatalf("captured human_decision = %q, want %q", outcome.HumanDecision, tc.decision)
+			}
+			if outcome.JudgeScoreJSON != tc.evalReport {
+				t.Fatalf("captured judge_score_json = %q, want raw eval report %q", outcome.JudgeScoreJSON, tc.evalReport)
+			}
+			if tc.reason != "" && outcome.Reason != tc.reason {
+				t.Fatalf("captured reason = %q, want %q", outcome.Reason, tc.reason)
+			}
+		})
+	}
+}
+
+func seedSkillOptJudgeCandidate(t *testing.T, store *Store, evalReportJSON string) AgentTemplateVersion {
+	t.Helper()
+	ctx := context.Background()
+	template := AgentTemplate{
+		ID:             "planner",
+		Name:           "Planner",
+		Description:    "Plans work",
+		SourceRepo:     "local",
+		SourceRef:      "current",
+		SourcePath:     "planner.md",
+		ResolvedCommit: "abc123",
+		Content:        "Plan carefully.",
+		MetadataJSON:   `{"id":"planner","name":"Planner","description":"Plans work","kind":"agent-template","version":1,"capabilities":["ask"],"runtime_compatibility":["codex"],"tags":["planning"],"inputs":["task"],"outputs":["plan"]}`,
+	}
+	if err := store.UpsertAgentTemplate(ctx, template); err != nil {
+		t.Fatalf("UpsertAgentTemplate returned error: %v", err)
+	}
+	current, err := store.GetAgentTemplate(ctx, "planner")
+	if err != nil {
+		t.Fatalf("GetAgentTemplate returned error: %v", err)
+	}
+	candidate, err := store.AddPendingAgentTemplateCandidate(ctx, AgentTemplate{
+		ID:             "planner",
+		Name:           "Planner Candidate",
+		Description:    "Plans work",
+		SourceRepo:     "gitmoot-skillopt",
+		SourceRef:      "candidate",
+		SourcePath:     "candidate.json",
+		ResolvedCommit: "def456",
+		Content:        "Plan carefully with risks.",
+		MetadataJSON:   template.MetadataJSON,
+	}, AgentTemplateCandidateReview{
+		TemplateID:     "planner",
+		BaseVersionID:  current.VersionID,
+		EvalReportJSON: evalReportJSON,
+		State:          "pending",
+	}, nil)
+	if err != nil {
+		t.Fatalf("AddPendingAgentTemplateCandidate returned error: %v", err)
+	}
+	return candidate
 }
