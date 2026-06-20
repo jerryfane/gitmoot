@@ -11297,10 +11297,20 @@ func skillOptJudgeReportRoot(judgeScoreJSON string) []map[string]any {
 	return sources
 }
 
+// skillOptJudgeSoftScore extracts the continuous judge score used for the
+// calibration curve. It mirrors the soft-score fallback chain of the verdict
+// heuristic (skillOptJudgeAcceptFromReport in internal/db/store.go): "soft",
+// then the landing-page profile's "best_selection_soft"/"best_selection_hard".
+// Keeping the two in lockstep means every report that produced an accept/reject
+// verdict is also banded in calibration — otherwise landing-page reports (which
+// carry best_selection_soft, not a top-level "soft") would be silently dropped
+// into "no soft score", blinding calibration to the dominant real report shape.
 func skillOptJudgeSoftScore(judgeScoreJSON string) (float64, bool) {
 	for _, source := range skillOptJudgeReportRoot(judgeScoreJSON) {
-		if value, ok := skillOptJudgeFloatValue(source["soft"]); ok {
-			return value, true
+		for _, key := range []string{"soft", "best_selection_soft", "best_selection_hard"} {
+			if value, ok := skillOptJudgeFloatValue(source[key]); ok {
+				return value, true
+			}
 		}
 	}
 	return 0, false
