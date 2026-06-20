@@ -11749,6 +11749,32 @@ func TestSkillOptJudgeReportRendersMatrixAndAgreement(t *testing.T) {
 	}
 }
 
+func TestSkillOptJudgeSoftScoreFallsBackToSelectionScore(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		report string
+		want   float64
+		wantOK bool
+	}{
+		{name: "top-level soft wins", report: `{"soft":0.42,"best_selection_soft":0.9}`, want: 0.42, wantOK: true},
+		{name: "nested evaluator_score soft", report: `{"evaluator_score":{"soft":0.55}}`, want: 0.55, wantOK: true},
+		{name: "landing-page best_selection_soft", report: `{"best_selection_hard":0.0,"best_selection_soft":0.76,"promotable":true}`, want: 0.76, wantOK: true},
+		{name: "best_selection_hard last resort", report: `{"best_selection_hard":0.5}`, want: 0.5, wantOK: true},
+		{name: "no continuous score", report: `{"quality_status":"fail"}`, wantOK: false},
+		{name: "empty report", report: ``, wantOK: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := skillOptJudgeSoftScore(tc.report)
+			if ok != tc.wantOK {
+				t.Fatalf("skillOptJudgeSoftScore ok = %v, want %v", ok, tc.wantOK)
+			}
+			if tc.wantOK && got != tc.want {
+				t.Fatalf("skillOptJudgeSoftScore = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func cliSkillOptTemplate(id string, body string) db.AgentTemplate {
 	content := cliSkillOptTemplateContent(id, body)
 	parsed, err := agenttemplate.ParseTemplateContent(content)
