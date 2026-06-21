@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/gitmoot/internal/artifact"
+	"github.com/jerryfane/gitmoot/internal/cockpit"
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/daemon"
 	"github.com/jerryfane/gitmoot/internal/db"
@@ -1689,6 +1690,28 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 			writeLine(w.Stdout, "job %s runtime lock release failed: %v", job.ID, err)
 		}
 	}()
+	// Cockpit wrapping happens AFTER the runtime-session lock + checkout
+	// resolution so at most one live pane exists per held runtime session and the
+	// pane's CWD is the resolved worktree. It is strictly opt-in and best-effort:
+	// when --cockpit is off (or herdr is unavailable) the adapter is unchanged and
+	// behavior is byte-identical to today. A policy load failure degrades to no
+	// cockpit rather than failing the job.
+	if payload.Cockpit {
+		policy, policyErr := w.orchestratePolicy()
+		modeOff := policyErr != nil || policy.CockpitMode == config.CockpitModeOff
+		var cp *cockpit.Cockpit
+		if !modeOff {
+			cp = w.newCockpit(policy)
+		}
+		meta := cockpitJobMeta(job, payload, agent, checkout, policy.CockpitPaneKey)
+		var unavailable bool
+		adapter, unavailable = maybeWrapCockpit(cp, payload.Cockpit, modeOff, adapter, meta)
+		if unavailable {
+			if eventErr := w.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "cockpit_unavailable", Message: "cockpit requested but herdr is unavailable; running without a pane"}); eventErr != nil {
+				writeLine(w.Stdout, "job %s cockpit_unavailable event failed: %v", job.ID, eventErr)
+			}
+		}
+	}
 	if managed.OK {
 		if err := w.Store.MarkAgentInstanceRunning(ctx, agent.Name, time.Now().UTC(), managed.JobTimeout); err != nil {
 			if finishErr := w.finishQueuedJob(ctx, job.ID, workflow.JobFailed, err); finishErr != nil {
@@ -1742,6 +1765,80 @@ func (w jobWorker) parallelSessionPolicy() (config.ParallelSessionPolicy, error)
 		return config.ParallelSessionPolicy{}, err
 	}
 	return config.LoadParallelSessionPolicy(paths)
+}
+
+// orchestratePolicy loads the host-level [orchestrate] cockpit policy, mirroring
+// parallelSessionPolicy: an implicit/empty config home uses the defaults, and an
+// explicit home loads from the config file. It is best-effort at the call site —
+// a load error degrades to no cockpit (the job runs unwrapped).
+func (w jobWorker) orchestratePolicy() (config.OrchestratePolicy, error) {
+	if !w.ConfigHomeExplicit && strings.TrimSpace(w.ConfigHome) == "" {
+		return config.DefaultOrchestratePolicy(), nil
+	}
+	paths, err := initializedPaths(w.ConfigHome)
+	if err != nil {
+		return config.OrchestratePolicy{}, err
+	}
+	return config.LoadOrchestratePolicy(paths)
+}
+
+// newCockpit constructs a *cockpit.Cockpit from the orchestrate policy, backed by
+// the db store via the cockpitPaneStore shim. When the policy disables cockpit
+// panes (mode "off") it returns nil so the caller skips wrapping entirely. The
+// herdr binary is taken from HERDR_BIN (falling back to "herdr").
+func (w jobWorker) newCockpit(policy config.OrchestratePolicy) *cockpit.Cockpit {
+	if policy.CockpitMode == config.CockpitModeOff {
+		return nil
+	}
+	return cockpit.New(cockpit.Options{
+		HerdrBin:    firstNonEmpty(os.Getenv("HERDR_BIN"), "herdr"),
+		MaxPanes:    policy.CockpitMaxPanes,
+		PaneKeyMode: policy.CockpitPaneKey,
+	}, cockpitPaneStore{store: w.Store})
+}
+
+// cockpitJobMeta builds the cockpit.JobMeta for a delegation job from the decoded
+// payload, the runtime agent, and the resolved checkout dir. The pane key follows
+// the policy pane-key mode: "seat" keys by agent (one pane per logical seat),
+// otherwise the job id (one pane per job, the P0 default).
+func cockpitJobMeta(job db.Job, payload workflow.JobPayload, agent runtime.Agent, checkout string, paneKeyMode string) cockpit.JobMeta {
+	paneKey := job.ID
+	if paneKeyMode == config.CockpitPaneKeySeat {
+		paneKey = agent.Name
+	}
+	return cockpit.JobMeta{
+		JobID:     job.ID,
+		RootJobID: payload.RootJobID,
+		Agent:     agent.Name,
+		Action:    job.Type,
+		Branch:    payload.Branch,
+		Worktree:  checkout,
+		PaneKey:   paneKey,
+		Depth:     payload.DelegationDepth,
+	}
+}
+
+// maybeWrapCockpit decides whether a job's delivery is wrapped in a herdr pane.
+// It is a pure helper (no daemon state) so the wrap-vs-passthrough decision is
+// directly unit-testable. The returned unavailable flag is true exactly when the
+// caller should emit a single cockpit_unavailable job event:
+//   - not requested (payload.Cockpit false): inner unchanged, no event.
+//   - requested but the policy mode is off: skip entirely, inner unchanged, no
+//     event (an off host opted out, so there is nothing to warn about).
+//   - requested, mode not off, but the cockpit is nil or herdr is not available:
+//     inner unchanged, unavailable=true so the caller emits the event.
+//   - requested and available: the wrapped adapter, no event.
+//
+// Cockpit construction/Available failures are fail-open by contract: cp.Wrap
+// already returns inner untouched when Available is false.
+func maybeWrapCockpit(cp *cockpit.Cockpit, requested bool, modeOff bool, inner workflow.DeliveryAdapter, meta cockpit.JobMeta) (workflow.DeliveryAdapter, bool) {
+	if !requested || modeOff {
+		return inner, false
+	}
+	if cp == nil || !cp.Available(context.Background()) {
+		return inner, true
+	}
+	return cp.Wrap(inner, meta), false
 }
 
 func tempWorkerEligible(ctx context.Context, store *db.Store, job db.Job, payload workflow.JobPayload, agent runtime.Agent, policy config.ParallelSessionPolicy, now time.Time) tempWorkerEligibility {
