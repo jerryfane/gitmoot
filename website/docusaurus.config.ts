@@ -87,6 +87,11 @@ const config: Config = {
           position: 'right',
         },
         {
+          href: 'https://gitmoot.io/llms.txt',
+          label: 'llms.txt',
+          position: 'right',
+        },
+        {
           href: 'https://github.com/jerryfane/gitmoot',
           label: 'GitHub',
           position: 'right',
@@ -110,6 +115,7 @@ const config: Config = {
       links: [
         {label: 'Install script', href: 'https://gitmoot.io/install.sh'},
         {label: 'SKILL.md', href: 'https://gitmoot.io/SKILL.md'},
+        {label: 'llms.txt', href: 'https://gitmoot.io/llms.txt'},
         {label: 'Website', href: 'https://gitmoot.io'},
         {label: 'GitHub', href: 'https://github.com/jerryfane/gitmoot'},
         {label: 'Discord', href: 'https://discord.gg/TTFRHFyDXf'},

@@ -473,7 +473,7 @@ for install details and troubleshooting.
 ## Documentation
 
 - [Hosted docs](https://gitmoot.io/docs/intro)
-- [LLM index](https://gitmoot.io/llms.txt)
+- [LLM index](https://gitmoot.io/llms.txt) — machine-readable docs index; agents start here (full context: [llms-full.txt](https://gitmoot.io/llms-full.txt))
 - [Agent Skills package](skills/gitmoot/SKILL.md)
 - [CLI reference](skills/gitmoot/references/CLI.md)
 - [Codex and Claude plugins](docs/plugins.md)

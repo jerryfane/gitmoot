@@ -5,6 +5,10 @@ goals, reviews, pull request comments, daemon jobs, branch locks, agent
 templates, current-chat prompt import, and Codex or Claude Code runtime
 workflows.
 
+This file is the machine-readable index of the Gitmoot docs — agents should
+start here, then open [`llms-full.txt`](https://gitmoot.io/llms-full.txt) for the
+full expanded context.
+
 ## Start Here
 
 - [Introduction](https://gitmoot.io/docs/intro): What Gitmoot is and when to use it.
@@ -13,7 +17,7 @@ workflows.
 - [PR Comment Workflow](https://gitmoot.io/docs/workflows/pr-comment-workflow): Route auditable work from GitHub comments.
 - [Planner And Goal Workflow](https://gitmoot.io/docs/workflows/planner-goal-workflow): Create structured plans and goal files.
 - [Template Capture Workflow](https://gitmoot.io/docs/workflows/template-capture-workflow): Turn a current chat workflow into a reviewed reusable template.
-- [SkillOpt Train Workflow](https://gitmoot.io/docs/workflows/skillopt-train-workflow): Run the full feedback, optimizer, candidate-review, and promotion loop.
+- [SkillOpt Train Workflow](https://gitmoot.io/docs/workflows/skillopt-train-workflow): Run the full feedback, optimizer, candidate-review, and promotion loop, including judge↔human outcome capture, `judge-report`, and judge-prompt optimization.
 
 ## References
 

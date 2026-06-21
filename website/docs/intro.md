@@ -8,6 +8,14 @@ GitHub pull request comments, routes jobs to registered agent runtimes, and
 writes attributed results back to the pull request discussion. There is no
 hosted control plane in the current beta.
 
+:::tip For agents
+New here? Open **[`llms.txt`](https://gitmoot.io/llms.txt)** — the
+machine-readable index of these docs — and the agent skill
+**[`SKILL.md`](https://gitmoot.io/SKILL.md)**.
+**[`llms-full.txt`](https://gitmoot.io/llms-full.txt)** has the full expanded
+context in one file.
+:::
+
 ## What Gitmoot Is For
 
 - Route PR comments to named local agents.
@@ -49,9 +57,7 @@ flowchart TD
 Codex, Claude Code, and Kimi Code are the runtimes Gitmoot can start or
 subscribe; shell is subscribe-only.
 
-Use the docs here for the human workflow. Agents should also read
-[`SKILL.md`](https://gitmoot.io/SKILL.md) and
-[`llms.txt`](https://gitmoot.io/llms.txt).
+Use the docs here for the human workflow; agents have the index callout above.
 
 ## Docs Map
 
