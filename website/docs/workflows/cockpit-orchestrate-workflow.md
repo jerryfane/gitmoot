@@ -22,6 +22,11 @@ the coordinator splits a workspace for the run, each subagent gets a pane labele
 the job runs. Children inherit the cockpit setting from their parent, so a single
 `--cockpit` on the root lights up the whole orchestra.
 
+**Auto-detect:** if you run `gitmoot orchestrate` from inside a Herdr session
+(`HERDR_ENV` set), the cockpit turns on automatically — no `--cockpit` needed. An
+explicit flag still works anywhere; `cockpit_mode = off` (below) is the host-level
+veto; outside a Herdr session it stays off unless you pass the flag.
+
 Pick where the run lands with `--cockpit-session`:
 
 ```sh
@@ -62,15 +67,17 @@ overridden per run by the flags above:
 
 ```toml
 [orchestrate]
-cockpit_mode = "auto"      # on | off | auto (auto = on iff herdr is reachable)
+cockpit_mode = "auto"      # on | off | auto (auto = on when launched in a Herdr session)
 cockpit_session = ""       # default Herdr session/workspace label ("" = per-run)
 cockpit_max_panes = 4      # cap on simultaneous panes per run
 cockpit_pane_key = "job"   # job (one pane per job) | seat (reuse a pane per role)
 ```
 
 - `cockpit_mode = "off"` disables the cockpit even if `--cockpit` was passed;
-  `"on"` forces it (and emits a `cockpit_unavailable` job event if Herdr is
-  unreachable); `"auto"` (the default) turns it on only when `herdr status` is ok.
+  `"auto"` (the default) auto-enables it when you run `orchestrate` from inside a
+  Herdr session (and honors an explicit `--cockpit` anywhere). Either way a pane
+  is only actually opened when `herdr status` is ok; otherwise the requested run
+  emits a single `cockpit_unavailable` job event and proceeds without panes.
 - `cockpit_pane_key = "job"` opens one pane per child job. `seat` mode reuses a
   single pane per logical role across phases so a long run does not accumulate
   panes.

@@ -2741,3 +2741,22 @@ func TestAgentModelRoundTripsThroughStorageMapping(t *testing.T) {
 		t.Fatalf("runtimeAgent model = %q, want %q", roundTripped.Model, "opus")
 	}
 }
+
+func TestCockpitAutoEnabled(t *testing.T) {
+	cases := []struct {
+		explicit bool
+		env      string
+		want     bool
+	}{
+		{false, "", false},     // outside Herdr, no flag -> off
+		{false, "1", true},     // inside a Herdr session -> auto on
+		{false, "  ", false},   // whitespace HERDR_ENV -> off
+		{true, "", true},       // explicit --cockpit -> on even outside Herdr
+		{true, "1", true},      // explicit + in Herdr -> on
+	}
+	for _, c := range cases {
+		if got := cockpitAutoEnabled(c.explicit, c.env); got != c.want {
+			t.Errorf("cockpitAutoEnabled(%v, %q) = %v, want %v", c.explicit, c.env, got, c.want)
+		}
+	}
+}

@@ -317,6 +317,11 @@ func runOrchestrate(args []string, stdout, stderr io.Writer) int {
 	}
 	// Force the background run path: orchestrate always fans out delegations.
 	options.background = true
+	// Auto-detect: when orchestrate is launched from inside a Herdr session, default
+	// the cockpit on so panes "just appear" without an explicit --cockpit. An
+	// explicit --cockpit/--herdr/--cockpit-session already set it; outside Herdr it
+	// stays off; and the daemon's [orchestrate] cockpit_mode = off still vetoes.
+	options.cockpit = cockpitAutoEnabled(options.cockpit, os.Getenv("HERDR_ENV"))
 	selected, reason := selectOrchestrateAction(options)
 	output, exit := dispatchAgentCommand(options, selected, reason, "orchestrate", stdout, stderr)
 	if exit != 0 {
@@ -532,6 +537,14 @@ func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agen
 		options.cockpit = true
 	}
 	return options, true
+}
+
+// cockpitAutoEnabled implements the cockpit "auto" default: it stays whatever the
+// user explicitly chose, otherwise turns on when launched from inside a Herdr
+// session (a non-empty HERDR_ENV). The daemon's [orchestrate] cockpit_mode = off
+// is the host-level veto applied later.
+func cockpitAutoEnabled(explicit bool, herdrEnv string) bool {
+	return explicit || strings.TrimSpace(herdrEnv) != ""
 }
 
 func setAgentRunOption(options *agentRunOptions, flagName string, value string, stderr io.Writer) bool {
