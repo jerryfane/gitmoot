@@ -211,12 +211,77 @@ func TestDaemonRestartOverlayPreservesSavedArgs(t *testing.T) {
 	}
 }
 
+func TestDaemonStartForwardsRepoAndSessionThroughRestart(t *testing.T) {
+	// The detached child argv carries both filters (this is exactly what
+	// daemonMeta.Args records).
+	childArgs := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, "owner/project", "root-coordinator")
+	if !daemonArgsContainFlag(childArgs, "repo", "owner/project") {
+		t.Fatalf("child argv missing --repo: %v", childArgs)
+	}
+	if !daemonArgsContainFlag(childArgs, "session", "root-coordinator") {
+		t.Fatalf("child argv missing --session: %v", childArgs)
+	}
+
+	meta := daemonMeta{Args: childArgs}
+
+	// A restart with no explicit start flags rebuilds the start args from the
+	// saved run args and must preserve both filters.
+	restartCfg, code := parseDaemonStartConfig("daemon restart", nil, io.Discard)
+	if code != 0 {
+		t.Fatalf("parseDaemonStartConfig(restart) code = %d", code)
+	}
+	targetArgs := overlayDaemonStartArgs(daemonStartArgsFromRunArgs(meta.Args), restartCfg)
+	parsed, code := parseDaemonStartConfig("daemon restart", targetArgs, io.Discard)
+	if code != 0 {
+		t.Fatalf("parse restored restart args code = %d, args=%v", code, targetArgs)
+	}
+	if parsed.RepoFlag != "owner/project" {
+		t.Fatalf("restart repo flag = %q, want owner/project; args=%v", parsed.RepoFlag, targetArgs)
+	}
+	if parsed.Session != "root-coordinator" {
+		t.Fatalf("restart session = %q, want root-coordinator; args=%v", parsed.Session, targetArgs)
+	}
+
+	// An explicit --session on restart overlays the saved value.
+	overrideCfg, code := parseDaemonStartConfig("daemon restart", []string{"--session", "other-root"}, io.Discard)
+	if code != 0 {
+		t.Fatalf("parseDaemonStartConfig(override) code = %d", code)
+	}
+	overlaid := overlayDaemonStartArgs(daemonStartArgsFromRunArgs(meta.Args), overrideCfg)
+	parsedOverride, code := parseDaemonStartConfig("daemon restart", overlaid, io.Discard)
+	if code != 0 {
+		t.Fatalf("parse overlaid restart args code = %d, args=%v", code, overlaid)
+	}
+	if parsedOverride.RepoFlag != "owner/project" {
+		t.Fatalf("override repo flag = %q, want owner/project; args=%v", parsedOverride.RepoFlag, overlaid)
+	}
+	if parsedOverride.Session != "other-root" {
+		t.Fatalf("override session = %q, want other-root; args=%v", parsedOverride.Session, overlaid)
+	}
+}
+
+func TestDaemonStartConfigSessionRootAlias(t *testing.T) {
+	parsed, code := parseDaemonStartConfig("daemon start", []string{"--root", "root-coordinator"}, io.Discard)
+	if code != 0 {
+		t.Fatalf("parseDaemonStartConfig(--root) code = %d", code)
+	}
+	if parsed.Session != "root-coordinator" {
+		t.Fatalf("--root session = %q, want root-coordinator", parsed.Session)
+	}
+	if !parsed.ExplicitSession {
+		t.Fatalf("--root did not mark the session as explicit")
+	}
+}
+
 func TestDaemonChildArgsRunAllRepoSupervisor(t *testing.T) {
-	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 2, true)
+	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 2, true, "", "")
 
 	for i, arg := range args {
 		if arg == "--repo" || strings.HasPrefix(arg, "--repo=") {
 			t.Fatalf("daemon child args include repo at index %d: %v", i, args)
+		}
+		if arg == "--session" || strings.HasPrefix(arg, "--session=") {
+			t.Fatalf("daemon child args include session at index %d: %v", i, args)
 		}
 	}
 	parsed, code := parseDaemonStartConfig("daemon restart", args[2:], io.Discard)
@@ -226,9 +291,60 @@ func TestDaemonChildArgsRunAllRepoSupervisor(t *testing.T) {
 	if parsed.RepoSet {
 		t.Fatalf("daemon child args selected single-repo mode: %v", args)
 	}
+	if parsed.Session != "" {
+		t.Fatalf("daemon child args carried a session filter: %v", args)
+	}
 	if parsed.Workers != 2 || parsed.Poll != 30*time.Second || !parsed.WatchSkillOptReviews {
 		t.Fatalf("parsed child args = %+v", parsed)
 	}
+}
+
+func TestDaemonChildArgsForwardsRepo(t *testing.T) {
+	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, "owner/project", "")
+
+	if !daemonArgsContainFlag(args, "repo", "owner/project") {
+		t.Fatalf("daemon child args missing --repo owner/project: %v", args)
+	}
+	parsed, code := parseDaemonStartConfig("daemon restart", args[2:], io.Discard)
+	if code != 0 {
+		t.Fatalf("parse child args code = %d, args=%v", code, args)
+	}
+	if !parsed.RepoSet || parsed.RepoFlag != "owner/project" {
+		t.Fatalf("parsed child args did not select single-repo mode: %+v args=%v", parsed, args)
+	}
+	if parsed.Session != "" {
+		t.Fatalf("parsed child args carried a session filter: %+v", parsed)
+	}
+}
+
+func TestDaemonChildArgsForwardsSession(t *testing.T) {
+	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, "owner/project", "root-coordinator")
+
+	if !daemonArgsContainFlag(args, "repo", "owner/project") {
+		t.Fatalf("daemon child args missing --repo owner/project: %v", args)
+	}
+	if !daemonArgsContainFlag(args, "session", "root-coordinator") {
+		t.Fatalf("daemon child args missing --session root-coordinator: %v", args)
+	}
+	parsed, code := parseDaemonStartConfig("daemon restart", args[2:], io.Discard)
+	if code != 0 {
+		t.Fatalf("parse child args code = %d, args=%v", code, args)
+	}
+	if parsed.Session != "root-coordinator" {
+		t.Fatalf("parsed child args session = %q, want root-coordinator; args=%v", parsed.Session, args)
+	}
+}
+
+// daemonArgsContainFlag reports whether argv carries `--name value` as a
+// separate flag/value pair.
+func daemonArgsContainFlag(args []string, name string, value string) bool {
+	flagName := "--" + name
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == flagName && args[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDaemonProcessArgsMatchRequiresSavedArgs(t *testing.T) {
@@ -1085,7 +1201,7 @@ func TestDaemonWorkerTickRetriesFailedResultCommentPost(t *testing.T) {
 	}
 
 	comments.postErr = nil
-	if err := retryPendingJobComments(ctx, worker, "owner/repo"); err != nil {
+	if err := retryPendingJobComments(ctx, worker, "owner/repo", ""); err != nil {
 		t.Fatalf("retryPendingJobComments returned error: %v", err)
 	}
 	if len(comments.posted) != 1 {
@@ -1127,7 +1243,7 @@ func TestRetryPendingJobCommentsPreservesStoredFailureDiagnostic(t *testing.T) {
 		return comments
 	}
 
-	if err := retryPendingJobComments(ctx, worker, "owner/repo"); err != nil {
+	if err := retryPendingJobComments(ctx, worker, "owner/repo", ""); err != nil {
 		t.Fatalf("retryPendingJobComments returned error: %v", err)
 	}
 
@@ -3401,7 +3517,7 @@ func TestRunQueuedJobsForRepoSkipsOtherRepos(t *testing.T) {
 		return adapter, nil
 	}
 
-	if err := runQueuedJobsForRepo(ctx, worker, 2, "owner/repo-a"); err != nil {
+	if err := runQueuedJobsForRepo(ctx, worker, 2, "owner/repo-a", ""); err != nil {
 		t.Fatalf("runQueuedJobsForRepo returned error: %v", err)
 	}
 
@@ -3418,6 +3534,115 @@ func TestRunQueuedJobsForRepoSkipsOtherRepos(t *testing.T) {
 	}
 	if jobB.State != string(workflow.JobQueued) {
 		t.Fatalf("job-b state = %q, want queued", jobB.State)
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", adapter.calls)
+	}
+}
+
+func TestRunQueuedJobsForRepoSkipsOtherSessions(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo-a", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "audit", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo-a")
+	// The root coordinator job (its own id is the root) and a child carrying the
+	// root id both belong to session "root-coordinator"; a job from a different
+	// root does not.
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "root-coordinator", Agent: "audit", Action: "ask", Repo: "owner/repo-a", Branch: "main", PullRequest: 1})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "child-of-root", Agent: "audit", Action: "ask", Repo: "owner/repo-a", Branch: "main", PullRequest: 2, RootJobID: "root-coordinator"})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "other-root-job", Agent: "audit", Action: "ask", Repo: "owner/repo-a", Branch: "main", PullRequest: 3, RootJobID: "other-root"})
+	adapter := &cliWorkerFakeAdapter{
+		output: `{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
+	}
+	worker := defaultJobWorker(store, io.Discard)
+	worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		return t.TempDir(), nil
+	}
+	worker.AdapterFactory = func(runtime.Agent, string) (workflow.DeliveryAdapter, error) {
+		return adapter, nil
+	}
+
+	if err := runQueuedJobsForRepo(ctx, worker, 3, "", "root-coordinator"); err != nil {
+		t.Fatalf("runQueuedJobsForRepo returned error: %v", err)
+	}
+
+	root, err := store.GetJob(ctx, "root-coordinator")
+	if err != nil {
+		t.Fatalf("GetJob root-coordinator returned error: %v", err)
+	}
+	child, err := store.GetJob(ctx, "child-of-root")
+	if err != nil {
+		t.Fatalf("GetJob child-of-root returned error: %v", err)
+	}
+	other, err := store.GetJob(ctx, "other-root-job")
+	if err != nil {
+		t.Fatalf("GetJob other-root-job returned error: %v", err)
+	}
+	// The root coordinator (job.ID == session) ran.
+	if root.State != string(workflow.JobSucceeded) {
+		t.Fatalf("root-coordinator state = %q, want succeeded", root.State)
+	}
+	// The child (payload.RootJobID == session) ran.
+	if child.State != string(workflow.JobSucceeded) {
+		t.Fatalf("child-of-root state = %q, want succeeded", child.State)
+	}
+	// The non-matching root stayed queued.
+	if other.State != string(workflow.JobQueued) {
+		t.Fatalf("other-root-job state = %q, want queued", other.State)
+	}
+	if adapter.calls != 2 {
+		t.Fatalf("adapter calls = %d, want 2", adapter.calls)
+	}
+}
+
+func TestRunQueuedJobsForRepoAppliesRepoAndSessionAndMatch(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo-a", t.TempDir())
+	seedDaemonWorkerRepo(t, store, "owner/repo-b", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "audit", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo-a")
+	if err := store.AllowAgentRepo(ctx, "audit", "owner/repo-b"); err != nil {
+		t.Fatalf("AllowAgentRepo returned error: %v", err)
+	}
+	// Only the job matching BOTH repo AND session should run.
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "match", Agent: "audit", Action: "ask", Repo: "owner/repo-a", Branch: "main", PullRequest: 1, RootJobID: "root-coordinator"})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "wrong-repo", Agent: "audit", Action: "ask", Repo: "owner/repo-b", Branch: "main", PullRequest: 2, RootJobID: "root-coordinator"})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "wrong-session", Agent: "audit", Action: "ask", Repo: "owner/repo-a", Branch: "main", PullRequest: 3, RootJobID: "other-root"})
+	adapter := &cliWorkerFakeAdapter{
+		output: `{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
+	}
+	worker := defaultJobWorker(store, io.Discard)
+	worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		return t.TempDir(), nil
+	}
+	worker.AdapterFactory = func(runtime.Agent, string) (workflow.DeliveryAdapter, error) {
+		return adapter, nil
+	}
+
+	if err := runQueuedJobsForRepo(ctx, worker, 3, "owner/repo-a", "root-coordinator"); err != nil {
+		t.Fatalf("runQueuedJobsForRepo returned error: %v", err)
+	}
+
+	match, err := store.GetJob(ctx, "match")
+	if err != nil {
+		t.Fatalf("GetJob match returned error: %v", err)
+	}
+	wrongRepo, err := store.GetJob(ctx, "wrong-repo")
+	if err != nil {
+		t.Fatalf("GetJob wrong-repo returned error: %v", err)
+	}
+	wrongSession, err := store.GetJob(ctx, "wrong-session")
+	if err != nil {
+		t.Fatalf("GetJob wrong-session returned error: %v", err)
+	}
+	if match.State != string(workflow.JobSucceeded) {
+		t.Fatalf("match state = %q, want succeeded", match.State)
+	}
+	if wrongRepo.State != string(workflow.JobQueued) {
+		t.Fatalf("wrong-repo state = %q, want queued", wrongRepo.State)
+	}
+	if wrongSession.State != string(workflow.JobQueued) {
+		t.Fatalf("wrong-session state = %q, want queued", wrongSession.State)
 	}
 	if adapter.calls != 1 {
 		t.Fatalf("adapter calls = %d, want 1", adapter.calls)
@@ -3521,7 +3746,7 @@ func TestRunQueuedJobsRecordsPostDeliveryWorkflowErrorForRetry(t *testing.T) {
 	}
 	gate.err = nil
 	gate.decision = workflow.MergeDecision{Ready: true}
-	if err := retryPendingJobAdvancements(ctx, worker, ""); err != nil {
+	if err := retryPendingJobAdvancements(ctx, worker, "", ""); err != nil {
 		t.Fatalf("retryPendingJobAdvancements returned error: %v", err)
 	}
 	if adapter.calls != 1 {
@@ -3578,7 +3803,7 @@ func TestRetryPendingJobAdvancementsRecoversStartedAdvancement(t *testing.T) {
 		return workflow.Engine{Store: store, MergeGate: gate}
 	}
 
-	if err := retryPendingJobAdvancements(ctx, worker, ""); err != nil {
+	if err := retryPendingJobAdvancements(ctx, worker, "", ""); err != nil {
 		t.Fatalf("retryPendingJobAdvancements returned error: %v", err)
 	}
 
@@ -3632,7 +3857,7 @@ func TestRetryPendingJobAdvancementsAdvancesFailedStoredResult(t *testing.T) {
 		return workflow.Engine{Store: store}
 	}
 
-	if err := retryPendingJobAdvancements(ctx, worker, ""); err != nil {
+	if err := retryPendingJobAdvancements(ctx, worker, "", ""); err != nil {
 		t.Fatalf("retryPendingJobAdvancements returned error: %v", err)
 	}
 
@@ -3740,7 +3965,7 @@ func TestRetryPendingJobAdvancementsRefreshesImplementedHeadBeforePreflight(t *t
 		return daemonWorkflowEngine(store, github.NoopClient{}, checkout, "")
 	}
 
-	if err := retryPendingJobAdvancements(ctx, worker, ""); err != nil {
+	if err := retryPendingJobAdvancements(ctx, worker, "", ""); err != nil {
 		t.Fatalf("retryPendingJobAdvancements returned error: %v", err)
 	}
 
@@ -3880,7 +4105,7 @@ func TestRecoverCancelledRunningJobsSettlesAbandonedCancellation(t *testing.T) {
 		t.Fatalf("CancelJob returned error: %v", err)
 	}
 
-	if err := recoverCancelledRunningJobsForRepo(ctx, store, io.Discard, "owner/repo"); err != nil {
+	if err := recoverCancelledRunningJobsForRepo(ctx, store, io.Discard, "owner/repo", ""); err != nil {
 		t.Fatalf("recoverCancelledRunningJobsForRepo returned error: %v", err)
 	}
 
@@ -3910,7 +4135,7 @@ func TestRecoverCancelledRunningJobsForRepoSkipsOtherRepos(t *testing.T) {
 		}
 	}
 
-	if err := recoverCancelledRunningJobsForRepo(ctx, store, io.Discard, "owner/repo-a"); err != nil {
+	if err := recoverCancelledRunningJobsForRepo(ctx, store, io.Discard, "owner/repo-a", ""); err != nil {
 		t.Fatalf("recoverCancelledRunningJobsForRepo returned error: %v", err)
 	}
 
@@ -3940,7 +4165,7 @@ func TestDaemonWorkerTickRechecksStaleRunningJobs(t *testing.T) {
 	worker := defaultJobWorker(store, io.Discard)
 	now := time.Now().UTC().Add(daemonRunningJobStaleAfter + time.Second)
 
-	if err := runDaemonWorkerTick(ctx, store, worker, 0, false, "", io.Discard, now); err != nil {
+	if err := runDaemonWorkerTick(ctx, store, worker, 0, false, "", "", io.Discard, now); err != nil {
 		t.Fatalf("runDaemonWorkerTick returned error: %v", err)
 	}
 
@@ -3964,7 +4189,7 @@ func TestRecoverRunningJobsForRepoSkipsOtherRepos(t *testing.T) {
 		}
 	}
 
-	if err := recoverRunningJobsBeforeForRepo(ctx, store, io.Discard, time.Now().UTC().Add(time.Second), "owner/repo-a"); err != nil {
+	if err := recoverRunningJobsBeforeForRepo(ctx, store, io.Discard, time.Now().UTC().Add(time.Second), "owner/repo-a", ""); err != nil {
 		t.Fatalf("recoverRunningJobsBeforeForRepo returned error: %v", err)
 	}
 

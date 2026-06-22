@@ -108,7 +108,7 @@ func runDaemonStartWithWorkDir(args []string, workDir string, stdout, stderr io.
 		}
 	}
 
-	started, err := startDaemonChild(cfg.Home, cfg.Poll.String(), cfg.Workers, cfg.WatchSkillOptReviews, state, resolvedWorkDir)
+	started, err := startDaemonChild(cfg.Home, cfg.Poll.String(), cfg.Workers, cfg.WatchSkillOptReviews, cfg.RepoFlag, cfg.Session, state, resolvedWorkDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "daemon start: %v\n", err)
 		return 1
@@ -128,6 +128,9 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	repoFlag := fs.String("repo", "", "GitHub repository as owner/repo")
+	var session string
+	fs.StringVar(&session, "session", "", "scope the daemon worker to a delegation root job id")
+	fs.StringVar(&session, "root", "", "alias for --session")
 	poll := fs.Duration("poll", 30*time.Second, "poll interval")
 	workers := fs.Int("workers", 1, "worker count")
 	dryRun := fs.Bool("dry-run", false, "run without mutating external systems")
@@ -159,7 +162,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 
 	if *repoFlag == "" {
-		err := runRegisteredRepoSupervisor(ctx, *home, *poll, *workers, *dryRun, *watchSkillOptReviews, stdout)
+		err := runRegisteredRepoSupervisor(ctx, *home, *poll, *workers, *dryRun, *watchSkillOptReviews, session, stdout)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 0
 		}
@@ -198,7 +201,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 			Store:        store,
 			GitHub:       gh,
 			Workflow:     &engine,
-		}, store, *workers, stdout)
+		}, store, *workers, session, stdout)
 	})
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return 0
@@ -401,6 +404,8 @@ type daemonStartConfig struct {
 	RepoFlag                     string
 	Repo                         github.Repository
 	RepoSet                      bool
+	Session                      string
+	ExplicitSession              bool
 	Poll                         time.Duration
 	Workers                      int
 	ExplicitStartConfig          bool
@@ -418,6 +423,9 @@ func parseDaemonStartConfig(command string, args []string, stderr io.Writer) (da
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	repoFlag := fs.String("repo", "", "GitHub repository as owner/repo")
+	var session string
+	fs.StringVar(&session, "session", "", "scope the daemon worker to a delegation root job id")
+	fs.StringVar(&session, "root", "", "alias for --session")
 	poll := fs.Duration("poll", 30*time.Second, "poll interval")
 	workers := fs.Int("workers", 1, "worker count")
 	watchSkillOptReviews := fs.Bool("watch-skillopt-reviews", false, "poll watched SkillOpt review issue comments and import valid feedback")
@@ -434,6 +442,7 @@ func parseDaemonStartConfig(command string, args []string, stderr io.Writer) (da
 	cfg := daemonStartConfig{
 		Home:                 *home,
 		RepoFlag:             *repoFlag,
+		Session:              session,
 		Poll:                 *poll,
 		Workers:              *workers,
 		WatchSkillOptReviews: *watchSkillOptReviews,
@@ -442,6 +451,9 @@ func parseDaemonStartConfig(command string, args []string, stderr io.Writer) (da
 		switch f.Name {
 		case "repo":
 			cfg.ExplicitRepo = true
+			cfg.ExplicitStartConfig = true
+		case "session", "root":
+			cfg.ExplicitSession = true
 			cfg.ExplicitStartConfig = true
 		case "poll":
 			cfg.ExplicitPoll = true
@@ -567,6 +579,9 @@ func overlayDaemonStartArgs(args []string, cfg daemonStartConfig) []string {
 	if cfg.ExplicitRepo {
 		args = withDaemonFlagArg(args, "repo", cfg.RepoFlag)
 	}
+	if cfg.ExplicitSession {
+		args = withDaemonFlagArg(args, "session", cfg.Session)
+	}
 	if cfg.ExplicitPoll {
 		args = withDaemonFlagArg(args, "poll", cfg.Poll.String())
 	}
@@ -637,7 +652,7 @@ func currentDaemonPID(state daemonState) (pid int, stale bool, err error) {
 	return pid, false, nil
 }
 
-func startDaemonChild(home string, poll string, workers int, watchSkillOptReviews bool, state daemonState, workDir string) (daemonMeta, error) {
+func startDaemonChild(home string, poll string, workers int, watchSkillOptReviews bool, repo string, session string, state daemonState, workDir string) (daemonMeta, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return daemonMeta{}, err
@@ -647,7 +662,7 @@ func startDaemonChild(home string, poll string, workers int, watchSkillOptReview
 		return daemonMeta{}, err
 	}
 	defer logFile.Close()
-	args := daemonChildArgs(home, poll, workers, watchSkillOptReviews)
+	args := daemonChildArgs(home, poll, workers, watchSkillOptReviews, repo, session)
 	cmd := exec.Command(executable, args...)
 	cmd.Dir = workDir
 	cmd.Stdout = logFile
@@ -670,10 +685,16 @@ func startDaemonChild(home string, poll string, workers int, watchSkillOptReview
 	}, nil
 }
 
-func daemonChildArgs(home string, poll string, workers int, watchSkillOptReviews bool) []string {
+func daemonChildArgs(home string, poll string, workers int, watchSkillOptReviews bool, repo string, session string) []string {
 	args := []string{"daemon", "run", "--poll", poll, "--workers", strconv.Itoa(workers)}
 	if home != "" {
 		args = append(args, "--home", home)
+	}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
+	if session != "" {
+		args = append(args, "--session", session)
 	}
 	if watchSkillOptReviews {
 		args = append(args, "--watch-skillopt-reviews")
@@ -804,7 +825,7 @@ func hasWhitespace(value string) bool {
 	return strings.ContainsAny(value, " \t\r\n")
 }
 
-func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Duration, workers int, dryRun bool, watchSkillOptReviews bool, stdout io.Writer) error {
+func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Duration, workers int, dryRun bool, watchSkillOptReviews bool, rootFilter string, stdout io.Writer) error {
 	return withStoreAndPaths(home, func(paths config.Paths, store *db.Store) error {
 		schedule := registeredRepoSchedule{
 			NextPoll:    map[string]time.Time{},
@@ -826,7 +847,7 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 				return err
 			}
 			workerErr = startSupervisorWorkerLoop(ctx, daemonWorkerLoopInterval, func(now time.Time) error {
-				return runEnabledRepoWorkerTicksWithLocks(ctx, store, worker, workers, stdout, now, checkoutLocks)
+				return runEnabledRepoWorkerTicksWithLocks(ctx, store, worker, workers, rootFilter, stdout, now, checkoutLocks)
 			})
 			startCockpitReconcileLoop(ctx, store, paths.Home, stdout)
 		}
@@ -859,14 +880,14 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 	})
 }
 
-func runSingleRepoSupervisor(ctx context.Context, home string, d daemon.Daemon, store *db.Store, workers int, stdout io.Writer) error {
+func runSingleRepoSupervisor(ctx context.Context, home string, d daemon.Daemon, store *db.Store, workers int, rootFilter string, stdout io.Writer) error {
 	if err := recoverExpiredRuntimeSessionLocks(ctx, store, stdout, time.Now().UTC()); err != nil {
 		return err
 	}
-	if err := recoverRunningJobsForRepo(ctx, store, stdout, d.Repo.FullName()); err != nil {
+	if err := recoverRunningJobsForRepo(ctx, store, stdout, d.Repo.FullName(), rootFilter); err != nil {
 		return err
 	}
-	if err := recoverCancelledRunningJobsForRepo(ctx, store, stdout, d.Repo.FullName()); err != nil {
+	if err := recoverCancelledRunningJobsForRepo(ctx, store, stdout, d.Repo.FullName(), rootFilter); err != nil {
 		return err
 	}
 	interval := d.PollInterval
@@ -879,7 +900,7 @@ func runSingleRepoSupervisor(ctx context.Context, home string, d daemon.Daemon, 
 	workerErr := startSupervisorWorkerLoop(ctx, daemonWorkerLoopInterval, func(now time.Time) error {
 		checkoutLock.Lock()
 		defer checkoutLock.Unlock()
-		return runDaemonWorkerTick(ctx, store, worker, workers, false, d.Repo.FullName(), stdout, now)
+		return runDaemonWorkerTick(ctx, store, worker, workers, false, d.Repo.FullName(), rootFilter, stdout, now)
 	})
 	startCockpitReconcileLoop(ctx, store, home, stdout)
 	for {
@@ -1224,7 +1245,7 @@ func defaultJobWorker(store *db.Store, stdout io.Writer, home ...string) jobWork
 }
 
 func recoverRunningJobs(ctx context.Context, store *db.Store, stdout io.Writer) error {
-	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, time.Now().UTC().Add(-daemonRunningJobStaleAfter), "")
+	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, time.Now().UTC().Add(-daemonRunningJobStaleAfter), "", "")
 }
 
 func recoverExpiredRuntimeSessionLocks(ctx context.Context, store *db.Store, stdout io.Writer, now time.Time) error {
@@ -1239,11 +1260,11 @@ func recoverExpiredRuntimeSessionLocks(ctx context.Context, store *db.Store, std
 }
 
 func recoverRunningJobsBefore(ctx context.Context, store *db.Store, stdout io.Writer, before time.Time) error {
-	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, before, "")
+	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, before, "", "")
 }
 
-func recoverRunningJobsForRepo(ctx context.Context, store *db.Store, stdout io.Writer, repoFilter string) error {
-	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, time.Now().UTC().Add(-daemonRunningJobStaleAfter), repoFilter)
+func recoverRunningJobsForRepo(ctx context.Context, store *db.Store, stdout io.Writer, repoFilter string, rootFilter string) error {
+	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, time.Now().UTC().Add(-daemonRunningJobStaleAfter), repoFilter, rootFilter)
 }
 
 func recoverCancelledRunningJobsForEnabledRepos(ctx context.Context, store *db.Store, stdout io.Writer) error {
@@ -1255,20 +1276,20 @@ func recoverCancelledRunningJobsForEnabledRepos(ctx context.Context, store *db.S
 		if !repo.Enabled {
 			continue
 		}
-		if err := recoverCancelledRunningJobsForRepo(ctx, store, stdout, repo.FullName()); err != nil {
+		if err := recoverCancelledRunningJobsForRepo(ctx, store, stdout, repo.FullName(), ""); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func recoverCancelledRunningJobsForRepo(ctx context.Context, store *db.Store, stdout io.Writer, repoFilter string) error {
+func recoverCancelledRunningJobsForRepo(ctx context.Context, store *db.Store, stdout io.Writer, repoFilter string, rootFilter string) error {
 	jobs, err := store.ListJobs(ctx)
 	if err != nil {
 		return err
 	}
 	for _, job := range jobs {
-		if job.State != string(workflow.JobCancelled) || !queuedJobMatchesRepo(job, repoFilter) {
+		if job.State != string(workflow.JobCancelled) || !queuedJobMatchesRepo(job, repoFilter) || !queuedJobMatchesSession(job, rootFilter) {
 			continue
 		}
 		settled, err := workflow.SettleCancelledRunningJob(ctx, store, job.ID, "cancelled job recovered after daemon restart")
@@ -1282,13 +1303,13 @@ func recoverCancelledRunningJobsForRepo(ctx context.Context, store *db.Store, st
 	return nil
 }
 
-func recoverRunningJobsBeforeForRepo(ctx context.Context, store *db.Store, stdout io.Writer, before time.Time, repoFilter string) error {
+func recoverRunningJobsBeforeForRepo(ctx context.Context, store *db.Store, stdout io.Writer, before time.Time, repoFilter string, rootFilter string) error {
 	jobs, err := store.ListRunningJobsUpdatedBefore(ctx, before)
 	if err != nil {
 		return err
 	}
 	for _, job := range jobs {
-		if !queuedJobMatchesRepo(job, repoFilter) {
+		if !queuedJobMatchesRepo(job, repoFilter) || !queuedJobMatchesSession(job, rootFilter) {
 			continue
 		}
 		recovered, err := store.TransitionJobStateWithEvent(ctx, job.ID, string(workflow.JobRunning), string(workflow.JobQueued), db.JobEvent{
@@ -1307,16 +1328,16 @@ func recoverRunningJobsBeforeForRepo(ctx context.Context, store *db.Store, stdou
 }
 
 func runQueuedJobs(ctx context.Context, worker jobWorker, limit int) error {
-	return runQueuedJobsForRepo(ctx, worker, limit, "")
+	return runQueuedJobsForRepo(ctx, worker, limit, "", "")
 }
 
-func retryPendingJobAdvancements(ctx context.Context, worker jobWorker, repoFilter string) error {
+func retryPendingJobAdvancements(ctx context.Context, worker jobWorker, repoFilter string, rootFilter string) error {
 	jobs, err := worker.Store.ListJobs(ctx)
 	if err != nil {
 		return err
 	}
 	for _, job := range jobs {
-		if !jobStateCanRetryAdvancement(job.State) || !queuedJobMatchesRepo(job, repoFilter) {
+		if !jobStateCanRetryAdvancement(job.State) || !queuedJobMatchesRepo(job, repoFilter) || !queuedJobMatchesSession(job, rootFilter) {
 			continue
 		}
 		needsRetry, err := worker.jobNeedsAdvanceRetry(ctx, job.ID)
@@ -1333,30 +1354,30 @@ func retryPendingJobAdvancements(ctx context.Context, worker jobWorker, repoFilt
 	return nil
 }
 
-func runDaemonWorkerTick(ctx context.Context, store *db.Store, worker jobWorker, workers int, dryRun bool, repoFilter string, stdout io.Writer, now time.Time) error {
+func runDaemonWorkerTick(ctx context.Context, store *db.Store, worker jobWorker, workers int, dryRun bool, repoFilter string, rootFilter string, stdout io.Writer, now time.Time) error {
 	if dryRun {
 		return nil
 	}
-	if err := recoverRunningJobsBeforeForRepo(ctx, store, stdout, now.Add(-daemonRunningJobStaleAfter), repoFilter); err != nil {
+	if err := recoverRunningJobsBeforeForRepo(ctx, store, stdout, now.Add(-daemonRunningJobStaleAfter), repoFilter, rootFilter); err != nil {
 		return err
 	}
 	if err := recoverExpiredRuntimeSessionLocks(ctx, store, stdout, now); err != nil {
 		return err
 	}
-	if err := retryPendingJobAdvancements(ctx, worker, repoFilter); err != nil {
+	if err := retryPendingJobAdvancements(ctx, worker, repoFilter, rootFilter); err != nil {
 		return err
 	}
-	if err := retryPendingJobComments(ctx, worker, repoFilter); err != nil {
+	if err := retryPendingJobComments(ctx, worker, repoFilter, rootFilter); err != nil {
 		return err
 	}
-	return runQueuedJobsForRepo(ctx, worker, workers, repoFilter)
+	return runQueuedJobsForRepo(ctx, worker, workers, repoFilter, rootFilter)
 }
 
 func runEnabledRepoWorkerTicks(ctx context.Context, store *db.Store, worker jobWorker, workers int, stdout io.Writer, now time.Time) error {
-	return runEnabledRepoWorkerTicksWithLocks(ctx, store, worker, workers, stdout, now, nil)
+	return runEnabledRepoWorkerTicksWithLocks(ctx, store, worker, workers, "", stdout, now, nil)
 }
 
-func runEnabledRepoWorkerTicksWithLocks(ctx context.Context, store *db.Store, worker jobWorker, workers int, stdout io.Writer, now time.Time, locks *repoCheckoutLocks) error {
+func runEnabledRepoWorkerTicksWithLocks(ctx context.Context, store *db.Store, worker jobWorker, workers int, rootFilter string, stdout io.Writer, now time.Time, locks *repoCheckoutLocks) error {
 	repos, err := store.ListRepos(ctx)
 	if err != nil {
 		return err
@@ -1369,7 +1390,7 @@ func runEnabledRepoWorkerTicksWithLocks(ctx context.Context, store *db.Store, wo
 		if lock != nil {
 			lock.Lock()
 		}
-		if err := runDaemonWorkerTick(ctx, store, worker, workers, false, repo.FullName(), stdout, now); err != nil {
+		if err := runDaemonWorkerTick(ctx, store, worker, workers, false, repo.FullName(), rootFilter, stdout, now); err != nil {
 			if lock != nil {
 				lock.Unlock()
 			}
@@ -1391,13 +1412,13 @@ func jobStateCanRetryAdvancement(state string) bool {
 	}
 }
 
-func retryPendingJobComments(ctx context.Context, worker jobWorker, repoFilter string) error {
+func retryPendingJobComments(ctx context.Context, worker jobWorker, repoFilter string, rootFilter string) error {
 	jobs, err := worker.Store.ListJobs(ctx)
 	if err != nil {
 		return err
 	}
 	for _, job := range jobs {
-		if !jobStateCanRetryComment(job.State) || !queuedJobMatchesRepo(job, repoFilter) {
+		if !jobStateCanRetryComment(job.State) || !queuedJobMatchesRepo(job, repoFilter) || !queuedJobMatchesSession(job, rootFilter) {
 			continue
 		}
 		needsRetry, err := worker.jobNeedsCommentRetry(ctx, job.ID)
@@ -1427,7 +1448,7 @@ func jobStateCanRetryComment(state string) bool {
 	}
 }
 
-func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repoFilter string) error {
+func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repoFilter string, rootFilter string) error {
 	if limit <= 0 {
 		return nil
 	}
@@ -1437,7 +1458,7 @@ func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repo
 	}
 	pending := make([]db.Job, 0, len(jobs))
 	for _, job := range jobs {
-		if queuedJobMatchesRepo(job, repoFilter) {
+		if queuedJobMatchesRepo(job, repoFilter) && queuedJobMatchesSession(job, rootFilter) {
 			pending = append(pending, job)
 		}
 	}
@@ -1575,6 +1596,24 @@ func queuedJobMatchesRepo(job db.Job, repoFilter string) bool {
 	}
 	payload, err := daemonJobPayload(job)
 	return err == nil && payload.Repo == repoFilter
+}
+
+// queuedJobMatchesSession reports whether a job belongs to the delegation tree
+// rooted at rootFilter. An empty filter matches everything (the default daemon
+// behavior). Otherwise a job matches iff it is the root coordinator job itself
+// (job.ID == rootFilter) or carries the root id in its payload
+// (payload.RootJobID == rootFilter); children and continuations inherit the
+// root id via the payload.
+func queuedJobMatchesSession(job db.Job, rootFilter string) bool {
+	rootFilter = strings.TrimSpace(rootFilter)
+	if rootFilter == "" {
+		return true
+	}
+	if job.ID == rootFilter {
+		return true
+	}
+	payload, err := daemonJobPayload(job)
+	return err == nil && payload.RootJobID == rootFilter
 }
 
 func queuedJobCheckoutKey(ctx context.Context, store *db.Store, job db.Job) string {
