@@ -6856,6 +6856,13 @@ Delegation fields:
   job (for example a Codex, Claude Code, or Kimi Code model name). When omitted,
   the delegated agent's configured default model is used. There is no allow-list;
   Gitmoot passes the value through to the runtime as-is.
+- `phase` (optional): a free-form per-delegation string. It is pass-through
+  metadata — Gitmoot carries it through to the child job untouched and echoes it
+  back in the coordinator continuation for each delegation that set a non-empty
+  value, so the coordinator can group or label legs (for example `plan`,
+  `implement`, `verify`). Like `model`, it is metadata only: it does **not**
+  affect scheduling, loop detection, or termination, and it is not part of the
+  delegation-set signature used for loop detection. There is no allow-list.
 - `ephemeral` (optional): an inline worker spec that spawns a throwaway child
   agent on demand instead of routing to a pre-registered one. It is **mutually
   exclusive** with `agent`: a delegation must set exactly one of `agent` or
