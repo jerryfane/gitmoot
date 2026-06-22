@@ -31,14 +31,23 @@ type OrchestratePolicy struct {
 	CockpitSession  string
 	CockpitMaxPanes int
 	CockpitPaneKey  string
+	// InlineArtifactBodies opts the coordinator continuation prompt into inlining
+	// each finished child's artifact_body as a fenced block (see issue #368). It is
+	// off by default because inlined briefs can be large.
+	InlineArtifactBodies bool
+	// InlineArtifactMaxBytes is the per-body byte cap applied when
+	// InlineArtifactBodies is set; 0 means the engine's built-in default.
+	InlineArtifactMaxBytes int
 }
 
 func DefaultOrchestratePolicy() OrchestratePolicy {
 	return OrchestratePolicy{
-		CockpitMode:     CockpitModeAuto,
-		CockpitSession:  "",
-		CockpitMaxPanes: 4,
-		CockpitPaneKey:  CockpitPaneKeyJob,
+		CockpitMode:            CockpitModeAuto,
+		CockpitSession:         "",
+		CockpitMaxPanes:        4,
+		CockpitPaneKey:         CockpitPaneKeyJob,
+		InlineArtifactBodies:   false,
+		InlineArtifactMaxBytes: 0,
 	}
 }
 
@@ -93,6 +102,14 @@ func applyOrchestratePolicyField(policy *OrchestratePolicy, key string, value st
 	case "cockpit_pane_key":
 		parsed, err := parseConfigString(value)
 		policy.CockpitPaneKey = strings.TrimSpace(parsed)
+		return err
+	case "inline_artifact_bodies":
+		parsed, err := strconv.ParseBool(value)
+		policy.InlineArtifactBodies = parsed
+		return err
+	case "inline_artifact_max_bytes":
+		parsed, err := strconv.Atoi(value)
+		policy.InlineArtifactMaxBytes = parsed
 		return err
 	default:
 		return nil

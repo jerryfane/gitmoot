@@ -29,6 +29,54 @@ func TestLoadOrchestratePolicyDefaults(t *testing.T) {
 	if policy.CockpitPaneKey != CockpitPaneKeyJob {
 		t.Fatalf("CockpitPaneKey = %q, want %q", policy.CockpitPaneKey, CockpitPaneKeyJob)
 	}
+	if policy.InlineArtifactBodies {
+		t.Fatalf("InlineArtifactBodies = true, want false by default")
+	}
+	if policy.InlineArtifactMaxBytes != 0 {
+		t.Fatalf("InlineArtifactMaxBytes = %d, want 0 by default", policy.InlineArtifactMaxBytes)
+	}
+}
+
+// TestLoadOrchestratePolicyInlineArtifactKeys pins #368: both inline-artifact keys
+// parse from [orchestrate], and absent keys default off.
+func TestLoadOrchestratePolicyInlineArtifactKeys(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[orchestrate]
+inline_artifact_bodies = true
+inline_artifact_max_bytes = 4096
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+
+	policy, err := LoadOrchestratePolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadOrchestratePolicy returned error: %v", err)
+	}
+	if !policy.InlineArtifactBodies {
+		t.Fatalf("InlineArtifactBodies = false, want true")
+	}
+	if policy.InlineArtifactMaxBytes != 4096 {
+		t.Fatalf("InlineArtifactMaxBytes = %d, want 4096", policy.InlineArtifactMaxBytes)
+	}
+
+	// Absent keys keep the off default even when the section is otherwise present.
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[orchestrate]
+cockpit_mode = "auto"
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	policy, err = LoadOrchestratePolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadOrchestratePolicy returned error: %v", err)
+	}
+	if policy.InlineArtifactBodies || policy.InlineArtifactMaxBytes != 0 {
+		t.Fatalf("absent inline keys should default off, got %+v", policy)
+	}
 }
 
 func TestLoadOrchestratePolicyOverrides(t *testing.T) {
