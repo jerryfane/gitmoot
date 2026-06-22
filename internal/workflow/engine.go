@@ -497,10 +497,15 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 			// skip_native_review_fanout straight onto the PR event.
 			SkipReviewFanout: payload.SkipNativeReviewFanout,
 		}
-		// Persist the flag onto the branch lock so the daemon's PR-watcher path
-		// (trigger 2) can read it when it independently opens the PR workflow.
-		if err := e.Store.SetBranchLockReviewFanout(ctx, payload.Repo, payload.Branch, payload.SkipNativeReviewFanout); err != nil {
-			return err
+		// Persist the flag onto the branch lock ONLY when set, so the daemon's
+		// PR-watcher path (trigger 2) can read it. Skipping the write on the common
+		// default (false) keeps that path free of an extra lock UPDATE and the new
+		// failure mode it would introduce — a freshly created lock already defaults
+		// to not-skip.
+		if payload.SkipNativeReviewFanout {
+			if err := e.Store.SetBranchLockReviewFanout(ctx, payload.Repo, payload.Branch, true); err != nil {
+				return err
+			}
 		}
 		return e.HandlePullRequestOpened(ctx, event)
 	case "review":
