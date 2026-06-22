@@ -274,6 +274,18 @@ string (a Codex, Claude Code, or Kimi Code model name) with no allow-list; an
 omitted `--model` leaves the agent's default model in effect. Both `--model X`
 and `--model=X` are accepted.
 
+`gitmoot orchestrate`, `agent run`, and `agent implement` also accept an optional
+`--skip-native-review-fanout` flag. By default an `implement` job that opens a
+pull request fans the PR out to Gitmoot's native reviewers (the configured
+required reviewers, or the ones passed for the task). With
+`--skip-native-review-fanout` set, the coordinator owns review orchestration
+instead: the implement→PR step still records the PR baseline, runs the merge
+gate, and records the `implemented` decision, but it enqueues **no** native
+review jobs. The skip is honored on both PR-open paths — the engine's
+implement-advance and the daemon's GitHub PR-watcher — so a PR opened either way
+stays free of native review fan-out. The flag defaults off; leave it off for the
+full native review fan-out, which is byte-identical to prior behavior.
+
 Start an orchestra of agents with `gitmoot orchestrate`:
 
 ```sh
