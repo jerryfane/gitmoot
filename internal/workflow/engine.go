@@ -1962,16 +1962,48 @@ func (e Engine) appendInlineArtifactBody(builder *strings.Builder, payload JobPa
 	}
 	truncated, omitted := truncateUTF8Bytes(body, limit)
 	*remaining -= len(truncated)
-	builder.WriteString("  artifact_body:\n")
-	builder.WriteString("```\n")
-	builder.WriteString(truncated)
+	// Assemble the inner block (body + optional truncation marker) first, then pick
+	// a fence longer than the longest backtick run inside it. A plain ``` fence is
+	// broken by a body that itself contains ``` (briefs/reviews routinely embed code
+	// fences), which would let an embedded gitmoot_result sentinel escape — exactly
+	// what fencing must prevent.
+	var inner strings.Builder
+	inner.WriteString(truncated)
 	if !strings.HasSuffix(truncated, "\n") {
-		builder.WriteString("\n")
+		inner.WriteString("\n")
 	}
 	if omitted > 0 {
-		fmt.Fprintf(builder, "... (%d bytes truncated; full brief at %s)\n", omitted, e.inlineBriefPath(childJobID))
+		fmt.Fprintf(&inner, "... (%d bytes truncated; full brief at %s)\n", omitted, e.inlineBriefPath(childJobID))
 	}
-	builder.WriteString("```\n")
+	fence := artifactBodyFence(inner.String())
+	builder.WriteString("  artifact_body:\n")
+	builder.WriteString(fence)
+	builder.WriteString("\n")
+	builder.WriteString(inner.String())
+	builder.WriteString(fence)
+	builder.WriteString("\n")
+}
+
+// artifactBodyFence returns a backtick fence guaranteed longer than the longest
+// run of backticks in content, so an embedded ``` (or a sentinel wrapped in one)
+// cannot terminate the fenced block early. Minimum three backticks.
+func artifactBodyFence(content string) string {
+	longest, run := 0, 0
+	for _, r := range content {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	n := longest + 1
+	if n < 3 {
+		n = 3
+	}
+	return strings.Repeat("`", n)
 }
 
 // inlineBriefPath renders the on-disk location of the parent's full brief.md, the
