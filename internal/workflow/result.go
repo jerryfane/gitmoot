@@ -46,6 +46,7 @@ type Delegation struct {
 	FailurePolicy string         `json:"failure_policy,omitempty"`
 	Fingerprint   string         `json:"fingerprint,omitempty"`
 	SynthesisRule string         `json:"synthesis_rule,omitempty"`
+	Quorum        int            `json:"quorum,omitempty"`
 	Model         string         `json:"model,omitempty"`
 	Phase         string         `json:"phase,omitempty"`
 }
@@ -319,6 +320,10 @@ func validateDelegationLifecycle(d Delegation) error {
 	}
 	switch strings.ToLower(strings.TrimSpace(d.SynthesisRule)) {
 	case "", "summary", "vote":
+	case "quorum":
+		if d.Quorum <= 0 {
+			return fmt.Errorf("delegation %q synthesis_rule quorum requires quorum > 0", d.ID)
+		}
 	default:
 		return fmt.Errorf("delegation %q synthesis_rule %q is invalid", d.ID, d.SynthesisRule)
 	}
