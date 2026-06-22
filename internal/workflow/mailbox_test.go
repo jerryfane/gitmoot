@@ -181,6 +181,60 @@ func TestMailboxEnqueueOmitsEmptyModel(t *testing.T) {
 	}
 }
 
+func TestMailboxEnqueuePersistsPhase(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+
+	if _, err := mailbox.Enqueue(ctx, JobRequest{
+		ID:     "job-phase",
+		Agent:  "audit",
+		Action: "review",
+		Repo:   "jerryfane/gitmoot",
+		Phase:  "design",
+	}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+
+	stored, err := store.GetJob(ctx, "job-phase")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	if !strings.Contains(stored.Payload, `"phase":"design"`) {
+		t.Fatalf("payload = %q, want it to contain phase", stored.Payload)
+	}
+	payload, err := unmarshalPayload(stored.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.Phase != "design" {
+		t.Fatalf("payload.Phase = %q, want %q", payload.Phase, "design")
+	}
+}
+
+func TestMailboxEnqueueOmitsEmptyPhase(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+
+	if _, err := mailbox.Enqueue(ctx, JobRequest{
+		ID:     "job-no-phase",
+		Agent:  "audit",
+		Action: "review",
+		Repo:   "jerryfane/gitmoot",
+	}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+
+	stored, err := store.GetJob(ctx, "job-no-phase")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	if strings.Contains(stored.Payload, `"phase"`) {
+		t.Fatalf("payload = %q, want no phase key when phase is empty", stored.Payload)
+	}
+}
+
 func TestMailboxRunDeliversModelOverride(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

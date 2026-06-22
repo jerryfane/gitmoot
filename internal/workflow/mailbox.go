@@ -55,6 +55,7 @@ type JobRequest struct {
 	DelegationRepeatCount  int
 	DelegationFinalize     bool
 	Model                  string
+	Phase                  string
 	Cockpit                bool
 	CockpitSession         string
 	CockpitPaneKey         string
@@ -98,6 +99,7 @@ type JobPayload struct {
 	DelegationRepeatCount  int            `json:"delegation_repeat_count,omitempty"`
 	DelegationFinalize     bool           `json:"delegation_finalize,omitempty"`
 	Model                  string         `json:"model,omitempty"`
+	Phase                  string         `json:"phase,omitempty"`
 	Cockpit                bool           `json:"cockpit,omitempty"`
 	CockpitSession         string         `json:"cockpit_session,omitempty"`
 	CockpitPaneKey         string         `json:"cockpit_pane_key,omitempty"`
@@ -160,6 +162,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		DelegationRepeatCount:  request.DelegationRepeatCount,
 		DelegationFinalize:     request.DelegationFinalize,
 		Model:                  request.Model,
+		Phase:                  request.Phase,
 		Cockpit:                request.Cockpit,
 		CockpitSession:         strings.TrimSpace(request.CockpitSession),
 		CockpitPaneKey:         strings.TrimSpace(request.CockpitPaneKey),

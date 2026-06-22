@@ -47,6 +47,7 @@ type Delegation struct {
 	Fingerprint   string         `json:"fingerprint,omitempty"`
 	SynthesisRule string         `json:"synthesis_rule,omitempty"`
 	Model         string         `json:"model,omitempty"`
+	Phase         string         `json:"phase,omitempty"`
 }
 
 type AgentResult struct {

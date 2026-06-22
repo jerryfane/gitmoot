@@ -2260,6 +2260,46 @@ func TestContinuationPromptInlinesChildResults(t *testing.T) {
 	}
 }
 
+func TestContinuationPromptIncludesPhase(t *testing.T) {
+	dels := []Delegation{
+		{ID: "api", Agent: "api", Action: "review", Prompt: "build api", Phase: "design"},
+		{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+	}
+	children := map[string]db.Job{
+		"api": {ID: "parent-job/delegation/api", Agent: "api", State: string(JobSucceeded)},
+		"ui":  {ID: "parent-job/delegation/ui", Agent: "ui", State: string(JobSucceeded)},
+	}
+	childPayloads := map[string]JobPayload{
+		"api": {Result: &AgentResult{Decision: "implemented", Summary: "api built"}},
+		"ui":  {Result: &AgentResult{Decision: "approved", Summary: "ui built"}},
+	}
+	withPhase := buildContinuationPrompt(&AgentResult{Delegations: dels}, children, childPayloads)
+	if !strings.Contains(withPhase, "[phase: design]") {
+		t.Fatalf("continuation prompt missing phase label\n%s", withPhase)
+	}
+
+	// Omitting phase on every delegation leaves the prompt byte-identical to one
+	// rendered without any phase plumbing, and emits no phase label.
+	noPhaseDels := []Delegation{
+		{ID: "api", Agent: "api", Action: "review", Prompt: "build api"},
+		{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+	}
+	noPhase := buildContinuationPrompt(&AgentResult{Delegations: noPhaseDels}, children, childPayloads)
+	if strings.Contains(noPhase, "phase") {
+		t.Fatalf("continuation prompt must not mention phase when none set\n%s", noPhase)
+	}
+
+	// Only the api delegation carried a phase; clearing it must produce exactly
+	// the no-phase rendering.
+	cleared := []Delegation{
+		{ID: "api", Agent: "api", Action: "review", Prompt: "build api"},
+		{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
+	}
+	if got := buildContinuationPrompt(&AgentResult{Delegations: cleared}, children, childPayloads); got != noPhase {
+		t.Fatalf("clearing phase changed the prompt:\n--- got ---\n%s\n--- want ---\n%s", got, noPhase)
+	}
+}
+
 func countJobEvents(t *testing.T, store *db.Store, jobID, kind string) int {
 	t.Helper()
 	events, err := store.ListJobEvents(context.Background(), jobID)
@@ -2356,6 +2396,54 @@ func TestEngineDelegationRequestCopiesModel(t *testing.T) {
 	)
 	if request.Model != "opus" {
 		t.Fatalf("request.Model = %q, want %q", request.Model, "opus")
+	}
+}
+
+func TestEngineDelegationPhasePlumbedToChildPayload(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "audit",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Phase: "  design  "},
+			},
+		},
+	})
+
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob returned error: %v", err)
+	}
+
+	child := mustJob(t, store, "parent-job/delegation/del-1")
+	payload, err := unmarshalPayload(child.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if payload.Phase != "design" {
+		t.Fatalf("child payload Phase = %q, want trimmed %q", payload.Phase, "design")
+	}
+}
+
+func TestEngineDelegationRequestCopiesPhase(t *testing.T) {
+	engine := Engine{}
+	request := engine.delegationRequest(
+		db.Job{ID: "parent-job", Agent: "audit"},
+		JobPayload{Repo: "jerryfane/gitmoot"},
+		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go", Phase: "  design  "},
+	)
+	if request.Phase != "design" {
+		t.Fatalf("request.Phase = %q, want trimmed %q", request.Phase, "design")
 	}
 }
 
@@ -3397,6 +3485,23 @@ func TestCanonicalDelegationSetHashStableUnderReorder(t *testing.T) {
 		if canonicalDelegationSetHash(changed) == baseHash {
 			t.Fatalf("hash must change when the %s changes", name)
 		}
+	}
+}
+
+// TestCanonicalDelegationSetHashIgnoresPhase pins that phase is metadata for
+// loop detection: two delegation sets differing ONLY in phase hash identically,
+// exactly like model.
+func TestCanonicalDelegationSetHashIgnoresPhase(t *testing.T) {
+	base := []Delegation{
+		{ID: "a", Agent: "wa", Action: "review", Prompt: "step a"},
+		{ID: "b", Agent: "wb", Action: "review", Prompt: "step b"},
+	}
+	phased := []Delegation{
+		{ID: "a", Agent: "wa", Action: "review", Prompt: "step a", Phase: "design"},
+		{ID: "b", Agent: "wb", Action: "review", Prompt: "step b", Phase: "implement"},
+	}
+	if canonicalDelegationSetHash(base) != canonicalDelegationSetHash(phased) {
+		t.Fatal("hash must ignore phase (metadata, excluded from loop detection)")
 	}
 }
 
