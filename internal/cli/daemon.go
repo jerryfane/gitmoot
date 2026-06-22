@@ -194,6 +194,9 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 			Store:     store,
 			MergeGate: newDaemonPolicyMergeGate(store, gh, checkout),
 		}
+		// Honor the opt-in [orchestrate] artifact-body inlining policy on this
+		// single-repo engine too; fail-safe to off if the policy cannot load.
+		defaultJobWorker(store, stdout, *home).applyInlineArtifactPolicy(&engine)
 		fmt.Fprintf(stdout, "watching %s every %s\n", repo.FullName(), poll.String())
 		return runSingleRepoSupervisor(ctx, *home, daemon.Daemon{
 			Repo:         repo,
@@ -2953,7 +2956,21 @@ func (w jobWorker) defaultStartAdapter(runtimeName string, checkout string) (run
 }
 
 func (w jobWorker) defaultWorkflow(checkout string) workflow.Engine {
-	return daemonWorkflowEngine(w.Store, github.NewClient(checkout), checkout, w.workflowHome())
+	engine := daemonWorkflowEngine(w.Store, github.NewClient(checkout), checkout, w.workflowHome())
+	w.applyInlineArtifactPolicy(&engine)
+	return engine
+}
+
+// applyInlineArtifactPolicy sets the engine's opt-in artifact-body inlining fields
+// from the host [orchestrate] policy. It is fail-safe: any load error leaves the
+// engine with inlining off (the default) rather than failing engine construction.
+func (w jobWorker) applyInlineArtifactPolicy(engine *workflow.Engine) {
+	policy, err := w.orchestratePolicy()
+	if err != nil {
+		return
+	}
+	engine.InlineArtifactBodies = policy.InlineArtifactBodies
+	engine.MaxInlineArtifactBytes = policy.InlineArtifactMaxBytes
 }
 
 // workflowHome resolves the GITMOOT_HOME root used to place per-delegation

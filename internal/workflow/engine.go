@@ -44,6 +44,18 @@ type Engine struct {
 	// optional and defaults to time.Now; tests inject it to drive the per-root
 	// wall-clock backstop (see MaxDelegationWallClock) deterministically.
 	Now func() time.Time
+	// InlineArtifactBodies, when true, makes buildContinuationPrompt append each
+	// finished child's payload.Result.ArtifactBody as a fenced block after the
+	// child's decision/summary/PR line, so a coordinator continuation can read the
+	// child briefs inline rather than re-opening every child job. It is opt-in
+	// (default false) because inlining bodies can be large; when false the
+	// continuation prompt is byte-identical to the legacy output.
+	InlineArtifactBodies bool
+	// MaxInlineArtifactBytes is the per-body cap (in bytes) applied to each child's
+	// inlined ArtifactBody when InlineArtifactBodies is true. A value <= 0 means
+	// defaultMaxInlineArtifactBytes. The total inlined across all children in one
+	// continuation is additionally bounded by maxInlineArtifactTotalBytes.
+	MaxInlineArtifactBytes int
 }
 
 // now returns the engine's current time, defaulting to time.Now when Now is unset.
@@ -620,6 +632,16 @@ const MaxDelegationTotalJobs = 64
 // width of a single dispatch so a coordinator returning hundreds of delegations
 // at once is refused with a delegation_width_exceeded event.
 const MaxDelegationWidth = 16
+
+// defaultMaxInlineArtifactBytes is the per-body cap applied to each child's
+// inlined ArtifactBody in a coordinator continuation prompt when
+// Engine.MaxInlineArtifactBytes is unset (<= 0). See InlineArtifactBodies.
+const defaultMaxInlineArtifactBytes = 32 * 1024
+
+// maxInlineArtifactTotalBytes bounds the aggregate of all child ArtifactBodies
+// inlined into a single coordinator continuation prompt, independent of the
+// per-body cap, so a wide fan-out of briefs cannot balloon one continuation.
+const maxInlineArtifactTotalBytes = 128 * 1024
 
 // MaxDelegationWallClock bounds how long a single coordination tree (all children
 // and continuations sharing one root, see rootJobID) may run before a coordinator
@@ -1496,7 +1518,7 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 		LeadAgent:    parentPayload.LeadAgent,
 		Reviewers:    parentPayload.Reviewers,
 		Sender:       parentJob.Agent,
-		Instructions: buildContinuationPrompt(parentResult, children, childPayloads),
+		Instructions: e.buildContinuationPrompt(parentResult, children, childPayloads),
 		Constraints:  parentPayload.Constraints,
 		ParentJobID:  parentJob.ID,
 		// Increment depth per continuation generation so a coordinator whose
@@ -1867,10 +1889,13 @@ func delegationContinuationID(parentJobID string) string {
 // buildContinuationPrompt inlines each finished child's job id, agent, decision,
 // summary, and PR link into the coordinator continuation prompt so the
 // coordinator can synthesize the results without re-reading every child job.
-func buildContinuationPrompt(parentResult *AgentResult, children map[string]db.Job, childPayloads map[string]JobPayload) string {
+func (e Engine) buildContinuationPrompt(parentResult *AgentResult, children map[string]db.Job, childPayloads map[string]JobPayload) string {
 	var builder strings.Builder
 	builder.WriteString("All delegated jobs have finished. Review the results below and decide the next step.\n\n")
 	builder.WriteString("Delegation results:\n")
+	// remainingInline tracks the aggregate ArtifactBody budget across all children
+	// for this continuation; only consulted when InlineArtifactBodies is set.
+	remainingInline := maxInlineArtifactTotalBytes
 	for _, d := range parentResult.Delegations {
 		child, ok := children[d.ID]
 		if !ok {
@@ -1896,11 +1921,104 @@ func buildContinuationPrompt(parentResult *AgentResult, children map[string]db.J
 			fmt.Fprintf(&builder, " (%s)", link)
 		}
 		builder.WriteString("\n")
+		// Opt-in: inline the child's brief body as a fenced block so a downstream
+		// model reads it inline. Guarded entirely behind the flag so the disabled
+		// output is byte-identical to the legacy prompt.
+		if e.InlineArtifactBodies {
+			e.appendInlineArtifactBody(&builder, childPayloads[d.ID], child.ID, &remainingInline)
+		}
 	}
 	// Completion contract: make termination directed. The engine already treats
 	// an empty delegations list as terminal, so spell it out for the agent.
 	builder.WriteString("\n\nIf the goal is now complete, return your result with an EMPTY delegations list to finish. Only return new delegations if more work is genuinely required.")
 	return builder.String()
+}
+
+// appendInlineArtifactBody writes a fenced block containing the child's
+// payload.Result.ArtifactBody, rune-safe truncated to the per-body cap
+// (e.MaxInlineArtifactBytes or defaultMaxInlineArtifactBytes) and further bounded
+// by the per-continuation aggregate budget (*remaining). The block is fenced so an
+// embedded gitmoot_result sentinel inside a body cannot confuse a downstream
+// model. When truncation occurs a trailing marker points at the full brief on
+// disk. It is only called when Engine.InlineArtifactBodies is true.
+func (e Engine) appendInlineArtifactBody(builder *strings.Builder, payload JobPayload, childJobID string, remaining *int) {
+	if payload.Result == nil {
+		return
+	}
+	body := payload.Result.ArtifactBody
+	if body == "" {
+		return
+	}
+	perBody := e.MaxInlineArtifactBytes
+	if perBody <= 0 {
+		perBody = defaultMaxInlineArtifactBytes
+	}
+	limit := perBody
+	if *remaining < limit {
+		limit = *remaining
+	}
+	if limit <= 0 {
+		return
+	}
+	truncated, omitted := truncateUTF8Bytes(body, limit)
+	*remaining -= len(truncated)
+	builder.WriteString("  artifact_body:\n")
+	builder.WriteString("```\n")
+	builder.WriteString(truncated)
+	if !strings.HasSuffix(truncated, "\n") {
+		builder.WriteString("\n")
+	}
+	if omitted > 0 {
+		fmt.Fprintf(builder, "... (%d bytes truncated; full brief at %s)\n", omitted, e.inlineBriefPath(childJobID))
+	}
+	builder.WriteString("```\n")
+}
+
+// inlineBriefPath renders the on-disk location of the parent's full brief.md, the
+// same path writeDelegationArtifacts uses (ArtifactRoot/delegations/<sanitized
+// parent job id>/brief.md). The parent job id is recovered from a child job id by
+// stripping the trailing "/delegation/<child>" suffix; on any failure it falls
+// back to a placeholder segment so the marker is still actionable.
+func (e Engine) inlineBriefPath(childJobID string) string {
+	root := strings.TrimSpace(e.ArtifactRoot)
+	if root == "" {
+		root = "<ArtifactRoot>"
+	}
+	segment := "<parent>"
+	parentJobID := parentJobIDFromChild(childJobID)
+	if seg, err := safeDelegationPathSegment(parentJobID, "parent job id"); err == nil {
+		segment = seg
+	}
+	return root + "/delegations/" + segment + "/brief.md"
+}
+
+// parentJobIDFromChild recovers a parent job id from a delegation child job id of
+// the form "<parent>/delegation/<child>". When the marker is absent it returns the
+// input unchanged so inlineBriefPath can still sanitize it.
+func parentJobIDFromChild(childJobID string) string {
+	if idx := strings.LastIndex(childJobID, "/delegation/"); idx >= 0 {
+		return childJobID[:idx]
+	}
+	return childJobID
+}
+
+// truncateUTF8Bytes returns s capped to at most maxBytes bytes without splitting a
+// multi-byte UTF-8 rune, along with the number of bytes omitted from the original.
+// Unlike the truncators in internal/cli it does NOT collapse whitespace; the body
+// is preserved verbatim up to the cut point.
+func truncateUTF8Bytes(s string, maxBytes int) (string, int) {
+	if maxBytes <= 0 {
+		return "", len(s)
+	}
+	if len(s) <= maxBytes {
+		return s, 0
+	}
+	cut := maxBytes
+	// Back up to a rune boundary: a continuation byte has the form 10xxxxxx.
+	for cut > 0 && (s[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	return s[:cut], len(s) - cut
 }
 
 // buildCorrectiveContinuationPrompt is the one-shot nudge sent when a
