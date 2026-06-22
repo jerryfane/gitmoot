@@ -21,29 +21,30 @@ import (
 )
 
 type localAgentDispatchRequest struct {
-	RepoFlag             string
-	Agent                string
-	Action               string
-	Instructions         string
-	Background           bool
-	Type                 string
-	Model                string
-	Home                 string
-	AllowManagedSync     bool
-	JobTimeout           time.Duration
-	TaskID               string
-	PullRequest          int
-	HeadSHA              string
-	Branch               string
-	GoalID               string
-	TaskTitle            string
-	LeadAgent            string
-	Reviewers            []string
-	Cockpit              bool
-	CockpitSession       string
-	SelectedAction       string
-	SelectedActionReason string
-	ExecutionPath        string
+	RepoFlag               string
+	Agent                  string
+	Action                 string
+	Instructions           string
+	Background             bool
+	Type                   string
+	Model                  string
+	Home                   string
+	AllowManagedSync       bool
+	JobTimeout             time.Duration
+	TaskID                 string
+	PullRequest            int
+	HeadSHA                string
+	Branch                 string
+	GoalID                 string
+	TaskTitle              string
+	LeadAgent              string
+	Reviewers              []string
+	Cockpit                bool
+	CockpitSession         string
+	SkipNativeReviewFanout bool
+	SelectedAction         string
+	SelectedActionReason   string
+	ExecutionPath          string
 }
 
 type localAgentJobOutput struct {
@@ -124,23 +125,24 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		}
 	}
 	job, err := (workflow.Mailbox{Store: store}).Enqueue(ctx, workflow.JobRequest{
-		ID:             localAgentJobID(request.Action, agent.Name),
-		Agent:          agent.Name,
-		Action:         request.Action,
-		Repo:           repo.FullName(),
-		Branch:         firstNonEmpty(request.Branch, record.DefaultBranch),
-		PullRequest:    request.PullRequest,
-		HeadSHA:        request.HeadSHA,
-		GoalID:         request.GoalID,
-		TaskID:         request.TaskID,
-		TaskTitle:      request.TaskTitle,
-		LeadAgent:      firstNonEmpty(request.LeadAgent, agent.Name),
-		Reviewers:      request.Reviewers,
-		Sender:         "local",
-		Instructions:   request.Instructions,
-		Model:          request.Model,
-		Cockpit:        request.Cockpit,
-		CockpitSession: request.CockpitSession,
+		ID:                     localAgentJobID(request.Action, agent.Name),
+		Agent:                  agent.Name,
+		Action:                 request.Action,
+		Repo:                   repo.FullName(),
+		Branch:                 firstNonEmpty(request.Branch, record.DefaultBranch),
+		PullRequest:            request.PullRequest,
+		HeadSHA:                request.HeadSHA,
+		GoalID:                 request.GoalID,
+		TaskID:                 request.TaskID,
+		TaskTitle:              request.TaskTitle,
+		LeadAgent:              firstNonEmpty(request.LeadAgent, agent.Name),
+		Reviewers:              request.Reviewers,
+		Sender:                 "local",
+		Instructions:           request.Instructions,
+		Model:                  request.Model,
+		Cockpit:                request.Cockpit,
+		CockpitSession:         request.CockpitSession,
+		SkipNativeReviewFanout: request.SkipNativeReviewFanout,
 	})
 	if err != nil {
 		return localAgentJobOutput{}, err

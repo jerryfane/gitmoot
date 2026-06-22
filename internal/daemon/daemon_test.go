@@ -220,6 +220,162 @@ func TestPollOnceRoutesPullRequestUpdatesToWorkflow(t *testing.T) {
 	}
 }
 
+func TestHandlePullRequestWorkflowSkipsReviewFanoutWhenLockSet(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:           "lead",
+		Role:           "lead",
+		Runtime:        "codex",
+		RuntimeRef:     "last",
+		RepoScope:      repo.FullName(),
+		Capabilities:   []string{"implement"},
+		AutonomyPolicy: "auto",
+		HealthStatus:   "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent lead returned error: %v", err)
+	}
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:           "audit",
+		Role:           "reviewer",
+		Runtime:        "codex",
+		RuntimeRef:     "last",
+		RepoScope:      repo.FullName(),
+		Capabilities:   []string{"review"},
+		AutonomyPolicy: "auto",
+		HealthStatus:   "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent audit returned error: %v", err)
+	}
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: repo.FullName(), Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-007", GoalID: "goal-1", Title: "Task 7", State: string(workflow.TaskPlanned), Branch: "task-7"}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	// The implement-job advancement would persist this flag onto the lock; set it
+	// directly here to exercise the daemon's trigger-2 read.
+	if err := store.SetBranchLockReviewFanout(ctx, repo.FullName(), "task-7", true); err != nil {
+		t.Fatalf("SetBranchLockReviewFanout returned error: %v", err)
+	}
+	client := &fakeGitHub{
+		pulls:    []github.PullRequest{},
+		comments: map[int64][]github.IssueComment{7: {}},
+	}
+	gate := &fakeWorkflowMergeGate{decision: workflow.MergeDecision{Ready: true}}
+	engine := workflow.Engine{
+		Store:     store,
+		MergeGate: gate,
+		JobID: func(request workflow.JobRequest) string {
+			parts := []string{request.Action, request.Agent, request.TaskID}
+			if request.ReviewRound != "" {
+				parts = append(parts, request.ReviewRound)
+			}
+			return strings.Join(parts, "-")
+		},
+	}
+	daemon := Daemon{Repo: repo, Store: store, GitHub: client, Workflow: &engine}
+
+	pull := github.PullRequest{
+		Number:  7,
+		Title:   "Task 7",
+		State:   "open",
+		URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+		HeadRef: "task-7",
+		BaseRef: "main",
+		HeadSHA: "abc123",
+	}
+	if err := daemon.handlePullRequestWorkflow(ctx, pull); err != nil {
+		t.Fatalf("handlePullRequestWorkflow returned error: %v", err)
+	}
+
+	// Zero review jobs were enqueued even though a review-capable agent exists.
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListJobs returned error: %v", err)
+	}
+	for _, job := range jobs {
+		if job.Type == "review" {
+			t.Fatalf("expected no review jobs with skip set, found %+v", job)
+		}
+	}
+	// The no-reviewers tail still ran (merge gate evaluated, baseline recorded).
+	if len(gate.requests) != 1 || gate.requests[0].PullRequest != 7 {
+		t.Fatalf("merge gate requests = %+v", gate.requests)
+	}
+	if _, err := store.GetPullRequest(ctx, repo.FullName(), 7); err != nil {
+		t.Fatalf("GetPullRequest returned error: %v", err)
+	}
+}
+
+func TestHandlePullRequestWorkflowFansOutWhenLockUnset(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:           "lead",
+		Role:           "lead",
+		Runtime:        "codex",
+		RuntimeRef:     "last",
+		RepoScope:      repo.FullName(),
+		Capabilities:   []string{"implement"},
+		AutonomyPolicy: "auto",
+		HealthStatus:   "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent lead returned error: %v", err)
+	}
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:           "audit",
+		Role:           "reviewer",
+		Runtime:        "codex",
+		RuntimeRef:     "last",
+		RepoScope:      repo.FullName(),
+		Capabilities:   []string{"review"},
+		AutonomyPolicy: "auto",
+		HealthStatus:   "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent audit returned error: %v", err)
+	}
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: repo.FullName(), Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-007", GoalID: "goal-1", Title: "Task 7", State: string(workflow.TaskPlanned), Branch: "task-7"}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	client := &fakeGitHub{
+		pulls:    []github.PullRequest{},
+		comments: map[int64][]github.IssueComment{7: {}},
+	}
+	engine := workflow.Engine{
+		Store: store,
+		JobID: func(request workflow.JobRequest) string {
+			parts := []string{request.Action, request.Agent, request.TaskID}
+			if request.ReviewRound != "" {
+				parts = append(parts, request.ReviewRound)
+			}
+			return strings.Join(parts, "-")
+		},
+	}
+	daemon := Daemon{Repo: repo, Store: store, GitHub: client, Workflow: &engine}
+
+	pull := github.PullRequest{
+		Number:  7,
+		Title:   "Task 7",
+		State:   "open",
+		URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+		HeadRef: "task-7",
+		BaseRef: "main",
+		HeadSHA: "abc123",
+	}
+	if err := daemon.handlePullRequestWorkflow(ctx, pull); err != nil {
+		t.Fatalf("handlePullRequestWorkflow returned error: %v", err)
+	}
+	if _, err := store.GetJob(ctx, "review-audit-task-007-review-1"); err != nil {
+		t.Fatalf("expected review job to be enqueued (default fanout): %v", err)
+	}
+}
+
 func TestPollOnceRetriesPullRequestWorkflowAfterRoutingFailure(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)

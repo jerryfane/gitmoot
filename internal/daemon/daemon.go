@@ -266,6 +266,10 @@ func (d Daemon) handlePullRequestWorkflow(ctx context.Context, pull github.PullR
 		LeadAgent:         lock.Owner,
 		Sender:            "github",
 		RequiredReviewers: reviewers,
+		// Trigger 2 (daemon path): the implement-job advancement persisted the
+		// skip flag onto the branch lock; honor it so the PR-watcher path skips
+		// the native review fanout too.
+		SkipReviewFanout: lock.SkipNativeReviewFanout,
 	})
 }
 

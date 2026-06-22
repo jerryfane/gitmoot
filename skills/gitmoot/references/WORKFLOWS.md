@@ -484,6 +484,29 @@ Each child job carries job-tree linkage fields — `parent_job_id`,
 can be traced back to its parent, its originating delegation, and the root of the
 tree. See `RESULT_CONTRACT.md` for the full delegation field reference.
 
+## Coordinator-Owned Review
+
+By default an `implement` job that opens a pull request fans the PR out to
+Gitmoot's native reviewers — the configured required reviewers, or the ones
+passed for the task — so each reviewer runs as its own review job before the
+merge gate. When a coordinator already plans review itself (for example a
+`review-panel` leg, or a custom continuation that reconvenes its own reviewers),
+that native fan-out duplicates work. Pass `--skip-native-review-fanout` on
+`gitmoot orchestrate`, `gitmoot agent run`, or `gitmoot agent implement` to hand
+review orchestration to the coordinator:
+
+```sh
+gitmoot agent implement lead --repo owner/repo --task task-001 --skip-native-review-fanout "Implement this task."
+gitmoot orchestrate decompose-and-verify "Implement the export feature described in the task." --repo owner/repo --skip-native-review-fanout
+```
+
+With the flag set, the implement→PR step still records the PR baseline, runs the
+merge gate, and records the `implemented` decision — it simply enqueues **no**
+native review jobs. The skip is honored on both PR-open paths: the engine's
+implement-advance and the daemon's GitHub PR-watcher, so a PR opened either way
+stays free of native review fan-out. The flag defaults off; leaving it off keeps
+the full native review fan-out, byte-identical to prior behavior.
+
 ## Coordinator Recipes
 
 Coordinator recipes are built-in agent templates that turn the Orchestra pattern

@@ -77,6 +77,11 @@ type PullRequestEvent struct {
 	LeadAgent         string
 	Sender            string
 	RequiredReviewers []string
+	// SkipReviewFanout, when true, suppresses the native review-fanout loop in
+	// HandlePullRequestOpened: zero review jobs are enqueued and the PR runs the
+	// same no-reviewers tail (record baseline + merge gate) the zero-reviewers
+	// case already runs, so the PR still advances. Defaults false => full fanout.
+	SkipReviewFanout bool
 }
 
 type MergeRequest struct {
@@ -135,7 +140,10 @@ func (e Engine) HandlePullRequestOpened(ctx context.Context, event PullRequestEv
 	if len(reviewers) == 0 {
 		reviewers = compactStrings(append([]string{}, e.RequiredReviewers...))
 	}
-	if len(reviewers) == 0 {
+	// When the caller asked to skip the native review fanout, run the exact same
+	// no-reviewers tail the zero-reviewers case runs (merge gate + baseline) so the
+	// PR still advances, but enqueue ZERO review jobs.
+	if len(reviewers) == 0 || event.SkipReviewFanout {
 		decision, err := e.runMergeGate(ctx, "", JobPayload{
 			Repo:        event.Repo,
 			Branch:      event.Branch,
@@ -485,6 +493,19 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 			LeadAgent:         leadAgent,
 			Sender:            job.Agent,
 			RequiredReviewers: e.requiredReviewers(payload),
+			// Trigger 1 (in-process path): carry the implement job's
+			// skip_native_review_fanout straight onto the PR event.
+			SkipReviewFanout: payload.SkipNativeReviewFanout,
+		}
+		// Persist the flag onto the branch lock ONLY when set, so the daemon's
+		// PR-watcher path (trigger 2) can read it. Skipping the write on the common
+		// default (false) keeps that path free of an extra lock UPDATE and the new
+		// failure mode it would introduce — a freshly created lock already defaults
+		// to not-skip.
+		if payload.SkipNativeReviewFanout {
+			if err := e.Store.SetBranchLockReviewFanout(ctx, payload.Repo, payload.Branch, true); err != nil {
+				return err
+			}
 		}
 		return e.HandlePullRequestOpened(ctx, event)
 	case "review":

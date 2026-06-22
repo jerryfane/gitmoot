@@ -402,9 +402,10 @@ type PairwisePreference struct {
 }
 
 type BranchLock struct {
-	RepoFullName string
-	Branch       string
-	Owner        string
+	RepoFullName           string
+	Branch                 string
+	Owner                  string
+	SkipNativeReviewFanout bool
 }
 
 type BranchLockEvent struct {
@@ -4294,16 +4295,16 @@ func (s *Store) CreateLock(ctx context.Context, lock BranchLock) (bool, error) {
 }
 
 func (s *Store) GetBranchLock(ctx context.Context, repoFullName string, branch string) (BranchLock, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT repo_full_name, branch, owner FROM branch_locks WHERE repo_full_name = ? AND branch = ?`, repoFullName, branch)
+	row := s.db.QueryRowContext(ctx, `SELECT repo_full_name, branch, owner, skip_native_review_fanout FROM branch_locks WHERE repo_full_name = ? AND branch = ?`, repoFullName, branch)
 	var lock BranchLock
-	if err := row.Scan(&lock.RepoFullName, &lock.Branch, &lock.Owner); err != nil {
+	if err := row.Scan(&lock.RepoFullName, &lock.Branch, &lock.Owner, &lock.SkipNativeReviewFanout); err != nil {
 		return BranchLock{}, err
 	}
 	return lock, nil
 }
 
 func (s *Store) ListBranchLocks(ctx context.Context, repoFullName string) ([]BranchLock, error) {
-	query := `SELECT repo_full_name, branch, owner FROM branch_locks`
+	query := `SELECT repo_full_name, branch, owner, skip_native_review_fanout FROM branch_locks`
 	args := []any{}
 	if strings.TrimSpace(repoFullName) != "" {
 		query += ` WHERE repo_full_name = ?`
@@ -4319,12 +4320,22 @@ func (s *Store) ListBranchLocks(ctx context.Context, repoFullName string) ([]Bra
 	var locks []BranchLock
 	for rows.Next() {
 		var lock BranchLock
-		if err := rows.Scan(&lock.RepoFullName, &lock.Branch, &lock.Owner); err != nil {
+		if err := rows.Scan(&lock.RepoFullName, &lock.Branch, &lock.Owner, &lock.SkipNativeReviewFanout); err != nil {
 			return nil, err
 		}
 		locks = append(locks, lock)
 	}
 	return locks, rows.Err()
+}
+
+// SetBranchLockReviewFanout persists the skip_native_review_fanout flag onto the
+// branch lock for (repoFullName, branch). It is a no-op when no lock exists for
+// the pair. The flag is never written at lock creation (CreateLock defaults it to
+// 0); only the implement-job advancement path sets it so the daemon's PR-watcher
+// can read whether the native review fanout should be skipped.
+func (s *Store) SetBranchLockReviewFanout(ctx context.Context, repoFullName string, branch string, skip bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE branch_locks SET skip_native_review_fanout = ?, updated_at = CURRENT_TIMESTAMP WHERE repo_full_name = ? AND branch = ?`, skip, repoFullName, branch)
+	return err
 }
 
 func (s *Store) ReleaseLock(ctx context.Context, lock BranchLock) (bool, error) {
@@ -5678,5 +5689,8 @@ CREATE TABLE cockpit_workspaces (
 	`,
 	`
 ALTER TABLE cockpit_workspaces ADD COLUMN root_pane_id TEXT NOT NULL DEFAULT '';
+	`,
+	`
+ALTER TABLE branch_locks ADD COLUMN skip_native_review_fanout INTEGER NOT NULL DEFAULT 0;
 	`,
 }
