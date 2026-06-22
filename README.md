@@ -145,6 +145,17 @@ ownership, and busy Codex/Claude runtime sessions can fork bounded temporary
 workers when `[parallel_sessions]` allows it. Temp workers still require
 checkout/worktree safety and write-capable agents for implementation jobs.
 
+`gitmoot daemon start --repo owner/repo` scopes the background daemon to that one
+repo; `gitmoot daemon start` with no `--repo` supervises every enabled repo. Both
+`daemon run` and `daemon start` accept `--session <root-job-id>` (alias `--root`)
+to pin the worker to a single orchestration run — it then runs only jobs whose
+`root_job_id` matches that value plus the root coordinator job itself, AND-combined
+with any `--repo` filter:
+
+```sh
+gitmoot daemon start --repo owner/repo --session <root-job-id>
+```
+
 Route work through PR comments:
 
 ```text
@@ -160,7 +171,8 @@ For the full walkthrough, see [docs/local-workflow.md](docs/local-workflow.md).
 - **Repo**: a GitHub repository plus local checkout path that Gitmoot is allowed
   to monitor and mutate.
 - **Daemon**: the local background process that polls GitHub PRs and routes
-  queued jobs.
+  queued jobs. By default it supervises every enabled repo; `--repo` scopes it to
+  one repo and `--session <root-job-id>` scopes it to one orchestration run.
 - **Agent**: a named Gitmoot identity with repo access, role, capabilities, and
   a runtime adapter.
 - **Runtime adapter**: the bridge from Gitmoot jobs to Codex, Claude Code,

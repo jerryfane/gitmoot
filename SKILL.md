@@ -131,6 +131,8 @@ gitmoot plugin doctor
 gitmoot status --repo owner/repo
 gitmoot events --repo owner/repo
 gitmoot daemon start --repo owner/repo --poll 30s
+gitmoot daemon start --repo owner/repo --session <root-job-id>
+gitmoot daemon start
 gitmoot daemon status
 gitmoot plugin doctor
 gitmoot agent list
@@ -160,7 +162,13 @@ gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issu
 ```
 
 Use `gitmoot daemon start` for the background daemon. Use `gitmoot daemon run`
-only when the user explicitly wants a foreground process.
+only when the user explicitly wants a foreground process. `gitmoot daemon start
+--repo owner/repo` scopes the background daemon to that one repo; `gitmoot daemon
+start` with no `--repo` supervises every enabled repo. Both `daemon run` and
+`daemon start` accept `--session <root-job-id>` (alias `--root`) to pin the
+worker to one orchestration run: it then runs only jobs whose `root_job_id`
+matches that value plus the root coordinator job itself, AND-combined with any
+`--repo` filter.
 
 Use `gitmoot agent prompt <agent-or-template>` when the user wants to reuse a
 Gitmoot agent prompt in the current chat. Use `gitmoot agent run` for

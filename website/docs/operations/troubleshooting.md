@@ -193,6 +193,15 @@ gitmoot daemon start --repo owner/repo --poll 30s --workers 1
 
 Use `gitmoot daemon run` only when you intentionally want a foreground process.
 
+If queued jobs for one repo never move while another repo's jobs do, check
+whether the daemon was started with `--repo`: `gitmoot daemon start --repo
+owner/repo` scopes the background daemon to that one repo and skips jobs for
+every other repo. Start it without `--repo` to supervise all enabled repos, or
+start a daemon per repo. Likewise, a daemon started with `--session <root-job-id>`
+(alias `--root`) runs only jobs whose `root_job_id` matches that orchestration
+run plus the root coordinator job itself, AND-combined with any `--repo` filter;
+restart it without `--session` to drain unrelated jobs.
+
 ## Job Stuck Or Failed
 
 Symptom: a job is queued, blocked, failed, or no longer changing state.

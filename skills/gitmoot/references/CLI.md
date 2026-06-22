@@ -55,6 +55,8 @@ snippet with `--config-snippet`.
 gitmoot status --repo owner/repo
 gitmoot events --repo owner/repo
 gitmoot daemon start --repo owner/repo --poll 30s --workers 1
+gitmoot daemon start --repo owner/repo --session <root-job-id>
+gitmoot daemon start
 gitmoot daemon status
 gitmoot daemon logs
 gitmoot daemon stop
@@ -68,6 +70,17 @@ Use `daemon start` for the background daemon. Use `daemon run` only when the
 user explicitly wants a foreground process. Keep the default `--workers 1`
 unless the Gitmoot home has multiple independent runtime sessions or managed
 agent types with `max_background` greater than one.
+
+`daemon start --repo owner/repo` scopes the background daemon to a single repo:
+it only polls and runs jobs for that repo. `daemon start` with no `--repo` still
+supervises every enabled repo in the Gitmoot home.
+
+Both `daemon run` and `daemon start` accept `--session <root-job-id>` (alias
+`--root`) to pin the worker to one orchestration run. With `--session` set, the
+worker runs only jobs whose `root_job_id` matches that value plus the root
+coordinator job itself, and ignores every other queued job. `--session` composes
+with `--repo` (AND): a job must match both filters to run. Leaving both empty
+keeps the default behavior of matching all enabled repos and all jobs.
 
 `gitmoot dashboard` shows local state — daemon health, repos, agents and runtime
 sessions, jobs by state, worktrees, branch locks, SkillOpt train phase/candidate,

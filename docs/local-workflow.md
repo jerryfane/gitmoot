@@ -302,8 +302,26 @@ If a job is not eligible, Gitmoot keeps the old queue/wait behavior.
    from the matching checkout (the daemon validates the current checkout's
    `origin` remote against `--repo` to bootstrap it). `agent start
    --start-daemon` runs this same background start path for the selected
-   checkout. Use `gitmoot daemon start` without `--repo` after registering all
-   intended repos if one daemon should supervise the whole Gitmoot home.
+   checkout.
+
+   `gitmoot daemon start --repo owner/project` also scopes the background daemon
+   to that one repo: it only polls and runs jobs for `owner/project`. Use
+   `gitmoot daemon start` without `--repo` after registering all intended repos
+   if one daemon should supervise the whole Gitmoot home; that supervises every
+   enabled repo.
+
+   To pin a worker to a single orchestration run, pass `--session <root-job-id>`
+   (alias `--root`) to `daemon run` or `daemon start`:
+
+   ```sh
+   gitmoot daemon start --repo owner/project --session <root-job-id>
+   ```
+
+   With `--session` set, the worker runs only jobs whose `root_job_id` matches
+   that value, plus the root coordinator job itself, and ignores every other
+   queued job. `--session` composes with `--repo` (AND): a job must match both
+   filters to run. Leaving both empty keeps the default of matching all enabled
+   repos and all jobs.
 
    Gitmoot records agent autonomy policy as `read-only`, `workspace-write`,
    `danger-full-access`, or `auto`. For Codex these map to Codex sandbox
