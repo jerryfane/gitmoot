@@ -591,6 +591,112 @@ func TestEngineHandlePullRequestOpenedDoesNotOverwriteNoReviewerMerge(t *testing
 	}
 }
 
+func TestEngineHandlePullRequestOpenedSkipsReviewFanout(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	// A ready-but-not-merged gate so the no-reviewers tail runs to completion and
+	// records the baseline (the same tail the zero-reviewers path runs).
+	gate := &fakeMergeGate{decision: MergeDecision{Ready: true}}
+	engine.MergeGate = gate
+
+	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
+		Repo:              "jerryfane/gitmoot",
+		Branch:            "task-7",
+		PullRequest:       7,
+		HeadSHA:           "head123",
+		GoalID:            "goal-1",
+		TaskID:            "task-7",
+		TaskTitle:         "Workflow Engine",
+		LeadAgent:         "lead",
+		Sender:            "lead",
+		RequiredReviewers: []string{"audit"},
+		SkipReviewFanout:  true,
+	})
+
+	if err != nil {
+		t.Fatalf("HandlePullRequestOpened returned error: %v", err)
+	}
+	assertTaskState(t, store, "task-7", TaskReadyToMerge)
+	// Zero review jobs enqueued despite a required reviewer being present.
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListJobs returned error: %v", err)
+	}
+	for _, job := range jobs {
+		if job.Type == "review" {
+			t.Fatalf("expected no review jobs, found %+v", job)
+		}
+	}
+	// The merge gate (no-reviewers tail) still ran.
+	if len(gate.requests) != 1 || gate.requests[0].PullRequest != 7 || !gate.requests[0].ReviewOptional {
+		t.Fatalf("merge gate requests = %+v", gate.requests)
+	}
+	// Baseline still recorded so the PR advances.
+	pr, err := store.GetPullRequest(ctx, "jerryfane/gitmoot", 7)
+	if err != nil {
+		t.Fatalf("GetPullRequest returned error: %v", err)
+	}
+	if pr.HeadBranch != "task-7" || pr.HeadSHA != "head123" {
+		t.Fatalf("pull request baseline = %+v", pr)
+	}
+}
+
+func TestEngineAdvanceImplementPersistsSkipReviewFanoutOntoLock(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	gate := &fakeMergeGate{decision: MergeDecision{Reason: "ci is pending"}}
+	engine.MergeGate = gate
+	// A branch lock owned by the lead must exist for the setter to flip.
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	insertCompletedJob(t, store, db.Job{
+		ID:    "implement-job",
+		Agent: "lead",
+		Type:  "implement",
+	}, JobPayload{
+		Repo:                   "jerryfane/gitmoot",
+		Branch:                 "task-7",
+		PullRequest:            7,
+		HeadSHA:                "head123",
+		TaskID:                 "task-7",
+		TaskTitle:              "Workflow Engine",
+		LeadAgent:              "lead",
+		SkipNativeReviewFanout: true,
+		Result:                 &AgentResult{Decision: "implemented", Summary: "opened PR"},
+	})
+
+	err := engine.AdvanceJob(ctx, "implement-job")
+
+	// The no-reviewers tail blocks on the pending gate; trigger 1 must have fired
+	// (no review jobs) and the flag must be persisted onto the lock (trigger 2).
+	var blocked BlockedError
+	if !errors.As(err, &blocked) || blocked.Reason != "ci is pending" {
+		t.Fatalf("error = %v, want merge gate BlockedError", err)
+	}
+	jobs, err := store.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListJobs returned error: %v", err)
+	}
+	for _, job := range jobs {
+		if job.Type == "review" {
+			t.Fatalf("expected no review jobs, found %+v", job)
+		}
+	}
+	lock, err := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	if err != nil {
+		t.Fatalf("GetBranchLock returned error: %v", err)
+	}
+	if !lock.SkipNativeReviewFanout {
+		t.Fatalf("expected lock.SkipNativeReviewFanout = true, got %+v", lock)
+	}
+}
+
 func TestEngineAdvanceImplementDispatchesReviewers(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)

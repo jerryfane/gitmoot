@@ -59,6 +59,7 @@ type JobRequest struct {
 	Cockpit                bool
 	CockpitSession         string
 	CockpitPaneKey         string
+	SkipNativeReviewFanout bool
 	Ephemeral              *EphemeralSpec
 }
 
@@ -103,6 +104,7 @@ type JobPayload struct {
 	Cockpit                bool           `json:"cockpit,omitempty"`
 	CockpitSession         string         `json:"cockpit_session,omitempty"`
 	CockpitPaneKey         string         `json:"cockpit_pane_key,omitempty"`
+	SkipNativeReviewFanout bool           `json:"skip_native_review_fanout,omitempty"`
 	Ephemeral              *EphemeralSpec `json:"ephemeral,omitempty"`
 	RawOutputs             []string       `json:"raw_outputs,omitempty"`
 	Result                 *AgentResult   `json:"result,omitempty"`
@@ -166,6 +168,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		Cockpit:                request.Cockpit,
 		CockpitSession:         strings.TrimSpace(request.CockpitSession),
 		CockpitPaneKey:         strings.TrimSpace(request.CockpitPaneKey),
+		SkipNativeReviewFanout: request.SkipNativeReviewFanout,
 		Ephemeral:              request.Ephemeral,
 	})
 	if err != nil {

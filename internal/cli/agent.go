@@ -254,20 +254,21 @@ func printAgentAskUsage(w io.Writer) {
 }
 
 type agentRunOptions struct {
-	home           string
-	repo           string
-	jsonOutput     bool
-	background     bool
-	typeName       string
-	model          string
-	taskID         string
-	prNumber       int
-	headSHA        string
-	branch         string
-	agent          string
-	message        string
-	cockpit        bool
-	cockpitSession string
+	home                   string
+	repo                   string
+	jsonOutput             bool
+	background             bool
+	typeName               string
+	model                  string
+	taskID                 string
+	prNumber               int
+	headSHA                string
+	branch                 string
+	agent                  string
+	message                string
+	cockpit                bool
+	cockpitSession         string
+	skipNativeReviewFanout bool
 }
 
 func runAgentRun(args []string, stdout, stderr io.Writer) int {
@@ -420,23 +421,24 @@ func dispatchAgentCommand(options agentRunOptions, action string, reason string,
 	if err := withStore(options.home, func(store *db.Store) error {
 		var err error
 		output, err = dispatchLocalAgentJob(context.Background(), store, localAgentDispatchRequest{
-			RepoFlag:             options.repo,
-			Agent:                options.agent,
-			Action:               action,
-			Instructions:         options.message,
-			Background:           options.background,
-			Type:                 options.typeName,
-			Model:                options.model,
-			Home:                 options.home,
-			TaskID:               options.taskID,
-			PullRequest:          options.prNumber,
-			HeadSHA:              options.headSHA,
-			Branch:               options.branch,
-			Cockpit:              options.cockpit,
-			CockpitSession:       options.cockpitSession,
-			SelectedAction:       action,
-			SelectedActionReason: reason,
-			ExecutionPath:        executionPath,
+			RepoFlag:               options.repo,
+			Agent:                  options.agent,
+			Action:                 action,
+			Instructions:           options.message,
+			Background:             options.background,
+			Type:                   options.typeName,
+			Model:                  options.model,
+			Home:                   options.home,
+			TaskID:                 options.taskID,
+			PullRequest:            options.prNumber,
+			HeadSHA:                options.headSHA,
+			Branch:                 options.branch,
+			Cockpit:                options.cockpit,
+			CockpitSession:         options.cockpitSession,
+			SkipNativeReviewFanout: options.skipNativeReviewFanout,
+			SelectedAction:         action,
+			SelectedActionReason:   reason,
+			ExecutionPath:          executionPath,
 		})
 		return err
 	}); err != nil {
@@ -485,6 +487,8 @@ func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agen
 			options.jsonOutput = true
 		case arg == "--cockpit" || arg == "--herdr":
 			options.cockpit = true
+		case arg == "--skip-native-review-fanout":
+			options.skipNativeReviewFanout = true
 		case arg == "--type" || arg == "--model" || arg == "--repo" || arg == "--home" || arg == "--task" || arg == "--pr" || arg == "--head-sha" || arg == "--branch" || arg == "--cockpit-session":
 			if index+1 >= len(args) {
 				fmt.Fprintf(stderr, "%s requires a value for %s\n", label, arg)
@@ -581,13 +585,13 @@ func printAgentRunUsage(w io.Writer, command string) {
 	fmt.Fprintln(w, "Usage:")
 	switch command {
 	case "orchestrate":
-		fmt.Fprintln(w, "  gitmoot orchestrate <agent> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--type type] [--model model] [--cockpit] [--cockpit-session name] [--home path] [--json]")
+		fmt.Fprintln(w, "  gitmoot orchestrate <agent> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--type type] [--model model] [--cockpit] [--cockpit-session name] [--skip-native-review-fanout] [--home path] [--json]")
 	case "review":
 		fmt.Fprintln(w, "  gitmoot agent review <name> \"message\" --repo owner/repo --pr number [--head-sha sha] [--branch branch] [--background] [--type type] [--model model] [--home path] [--json]")
 	case "implement":
-		fmt.Fprintln(w, "  gitmoot agent implement <name> \"message\" [--repo owner/repo] [--task task-id] [--branch branch] [--background] [--type type] [--model model] [--home path] [--json]")
+		fmt.Fprintln(w, "  gitmoot agent implement <name> \"message\" [--repo owner/repo] [--task task-id] [--branch branch] [--background] [--type type] [--model model] [--skip-native-review-fanout] [--home path] [--json]")
 	default:
-		fmt.Fprintln(w, "  gitmoot agent run <name> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--background] [--type type] [--model model] [--home path] [--json]")
+		fmt.Fprintln(w, "  gitmoot agent run <name> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--background] [--type type] [--model model] [--skip-native-review-fanout] [--home path] [--json]")
 	}
 }
 

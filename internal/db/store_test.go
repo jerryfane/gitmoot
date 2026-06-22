@@ -2278,6 +2278,61 @@ func TestRepositoryMethods(t *testing.T) {
 	}
 }
 
+func TestBranchLockSkipNativeReviewFanout(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	if created, err := store.CreateLock(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !created {
+		t.Fatalf("CreateLock returned created=%v err=%v", created, err)
+	}
+
+	// CreateLock defaults the flag to false.
+	lock, err := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	if err != nil {
+		t.Fatalf("GetBranchLock returned error: %v", err)
+	}
+	if lock.SkipNativeReviewFanout {
+		t.Fatalf("expected default SkipNativeReviewFanout=false, got %+v", lock)
+	}
+
+	// SetBranchLockReviewFanout flips it; GetBranchLock returns it.
+	if err := store.SetBranchLockReviewFanout(ctx, "jerryfane/gitmoot", "task-7", true); err != nil {
+		t.Fatalf("SetBranchLockReviewFanout returned error: %v", err)
+	}
+	lock, err = store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	if err != nil {
+		t.Fatalf("GetBranchLock returned error: %v", err)
+	}
+	if !lock.SkipNativeReviewFanout {
+		t.Fatalf("expected SkipNativeReviewFanout=true after set, got %+v", lock)
+	}
+
+	// ListBranchLocks round-trips the column.
+	locks, err := store.ListBranchLocks(ctx, "jerryfane/gitmoot")
+	if err != nil {
+		t.Fatalf("ListBranchLocks returned error: %v", err)
+	}
+	if len(locks) != 1 || !locks[0].SkipNativeReviewFanout {
+		t.Fatalf("ListBranchLocks = %+v", locks)
+	}
+
+	// Flipping back to false round-trips too.
+	if err := store.SetBranchLockReviewFanout(ctx, "jerryfane/gitmoot", "task-7", false); err != nil {
+		t.Fatalf("SetBranchLockReviewFanout(false) returned error: %v", err)
+	}
+	lock, err = store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	if err != nil {
+		t.Fatalf("GetBranchLock returned error: %v", err)
+	}
+	if lock.SkipNativeReviewFanout {
+		t.Fatalf("expected SkipNativeReviewFanout=false after reset, got %+v", lock)
+	}
+}
+
 func TestAddPendingAgentTemplateCandidateRollsBackArtifacts(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
