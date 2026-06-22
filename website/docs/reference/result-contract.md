@@ -102,7 +102,8 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
   reach an approving decision; otherwise the parent blocks, exactly as a failed
   `vote` does. `vote` is the special case where `K` equals the number of
   delegations (every child must approve). `K` is an integer count only — no
-  fractions or percentages.
+  fractions or percentages — and must not exceed the number of delegations (a
+  larger `K` is unsatisfiable and is rejected).
 - `timeout` (optional): a Go duration string that must be positive (for example,
   `10m`).
 - `retry` (optional): an integer that must be `>= 0`.

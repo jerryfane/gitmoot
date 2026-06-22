@@ -6849,7 +6849,8 @@ Delegation fields:
   children reach an approving decision; otherwise the parent blocks, exactly as a
   failed `vote` does. `vote` is the special case where `K` equals the number of
   delegations (every child must approve). `K` is an integer count only — no
-  fractions or percentages.
+  fractions or percentages — and must not exceed the number of delegations (a
+  larger `K` is unsatisfiable and is rejected).
 - `timeout` (optional): a Go duration string and must be positive (e.g. `10m`).
 - `retry` (optional): integer `>= 0`.
 - `worktree` (optional): worktree path for the child job.

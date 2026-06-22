@@ -3680,6 +3680,28 @@ func TestEngineDelegationSynthesisRuleQuorumPassesWhenMet(t *testing.T) {
 	}
 }
 
+// TestQuorumThresholdExceedingDelegationCountRejected pins that a quorum K larger
+// than the number of delegations (always unsatisfiable → would block forever) is
+// rejected at extraction, while K == len (vote-equivalent) is accepted.
+func TestQuorumThresholdExceedingDelegationCountRejected(t *testing.T) {
+	result := AgentResult{
+		Decision: "approved",
+		Summary:  "s",
+		Delegations: []Delegation{
+			{ID: "a", Agent: "a", Action: "ask", Prompt: "p", SynthesisRule: "quorum", Quorum: 3},
+			{ID: "b", Agent: "b", Action: "ask", Prompt: "p", SynthesisRule: "quorum", Quorum: 3},
+		},
+	}
+	if err := validateAgentResult(result); err == nil {
+		t.Fatal("quorum K=3 with 2 delegations must be rejected (unsatisfiable)")
+	}
+	result.Delegations[0].Quorum = 2
+	result.Delegations[1].Quorum = 2
+	if err := validateAgentResult(result); err != nil {
+		t.Fatalf("quorum K=2 with 2 delegations (== len) must be valid: %v", err)
+	}
+}
+
 type fakeImplementationFinalizer struct {
 	payload JobPayload
 	err     error
