@@ -221,7 +221,14 @@ the termination bounds below are measured against.
   fields are coupled: child-facing `artifacts` handles describe what a child can
   reference, and `artifact_body` carries the actual payload at the top level of
   the parent result. Setting `artifacts` without `artifact_body` is rejected by
-  validation.
+  validation. When the orchestrate policy enables it, a child's `artifact_body`
+  can also be **inlined** into the coordinator continuation prompt — appended as a
+  fenced block after each child's decision/summary/PR line, size-capped (per body
+  and per continuation) and rune-safe truncated, with a marker pointing at the
+  full on-disk brief at `<ArtifactRoot>/delegations/<parent>/brief.md`. Inlining
+  is **off by default**; see `inline_artifact_bodies` in the
+  [cockpit/orchestrate config](../workflows/cockpit-orchestrate-workflow.md#configuration-the-orchestrate-section).
+  With it off, the continuation prompt is byte-identical to before.
 
 ## Termination bounds
 

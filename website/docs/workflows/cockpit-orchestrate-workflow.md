@@ -71,6 +71,8 @@ cockpit_mode = "auto"      # on | off | auto (auto = on when launched in a Herdr
 cockpit_session = ""       # default Herdr session/workspace label ("" = per-run)
 cockpit_max_panes = 4      # cap on simultaneous panes per run
 cockpit_pane_key = "job"   # job (one pane per job) | seat (reuse a pane per role)
+inline_artifact_bodies = false   # inline each child's artifact_body into the coordinator continuation
+inline_artifact_max_bytes = 32768  # per-body cap (bytes) when inlining is on
 ```
 
 - `cockpit_mode = "off"` disables the cockpit even if `--cockpit` was passed;
@@ -81,6 +83,14 @@ cockpit_pane_key = "job"   # job (one pane per job) | seat (reuse a pane per rol
 - `cockpit_pane_key = "job"` opens one pane per child job. `seat` mode reuses a
   single pane per logical role across phases so a long run does not accumulate
   panes.
+- `inline_artifact_bodies` (default `false`) inlines each child's `artifact_body`
+  into the coordinator continuation prompt as a fenced block, so the coordinator
+  reads the briefs without re-fetching them from disk. Off by default, the
+  continuation is byte-identical to before.
+- `inline_artifact_max_bytes` (default `32768`, i.e. 32 KiB per body) caps how
+  many bytes of each child's body are inlined; longer bodies are rune-safe
+  truncated with a marker pointing at the full on-disk brief. A per-continuation
+  aggregate cap also bounds the total inlined across all children.
 
 ## Constrained hosts
 
