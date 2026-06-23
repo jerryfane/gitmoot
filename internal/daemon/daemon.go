@@ -25,6 +25,10 @@ type Daemon struct {
 	GitHub       github.Client
 	Workflow     *workflow.Engine
 	Sleep        func(context.Context, time.Duration) error
+	// WatchIssues opts in to the issue-comment workflow (#389): when true,
+	// PollOnce also polls open non-PR issues and routes `@<agent> ask …`
+	// comments to jobs. Default false keeps the PR-only behavior unchanged.
+	WatchIssues bool
 }
 
 func (d Daemon) Run(ctx context.Context) error {
@@ -113,6 +117,46 @@ func (d Daemon) PollOnce(ctx context.Context) error {
 	}
 	if err := d.retryClosedReadyToMerge(ctx, openBranches); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if d.WatchIssues {
+		if err := d.PollIssuesOnce(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// PollIssuesOnce is the opt-in issue-comment workflow (#389). It lists open
+// non-PR issues (PRs are filtered out by github.ListIssues so the PR-watcher is
+// not duplicated) and, for each, routes `@<agent> ask …` comments to jobs via
+// the shared comment->job->reply core. It reuses the seen_comments dedup, the
+// authorize-commenter gate, and PostIssueComment exactly like the PR path; an
+// `ask` needs no branch/HeadSHA, so those are left empty.
+func (d Daemon) PollIssuesOnce(ctx context.Context) error {
+	if err := d.validate(); err != nil {
+		return err
+	}
+	issues, err := d.GitHub.ListIssues(ctx, d.Repo, "open")
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, issue := range issues {
+		if issue.IsPullRequest {
+			continue
+		}
+		comments, err := d.GitHub.ListIssueComments(ctx, d.Repo, issue.Number)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, comment := range comments {
+			if err := d.handleIssueComment(ctx, issue, comment); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
 	return firstErr
 }
@@ -543,6 +587,111 @@ func (d Daemon) handleComment(ctx context.Context, pull github.PullRequest, comm
 		}
 	}
 	return d.markCommentSeen(ctx, pull, comment)
+}
+
+// handleIssueComment is the issue-side analogue of handleComment (#389). It
+// reuses the same seen_comments dedup and authorize-commenter gate, but routes
+// only `@<agent> ask …` commands: an `ask` needs no branch/HeadSHA, so plain
+// issues carry no PR-specific actions (implement/review/merge/status/etc. are
+// ignored on issues). Non-ask commands never mark the comment seen, so a later
+// real ask in the same thread is still picked up.
+func (d Daemon) handleIssueComment(ctx context.Context, issue github.Issue, comment github.IssueComment) error {
+	commands := ParseCommands(comment.Body)
+	asks := make([]Command, 0, len(commands))
+	for _, command := range commands {
+		if command.Action == "ask" {
+			asks = append(asks, command)
+		}
+	}
+	if len(asks) == 0 {
+		return nil
+	}
+
+	seen, err := d.Store.HasCommentSeen(ctx, d.Repo.FullName(), comment.ID)
+	if err != nil {
+		return err
+	}
+	if seen {
+		return nil
+	}
+
+	authorized, err := d.authorizeCommenter(ctx, comment.Author)
+	if err != nil {
+		return err
+	}
+	if !authorized {
+		if err := d.ack(ctx, issue.Number, fmt.Sprintf("Gitmoot ignored comment %d from `%s`: `/gitmoot` commands require write, maintain, or admin repository permission.", comment.ID, comment.Author)); err != nil {
+			return err
+		}
+		return d.markIssueCommentSeen(ctx, issue, comment)
+	}
+
+	for sequence, command := range commands {
+		if command.Action != "ask" {
+			continue
+		}
+		if err := d.handleIssueAsk(ctx, issue, comment, sequence, command); err != nil {
+			return err
+		}
+	}
+	return d.markIssueCommentSeen(ctx, issue, comment)
+}
+
+// handleIssueAsk enqueues a deduped `ask` job for an issue comment and posts an
+// acknowledgement, mirroring the agent branch of handleCommand but with an
+// issue-comment job id (so issue jobs never collide with PR jobs) and empty
+// branch/HeadSHA.
+func (d Daemon) handleIssueAsk(ctx context.Context, issue github.Issue, comment github.IssueComment, sequence int, command Command) error {
+	if err := command.Validate(); err != nil {
+		return d.ack(ctx, issue.Number, fmt.Sprintf("Gitmoot could not route comment %d: %v.", comment.ID, err))
+	}
+	agent, err := d.Store.GetAgent(ctx, command.Agent)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return d.ack(ctx, issue.Number, fmt.Sprintf("Gitmoot could not find subscribed agent `%s` for this repository.", command.Agent))
+		}
+		return err
+	}
+	allowed, err := d.Store.AgentCanAccessRepo(ctx, agent.Name, d.Repo.FullName())
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return d.ack(ctx, issue.Number, fmt.Sprintf("Gitmoot agent `%s` is not allowed on `%s`.", agent.Name, d.Repo.FullName()))
+	}
+	if !hasCapability(agent.Capabilities, command.Action) {
+		return d.ack(ctx, issue.Number, fmt.Sprintf("Gitmoot agent `%s` does not advertise `%s` capability.", agent.Name, command.Action))
+	}
+
+	job, created, err := d.enqueueJob(ctx, workflow.JobRequest{
+		ID:           issueJobID(d.Repo, issue.Number, comment.ID, sequence, command.Agent, command.Action),
+		Agent:        agent.Name,
+		Action:       command.Action,
+		Repo:         d.Repo.FullName(),
+		PullRequest:  int(issue.Number),
+		TaskID:       fmt.Sprintf("issue-%d-comment-%d", issue.Number, comment.ID),
+		TaskTitle:    issue.Title,
+		Sender:       comment.Author,
+		Instructions: command.Instructions,
+		Constraints: []string{
+			"Respond using the gitmoot_result JSON contract.",
+			"Keep the work scoped to answering the issue question.",
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	if created {
+		if err := d.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "routed",
+			Message: fmt.Sprintf("routed from issue #%d comment %d by %s", issue.Number, comment.ID, comment.Author),
+		}); err != nil {
+			return err
+		}
+	}
+	return d.ack(ctx, issue.Number, fmt.Sprintf("Gitmoot queued `%s` job `%s` for `%s`.", command.Action, job.ID, agent.Name))
 }
 
 func (d Daemon) handleRecoveryComment(ctx context.Context, pull github.PullRequest, comment github.IssueComment) error {
@@ -979,6 +1128,16 @@ func (d Daemon) markCommentSeen(ctx context.Context, pull github.PullRequest, co
 	return err
 }
 
+func (d Daemon) markIssueCommentSeen(ctx context.Context, issue github.Issue, comment github.IssueComment) error {
+	_, err := d.Store.MarkCommentSeenIfNew(ctx, db.Comment{
+		RepoFullName: d.Repo.FullName(),
+		CommentID:    comment.ID,
+		PullRequest:  issue.Number,
+		Body:         comment.Body,
+	})
+	return err
+}
+
 func (d Daemon) ack(ctx context.Context, issueNumber int64, body string) error {
 	_, err := d.GitHub.PostIssueComment(ctx, d.Repo, issueNumber, body)
 	return err
@@ -1028,6 +1187,26 @@ func jobID(repo github.Repository, pullNumber, commentID int64, sequence int, ag
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(action))
 	return "pr-comment-" + strconv.FormatUint(hash.Sum64(), 36)
+}
+
+// issueJobID is the issue-comment analogue of jobID. It hashes the same fields
+// (repo + issue number + comment id + sequence + agent + action) but emits an
+// `issue-comment-` prefix so an issue ask job never collides with a PR-comment
+// job, even for the same numbers.
+func issueJobID(repo github.Repository, issueNumber, commentID int64, sequence int, agent, action string) string {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(repo.FullName()))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(strconv.FormatInt(issueNumber, 10)))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(strconv.FormatInt(commentID, 10)))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(strconv.Itoa(sequence)))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(agent))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(action))
+	return "issue-comment-" + strconv.FormatUint(hash.Sum64(), 36)
 }
 
 func ParseRepository(value string) (github.Repository, error) {

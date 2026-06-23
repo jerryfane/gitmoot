@@ -293,6 +293,33 @@ func TestSearchOpenIssuesUsesIssueSearchEndpoint(t *testing.T) {
 	runner.wantArgs(t, 0, "api", "-X", "GET", "search/issues", "-f", `q=repo:jerryfane/gitmoot is:issue is:open in:body "<!-- gitmoot:dashboard-report fingerprint:abc -->"`)
 }
 
+func TestListIssuesFiltersOutPullRequests(t *testing.T) {
+	// GET /repos/{o}/{r}/issues returns issues AND PRs; PRs carry a
+	// `pull_request` object. ListIssues must drop those so the issue-comment
+	// watcher does not duplicate the PR-watcher.
+	runner := &fakeRunner{
+		results: []subprocess.Result{{
+			Stdout: `[
+				{"number":42,"title":"A real issue","state":"open","html_url":"https://github.com/jerryfane/gitmoot/issues/42","body":"please help"},
+				{"number":43,"title":"A pull request","state":"open","html_url":"https://github.com/jerryfane/gitmoot/pull/43","pull_request":{"url":"https://api.github.com/repos/jerryfane/gitmoot/pulls/43"}}
+			]`,
+		}},
+	}
+	client := GhClient{Runner: runner}
+
+	issues, err := client.ListIssues(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, "open")
+	if err != nil {
+		t.Fatalf("ListIssues returned error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("ListIssues returned %d issues, want 1 (PR filtered out): %+v", len(issues), issues)
+	}
+	if issues[0].Number != 42 || issues[0].IsPullRequest {
+		t.Fatalf("issues[0] = %+v, want plain issue #42", issues[0])
+	}
+	runner.wantArgs(t, 0, "api", "--paginate", "-X", "GET", "repos/jerryfane/gitmoot/issues", "-f", "state=open")
+}
+
 func TestPreflightChecksGhAuthAndRepoAccess(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{

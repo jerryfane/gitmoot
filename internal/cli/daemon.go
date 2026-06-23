@@ -57,8 +57,8 @@ func runDaemon(args []string, stdout, stderr io.Writer) int {
 
 func printDaemonUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  gitmoot daemon start [--repo owner/repo] [--poll 30s] [--workers 1] [--watch-skillopt-reviews]")
-	fmt.Fprintln(w, "  gitmoot daemon run [--repo owner/repo] [--poll 30s] [--workers 1] [--watch-skillopt-reviews]")
+	fmt.Fprintln(w, "  gitmoot daemon start [--repo owner/repo] [--poll 30s] [--workers 1] [--watch-skillopt-reviews] [--watch-issues]")
+	fmt.Fprintln(w, "  gitmoot daemon run [--repo owner/repo] [--poll 30s] [--workers 1] [--watch-skillopt-reviews] [--watch-issues]")
 	fmt.Fprintln(w, "  gitmoot daemon stop")
 	fmt.Fprintln(w, "  gitmoot daemon restart")
 	fmt.Fprintln(w, "  gitmoot daemon status")
@@ -108,7 +108,7 @@ func runDaemonStartWithWorkDir(args []string, workDir string, stdout, stderr io.
 		}
 	}
 
-	started, err := startDaemonChild(cfg.Home, cfg.Poll.String(), cfg.Workers, cfg.WatchSkillOptReviews, cfg.Scheduler, cfg.RepoFlag, cfg.Session, state, resolvedWorkDir)
+	started, err := startDaemonChild(cfg.Home, cfg.Poll.String(), cfg.Workers, cfg.WatchSkillOptReviews, cfg.WatchIssues, cfg.Scheduler, cfg.RepoFlag, cfg.Session, state, resolvedWorkDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "daemon start: %v\n", err)
 		return 1
@@ -147,6 +147,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 	workers := fs.Int("workers", 1, "worker count")
 	dryRun := fs.Bool("dry-run", false, "run without mutating external systems")
 	watchSkillOptReviews := fs.Bool("watch-skillopt-reviews", false, "poll watched SkillOpt review issue comments and import valid feedback")
+	watchIssues := fs.Bool("watch-issues", false, "poll open issues and route @<agent> ask comments to jobs (#389)")
 	scheduler := fs.String("scheduler", "barrier", "queued-job scheduler: barrier (default) or pool (#394 opt-in continuous worker pool)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -180,7 +181,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 
 	if *repoFlag == "" {
-		err := runRegisteredRepoSupervisor(ctx, *home, *poll, *workers, *dryRun, *watchSkillOptReviews, usePool, session, stdout)
+		err := runRegisteredRepoSupervisor(ctx, *home, *poll, *workers, *dryRun, *watchSkillOptReviews, *watchIssues, usePool, session, stdout)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 0
 		}
@@ -223,6 +224,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 			Store:        store,
 			GitHub:       gh,
 			Workflow:     &engine,
+			WatchIssues:  *watchIssues,
 		}, store, *workers, usePool, session, stdout)
 	})
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -436,6 +438,8 @@ type daemonStartConfig struct {
 	ExplicitWorkers              bool
 	WatchSkillOptReviews         bool
 	ExplicitWatchSkillOptReviews bool
+	WatchIssues                  bool
+	ExplicitWatchIssues          bool
 	Scheduler                    string
 	ExplicitScheduler            bool
 }
@@ -453,6 +457,7 @@ func parseDaemonStartConfig(command string, args []string, stderr io.Writer) (da
 	poll := fs.Duration("poll", 30*time.Second, "poll interval")
 	workers := fs.Int("workers", 1, "worker count")
 	watchSkillOptReviews := fs.Bool("watch-skillopt-reviews", false, "poll watched SkillOpt review issue comments and import valid feedback")
+	watchIssues := fs.Bool("watch-issues", false, "poll open issues and route @<agent> ask comments to jobs (#389)")
 	scheduler := fs.String("scheduler", "barrier", "queued-job scheduler: barrier (default) or pool (#394 opt-in continuous worker pool)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -471,6 +476,7 @@ func parseDaemonStartConfig(command string, args []string, stderr io.Writer) (da
 		Poll:                 *poll,
 		Workers:              *workers,
 		WatchSkillOptReviews: *watchSkillOptReviews,
+		WatchIssues:          *watchIssues,
 		Scheduler:            *scheduler,
 	}
 	fs.Visit(func(f *flag.Flag) {
@@ -489,6 +495,9 @@ func parseDaemonStartConfig(command string, args []string, stderr io.Writer) (da
 			cfg.ExplicitStartConfig = true
 		case "watch-skillopt-reviews":
 			cfg.ExplicitWatchSkillOptReviews = true
+			cfg.ExplicitStartConfig = true
+		case "watch-issues":
+			cfg.ExplicitWatchIssues = true
 			cfg.ExplicitStartConfig = true
 		case "scheduler":
 			cfg.ExplicitScheduler = true
@@ -624,6 +633,9 @@ func overlayDaemonStartArgs(args []string, cfg daemonStartConfig) []string {
 	if cfg.ExplicitWatchSkillOptReviews {
 		args = withDaemonBoolFlagArg(args, "watch-skillopt-reviews", cfg.WatchSkillOptReviews)
 	}
+	if cfg.ExplicitWatchIssues {
+		args = withDaemonBoolFlagArg(args, "watch-issues", cfg.WatchIssues)
+	}
 	if cfg.ExplicitScheduler {
 		args = withDaemonFlagArg(args, "scheduler", cfg.Scheduler)
 	}
@@ -688,7 +700,7 @@ func currentDaemonPID(state daemonState) (pid int, stale bool, err error) {
 	return pid, false, nil
 }
 
-func startDaemonChild(home string, poll string, workers int, watchSkillOptReviews bool, scheduler string, repo string, session string, state daemonState, workDir string) (daemonMeta, error) {
+func startDaemonChild(home string, poll string, workers int, watchSkillOptReviews bool, watchIssues bool, scheduler string, repo string, session string, state daemonState, workDir string) (daemonMeta, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return daemonMeta{}, err
@@ -698,7 +710,7 @@ func startDaemonChild(home string, poll string, workers int, watchSkillOptReview
 		return daemonMeta{}, err
 	}
 	defer logFile.Close()
-	args := daemonChildArgs(home, poll, workers, watchSkillOptReviews, scheduler, repo, session)
+	args := daemonChildArgs(home, poll, workers, watchSkillOptReviews, watchIssues, scheduler, repo, session)
 	cmd := exec.Command(executable, args...)
 	cmd.Dir = workDir
 	cmd.Stdout = logFile
@@ -721,7 +733,7 @@ func startDaemonChild(home string, poll string, workers int, watchSkillOptReview
 	}, nil
 }
 
-func daemonChildArgs(home string, poll string, workers int, watchSkillOptReviews bool, scheduler string, repo string, session string) []string {
+func daemonChildArgs(home string, poll string, workers int, watchSkillOptReviews bool, watchIssues bool, scheduler string, repo string, session string) []string {
 	args := []string{"daemon", "run", "--poll", poll, "--workers", strconv.Itoa(workers)}
 	if home != "" {
 		args = append(args, "--home", home)
@@ -734,6 +746,9 @@ func daemonChildArgs(home string, poll string, workers int, watchSkillOptReviews
 	}
 	if watchSkillOptReviews {
 		args = append(args, "--watch-skillopt-reviews")
+	}
+	if watchIssues {
+		args = append(args, "--watch-issues")
 	}
 	if usePool, _ := parseSchedulerMode(scheduler); usePool {
 		args = append(args, "--scheduler", "pool")
@@ -864,13 +879,14 @@ func hasWhitespace(value string) bool {
 	return strings.ContainsAny(value, " \t\r\n")
 }
 
-func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Duration, workers int, dryRun bool, watchSkillOptReviews bool, usePool bool, rootFilter string, stdout io.Writer) error {
+func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Duration, workers int, dryRun bool, watchSkillOptReviews bool, watchIssues bool, usePool bool, rootFilter string, stdout io.Writer) error {
 	return withStoreAndPaths(home, func(paths config.Paths, store *db.Store) error {
 		schedule := registeredRepoSchedule{
 			NextPoll:    map[string]time.Time{},
 			ErrorStreak: map[string]int{},
 		}
 		poller := defaultRegisteredRepoPoller(store, workers, dryRun, stdout, paths.Home)
+		poller.WatchIssues = watchIssues
 		blobStore := artifact.NewStore(paths.ArtifactBlobs)
 		reviewGitHub := newSkillOptGitHubClient()
 		worker := defaultJobWorker(store, stdout, home)
@@ -1091,6 +1107,7 @@ type registeredRepoPoller struct {
 	DryRun          bool
 	Stdout          io.Writer
 	RecoveryOnly    bool
+	WatchIssues     bool
 	CheckoutLocks   *repoCheckoutLocks
 	GitHubClient    func(checkout string) github.Client
 	WorkflowFactory func(store *db.Store, gh github.Client, checkout string) *workflow.Engine
@@ -1183,10 +1200,11 @@ func (p registeredRepoPoller) pollRepo(ctx context.Context, repoRecord db.Repo, 
 		}
 	}
 	d := daemon.Daemon{
-		Repo:     repo,
-		Store:    store,
-		GitHub:   gh,
-		Workflow: engine,
+		Repo:        repo,
+		Store:       store,
+		GitHub:      gh,
+		Workflow:    engine,
+		WatchIssues: p.WatchIssues,
 	}
 	if recoveryOnly {
 		err = d.PollRecoveryCommandsOnce(ctx)

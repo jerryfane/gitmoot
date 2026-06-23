@@ -214,7 +214,7 @@ func TestDaemonRestartOverlayPreservesSavedArgs(t *testing.T) {
 func TestDaemonStartForwardsRepoAndSessionThroughRestart(t *testing.T) {
 	// The detached child argv carries both filters (this is exactly what
 	// daemonMeta.Args records).
-	childArgs := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, "barrier", "owner/project", "root-coordinator")
+	childArgs := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, false, "barrier", "owner/project", "root-coordinator")
 	if !daemonArgsContainFlag(childArgs, "repo", "owner/project") {
 		t.Fatalf("child argv missing --repo: %v", childArgs)
 	}
@@ -274,7 +274,7 @@ func TestDaemonStartConfigSessionRootAlias(t *testing.T) {
 }
 
 func TestDaemonChildArgsRunAllRepoSupervisor(t *testing.T) {
-	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 2, true, "barrier", "", "")
+	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 2, true, false, "barrier", "", "")
 
 	for i, arg := range args {
 		if arg == "--repo" || strings.HasPrefix(arg, "--repo=") {
@@ -300,7 +300,7 @@ func TestDaemonChildArgsRunAllRepoSupervisor(t *testing.T) {
 }
 
 func TestDaemonChildArgsForwardsRepo(t *testing.T) {
-	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, "barrier", "owner/project", "")
+	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, false, "barrier", "owner/project", "")
 
 	if !daemonArgsContainFlag(args, "repo", "owner/project") {
 		t.Fatalf("daemon child args missing --repo owner/project: %v", args)
@@ -318,7 +318,7 @@ func TestDaemonChildArgsForwardsRepo(t *testing.T) {
 }
 
 func TestDaemonChildArgsForwardsSession(t *testing.T) {
-	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, "barrier", "owner/project", "root-coordinator")
+	args := daemonChildArgs("/tmp/gitmoot-home", "30s", 1, false, false, "barrier", "owner/project", "root-coordinator")
 
 	if !daemonArgsContainFlag(args, "repo", "owner/project") {
 		t.Fatalf("daemon child args missing --repo owner/project: %v", args)
@@ -3847,7 +3847,7 @@ func TestParseSchedulerMode(t *testing.T) {
 }
 
 func TestDaemonChildArgsForwardsPoolScheduler(t *testing.T) {
-	pool := daemonChildArgs("/tmp/home", "30s", 1, false, "pool", "", "")
+	pool := daemonChildArgs("/tmp/home", "30s", 1, false, false, "pool", "", "")
 	if !daemonArgsContainFlag(pool, "scheduler", "pool") {
 		t.Fatalf("pool child args missing --scheduler pool: %v", pool)
 	}
@@ -3860,7 +3860,7 @@ func TestDaemonChildArgsForwardsPoolScheduler(t *testing.T) {
 	}
 	// barrier (the default) appends no --scheduler flag, keeping the child argv
 	// byte-identical to before this change.
-	barrier := daemonChildArgs("/tmp/home", "30s", 1, false, "barrier", "", "")
+	barrier := daemonChildArgs("/tmp/home", "30s", 1, false, false, "barrier", "", "")
 	for _, a := range barrier {
 		if a == "--scheduler" {
 			t.Fatalf("barrier child args should not carry --scheduler: %v", barrier)
@@ -4907,6 +4907,10 @@ func (f *cliPollFakeGitHub) ListPullRequests(context.Context, github.Repository,
 		return nil, f.listErr
 	}
 	return append([]github.PullRequest(nil), f.pulls...), nil
+}
+
+func (f *cliPollFakeGitHub) ListIssues(context.Context, github.Repository, string) ([]github.Issue, error) {
+	return nil, nil
 }
 
 func (f *cliPollFakeGitHub) ListIssueComments(_ context.Context, _ github.Repository, issueNumber int64) ([]github.IssueComment, error) {

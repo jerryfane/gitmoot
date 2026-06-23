@@ -2074,6 +2074,159 @@ func TestRunContinuesAfterPollError(t *testing.T) {
 	}
 }
 
+func TestPollOnceWithoutWatchIssuesIgnoresIssues(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:           "researcher",
+		Role:           "researcher",
+		Runtime:        "claude",
+		RuntimeRef:     "last",
+		RepoScope:      repo.FullName(),
+		Capabilities:   []string{"ask"},
+		AutonomyPolicy: "auto",
+		HealthStatus:   "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent returned error: %v", err)
+	}
+	client := &fakeGitHub{
+		issues: []github.Issue{{Number: 42, Title: "Question", State: "open"}},
+		comments: map[int64][]github.IssueComment{
+			42: {{ID: 900, Body: "/gitmoot researcher ask what is best", Author: "alice"}},
+		},
+	}
+
+	// WatchIssues defaults to false: the issue loop must not run at all.
+	err := (Daemon{Repo: repo, Store: store, GitHub: client}).PollOnce(ctx)
+
+	if err != nil {
+		t.Fatalf("PollOnce returned error: %v", err)
+	}
+	if client.listIssuesCalls != 0 {
+		t.Fatalf("ListIssues calls = %d, want 0 when --watch-issues is off", client.listIssuesCalls)
+	}
+	if len(client.posted) != 0 {
+		t.Fatalf("posted = %+v, want none when --watch-issues is off", client.posted)
+	}
+	if _, err := store.GetJob(ctx, issueJobID(repo, 42, 900, 0, "researcher", "ask")); err == nil {
+		t.Fatal("issue ask created a job while --watch-issues was off")
+	}
+}
+
+func TestPollIssuesOnceRoutesAskAndDedupes(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:           "researcher",
+		Role:           "researcher",
+		Runtime:        "claude",
+		RuntimeRef:     "last",
+		RepoScope:      repo.FullName(),
+		Capabilities:   []string{"ask"},
+		AutonomyPolicy: "auto",
+		HealthStatus:   "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent returned error: %v", err)
+	}
+	client := &fakeGitHub{
+		issues: []github.Issue{
+			{Number: 42, Title: "Question", State: "open"},
+			// A PR slipped into the listing (defense in depth): it must be skipped.
+			{Number: 43, Title: "A PR", State: "open", IsPullRequest: true},
+		},
+		comments: map[int64][]github.IssueComment{
+			42: {{ID: 900, Body: "/gitmoot researcher ask what is the best approach", Author: "alice"}},
+			43: {{ID: 901, Body: "/gitmoot researcher ask should never run", Author: "alice"}},
+		},
+	}
+
+	d := Daemon{Repo: repo, Store: store, GitHub: client, WatchIssues: true}
+	if err := d.PollOnce(ctx); err != nil {
+		t.Fatalf("PollOnce returned error: %v", err)
+	}
+
+	if client.listIssuesCalls != 1 {
+		t.Fatalf("ListIssues calls = %d, want 1", client.listIssuesCalls)
+	}
+	if len(client.posted) != 1 || client.posted[0].issueNumber != 42 {
+		t.Fatalf("posted acknowledgements = %+v, want 1 on issue 42", client.posted)
+	}
+	if !strings.Contains(client.posted[0].body, "queued `ask` job") || !strings.Contains(client.posted[0].body, "`researcher`") {
+		t.Fatalf("ack body = %q", client.posted[0].body)
+	}
+
+	wantID := issueJobID(repo, 42, 900, 0, "researcher", "ask")
+	job, err := store.GetJob(ctx, wantID)
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	if !strings.HasPrefix(job.ID, "issue-comment-") {
+		t.Fatalf("issue job id = %q, want issue-comment- prefix", job.ID)
+	}
+	if job.Agent != "researcher" || job.Type != "ask" || job.State != string(workflow.JobQueued) {
+		t.Fatalf("job = %+v", job)
+	}
+	var payload workflow.JobPayload
+	if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Repo != repo.FullName() || payload.Branch != "" || payload.HeadSHA != "" {
+		t.Fatalf("ask payload should carry empty branch/headSHA: %+v", payload)
+	}
+	if payload.PullRequest != 42 || payload.Sender != "alice" || payload.Instructions != "what is the best approach" {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if _, err := store.GetJob(ctx, issueJobID(repo, 43, 901, 0, "researcher", "ask")); err == nil {
+		t.Fatal("ask on a PR row was routed; PRs must be skipped")
+	}
+	events, err := store.ListJobEvents(ctx, wantID)
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	if len(events) != 2 || events[1].Kind != "routed" || !strings.Contains(events[1].Message, "issue #42") {
+		t.Fatalf("events = %+v", events)
+	}
+
+	// Second poll: the comment is already seen, so no duplicate job/ack.
+	if err := d.PollOnce(ctx); err != nil {
+		t.Fatalf("second PollOnce returned error: %v", err)
+	}
+	if len(client.posted) != 1 {
+		t.Fatalf("posted acknowledgements after re-poll = %+v, want 1 (deduped)", client.posted)
+	}
+}
+
+func TestPollIssuesOnceIgnoresNonAskAndUnknownAgent(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	client := &fakeGitHub{
+		issues: []github.Issue{{Number: 7, Title: "Issue 7", State: "open"}},
+		comments: map[int64][]github.IssueComment{
+			// review/implement/status are PR-only: ignored on a plain issue, and the
+			// comment must NOT be marked seen so a later real ask is still picked up.
+			7: {{ID: 11, Body: "/gitmoot someone review please", Author: "alice"}},
+		},
+	}
+
+	d := Daemon{Repo: repo, Store: store, GitHub: client, WatchIssues: true}
+	if err := d.PollOnce(ctx); err != nil {
+		t.Fatalf("PollOnce returned error: %v", err)
+	}
+	if len(client.posted) != 0 {
+		t.Fatalf("posted = %+v, want none for a non-ask issue comment", client.posted)
+	}
+	seen, err := store.HasCommentSeen(ctx, repo.FullName(), 11)
+	if err != nil {
+		t.Fatalf("HasCommentSeen returned error: %v", err)
+	}
+	if seen {
+		t.Fatal("non-ask issue comment was marked seen; a later ask would be lost")
+	}
+}
+
 func testStore(t *testing.T) *db.Store {
 	t.Helper()
 	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
@@ -2091,12 +2244,14 @@ func testStore(t *testing.T) *db.Store {
 type fakeGitHub struct {
 	pulls                 []github.PullRequest
 	pullsByState          map[string][]github.PullRequest
+	issues                []github.Issue
 	comments              map[int64][]github.IssueComment
 	posted                []postedComment
 	permissions           map[string]string
 	postErrs              []error
 	listPullRequestsCalls int
 	listPullRequestsErrs  []error
+	listIssuesCalls       int
 }
 
 type postedComment struct {
@@ -2145,6 +2300,11 @@ func (f *fakeGitHub) ListPullRequests(_ context.Context, _ github.Repository, st
 		return append([]github.PullRequest(nil), f.pullsByState[state]...), nil
 	}
 	return append([]github.PullRequest(nil), f.pulls...), nil
+}
+
+func (f *fakeGitHub) ListIssues(_ context.Context, _ github.Repository, _ string) ([]github.Issue, error) {
+	f.listIssuesCalls++
+	return append([]github.Issue(nil), f.issues...), nil
 }
 
 func (f *fakeGitHub) CreatePullRequest(context.Context, github.CreatePullRequestInput) (github.PullRequest, error) {

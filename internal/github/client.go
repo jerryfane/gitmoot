@@ -26,6 +26,7 @@ type Client interface {
 	DeleteRepository(ctx context.Context, repo Repository) error
 	ListUserRepositories(ctx context.Context, limit int) ([]RepoSummary, error)
 	ListPullRequests(ctx context.Context, repo Repository, state string) ([]PullRequest, error)
+	ListIssues(ctx context.Context, repo Repository, state string) ([]Issue, error)
 	GetPullRequest(ctx context.Context, repo Repository, number int64) (PullRequest, error)
 	GetOpenPullRequestByHead(ctx context.Context, repo Repository, head string, base string) (PullRequest, bool, error)
 	CreatePullRequest(ctx context.Context, input CreatePullRequestInput) (PullRequest, error)
@@ -152,6 +153,33 @@ type Issue struct {
 	State  string `json:"state"`
 	URL    string `json:"html_url"`
 	Body   string `json:"body"`
+	// IsPullRequest is true when this row came back from the /issues listing as a
+	// pull request. The GitHub issues endpoint returns issues AND PRs; PRs carry
+	// a `pull_request` object. Callers that want plain issues filter these out so
+	// the PR-watcher is not duplicated.
+	IsPullRequest bool `json:"-"`
+}
+
+func (i *Issue) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		Number      int64           `json:"number"`
+		Title       string          `json:"title"`
+		State       string          `json:"state"`
+		URL         string          `json:"html_url"`
+		Body        string          `json:"body"`
+		PullRequest json.RawMessage `json:"pull_request"`
+	}
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	i.Number = decoded.Number
+	i.Title = decoded.Title
+	i.State = decoded.State
+	i.URL = decoded.URL
+	i.Body = decoded.Body
+	i.IsPullRequest = len(decoded.PullRequest) > 0 && string(decoded.PullRequest) != "null"
+	return nil
 }
 
 type CreateIssueInput struct {
@@ -435,6 +463,28 @@ func (c *GhClient) ListPullRequests(ctx context.Context, repo Repository, state 
 		state = "open"
 	}
 	return apiPaginatedJSON[PullRequest](ctx, c, "-X", "GET", endpoint(repo, "pulls"), "-f", "state="+state)
+}
+
+// ListIssues lists repository issues via GET /repos/{owner}/{repo}/issues. That
+// endpoint returns issues AND pull requests; PRs carry a `pull_request` object,
+// so the result is filtered down to plain issues here (IsPullRequest == true is
+// dropped) to keep the issue-comment watcher from duplicating the PR-watcher.
+func (c *GhClient) ListIssues(ctx context.Context, repo Repository, state string) ([]Issue, error) {
+	if state == "" {
+		state = "open"
+	}
+	issues, err := apiPaginatedJSON[Issue](ctx, c, "-X", "GET", endpoint(repo, "issues"), "-f", "state="+state)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.IsPullRequest {
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered, nil
 }
 
 func (c *GhClient) GetPullRequest(ctx context.Context, repo Repository, number int64) (PullRequest, error) {
@@ -1154,6 +1204,10 @@ func (NoopClient) Preflight(context.Context, Repository) error {
 }
 
 func (NoopClient) ListPullRequests(context.Context, Repository, string) ([]PullRequest, error) {
+	return nil, errors.ErrUnsupported
+}
+
+func (NoopClient) ListIssues(context.Context, Repository, string) ([]Issue, error) {
 	return nil, errors.ErrUnsupported
 }
 
