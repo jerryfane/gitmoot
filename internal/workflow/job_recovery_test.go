@@ -2,8 +2,11 @@ package workflow
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jerryfane/gitmoot/internal/db"
 )
@@ -147,6 +150,55 @@ func TestCancelJobCancelsQueuedOrRunningJob(t *testing.T) {
 	}
 	if len(events) != 2 || events[1].Kind != string(JobCancelled) {
 		t.Fatalf("events = %+v, want cancellation event", events)
+	}
+}
+
+func TestCancelJobReleasesRuntimeSessionLock(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	if err := store.CreateJobWithEvent(ctx, db.Job{ID: "job-1", Agent: "audit", Type: "ask", State: string(JobRunning)}, db.JobEvent{Kind: string(JobRunning), Message: "running"}); err != nil {
+		t.Fatalf("CreateJobWithEvent returned error: %v", err)
+	}
+
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	const lockKey = "runtime:codex:session-1"
+	acquired, err := store.AcquireResourceLock(ctx, db.ResourceLock{
+		ResourceKey: lockKey,
+		OwnerJobID:  "job-1",
+		OwnerToken:  "token-1",
+		ExpiresAt:   now.Add(30 * time.Minute).Format(time.RFC3339Nano),
+	}, now)
+	if err != nil {
+		t.Fatalf("AcquireResourceLock returned error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("AcquireResourceLock did not acquire the runtime-session lock")
+	}
+
+	job, err := CancelJob(ctx, store, "job-1")
+	if err != nil {
+		t.Fatalf("CancelJob returned error: %v", err)
+	}
+	if job.State != string(JobCancelled) {
+		t.Fatalf("job state = %q, want cancelled", job.State)
+	}
+
+	if _, err := store.GetResourceLock(ctx, lockKey); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetResourceLock after cancel error = %v, want sql.ErrNoRows (lock should be released)", err)
+	}
+
+	// A different job must be able to re-acquire the freed key immediately.
+	reacquired, err := store.AcquireResourceLock(ctx, db.ResourceLock{
+		ResourceKey: lockKey,
+		OwnerJobID:  "job-2",
+		OwnerToken:  "token-2",
+		ExpiresAt:   now.Add(30 * time.Minute).Format(time.RFC3339Nano),
+	}, now)
+	if err != nil {
+		t.Fatalf("second AcquireResourceLock returned error: %v", err)
+	}
+	if !reacquired {
+		t.Fatal("second job could not re-acquire the freed runtime-session lock")
 	}
 }
 

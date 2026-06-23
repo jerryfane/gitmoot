@@ -4338,6 +4338,21 @@ func (s *Store) ReleaseResourceLock(ctx context.Context, resourceKey string, own
 	return affected == 1, nil
 }
 
+// DeleteResourceLocksByOwner releases every resource lock held by ownerJobID,
+// regardless of token/expiry — used when a job is cancelled and can no longer
+// renew its locks. Returns the number released.
+func (s *Store) DeleteResourceLocksByOwner(ctx context.Context, ownerJobID string) (int64, error) {
+	ownerJobID = strings.TrimSpace(ownerJobID)
+	if ownerJobID == "" {
+		return 0, nil
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM resource_locks WHERE owner_job_id = ?`, ownerJobID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) DeleteExpiredResourceLocks(ctx context.Context, now time.Time) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `DELETE FROM resource_locks
 		WHERE expires_at <= ?

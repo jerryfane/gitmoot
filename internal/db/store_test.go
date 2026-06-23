@@ -1375,6 +1375,54 @@ func TestResourceLockMethods(t *testing.T) {
 	}
 }
 
+func TestDeleteResourceLocksByOwner(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	for _, lock := range []ResourceLock{
+		{ResourceKey: "runtime:codex:session-1", OwnerJobID: "job-a", OwnerToken: "token-a1", ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano)},
+		{ResourceKey: "runtime:codex:session-2", OwnerJobID: "job-a", OwnerToken: "token-a2", ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano)},
+		{ResourceKey: "runtime:codex:session-3", OwnerJobID: "job-b", OwnerToken: "token-b1", ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano)},
+	} {
+		acquired, err := store.AcquireResourceLock(ctx, lock, now)
+		if err != nil {
+			t.Fatalf("AcquireResourceLock(%s) returned error: %v", lock.ResourceKey, err)
+		}
+		if !acquired {
+			t.Fatalf("AcquireResourceLock(%s) did not acquire", lock.ResourceKey)
+		}
+	}
+
+	// Empty owner id is a no-op.
+	if released, err := store.DeleteResourceLocksByOwner(ctx, "  "); err != nil || released != 0 {
+		t.Fatalf("DeleteResourceLocksByOwner(empty) released=%d err=%v, want 0/nil", released, err)
+	}
+
+	released, err := store.DeleteResourceLocksByOwner(ctx, "job-a")
+	if err != nil {
+		t.Fatalf("DeleteResourceLocksByOwner(job-a) returned error: %v", err)
+	}
+	if released != 2 {
+		t.Fatalf("DeleteResourceLocksByOwner(job-a) released=%d, want 2", released)
+	}
+
+	// job-a's locks are gone.
+	for _, key := range []string{"runtime:codex:session-1", "runtime:codex:session-2"} {
+		if _, err := store.GetResourceLock(ctx, key); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("GetResourceLock(%s) error = %v, want sql.ErrNoRows", key, err)
+		}
+	}
+	// job-b's lock survives.
+	if _, err := store.GetResourceLock(ctx, "runtime:codex:session-3"); err != nil {
+		t.Fatalf("GetResourceLock(session-3) returned error: %v, want surviving lock", err)
+	}
+}
+
 func TestResourceLockRecoversExpiredLock(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
