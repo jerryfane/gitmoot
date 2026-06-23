@@ -4505,6 +4505,86 @@ func enqueueDaemonWorkerJob(t *testing.T, store *db.Store, request workflow.JobR
 	}
 }
 
+// TestRunQueuedJobsForRepoSkipsChildrenOfKilledRoot pins the #341 daemon half of
+// the operator kill switch: once a tree's root is marked killed, a queued CHILD
+// of that root is skipped by runQueuedJobsForRepo (never delivered, stays
+// queued), while a queued child of an un-killed root still runs.
+func TestRunQueuedJobsForRepoSkipsChildrenOfKilledRoot(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "w", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
+
+	killedChildPayload := mustJobPayload(t, workflow.JobPayload{Repo: "owner/repo", Branch: "main", Sender: "w", RootJobID: "killed-root", DelegationID: "d1"})
+	liveChildPayload := mustJobPayload(t, workflow.JobPayload{Repo: "owner/repo", Branch: "main", Sender: "w", RootJobID: "live-root", DelegationID: "d2"})
+	// A continuation of the killed root carries NO DelegationID and MUST still run
+	// so the engine routes the tree through the graceful #305 finalize.
+	killedContinuationPayload := mustJobPayload(t, workflow.JobPayload{Repo: "owner/repo", Branch: "main", Sender: "w", RootJobID: "killed-root", DelegationFinalize: true})
+	for _, j := range []db.Job{
+		{ID: "killed-root", Agent: "w", Type: "ask", State: string(workflow.JobSucceeded), Payload: mustJobPayload(t, workflow.JobPayload{Repo: "owner/repo", Sender: "w"})},
+		{ID: "live-root", Agent: "w", Type: "ask", State: string(workflow.JobSucceeded), Payload: mustJobPayload(t, workflow.JobPayload{Repo: "owner/repo", Sender: "w"})},
+		{ID: "killed-child", Agent: "w", Type: "ask", State: string(workflow.JobQueued), Payload: killedChildPayload},
+		{ID: "killed-root/continuation", Agent: "w", Type: "ask", State: string(workflow.JobQueued), Payload: killedContinuationPayload},
+		{ID: "live-child", Agent: "w", Type: "ask", State: string(workflow.JobQueued), Payload: liveChildPayload},
+	} {
+		if err := store.CreateJobWithEvent(ctx, j, db.JobEvent{Kind: j.State, Message: "seed"}); err != nil {
+			t.Fatalf("CreateJobWithEvent(%s) returned error: %v", j.ID, err)
+		}
+	}
+
+	// Operator kills only the first tree.
+	if err := store.SetRootJobKilled(ctx, "killed-root"); err != nil {
+		t.Fatalf("SetRootJobKilled returned error: %v", err)
+	}
+
+	adapter := &cliWorkerFakeAdapter{
+		output: `{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
+	}
+	worker := defaultJobWorker(store, io.Discard)
+	worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		return t.TempDir(), nil
+	}
+	worker.AdapterFactory = func(runtime.Agent, string) (workflow.DeliveryAdapter, error) {
+		return adapter, nil
+	}
+
+	if err := runQueuedJobsForRepo(ctx, worker, 4, "", ""); err != nil {
+		t.Fatalf("runQueuedJobsForRepo returned error: %v", err)
+	}
+
+	for _, id := range adapter.delivered {
+		if id == "killed-child" {
+			t.Fatalf("a queued child of a killed root must not be delivered; delivered=%v", adapter.delivered)
+		}
+	}
+	liveDelivered := false
+	for _, id := range adapter.delivered {
+		if id == "live-child" {
+			liveDelivered = true
+		}
+	}
+	if !liveDelivered {
+		t.Fatalf("a queued child of an un-killed root must still run; delivered=%v", adapter.delivered)
+	}
+	continuationDelivered := false
+	for _, id := range adapter.delivered {
+		if id == "killed-root/continuation" {
+			continuationDelivered = true
+		}
+	}
+	if !continuationDelivered {
+		t.Fatalf("the continuation of a killed root must run so the graceful finalize executes; delivered=%v", adapter.delivered)
+	}
+
+	killedChild, err := store.GetJob(ctx, "killed-child")
+	if err != nil {
+		t.Fatalf("GetJob(killed-child) returned error: %v", err)
+	}
+	if killedChild.State != string(workflow.JobQueued) {
+		t.Fatalf("killed-child state = %q, want still queued", killedChild.State)
+	}
+}
+
 func daemonWorkerHasEvent(events []db.JobEvent, kind string) bool {
 	for _, event := range events {
 		if event.Kind == kind {

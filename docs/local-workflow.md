@@ -44,6 +44,7 @@ gitmoot job show <job-id>
 gitmoot job watch <job-id>
 gitmoot job retry <job-id>
 gitmoot job cancel <job-id>
+gitmoot job kill <root-job-id>            # operator kill switch for a runaway delegation tree
 gitmoot status --repo owner/repo
 gitmoot version --json
 gitmoot update --check

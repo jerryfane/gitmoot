@@ -171,6 +171,47 @@ func TestRunJobRunUsesDaemonWorkerInternals(t *testing.T) {
 	}
 }
 
+// TestRunJobKill covers the #341 operator kill switch CLI: `job kill <root>`
+// marks the root as killed and reports it, and errors on a missing root id.
+func TestRunJobKill(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	seedCLIJob(t, store, db.Job{
+		ID:      "root-job",
+		Agent:   "coord",
+		Type:    "ask",
+		State:   string(workflow.JobRunning),
+		Payload: mustJobPayload(t, workflow.JobPayload{Repo: "owner/repo", Branch: "main"}),
+	}, "running")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"job", "kill", "root-job", "--home", home}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job kill exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "killed delegation tree rooted at root-job") {
+		t.Fatalf("job kill output = %q", stdout.String())
+	}
+	killed, err := store.IsRootJobKilled(context.Background(), "root-job")
+	if err != nil {
+		t.Fatalf("IsRootJobKilled returned error: %v", err)
+	}
+	if !killed {
+		t.Fatal("job kill should mark the root as killed")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"job", "kill", "no-such-root", "--home", home}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("job kill on missing root exit code = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "job kill:") {
+		t.Fatalf("job kill missing-root stderr = %q", stderr.String())
+	}
+}
+
 func openCLIJobStore(t *testing.T, home string) *db.Store {
 	t.Helper()
 	paths := config.PathsForHome(home)

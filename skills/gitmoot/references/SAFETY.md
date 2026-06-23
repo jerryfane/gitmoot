@@ -67,6 +67,13 @@ cannot recurse or fan out forever:
 - Loop detection: a canonical windowed signature hash over recent delegation
   activity halts repeated or cyclic delegation chains well before the depth cap
   is reached, preventing oscillating A→B→A loops.
+- Operator kill switch: `gitmoot job kill <root-job-id>` lets an operator
+  terminate a runaway tree by its root id from outside. It is the **first**
+  backstop, so operator action wins over every budget cap. The kill is graceful,
+  not a hard stop — in-flight jobs finish normally, the coordinator's next
+  continuation routes through the same finalize path below (a
+  `delegation_killed` event is emitted), and the daemon stops starting queued
+  children of the killed root.
 
 When a bound trips, the offending delegations are not dispatched and the parent
 receives a typed lifecycle event explaining why (for example, the delegation tree

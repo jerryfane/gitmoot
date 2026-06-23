@@ -474,9 +474,17 @@ gitmoot job watch <job-id>
 gitmoot job events <job-id>
 gitmoot job retry <job-id>
 gitmoot job cancel <job-id>
+gitmoot job kill <root-job-id>
 gitmoot lock list --repo owner/repo
 gitmoot lock show owner/repo <branch>
 ```
+
+`gitmoot job kill <root-job-id>` is the operator kill switch for a runaway
+delegation tree: it terminates the tree identified by its **root** job id
+gracefully. In-flight jobs finish normally; the coordinator's next continuation
+is routed through the graceful finalize path (synthesize what completed → stop)
+and the daemon stops starting queued children of that root. See
+`references/SAFETY.md` for how it relates to the other termination bounds.
 
 Merge-gate retries are automatic while the daemon is running. Retryable states,
 such as a busy base-branch merge queue or a GitHub branch update in progress,

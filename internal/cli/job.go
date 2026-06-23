@@ -36,6 +36,8 @@ func runJob(args []string, stdout, stderr io.Writer) int {
 		return runJobRetry(args[1:], stdout, stderr)
 	case "cancel":
 		return runJobCancel(args[1:], stdout, stderr)
+	case "kill":
+		return runJobKill(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown job command %q\n\n", args[0])
 		printJobUsage(stderr)
@@ -52,6 +54,7 @@ func printJobUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot job run <id>")
 	fmt.Fprintln(w, "  gitmoot job retry <id>")
 	fmt.Fprintln(w, "  gitmoot job cancel <id>")
+	fmt.Fprintln(w, "  gitmoot job kill <root-job-id>")
 }
 
 func runJobList(args []string, stdout, stderr io.Writer) int {
@@ -262,6 +265,31 @@ func runJobCancel(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "cancelled job %s\n", job.ID)
+	return 0
+}
+
+// runJobKill is the operator kill switch (#341): it marks a runaway delegation
+// tree (identified by its root job id) as killed so the engine routes the
+// coordinator's next continuation through the graceful finalize path and the
+// daemon stops starting queued children. In-flight jobs finish normally.
+func runJobKill(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("job kill", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	rootJobID, ok := parseSingleJobID(fs, args, stderr, "job kill")
+	if !ok {
+		return parseSingleJobIDExitCode(args)
+	}
+	var job db.Job
+	if err := withStore(*home, func(store *db.Store) error {
+		var err error
+		job, err = workflow.KillDelegationTree(context.Background(), store, rootJobID)
+		return err
+	}); err != nil {
+		fmt.Fprintf(stderr, "job kill: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "killed delegation tree rooted at %s\n", job.ID)
 	return 0
 }
 

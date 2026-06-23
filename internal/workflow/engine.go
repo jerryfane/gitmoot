@@ -796,6 +796,22 @@ func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload Job
 		return nil
 	}
 
+	rootID := e.rootJobID(job, payload)
+
+	// Operator kill switch (#341): an operator can terminate a runaway tree by
+	// root id (gitmoot job kill). This is the FIRST backstop so operator action
+	// wins over every budget cap: rather than dispatching the next generation,
+	// route through the same #305 graceful finalize continuation (synthesize what
+	// completed → stop). Fails open: a lookup error never blocks dispatch.
+	if killed, _ := e.Store.IsRootJobKilled(ctx, rootID); killed {
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "delegation_killed",
+			Message: fmt.Sprintf("root delegation tree %s killed by operator; not dispatching %d delegation(s)", rootID, len(payload.Result.Delegations)),
+		})
+		return e.enqueueFinalizeContinuation(ctx, job, payload, "delegation tree killed by operator")
+	}
+
 	if payload.DelegationDepth >= MaxDelegationDepth {
 		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
 			JobID:   job.ID,
@@ -805,7 +821,6 @@ func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload Job
 		return e.enqueueFinalizeContinuation(ctx, job, payload, fmt.Sprintf("delegation depth limit of %d reached", MaxDelegationDepth))
 	}
 
-	rootID := e.rootJobID(job, payload)
 	total, err := e.countRootDelegationJobs(ctx, rootID)
 	if err != nil {
 		return err
