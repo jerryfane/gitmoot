@@ -112,7 +112,8 @@ CREATE TABLE jobs (
 	parent_job_id TEXT NOT NULL DEFAULT '',
 	delegation_id TEXT NOT NULL DEFAULT '',
 	delegation_depth INTEGER NOT NULL DEFAULT 0,
-	delegated_by TEXT NOT NULL DEFAULT ''
+	delegated_by TEXT NOT NULL DEFAULT '',
+	root_killed INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 INSERT INTO jobs(id, agent, type, state, payload) VALUES ('old', 'w', 'ask', 'succeeded', '{}');
