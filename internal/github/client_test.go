@@ -818,7 +818,7 @@ func TestGetOpenPullRequestByHead(t *testing.T) {
 			{Stdout: `[{"number":7,"url":"https://github.com/jerryfane/gitmoot/pull/7","headRefOid":"abc123","baseRefName":"main","state":"OPEN"}]`},
 		}}
 		client := GhClient{Runner: runner}
-		pr, ok, err := client.GetOpenPullRequestByHead(context.Background(), repo, "task-7")
+		pr, ok, err := client.GetOpenPullRequestByHead(context.Background(), repo, "task-7", "main")
 		if err != nil || !ok {
 			t.Fatalf("GetOpenPullRequestByHead = (%+v, %v, %v), want found", pr, ok, err)
 		}
@@ -829,6 +829,7 @@ func TestGetOpenPullRequestByHead(t *testing.T) {
 			"pr", "list",
 			"--repo", "jerryfane/gitmoot",
 			"--head", "task-7",
+			"--base", "main",
 			"--state", "open",
 			"--json", "number,url,headRefOid,baseRefName,state",
 		)
@@ -837,7 +838,7 @@ func TestGetOpenPullRequestByHead(t *testing.T) {
 	t.Run("none", func(t *testing.T) {
 		runner := &fakeRunner{results: []subprocess.Result{{Stdout: `[]`}}}
 		client := GhClient{Runner: runner}
-		_, ok, err := client.GetOpenPullRequestByHead(context.Background(), repo, "task-7")
+		_, ok, err := client.GetOpenPullRequestByHead(context.Background(), repo, "task-7", "main")
 		if err != nil || ok {
 			t.Fatalf("GetOpenPullRequestByHead = (ok=%v, err=%v), want (false, nil)", ok, err)
 		}
@@ -864,7 +865,7 @@ func TestEnsurePullRequest(t *testing.T) {
 		if len(runner.calls) != 1 {
 			t.Fatalf("calls = %v, want exactly the query call", runner.calls)
 		}
-		runner.wantArgs(t, 0, "pr", "list", "--repo", "jerryfane/gitmoot", "--head", "task-7", "--state", "open", "--json", "number,url,headRefOid,baseRefName,state")
+		runner.wantArgs(t, 0, "pr", "list", "--repo", "jerryfane/gitmoot", "--head", "task-7", "--base", "main", "--state", "open", "--json", "number,url,headRefOid,baseRefName,state")
 	})
 
 	t.Run("creates when absent", func(t *testing.T) {
@@ -881,7 +882,7 @@ func TestEnsurePullRequest(t *testing.T) {
 		if pr.Number != 11 || pr.HeadSHA != "sha11" {
 			t.Fatalf("pr = %+v", pr)
 		}
-		runner.wantArgs(t, 0, "pr", "list", "--repo", "jerryfane/gitmoot", "--head", "task-7", "--state", "open", "--json", "number,url,headRefOid,baseRefName,state")
+		runner.wantArgs(t, 0, "pr", "list", "--repo", "jerryfane/gitmoot", "--head", "task-7", "--base", "main", "--state", "open", "--json", "number,url,headRefOid,baseRefName,state")
 		runner.wantArgs(t, 1, "pr", "create", "--repo", "jerryfane/gitmoot", "--title", "Task 7", "--body", "body", "--head", "task-7", "--base", "main")
 	})
 
@@ -926,6 +927,34 @@ func TestEnsurePullRequest(t *testing.T) {
 		}
 		if len(runner.calls) != 2 {
 			t.Fatalf("calls = %v, want query+create only (no re-query on a hard error)", runner.calls)
+		}
+	})
+
+	t.Run("returns the 422 error when the re-query still finds nothing", func(t *testing.T) {
+		createErr := errors.New("pull request create failed: GraphQL: A pull request already exists for jerryfane:task-7. (createPullRequest)")
+		runner := &fakeRunner{
+			results: []subprocess.Result{
+				{Stdout: `[]`}, // query: none
+				{Stderr: "pull request create failed: A pull request already exists"}, // create: 422
+				{Stdout: `[]`}, // re-query: still none (e.g. the existing PR targets a different base)
+			},
+			errs: []error{
+				nil,
+				createErr,
+				nil,
+			},
+		}
+		client := GhClient{Runner: runner}
+		_, err := client.EnsurePullRequest(context.Background(), input)
+		if err == nil {
+			t.Fatal("expected the original 422 error when the re-query finds no adoptable PR")
+		}
+		if !errors.Is(err, createErr) {
+			t.Fatalf("err = %v, want the original create (422) error", err)
+		}
+		// query, create (422), re-query — then surface the original error.
+		if len(runner.calls) != 3 {
+			t.Fatalf("calls = %v, want query+create+requery", runner.calls)
 		}
 	})
 }

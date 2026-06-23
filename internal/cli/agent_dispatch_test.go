@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -120,4 +122,90 @@ func TestLocalAgentJobOutputOmitsAdvanceErrorByDefault(t *testing.T) {
 	if strings.Contains(human.String(), "advance_error") {
 		t.Fatalf("default human output should omit advance_error:\n%s", human.String())
 	}
+}
+
+// recoverAdvanceErrorOutput is the post-success advance-recovery glue extracted
+// from dispatchLocalAgentJob: it recovers the persisted result ONLY when the run
+// error is a workflow.AdvanceError AND the re-fetched job is terminally
+// succeeded. It seeds a real db.Store job (mirroring the success-path payload)
+// and asserts the three branches.
+func TestRecoverAdvanceErrorOutput(t *testing.T) {
+	ctx := context.Background()
+	request := localAgentDispatchRequest{
+		SelectedAction:       "implement",
+		SelectedActionReason: "explicit agent implement",
+		ExecutionPath:        "agent_implement",
+	}
+	payload, err := json.Marshal(workflow.JobPayload{
+		Repo:        "owner/repo",
+		PullRequest: 7,
+		Result:      &workflow.AgentResult{Decision: "implemented", Summary: "opened PR"},
+		RawOutputs:  []string{`{"gitmoot_result":{}}`},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	seedJob := func(t *testing.T, store *db.Store, id string, state string) {
+		t.Helper()
+		if err := store.CreateJob(ctx, db.Job{
+			ID:      id,
+			Agent:   "lead",
+			Type:    "implement",
+			State:   state,
+			Payload: string(payload),
+		}); err != nil {
+			t.Fatalf("CreateJob returned error: %v", err)
+		}
+	}
+
+	t.Run("succeeded job + AdvanceError recovers with result and warning", func(t *testing.T) {
+		store := daemonWorkerStore(t)
+		seedJob(t, store, "local-implement-lead-ok", string(workflow.JobSucceeded))
+		runErr := workflow.AdvanceError{Err: errors.New("workflow blocked: ci is pending")}
+
+		out, recovered, err := recoverAdvanceErrorOutput(ctx, store, "local-implement-lead-ok", request, runErr)
+		if err != nil {
+			t.Fatalf("recoverAdvanceErrorOutput returned error: %v", err)
+		}
+		if !recovered {
+			t.Fatal("recovered = false, want true for a succeeded job with an AdvanceError")
+		}
+		if out.Result == nil || out.Result.Summary != "opened PR" {
+			t.Fatalf("output result = %+v", out.Result)
+		}
+		if out.AdvanceError == "" {
+			t.Fatalf("AdvanceError = %q, want the advance warning attached", out.AdvanceError)
+		}
+		if out.AdvanceError != runErr.Error() {
+			t.Fatalf("AdvanceError = %q, want %q", out.AdvanceError, runErr.Error())
+		}
+	})
+
+	t.Run("plain (non-AdvanceError) error does not recover", func(t *testing.T) {
+		store := daemonWorkerStore(t)
+		seedJob(t, store, "local-implement-lead-plain", string(workflow.JobSucceeded))
+
+		out, recovered, err := recoverAdvanceErrorOutput(ctx, store, "local-implement-lead-plain", request, errors.New("delivery failed"))
+		if err != nil {
+			t.Fatalf("recoverAdvanceErrorOutput returned error: %v", err)
+		}
+		if recovered {
+			t.Fatalf("recovered = true, want false for a non-AdvanceError; out=%+v", out)
+		}
+	})
+
+	t.Run("AdvanceError but job not succeeded does not recover", func(t *testing.T) {
+		store := daemonWorkerStore(t)
+		seedJob(t, store, "local-implement-lead-blocked", string(workflow.JobBlocked))
+		runErr := workflow.AdvanceError{Err: errors.New("workflow blocked: ci is pending")}
+
+		out, recovered, err := recoverAdvanceErrorOutput(ctx, store, "local-implement-lead-blocked", request, runErr)
+		if err != nil {
+			t.Fatalf("recoverAdvanceErrorOutput returned error: %v", err)
+		}
+		if recovered {
+			t.Fatalf("recovered = true, want false when the re-fetched job is not succeeded; out=%+v", out)
+		}
+	})
 }

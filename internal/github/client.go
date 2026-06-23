@@ -27,7 +27,7 @@ type Client interface {
 	ListUserRepositories(ctx context.Context, limit int) ([]RepoSummary, error)
 	ListPullRequests(ctx context.Context, repo Repository, state string) ([]PullRequest, error)
 	GetPullRequest(ctx context.Context, repo Repository, number int64) (PullRequest, error)
-	GetOpenPullRequestByHead(ctx context.Context, repo Repository, head string) (PullRequest, bool, error)
+	GetOpenPullRequestByHead(ctx context.Context, repo Repository, head string, base string) (PullRequest, bool, error)
 	CreatePullRequest(ctx context.Context, input CreatePullRequestInput) (PullRequest, error)
 	EnsurePullRequest(ctx context.Context, input CreatePullRequestInput) (PullRequest, error)
 	CreateIssue(ctx context.Context, input CreateIssueInput) (Issue, error)
@@ -461,22 +461,29 @@ func (c *GhClient) CreatePullRequest(ctx context.Context, input CreatePullReques
 	return pr, nil
 }
 
-// GetOpenPullRequestByHead returns the open PR whose head branch is `head`, if
-// one exists, via `gh pr list`. The boolean is false (with a nil error) when no
+// GetOpenPullRequestByHead returns the open PR whose head branch is `head` and
+// whose base branch is `base`, if one exists, via `gh pr list`. Filtering by
+// both head and base makes the match exact: GitHub guarantees a single open PR
+// per (head, same-base) pair — that uniqueness is exactly the 422 "a pull
+// request already exists" case. The boolean is false (with a nil error) when no
 // open PR is found. `gh pr list --json` field names differ from the REST API
 // (url/headRefOid/baseRefName), so the response is decoded through a dedicated
 // wire shape and mapped onto PullRequest.
-func (c *GhClient) GetOpenPullRequestByHead(ctx context.Context, repo Repository, head string) (PullRequest, bool, error) {
+func (c *GhClient) GetOpenPullRequestByHead(ctx context.Context, repo Repository, head string, base string) (PullRequest, bool, error) {
 	if strings.TrimSpace(repo.FullName()) == "" {
 		return PullRequest{}, false, fmt.Errorf("repository owner/name is required")
 	}
 	if strings.TrimSpace(head) == "" {
 		return PullRequest{}, false, fmt.Errorf("head branch is required")
 	}
+	if strings.TrimSpace(base) == "" {
+		return PullRequest{}, false, fmt.Errorf("base branch is required")
+	}
 	result, err := c.run(ctx, false,
 		"pr", "list",
 		"--repo", repo.FullName(),
 		"--head", head,
+		"--base", base,
 		"--state", "open",
 		"--json", "number,url,headRefOid,baseRefName,state",
 	)
@@ -514,7 +521,7 @@ func (c *GhClient) GetOpenPullRequestByHead(ctx context.Context, repo Repository
 // where two finalizers (or an out-of-band PR) turn a benign "already exists"
 // into a hard error.
 func (c *GhClient) EnsurePullRequest(ctx context.Context, input CreatePullRequestInput) (PullRequest, error) {
-	if existing, ok, err := c.GetOpenPullRequestByHead(ctx, input.Repo, input.Head); err != nil {
+	if existing, ok, err := c.GetOpenPullRequestByHead(ctx, input.Repo, input.Head, input.Base); err != nil {
 		return PullRequest{}, err
 	} else if ok {
 		return existing, nil
@@ -527,7 +534,7 @@ func (c *GhClient) EnsurePullRequest(ctx context.Context, input CreatePullReques
 		return PullRequest{}, err
 	}
 	// A concurrent create won the race; adopt the now-existing open PR.
-	if existing, ok, qerr := c.GetOpenPullRequestByHead(ctx, input.Repo, input.Head); qerr != nil {
+	if existing, ok, qerr := c.GetOpenPullRequestByHead(ctx, input.Repo, input.Head, input.Base); qerr != nil {
 		return PullRequest{}, qerr
 	} else if ok {
 		return existing, nil
@@ -1154,7 +1161,7 @@ func (NoopClient) GetPullRequest(context.Context, Repository, int64) (PullReques
 	return PullRequest{}, errors.ErrUnsupported
 }
 
-func (NoopClient) GetOpenPullRequestByHead(context.Context, Repository, string) (PullRequest, bool, error) {
+func (NoopClient) GetOpenPullRequestByHead(context.Context, Repository, string, string) (PullRequest, bool, error) {
 	return PullRequest{}, false, errors.ErrUnsupported
 }
 

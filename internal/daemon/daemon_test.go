@@ -2151,7 +2151,7 @@ func (f *fakeGitHub) CreatePullRequest(context.Context, github.CreatePullRequest
 	return github.PullRequest{}, errors.New("not implemented")
 }
 
-func (f *fakeGitHub) GetOpenPullRequestByHead(context.Context, github.Repository, string) (github.PullRequest, bool, error) {
+func (f *fakeGitHub) GetOpenPullRequestByHead(context.Context, github.Repository, string, string) (github.PullRequest, bool, error) {
 	return github.PullRequest{}, false, errors.New("not implemented")
 }
 
