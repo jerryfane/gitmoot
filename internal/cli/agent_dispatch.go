@@ -60,6 +60,12 @@ type localAgentJobOutput struct {
 	RawOutputCount       int                   `json:"raw_output_count"`
 	WatchCommand         string                `json:"watch_command,omitempty"`
 	DaemonRunning        bool                  `json:"daemon_running,omitempty"`
+	// AdvanceError is set only when the agent delivery + job succeeded
+	// terminally but a benign post-success advance step errored (e.g. a
+	// merge-gate block on a freshly-opened PR, or a 422 "PR already exists"
+	// race). The terminal-success result is still surfaced; this carries the
+	// advance warning so it is not silently lost.
+	AdvanceError string `json:"advance_error,omitempty"`
 }
 
 func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAgentDispatchRequest) (localAgentJobOutput, error) {
@@ -228,6 +234,9 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		}
 		engine := daemonWorkflowEngine(store, github.NewClient(checkoutPath), checkoutPath, workflowHome)
 		if _, err := engine.RunJob(runCtx, job.ID, runtimeAgent(agent), adapter); err != nil {
+			if out, ok, _ := recoverAdvanceErrorOutput(ctx, store, job.ID, request, err); ok {
+				return out, nil
+			}
 			return localAgentJobOutput{}, err
 		}
 	}
@@ -235,6 +244,42 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	if err != nil {
 		return localAgentJobOutput{}, err
 	}
+	return buildLocalAgentJobOutput(latest, request)
+}
+
+// recoverAdvanceErrorOutput salvages the persisted result when a post-success
+// advance step errors benignly (a merge-gate block on the freshly-opened PR, or
+// a 422 "PR already exists" race) AFTER the agent delivery + job already
+// succeeded terminally. It returns (output, true, nil) — output carrying the
+// advance warning — only when runErr is a workflow.AdvanceError AND the
+// re-fetched job is terminally succeeded AND the result renders. Otherwise it
+// returns recovered=false so the caller surfaces the raw run error; genuine
+// delivery/run failures (where the re-fetched job is NOT terminally succeeded)
+// never recover.
+func recoverAdvanceErrorOutput(ctx context.Context, store *db.Store, jobID string, request localAgentDispatchRequest, runErr error) (localAgentJobOutput, bool, error) {
+	var advErr workflow.AdvanceError
+	if !errors.As(runErr, &advErr) {
+		return localAgentJobOutput{}, false, nil
+	}
+	latest, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		return localAgentJobOutput{}, false, err
+	}
+	if latest.State != string(workflow.JobSucceeded) {
+		return localAgentJobOutput{}, false, nil
+	}
+	out, err := buildLocalAgentJobOutput(latest, request)
+	if err != nil {
+		return localAgentJobOutput{}, false, err
+	}
+	out.AdvanceError = advErr.Error()
+	return out, true, nil
+}
+
+// buildLocalAgentJobOutput renders the terminal job into the success-path
+// localAgentJobOutput. It is shared by the normal success return and the
+// post-success advance-error recovery so both surface the identical result.
+func buildLocalAgentJobOutput(latest db.Job, request localAgentDispatchRequest) (localAgentJobOutput, error) {
 	payload, err := daemonJobPayload(latest)
 	if err != nil {
 		return localAgentJobOutput{}, err
@@ -843,6 +888,9 @@ func printLocalAgentJobOutput(stdout io.Writer, output localAgentJobOutput) {
 	writeLine(stdout, "repo: %s", output.Repo)
 	writeLine(stdout, "agent: %s", output.Agent)
 	writeLine(stdout, "action: %s", output.Action)
+	if output.AdvanceError != "" {
+		writeLine(stdout, "advance_error: %s", output.AdvanceError)
+	}
 	if output.WatchCommand != "" {
 		writeLine(stdout, "next: %s", output.WatchCommand)
 	}
