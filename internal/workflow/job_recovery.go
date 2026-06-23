@@ -129,11 +129,16 @@ func CancelJob(ctx context.Context, store *db.Store, jobID string) (db.Job, erro
 		}
 		return db.Job{}, fmt.Errorf("job %s is %s; cancel requires queued or running", latest.ID, latest.State)
 	}
-	// Best-effort: release any resource locks the cancelled job still owns
-	// (e.g. a stranded runtime-session lock whose deferred release never ran
-	// because the job was killed). The job is already terminally cancelled, so
-	// no live owner is dispossessed. We swallow the error on purpose: lock
-	// cleanup is incidental and must never make a successful cancel fail.
+	// Best-effort: release any resource locks the cancelled job still owns (e.g. a
+	// stranded runtime-session lock whose deferred release never ran because the
+	// job was killed) so the next job on that runtime session does not wait out
+	// the full lock TTL. This only makes the existing TTL-based reaper release
+	// happen sooner for a cancelled job — the same brief same-session window
+	// already exists when a long-running job's lock TTL lapses while its runtime
+	// is still in flight; cancelling signals intent to abandon the job. A fully
+	// race-free release would have to reap the runtime process first (separate,
+	// larger change). We swallow the error on purpose: lock cleanup is incidental
+	// and must never make a successful cancel fail.
 	_, _ = store.DeleteResourceLocksByOwner(ctx, job.ID)
 	return store.GetJob(ctx, job.ID)
 }

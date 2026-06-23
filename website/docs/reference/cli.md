@@ -484,6 +484,11 @@ and the daemon stops starting queued children of that root. See the
 [termination bounds](result-contract.md#termination-bounds) for how it relates
 to the other delegation backstops.
 
+`gitmoot job cancel <job-id>` also releases any resource locks the cancelled job
+still owned — including a stranded `runtime:<rt>:<session>` lock left behind when
+a foreground `gitmoot agent ask` was killed — so the next ask on that agent does
+not wait out the lock TTL before it can run.
+
 Merge-gate retries are automatic while the daemon is running. Retryable states,
 such as a busy base-branch merge queue or a GitHub branch update in progress,
 are retried on the next daemon poll tick. The default poll interval is `30s`
