@@ -2306,7 +2306,11 @@ func (s *Store) UpdateJobUsage(ctx context.Context, id string, inputTokens int, 
 	if outputTokens < 0 {
 		outputTokens = 0
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET input_tokens = ?, output_tokens = ? WHERE id = ?`, inputTokens, outputTokens, id)
+	// Accumulate rather than overwrite: a job can be delivered more than once (a
+	// malformed-output repair retry re-delivers the same job.ID), so each delivery
+	// adds its usage instead of clobbering the prior write. The per-delta clamp to
+	// 0 above keeps the running total monotonic.
+	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ? WHERE id = ?`, inputTokens, outputTokens, id)
 	if err != nil {
 		return err
 	}

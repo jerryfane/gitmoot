@@ -52,8 +52,9 @@ func TestUpdateJobUsageRoundTrip(t *testing.T) {
 		t.Fatalf("ListJobs usage = %+v, want one job with (1500, 320)", jobs)
 	}
 
-	// Negative values clamp to 0 so a malformed runtime report cannot drive a tree
-	// aggregate negative.
+	// Negative deltas clamp to 0 so a malformed runtime report cannot drive a tree
+	// aggregate negative; usage accumulates, so a clamped delta preserves the prior
+	// total rather than resetting it.
 	if err := store.UpdateJobUsage(ctx, "j1", -5, -7); err != nil {
 		t.Fatalf("UpdateJobUsage (negative) returned error: %v", err)
 	}
@@ -61,8 +62,21 @@ func TestUpdateJobUsageRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJob (after negative) returned error: %v", err)
 	}
-	if got.InputTokens != 0 || got.OutputTokens != 0 {
-		t.Fatalf("clamped usage = (%d, %d), want (0, 0)", got.InputTokens, got.OutputTokens)
+	if got.InputTokens != 1500 || got.OutputTokens != 320 {
+		t.Fatalf("after a clamped-negative delta usage = (%d, %d), want (1500, 320) preserved", got.InputTokens, got.OutputTokens)
+	}
+
+	// A second positive delivery ACCUMULATES (a malformed-output repair re-delivers
+	// the same job id) instead of overwriting the first write.
+	if err := store.UpdateJobUsage(ctx, "j1", 100, 80); err != nil {
+		t.Fatalf("UpdateJobUsage (accumulate) returned error: %v", err)
+	}
+	got, err = store.GetJob(ctx, "j1")
+	if err != nil {
+		t.Fatalf("GetJob (after accumulate) returned error: %v", err)
+	}
+	if got.InputTokens != 1600 || got.OutputTokens != 400 {
+		t.Fatalf("accumulated usage = (%d, %d), want (1600, 400)", got.InputTokens, got.OutputTokens)
 	}
 
 	// Unknown job id is an error (mirrors UpdateJobPayload's requireAffected).
