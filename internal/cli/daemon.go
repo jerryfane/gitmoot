@@ -1461,9 +1461,18 @@ func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repo
 	}
 	pending := make([]db.Job, 0, len(jobs))
 	for _, job := range jobs {
-		if queuedJobMatchesRepo(job, repoFilter) && queuedJobMatchesSession(job, rootFilter) {
-			pending = append(pending, job)
+		if !queuedJobMatchesRepo(job, repoFilter) || !queuedJobMatchesSession(job, rootFilter) {
+			continue
 		}
+		// Operator kill switch (#341): once a tree's root is killed, do not start
+		// any of its queued children. The coordinator's own continuation still runs
+		// so the engine can route through the graceful finalize path; in-flight
+		// children finish normally. Only children (payload.RootJobID points at
+		// another root) are skipped here — the root job itself is never skipped.
+		if queuedChildOfKilledRoot(ctx, worker.Store, job) {
+			continue
+		}
+		pending = append(pending, job)
 	}
 	for len(pending) > 0 {
 		policy, err := worker.parallelSessionPolicy()
@@ -1617,6 +1626,28 @@ func queuedJobMatchesSession(job db.Job, rootFilter string) bool {
 	}
 	payload, err := daemonJobPayload(job)
 	return err == nil && payload.RootJobID == rootFilter
+}
+
+// queuedChildOfKilledRoot reports whether a queued job is a child of a delegation
+// tree whose root has been killed by an operator (#341). Only children are
+// matched: the root coordinator itself (payload.RootJobID == "" or == job.ID) is
+// never skipped, so its next continuation can run and route the engine through
+// the graceful finalize path. A payload-parse miss or store error fails open
+// (returns false) so a hiccup never silently strands a normal job.
+func queuedChildOfKilledRoot(ctx context.Context, store *db.Store, job db.Job) bool {
+	if store == nil {
+		return false
+	}
+	payload, err := daemonJobPayload(job)
+	if err != nil {
+		return false
+	}
+	rootJobID := strings.TrimSpace(payload.RootJobID)
+	if rootJobID == "" || rootJobID == job.ID {
+		return false
+	}
+	killed, err := store.IsRootJobKilled(ctx, rootJobID)
+	return err == nil && killed
 }
 
 func queuedJobCheckoutKey(ctx context.Context, store *db.Store, job db.Job) string {

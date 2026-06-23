@@ -928,6 +928,7 @@ gitmoot job show <job-id>
 gitmoot job watch <job-id>
 gitmoot job retry <job-id>
 gitmoot job cancel <job-id>
+gitmoot job kill <root-job-id>            # operator kill switch for a runaway delegation tree
 gitmoot status --repo owner/repo
 gitmoot version --json
 gitmoot update --check
@@ -5892,9 +5893,17 @@ gitmoot job watch <job-id>
 gitmoot job events <job-id>
 gitmoot job retry <job-id>
 gitmoot job cancel <job-id>
+gitmoot job kill <root-job-id>
 gitmoot lock list --repo owner/repo
 gitmoot lock show owner/repo <branch>
 ```
+
+`gitmoot job kill <root-job-id>` is the operator kill switch for a runaway
+delegation tree: it terminates the tree identified by its **root** job id
+gracefully. In-flight jobs finish normally; the coordinator's next continuation
+is routed through the graceful finalize path (synthesize what completed → stop)
+and the daemon stops starting queued children of that root. See
+`references/SAFETY.md` for how it relates to the other termination bounds.
 
 Merge-gate retries are automatic while the daemon is running. Retryable states,
 such as a busy base-branch merge queue or a GitHub branch update in progress,
@@ -6851,6 +6860,13 @@ cannot recurse or fan out forever:
 - Loop detection: a canonical windowed signature hash over recent delegation
   activity halts repeated or cyclic delegation chains well before the depth cap
   is reached, preventing oscillating A→B→A loops.
+- Operator kill switch: `gitmoot job kill <root-job-id>` lets an operator
+  terminate a runaway tree by its root id from outside. It is the **first**
+  backstop, so operator action wins over every budget cap. The kill is graceful,
+  not a hard stop — in-flight jobs finish normally, the coordinator's next
+  continuation routes through the same finalize path below (a
+  `delegation_killed` event is emitted), and the daemon stops starting queued
+  children of the killed root.
 
 When a bound trips, the offending delegations are not dispatched and the parent
 receives a typed lifecycle event explaining why (for example, the delegation tree
@@ -7048,6 +7064,11 @@ Delegation trees are bounded so they cannot run forever:
 - Loop detection: a windowed signature over recent delegation activity halts
   repeated or cyclic delegation chains (e.g. oscillating A→B→A) well before the
   depth cap is reached.
+- Operator kill switch: `gitmoot job kill <root-job-id>` terminates a runaway
+  tree by its root id from outside. It is the **first** backstop (operator action
+  wins over every budget cap) and is graceful — in-flight jobs finish, the
+  coordinator's next continuation routes through the finalize path below (a
+  `delegation_killed` event is emitted), and the daemon stops new children.
 
 When a bound trips (a budget cap or confirmed loop), the offending delegations
 are not dispatched and the parent receives a typed lifecycle event explaining why

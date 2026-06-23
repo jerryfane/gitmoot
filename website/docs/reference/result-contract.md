@@ -265,6 +265,12 @@ trips, the offending delegations are dropped rather than dispatched.
 - **Loop detection**: a canonical windowed signature over recent delegation
   activity halts repeated or cyclic delegation chains — for example an
   oscillating A→B→A loop — well before the depth cap is reached.
+- **Operator kill switch**: `gitmoot job kill <root-job-id>` lets an operator
+  terminate a runaway tree by its root id from outside. It is the **first**
+  backstop, so operator action wins over every budget cap. The kill is graceful —
+  in-flight jobs finish normally, the coordinator's next continuation routes
+  through the same finalize path below (a `delegation_killed` event is emitted),
+  and the daemon stops starting queued children of the killed root.
 
 When any bound trips, the offending delegations are not dispatched and the parent
 receives a typed lifecycle event explaining why. Rather than stopping silently,

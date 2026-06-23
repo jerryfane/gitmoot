@@ -201,6 +201,11 @@ type Job struct {
 	DelegationID    string
 	DelegationDepth int
 	DelegatedBy     string
+	// RootKilled is the operator kill-switch flag (#341). When true, the
+	// delegation tree rooted at this job has been killed: the engine's next
+	// dispatch routes through the graceful finalize continuation instead of
+	// dispatching new delegations, and the daemon skips queued children.
+	RootKilled bool
 	// UpdatedAt is populated by ListJobs (for age display in the dashboard);
 	// other readers may leave it zero.
 	UpdatedAt string
@@ -2050,17 +2055,42 @@ func (s *Store) JobCreatedAt(ctx context.Context, id string) (string, error) {
 	return createdAt, nil
 }
 
+// SetRootJobKilled marks a delegation tree's root job as killed by an operator
+// (#341). Only the root row carries the flag; the engine and daemon scope to a
+// tree by joining children's payload RootJobID back to this id. No-op-safe: an
+// unknown id simply affects zero rows (the caller verifies existence).
+func (s *Store) SetRootJobKilled(ctx context.Context, rootID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET root_killed = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, rootID)
+	return err
+}
+
+// IsRootJobKilled reports whether the root job rootID has been killed by an
+// operator (#341). An unknown id reads as not killed (COALESCE over no rows
+// yields zero rows, so the scan defaults to false), so the backstop fails open
+// and never blocks dispatch on a lookup miss.
+func (s *Store) IsRootJobKilled(ctx context.Context, rootID string) (bool, error) {
+	var killed bool
+	row := s.db.QueryRowContext(ctx, `SELECT COALESCE(root_killed, 0) FROM jobs WHERE id = ?`, rootID)
+	if err := row.Scan(&killed); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return killed, nil
+}
+
 func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by FROM jobs WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed FROM jobs WHERE id = ?`, id)
 	var job Job
-	if err := row.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy); err != nil {
+	if err := row.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled); err != nil {
 		return Job{}, err
 	}
 	return job, nil
 }
 
 func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, updated_at FROM jobs ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, updated_at FROM jobs ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -2069,7 +2099,7 @@ func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 	var jobs []Job
 	for rows.Next() {
 		var job Job
-		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.UpdatedAt); err != nil {
+		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled, &job.UpdatedAt); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, job)
@@ -2082,7 +2112,7 @@ func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 // id for a stable tree. It selects updated_at like ListJobs so callers can show
 // child age; the idx_jobs_parent_job_id index backs the filter.
 func (s *Store) ListJobsByParent(ctx context.Context, parentJobID string) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, updated_at
 		FROM jobs WHERE parent_job_id = ? ORDER BY delegation_id, id`, parentJobID)
 	if err != nil {
 		return nil, err
@@ -2092,7 +2122,7 @@ func (s *Store) ListJobsByParent(ctx context.Context, parentJobID string) ([]Job
 	var jobs []Job
 	for rows.Next() {
 		var job Job
-		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.UpdatedAt); err != nil {
+		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled, &job.UpdatedAt); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, job)
@@ -2101,7 +2131,7 @@ func (s *Store) ListJobsByParent(ctx context.Context, parentJobID string) ([]Job
 }
 
 func (s *Store) ListQueuedJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed
 		FROM jobs WHERE state = ? ORDER BY created_at, rowid`, "queued")
 	if err != nil {
 		return nil, err
@@ -2111,7 +2141,7 @@ func (s *Store) ListQueuedJobs(ctx context.Context) ([]Job, error) {
 	var jobs []Job
 	for rows.Next() {
 		var job Job
-		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy); err != nil {
+		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, job)
@@ -2120,7 +2150,7 @@ func (s *Store) ListQueuedJobs(ctx context.Context) ([]Job, error) {
 }
 
 func (s *Store) ListRunningJobsUpdatedBefore(ctx context.Context, before time.Time) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed
 		FROM jobs WHERE state = ? AND updated_at < ? ORDER BY id`, "running", before.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
@@ -2130,7 +2160,7 @@ func (s *Store) ListRunningJobsUpdatedBefore(ctx context.Context, before time.Ti
 	var jobs []Job
 	for rows.Next() {
 		var job Job
-		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy); err != nil {
+		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, job)
@@ -5732,5 +5762,8 @@ ALTER TABLE cockpit_workspaces ADD COLUMN root_pane_id TEXT NOT NULL DEFAULT '';
 	`,
 	`
 ALTER TABLE branch_locks ADD COLUMN skip_native_review_fanout INTEGER NOT NULL DEFAULT 0;
+	`,
+	`
+ALTER TABLE jobs ADD COLUMN root_killed INTEGER NOT NULL DEFAULT 0;
 	`,
 }
