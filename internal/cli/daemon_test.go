@@ -2953,6 +2953,176 @@ func TestDaemonImplementationFinalizerAdoptsExistingPullRequestViaEnsure(t *test
 	}
 }
 
+// stubSkipFlagAtOpenGitHub records whether the branch lock's skip flag was
+// already persisted at the moment the PR is opened — the #390 invariant: the
+// flag must be durable BEFORE the daemon-watched PR becomes observable, or the
+// PR-watcher can fan out native reviews in the gap.
+type stubSkipFlagAtOpenGitHub struct {
+	github.NoopClient
+	store      *db.Store
+	repo       string
+	branch     string
+	pr         github.PullRequest
+	opened     bool
+	skipAtOpen bool
+}
+
+func (s *stubSkipFlagAtOpenGitHub) EnsurePullRequest(ctx context.Context, _ github.CreatePullRequestInput) (github.PullRequest, error) {
+	s.opened = true
+	if lock, err := s.store.GetBranchLock(ctx, s.repo, s.branch); err == nil {
+		s.skipAtOpen = lock.SkipNativeReviewFanout
+	}
+	return s.pr, nil
+}
+
+// #390: with --skip-native-review-fanout, the finalizer must persist the skip
+// flag onto the branch lock BEFORE it opens the PR, so there is no TOCTOU window
+// in which the daemon's PR-watcher sees the fresh PR with the flag unset.
+func TestDaemonImplementationFinalizerPersistsSkipFanoutBeforeOpeningPR(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	remoteDir := filepath.Join(home, "remote.git")
+	repoDir := filepath.Join(home, "repo")
+	runGit(t, home, "init", "--bare", remoteDir)
+	runGit(t, home, "clone", remoteDir, repoDir)
+	runGit(t, repoDir, "config", "user.email", "gitmoot@example.com")
+	runGit(t, repoDir, "config", "user.name", "Gitmoot Test")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "initial")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "push", "-u", "origin", "main")
+	runGit(t, repoDir, "switch", "-c", "task-1")
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("new work\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if err := store.UpsertRepo(ctx, db.Repo{Owner: "owner", Name: "repo", CheckoutPath: repoDir, DefaultBranch: "main", PollInterval: "30s"}); err != nil {
+		t.Fatalf("UpsertRepo returned error: %v", err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-1", RepoFullName: "owner/repo", GoalID: "goal-1", Title: "Task 1", State: string(workflow.TaskImplementing), Branch: "task-1", WorktreePath: repoDir}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	// The branch lock exists from job start; the finalizer flips its flag.
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "owner/repo", Branch: "task-1", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	gh := &stubSkipFlagAtOpenGitHub{store: store, repo: "owner/repo", branch: "task-1", pr: github.PullRequest{
+		Number:  7,
+		URL:     "https://github.com/owner/repo/pull/7",
+		State:   "open",
+		HeadRef: "task-1",
+		BaseRef: "main",
+	}}
+	finalizer := daemonImplementationFinalizer{Store: store, GitHub: gh}
+	payload := workflow.JobPayload{
+		Repo:                   "owner/repo",
+		Branch:                 "task-1",
+		GoalID:                 "goal-1",
+		TaskID:                 "task-1",
+		TaskTitle:              "Task 1",
+		LeadAgent:              "lead",
+		SkipNativeReviewFanout: true,
+		Result:                 &workflow.AgentResult{Decision: "implemented", Summary: "done"},
+	}
+
+	if _, err := finalizer.FinalizeImplementation(ctx, db.Job{ID: "job-1", Agent: "lead", Type: "implement"}, payload); err != nil {
+		t.Fatalf("FinalizeImplementation returned error: %v", err)
+	}
+	if !gh.opened {
+		t.Fatal("EnsurePullRequest was never called; cannot assert ordering")
+	}
+	if !gh.skipAtOpen {
+		t.Fatal("#390 regression: branch-lock skip flag was NOT persisted before the PR was opened")
+	}
+	// And the flag is durably set after finalize.
+	lock, err := store.GetBranchLock(ctx, "owner/repo", "task-1")
+	if err != nil {
+		t.Fatalf("GetBranchLock returned error: %v", err)
+	}
+	if !lock.SkipNativeReviewFanout {
+		t.Fatalf("expected lock.SkipNativeReviewFanout = true after finalize, got %+v", lock)
+	}
+}
+
+// #390 edge case: a re-finalize with no new changes and a PR already attached
+// takes the early "no changes" return BEFORE any PR-open path. The skip flag must
+// still be persisted on that path (it is written-ahead as soon as the branch is
+// confirmed), or a retry could leave the flag unset and reintroduce the TOCTOU.
+func TestDaemonImplementationFinalizerPersistsSkipFanoutOnNoChangeReFinalize(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	remoteDir := filepath.Join(home, "remote.git")
+	repoDir := filepath.Join(home, "repo")
+	runGit(t, home, "init", "--bare", remoteDir)
+	runGit(t, home, "clone", remoteDir, repoDir)
+	runGit(t, repoDir, "config", "user.email", "gitmoot@example.com")
+	runGit(t, repoDir, "config", "user.name", "Gitmoot Test")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "initial")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "push", "-u", "origin", "main")
+	runGit(t, repoDir, "switch", "-c", "task-1")
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	runGit(t, repoDir, "add", "feature.txt")
+	runGit(t, repoDir, "commit", "-m", "work")
+	head, err := (gitutil.Client{Dir: repoDir}).HeadSHA(ctx)
+	if err != nil {
+		t.Fatalf("HeadSHA returned error: %v", err)
+	}
+
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if err := store.UpsertRepo(ctx, db.Repo{Owner: "owner", Name: "repo", CheckoutPath: repoDir, DefaultBranch: "main", PollInterval: "30s"}); err != nil {
+		t.Fatalf("UpsertRepo returned error: %v", err)
+	}
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-1", RepoFullName: "owner/repo", GoalID: "goal-1", Title: "Task 1", State: string(workflow.TaskImplementing), Branch: "task-1", WorktreePath: repoDir}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "owner/repo", Branch: "task-1", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	// Clean worktree + PR already attached + head unchanged ⇒ the no-changes early
+	// return. NoopClient: no PR-open call is expected on this path.
+	finalizer := daemonImplementationFinalizer{Store: store, GitHub: github.NoopClient{}}
+	payload := workflow.JobPayload{
+		Repo:                   "owner/repo",
+		Branch:                 "task-1",
+		PullRequest:            7,
+		HeadSHA:                head,
+		GoalID:                 "goal-1",
+		TaskID:                 "task-1",
+		TaskTitle:              "Task 1",
+		LeadAgent:              "lead",
+		SkipNativeReviewFanout: true,
+		Result:                 &workflow.AgentResult{Decision: "implemented", Summary: "no new changes"},
+	}
+
+	finalized, err := finalizer.FinalizeImplementation(ctx, db.Job{ID: "job-1", Agent: "lead", Type: "implement"}, payload)
+	if err != nil {
+		t.Fatalf("FinalizeImplementation returned error: %v", err)
+	}
+	if finalized.PullRequest != 7 {
+		t.Fatalf("finalized.PullRequest = %d, want 7 (unchanged on no-change path)", finalized.PullRequest)
+	}
+	lock, err := store.GetBranchLock(ctx, "owner/repo", "task-1")
+	if err != nil {
+		t.Fatalf("GetBranchLock returned error: %v", err)
+	}
+	if !lock.SkipNativeReviewFanout {
+		t.Fatal("#390 regression: skip flag NOT persisted on the no-changes early-return path")
+	}
+}
+
 func TestDaemonImplementationFinalizerPushesAlreadyCommittedWork(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

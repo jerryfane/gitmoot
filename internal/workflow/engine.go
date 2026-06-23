@@ -494,7 +494,9 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 		if payload.Result.Decision != "implemented" {
 			return nil
 		}
+		finalizerRan := false
 		if e.implementationNeedsFinalizer(ctx, payload) {
+			finalizerRan = true
 			finalized, err := e.ImplementationFinalizer.FinalizeImplementation(ctx, job, payload)
 			if err != nil {
 				return err
@@ -535,12 +537,14 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 			// skip_native_review_fanout straight onto the PR event.
 			SkipReviewFanout: payload.SkipNativeReviewFanout,
 		}
-		// Persist the flag onto the branch lock ONLY when set, so the daemon's
-		// PR-watcher path (trigger 2) can read it. Skipping the write on the common
-		// default (false) keeps that path free of an extra lock UPDATE and the new
-		// failure mode it would introduce — a freshly created lock already defaults
-		// to not-skip.
-		if payload.SkipNativeReviewFanout {
+		// Persist the flag onto the branch lock for the daemon's PR-watcher path
+		// (trigger 2). When the finalizer ran it already wrote the flag BEFORE
+		// opening the PR (closing the #390 TOCTOU), so this write would be
+		// redundant; only the non-finalizer path (PR pre-attached, no managed
+		// worktree) reaches the PR with the flag unpersisted. Skipping the write on
+		// the common default (false) keeps that path free of an extra lock UPDATE —
+		// a freshly created lock already defaults to not-skip.
+		if payload.SkipNativeReviewFanout && !finalizerRan {
 			if err := e.Store.SetBranchLockReviewFanout(ctx, payload.Repo, payload.Branch, true); err != nil {
 				return err
 			}

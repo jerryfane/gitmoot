@@ -3100,6 +3100,21 @@ func (f daemonImplementationFinalizer) FinalizeImplementation(ctx context.Contex
 	if branch != task.Branch {
 		return payload, workflow.BlockedError{Reason: fmt.Sprintf("implemented task worktree is on branch %s, not %s", branch, task.Branch)}
 	}
+	// Write-ahead the skip-native-review-fanout flag onto the branch lock as soon
+	// as the branch is confirmed — before EVERY downstream path that proceeds with
+	// a PR: the no-changes-but-PR-exists early return below, the adopt path, and
+	// the fresh EnsurePullRequest create. This closes the #390 TOCTOU: the daemon's
+	// PR-watcher (trigger 2) must never observe a PR for this branch with the flag
+	// still unpersisted. The branch lock already exists (acquired at job start);
+	// SetBranchLockReviewFanout is an idempotent UPDATE keyed by repo+branch and a
+	// no-op if the lock is somehow absent. Written only when set, mirroring the
+	// engine path's default-fast on the common (false) case; the engine's
+	// post-advance write now covers only the non-finalizer path (see engine.go).
+	if payload.SkipNativeReviewFanout {
+		if err := f.Store.SetBranchLockReviewFanout(ctx, payload.Repo, task.Branch, true); err != nil {
+			return payload, fmt.Errorf("persist skip-native-review-fanout before opening PR: %w", err)
+		}
+	}
 	status, err := git.StatusPorcelain(ctx)
 	if err != nil {
 		return payload, fmt.Errorf("inspect implementation diff: %w", err)
