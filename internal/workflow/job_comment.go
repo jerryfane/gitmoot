@@ -161,10 +161,12 @@ func writeFindingObject(builder *strings.Builder, obj map[string]json.RawMessage
 
 	// A recommendation/severity-style qualifier shown alongside the heading.
 	qualifier := ""
+	qualifierKey := ""
 	for _, key := range []string{"recommendation", "severity", "status"} {
 		if _, ok := obj[key]; ok && key != headingKey {
 			if q := scalarFindingValue(obj[key]); strings.TrimSpace(q) != "" {
 				qualifier = q
+				qualifierKey = key
 				break
 			}
 		}
@@ -190,7 +192,7 @@ func writeFindingObject(builder *strings.Builder, obj map[string]json.RawMessage
 	builder.WriteByte('\n')
 
 	for _, key := range sortedFindingKeys(obj) {
-		if key == headingKey {
+		if key == headingKey || key == qualifierKey {
 			continue
 		}
 		writeFindingField(builder, "  ", key, obj[key], 0)

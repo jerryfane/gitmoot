@@ -88,6 +88,12 @@ func TestRenderJobResultCommentRendersFindings(t *testing.T) {
 	if strings.Contains(body, `{"approach":`) {
 		t.Fatalf("object finding rendered as inline raw JSON:\n%s", body)
 	}
+
+	// The qualifier promoted into the heading must not be repeated as a
+	// redundant key/value line in the sub-list.
+	if strings.Contains(body, "- recommendation: PRIMARY") {
+		t.Fatalf("qualifier duplicated in sub-list:\n%s", body)
+	}
 }
 
 func TestRenderJobResultCommentRedactsSecretsAndOmitsRawOutput(t *testing.T) {
