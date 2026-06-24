@@ -356,3 +356,29 @@ func (r pathSensitiveRunner) Run(ctx context.Context, dir string, command string
 	}
 	return r.fakeRunner.Run(ctx, dir, command, args...)
 }
+
+// TestClaudeAuthEnvLabeledAsShellScoped guards the #427 fix: the shell-local
+// claude auth check must label itself as reflecting the current shell, not the
+// daemon, so a warn in one terminal can't be mistaken for "the daemon is broken".
+func TestClaudeAuthEnvLabeledAsShellScoped(t *testing.T) {
+	withClaudeAuthEnv(t, map[string]string{runtime.ClaudeOAuthTokenEnv: "secret-token"})
+	check := Checker{}.claudeAuthEnv(context.Background())
+	if !check.OK {
+		t.Fatalf("claude auth check = %+v, want OK with env token", check)
+	}
+	if !strings.Contains(check.Detail, claudeShellAuthLabel) {
+		t.Fatalf("claude auth detail = %q, want shell-scoped label %q", check.Detail, claudeShellAuthLabel)
+	}
+	if strings.Contains(check.Detail, "secret-token") {
+		t.Fatalf("claude auth detail = %q must never print the token", check.Detail)
+	}
+}
+
+// TestClaudeAuthDaemonSkippedWithoutPaths guards the fail-open contract: with no
+// Paths the daemon-aware check is skipped (ok=false) and callers fall back to the
+// shell-local check, so GlobalChecks never invents a daemon check it can't back.
+func TestClaudeAuthDaemonSkippedWithoutPaths(t *testing.T) {
+	if _, ok := (Checker{}).claudeAuthDaemon(); ok {
+		t.Fatalf("claudeAuthDaemon returned a check without Paths set; want skip")
+	}
+}

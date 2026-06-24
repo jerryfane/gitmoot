@@ -448,7 +448,13 @@ func dashboardTUIDeps(home string, interval time.Duration) tui.Deps {
 		},
 		HealthChecks: func() ([]tui.HealthCheck, error) {
 			ctx := context.Background()
-			checker := doctor.Checker{}
+			// Resolve paths best-effort so the Health page can report the running
+			// daemon's Claude auth state, not just the shell that launched the
+			// dashboard (#427). A failure leaves Paths zero and skips the daemon
+			// check. LiveProbe stays false: a dashboard refresh must never spawn
+			// claude.
+			paths, _ := initializedPaths(home)
+			checker := doctor.Checker{Paths: paths}
 			out := []tui.HealthCheck{}
 			for _, c := range checker.GlobalChecks(ctx) {
 				out = append(out, toTUIHealthCheck(c, ""))

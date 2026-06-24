@@ -25,6 +25,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/db"
 	gitutil "github.com/jerryfane/gitmoot/internal/git"
 	"github.com/jerryfane/gitmoot/internal/github"
+	"github.com/jerryfane/gitmoot/internal/presence"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/subprocess"
 	"github.com/jerryfane/gitmoot/internal/workflow"
@@ -373,7 +374,26 @@ func runDaemonStatus(args []string, stdout, stderr io.Writer) int {
 		writeLine(stdout, "daemon stopped")
 	}
 	writeLine(stdout, "log: %s", state.LogFile)
+	if pid > 0 {
+		writeLine(stdout, "%s", daemonClaudeAuthLine(paths))
+	}
 	return 0
+}
+
+// daemonClaudeAuthLine reports the running daemon's Claude background-auth state
+// for `gitmoot daemon status` (#427). It is best-effort and OS-gated: when the
+// daemon's environment can't be read (non-Linux, hardened /proc) it says so
+// rather than implying the daemon is unauthenticated. Secrets are never printed
+// — only the masked set/unset booleans.
+func daemonClaudeAuthLine(paths config.Paths) string {
+	daemon := presence.InspectDaemonClaudeAuth(paths)
+	if !daemon.Detected {
+		return "claude auth: unknown (daemon environment not readable on this host)"
+	}
+	if daemon.Auth.Ready() {
+		return "claude auth: ok (" + daemon.Auth.MaskedDetail() + ")"
+	}
+	return "claude auth: warn (" + daemon.Auth.MaskedDetail() + "); " + runtime.ClaudeBackgroundTokenMessage
 }
 
 func runDaemonLogs(args []string, stdout, stderr io.Writer) int {

@@ -129,7 +129,11 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	// so a cached-creds box is reported accurately rather than false-warned. The
 	// dashboard (dashboard_tui.go) leaves LiveProbe false so its refresh loop
 	// never spawns claude.
-	checks := doctor.Checker{Dir: *repoDir, LiveProbe: true}.Run(context.Background())
+	// Resolve paths best-effort so the daemon-aware claude auth check (#427) can
+	// locate the running daemon. A failure here (no initialized home) just leaves
+	// Paths zero, which skips the daemon check and keeps the shell-local one.
+	paths, _ := config.DefaultPaths()
+	checks := doctor.Checker{Dir: *repoDir, LiveProbe: true, Paths: paths}.Run(context.Background())
 	for _, check := range checks {
 		status := "ok"
 		if !check.OK {

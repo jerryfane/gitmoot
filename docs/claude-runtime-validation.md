@@ -17,8 +17,52 @@ transcripts in the repository.
   export CLAUDE_CODE_OAUTH_TOKEN=<token>
   ```
 
-  Then restart the Gitmoot daemon so it inherits the token. Do not commit or
-  paste the token into issue comments, PR bodies, logs, or tracked files.
+  Then restart the Gitmoot daemon **from that same shell** so it inherits the
+  token. Do not commit or paste the token into issue comments, PR bodies, logs,
+  or tracked files.
+
+### Where to persist the token (this trips people up)
+
+`export` only affects the **current shell**. `gitmoot doctor` shows `claude
+auth` based on whatever shell you ran it in — and now also reports the **running
+daemon's** auth state on Linux (best-effort, read from the daemon process's
+environment). The daemon is what actually runs Claude jobs, so the daemon line
+is the signal that matters; a `current shell (not the daemon)` warn in some
+terminal does not mean the daemon is broken.
+
+To make the token survive new terminals and daemon restarts:
+
+- Persist it in **`~/.bashrc`**, not `~/.profile`. Interactive non-login
+  terminals (desktop tabs, most SSH sessions) read `~/.bashrc`; `~/.profile` is
+  read **only by login shells**. On Debian / Raspberry Pi OS the default
+  `~/.profile` itself sources `~/.bashrc`, so `~/.bashrc` covers both login and
+  non-login shells:
+
+  ```sh
+  echo 'export CLAUDE_CODE_OAUTH_TOKEN=<token>' >> ~/.bashrc
+  ```
+
+  Open a new terminal (or `source ~/.bashrc`), then restart the daemon from it.
+
+- Most robust: run the daemon under **`systemd --user`** with an
+  `EnvironmentFile`, so the daemon's auth no longer depends on which shell
+  launched it:
+
+  ```ini
+  # ~/.config/systemd/user/gitmoot-daemon.service
+  [Service]
+  EnvironmentFile=%h/.config/gitmoot/daemon.env   # contains CLAUDE_CODE_OAUTH_TOKEN=<token>
+  ExecStart=%h/.local/bin/gitmoot daemon run --repo owner/repo
+  ```
+
+  Keep the env file readable only by you (`chmod 600`); never commit it.
+
+Check the daemon's view of auth with:
+
+```sh
+gitmoot daemon status   # prints the running daemon's claude auth line on Linux
+gitmoot doctor          # shows claude auth (daemon) and the shell-local check
+```
 - `gitmoot plugin doctor claude` stays cheap and environment-only.
 - `gitmoot plugin doctor claude --live` is the explicit token-consuming smoke
   check. It should report `runtime-live ok` or a classified auth setup error.
