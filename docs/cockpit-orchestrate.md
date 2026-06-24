@@ -75,6 +75,7 @@ cockpit_max_panes = 4      # cap on simultaneous panes per run
 cockpit_pane_key = "job"   # job (one pane per job) | seat (reuse a pane per role)
 inline_artifact_bodies = false   # inline each child's artifact_body into the coordinator continuation
 inline_artifact_max_bytes = 32768  # per-body cap (bytes) when inlining is on
+inject_upstream_dep_context = false  # inject succeeded upstream dependency results into a dependent leg's prompt; default off
 max_delegation_token_budget = 0  # per-root delegation token budget (input+output); 0 = unlimited (off)
 max_delegation_cost_usd = 0      # per-root delegation dollar-cost budget (USD); 0 = unlimited (off)
 ```
@@ -95,6 +96,8 @@ max_delegation_cost_usd = 0      # per-root delegation dollar-cost budget (USD);
   many bytes of each child's body are inlined; longer bodies are rune-safe
   truncated with a marker pointing at the full on-disk brief. A per-continuation
   aggregate cap also bounds the total inlined across all children.
+- `inject_upstream_dep_context` (default `false`) injects succeeded upstream
+  dependency results into a dependent leg's prompt; default off.
 - `max_delegation_token_budget` (default `0` = unlimited/off) bounds a delegation
   tree by **cost** in addition to depth/width/total-jobs/wall-clock. When set to a
   positive value, the whole tree under one root is capped at that many cumulative
