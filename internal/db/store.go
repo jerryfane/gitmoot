@@ -201,6 +201,15 @@ type Job struct {
 	DelegationID    string
 	DelegationDepth int
 	DelegatedBy     string
+	// RootID is the id of the coordination tree's originating coordinator,
+	// denormalized onto the row as an indexed column (idx_jobs_root_id, #420) so
+	// root-scoped helpers can answer "which jobs belong to this run?" with one
+	// indexed lookup instead of a full-table scan that unmarshals every payload.
+	// It mirrors the engine's rootJobID() rule: payload.RootJobID when set, else
+	// the job's own id (self-root). payload.RootJobID stays the value source of
+	// truth; this column is a write-time denormalized index. It is populated by
+	// the ListJobsByRoot projection (other readers may leave it empty).
+	RootID string
 	// RootKilled is the operator kill-switch flag (#341). When true, the
 	// delegation tree rooted at this job has been killed: the engine's next
 	// dispatch routes through the graceful finalize continuation instead of
@@ -540,7 +549,63 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.backfillJobRootID(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+// backfillJobRootID populates the denormalized root_id column for any pre-#420
+// jobs row that still has the migration's DEFAULT '' (every row inserted after
+// #420 gets root_id at write time, so this only ever touches the historical
+// backlog once). It is the Go-side equivalent of the spec's in-migration
+// backfill SQL, chosen because modernc's json_extract raises a SQL error on a
+// malformed payload — which would abort the migration — whereas unmarshalling in
+// Go lets a malformed or root_job_id-less payload self-root to the job's own id,
+// matching the engine's rootJobID() fallback exactly.
+//
+// It is idempotent: the WHERE root_id = '' filter means a second run touches
+// nothing, and a job whose true root is genuinely "" is impossible because the
+// fallback is always the non-empty job id. Done outside applyMigration so it can
+// re-converge a partially-backfilled DB on any startup without bumping a version.
+func (s *Store) backfillJobRootID(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, payload FROM jobs WHERE root_id = ''`)
+	if err != nil {
+		return err
+	}
+	type pending struct{ id, rootID string }
+	var todo []pending
+	for rows.Next() {
+		var id, payload string
+		if err := rows.Scan(&id, &payload); err != nil {
+			rows.Close()
+			return err
+		}
+		rootID := rootIDFromPayload(payload)
+		if strings.TrimSpace(rootID) == "" {
+			rootID = id // malformed / root_job_id-less payload self-roots
+		}
+		todo = append(todo, pending{id: id, rootID: rootID})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(todo) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, p := range todo {
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET root_id = ? WHERE id = ? AND root_id = ''`, p.rootID, p.id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) applyMigration(ctx context.Context, version int, migration string) error {
@@ -2050,11 +2115,30 @@ func (s *Store) MarkCommentSeenIfNew(ctx context.Context, comment Comment) (bool
 	return affected == 1, nil
 }
 
+// rootIDFromPayload extracts the payload's root_job_id (the engine's rootJobID()
+// value source of truth) from a job payload JSON string. A malformed or
+// root_job_id-less payload yields "" — the caller's COALESCE(NULLIF(?,''), ?)
+// then self-roots the row to job.ID, matching rootJobID()'s fallback (#420).
+func rootIDFromPayload(payload string) string {
+	var p struct {
+		RootJobID string `json:"root_job_id"`
+	}
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		return ""
+	}
+	return p.RootJobID
+}
+
 func (s *Store) CreateJob(ctx context.Context, job Job) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO jobs(id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+	// root_id is a denormalized index of the engine's rootJobID() rule (#420):
+	// bind the SAME COALESCE(NULLIF(?,''), ?) to (payload.RootJobID, job.ID) so
+	// the invariant — payload root when set, else self-root — holds regardless of
+	// caller. payload.RootJobID stays the value source of truth.
+	_, err := s.db.ExecContext(ctx, `INSERT INTO jobs(id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_id, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?,''), ?), CURRENT_TIMESTAMP)`,
 		job.ID, job.Agent, job.Type, job.State, job.Payload,
-		job.ParentJobID, job.DelegationID, job.DelegationDepth, job.DelegatedBy)
+		job.ParentJobID, job.DelegationID, job.DelegationDepth, job.DelegatedBy,
+		rootIDFromPayload(job.Payload), job.ID)
 	return err
 }
 
@@ -2065,10 +2149,13 @@ func (s *Store) CreateJobWithEvent(ctx context.Context, job Job, event JobEvent)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+	// See CreateJob: same COALESCE(NULLIF(?,''), ?) bound to (payload.RootJobID,
+	// job.ID) denormalizes the rootJobID() rule onto the indexed root_id column.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_id, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?,''), ?), CURRENT_TIMESTAMP)`,
 		job.ID, job.Agent, job.Type, job.State, job.Payload,
-		job.ParentJobID, job.DelegationID, job.DelegationDepth, job.DelegatedBy); err != nil {
+		job.ParentJobID, job.DelegationID, job.DelegationDepth, job.DelegatedBy,
+		rootIDFromPayload(job.Payload), job.ID); err != nil {
 		return err
 	}
 	if event.JobID == "" {
@@ -2165,6 +2252,53 @@ func (s *Store) ListJobsByParent(ctx context.Context, parentJobID string) ([]Job
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+// ListJobsByRoot returns every job in the coordination tree rooted at rootID:
+// the originating coordinator itself (its root_id self-roots to its own id) plus
+// every child or continuation whose root_id points back at it (#420). It mirrors
+// ListJobsByParent — same projection, populating RootID too — and is backed by
+// idx_jobs_root_id for an indexed lookup instead of a full-table scan that
+// unmarshals every payload. ORDER BY id is deterministic.
+func (s *Store) ListJobsByRoot(ctx context.Context, rootID string) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_id, root_killed, input_tokens, output_tokens, updated_at
+		FROM jobs WHERE root_id = ? ORDER BY id`, rootID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []Job
+	for rows.Next() {
+		var job Job
+		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootID, &job.RootKilled, &job.InputTokens, &job.OutputTokens, &job.UpdatedAt); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
+
+// CountJobsByRoot returns the number of jobs in the coordination tree rooted at
+// rootID via an indexed COUNT(*) on root_id (#420) — no row materialization, no
+// payload unmarshal. It is the SQL form of the engine's countRootDelegationJobs;
+// the grouping key (root_id) is identical to the old payload.RootJobID filter,
+// so the count is byte-identical.
+func (s *Store) CountJobsByRoot(ctx context.Context, rootID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE root_id = ?`, rootID).Scan(&count)
+	return count, err
+}
+
+// SumJobTokensByRoot returns the summed runtime token usage (input + output)
+// across the coordination tree rooted at rootID via an indexed SQL SUM on
+// root_id (#420). COALESCE guards the empty-tree case (SUM over zero rows is
+// NULL). It is the SQL form of sumRootDelegationTokens; same grouping key, so
+// the total is byte-identical.
+func (s *Store) SumJobTokensByRoot(ctx context.Context, rootID string) (int, error) {
+	var total int
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM jobs WHERE root_id = ?`, rootID).Scan(&total)
+	return total, err
 }
 
 func (s *Store) ListQueuedJobs(ctx context.Context) ([]Job, error) {
@@ -2294,6 +2428,11 @@ func (s *Store) DelegateQueuedJob(ctx context.Context, id string, fromAgent stri
 	}
 	defer tx.Rollback()
 
+	// root_id is intentionally left untouched here (#420). This is an in-place
+	// re-assignment of an already-queued job to a different agent; the job stays
+	// in the same coordination tree, so its root_id (set at insert from the
+	// original payload's RootJobID) remains correct. A re-delegation never carries
+	// a new RootJobID, so re-binding the COALESCE would only re-derive the same id.
 	result, err := tx.ExecContext(ctx, `UPDATE jobs SET agent = ?, payload = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND agent = ? AND state = ?`,
 		strings.TrimSpace(toAgent), payload, id, strings.TrimSpace(fromAgent), "queued")
 	if err != nil {
@@ -5845,5 +5984,17 @@ ALTER TABLE jobs ADD COLUMN root_killed INTEGER NOT NULL DEFAULT 0;
 	`
 ALTER TABLE jobs ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+	`,
+	// #420: denormalize the coordination-tree root onto an indexed root_id column
+	// so root-scoped helpers do one indexed lookup instead of a full-table scan
+	// that unmarshals every payload. New DEFAULT '' rows are then backfilled by
+	// backfillJobRootID (a Go-side, idempotent, malformed-JSON-safe pass run after
+	// migrations), not by in-migration json_extract: modernc's json_extract raises
+	// a SQL error on malformed payloads, which would abort the whole migration —
+	// the Go pass instead self-roots a malformed row, matching rootJobID().
+	`
+ALTER TABLE jobs ADD COLUMN root_id TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX idx_jobs_root_id ON jobs(root_id);
 	`,
 }

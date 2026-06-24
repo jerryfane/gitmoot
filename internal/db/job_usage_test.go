@@ -94,8 +94,11 @@ func TestJobTokenMigrationOnPreExistingDB(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gitmoot.db")
 
 	// Build an "old" database: a jobs table at the pre-#338B shape (no token
-	// columns) with one row, and a schema_migrations table marking every prior
-	// migration applied so Open()'s Migrate runs ONLY the new token-column ALTER.
+	// columns, no root_id) with one row, and a schema_migrations table marking
+	// every migration up to but excluding the token-column ALTER as applied, so
+	// Open()'s Migrate runs the token-column ALTER (the column under test) onto the
+	// pre-existing populated table. The #420 root_id ALTER+backfill (the last
+	// migration) runs in the same pass and is a no-op for this assertion.
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("sql.Open returned error: %v", err)
@@ -120,8 +123,12 @@ INSERT INTO jobs(id, agent, type, state, payload) VALUES ('old', 'w', 'ask', 'su
 `); err != nil {
 		t.Fatalf("seed old schema returned error: %v", err)
 	}
-	// Mark every migration except the final token-column ALTER as already applied.
-	for v := 1; v < len(migrations); v++ {
+	// Mark every migration before the token-column ALTER as already applied. The
+	// token-column ALTER is the second-to-last migration (the #420 root_id ALTER
+	// is last), so leave the final two versions unapplied: both run on Open, and
+	// the seeded table is missing both sets of columns so both ALTERs succeed.
+	tokenMigrationVersion := len(migrations) - 1
+	for v := 1; v < tokenMigrationVersion; v++ {
 		if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, 'seed')`, v); err != nil {
 			t.Fatalf("seed schema_migrations v%d returned error: %v", v, err)
 		}

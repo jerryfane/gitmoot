@@ -797,23 +797,17 @@ func (e Engine) rootWallClockExceeded(ctx context.Context, rootID string) (bool,
 // dispatch on a bad timestamp. A tree with no escalation contributes 0, keeping
 // default behavior byte-identical.
 func (e Engine) rootPausedDuration(ctx context.Context, rootID string, now time.Time) time.Duration {
-	jobs, err := e.Store.ListJobs(ctx)
+	// ListJobsByRoot (#420) is an indexed lookup on the denormalized root_id
+	// column: it returns exactly the tree (the self-rooted coordinator plus every
+	// child/continuation) instead of the whole table. The grouping key is
+	// identical to the old payload.RootJobID filter, so the sum is byte-identical;
+	// it still fails open (a lookup error contributes 0).
+	jobs, err := e.Store.ListJobsByRoot(ctx, rootID)
 	if err != nil {
 		return 0
 	}
 	var total time.Duration
 	for _, job := range jobs {
-		inTree := job.ID == rootID
-		if !inTree {
-			payload, err := unmarshalPayload(job.Payload)
-			if err != nil {
-				continue
-			}
-			inTree = payload.RootJobID == rootID
-		}
-		if !inTree {
-			continue
-		}
 		total += e.jobPausedDuration(ctx, job.ID, now)
 	}
 	return total
@@ -1100,29 +1094,14 @@ func progressDigest(dels []Delegation, childPayloads map[string]JobPayload) stri
 }
 
 // countRootDelegationJobs counts every job belonging to a coordination tree: the
-// originating coordinator itself (job.ID == rootID) plus every child or
-// continuation whose payload RootJobID points back at it. There is no store query
-// keyed on root, so it lists all jobs and filters (mirroring childDelegationJobs).
+// originating coordinator itself (its row self-roots to rootID) plus every child
+// or continuation whose root_id points back at it. The denormalized root_id
+// column (#420) lets the store answer with an indexed COUNT(*) instead of a
+// full-table scan that unmarshals every payload; the grouping key is identical
+// (root_id is the write-time denormalization of the old payload.RootJobID
+// filter), so the count is byte-identical.
 func (e Engine) countRootDelegationJobs(ctx context.Context, rootID string) (int, error) {
-	jobs, err := e.Store.ListJobs(ctx)
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, job := range jobs {
-		if job.ID == rootID {
-			count++
-			continue
-		}
-		payload, err := unmarshalPayload(job.Payload)
-		if err != nil {
-			return 0, err
-		}
-		if payload.RootJobID == rootID {
-			count++
-		}
-	}
-	return count, nil
+	return e.Store.CountJobsByRoot(ctx, rootID)
 }
 
 // rootJobCountForPressure returns the per-root job count for the budget-pressure
@@ -1138,34 +1117,16 @@ func (e Engine) rootJobCountForPressure(ctx context.Context, rootID string) int 
 }
 
 // sumRootDelegationTokens sums the runtime token usage (input + output) across an
-// entire coordination tree: the originating coordinator itself (job.ID == rootID)
-// plus every child or continuation whose payload RootJobID points back at it. It
-// mirrors countRootDelegationJobs (there is no store query keyed on root, so it
-// lists all jobs and filters). Used by the per-root token budget (#338 Part B) to
-// decide, before dispatching a new generation, whether the tree has already spent
-// its budget. Token capture is best-effort per runtime (see internal/runtime); a
-// job whose runtime did not report usage contributes 0, so the sum under-counts
-// rather than over-counts.
+// entire coordination tree: the originating coordinator itself (self-rooted to
+// rootID) plus every child or continuation whose root_id points back at it. Used
+// by the per-root token budget (#338 Part B) to decide, before dispatching a new
+// generation, whether the tree has already spent its budget. The denormalized
+// root_id column (#420) lets the store sum entirely in SQL — same grouping key,
+// byte-identical total, zero payload unmarshal. Token capture is best-effort per
+// runtime (see internal/runtime); a job whose runtime did not report usage
+// contributes 0, so the sum under-counts rather than over-counts.
 func (e Engine) sumRootDelegationTokens(ctx context.Context, rootID string) (int, error) {
-	jobs, err := e.Store.ListJobs(ctx)
-	if err != nil {
-		return 0, err
-	}
-	total := 0
-	for _, job := range jobs {
-		if job.ID == rootID {
-			total += job.InputTokens + job.OutputTokens
-			continue
-		}
-		payload, err := unmarshalPayload(job.Payload)
-		if err != nil {
-			return 0, err
-		}
-		if payload.RootJobID == rootID {
-			total += job.InputTokens + job.OutputTokens
-		}
-	}
-	return total, nil
+	return e.Store.SumJobTokensByRoot(ctx, rootID)
 }
 
 func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload JobPayload, ref taskRef) error {
