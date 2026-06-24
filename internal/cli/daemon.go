@@ -2117,6 +2117,16 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 		}
 		_ = w.postJobResultComment(ctx, job.ID, agent, "", errors.New(agentPermissionBlockedMessage))
 		writeLine(w.Stdout, "job %s blocked: %s", job.ID, agentPermissionBlockedMessage)
+		// A read-only implement DELEGATION child short-circuits to blocked here,
+		// BEFORE finishQueuedJob, via markJobPermissionBlocked (a direct transition)
+		// — and blockTaskForPermissionBlockedJob only blocks the task, it never
+		// advances the parent DAG. So without this the parent strands exactly like
+		// #409. Route the delegation child through the SAME finalize helper so its
+		// failure_policy fires. Gated strictly on a delegation child (ParentJobID set,
+		// Result nil), so a NON-delegation permission-blocked job is byte-identical.
+		if err := w.finalizePreflightDelegationChild(ctx, job.ID, errors.New(agentPermissionBlockedMessage)); err != nil {
+			return err
+		}
 		return nil
 	}
 	checkout, err := w.CheckoutValidator(ctx, job, payload, agent)
@@ -4118,10 +4128,23 @@ func (w jobWorker) finishQueuedJob(ctx context.Context, jobID string, state work
 	// finishQueuedJob is the single choke point all ~12 direct
 	// finishQueuedJob(JobFailed) sites (and handleRunJobError's JobQueued branch)
 	// funnel through, so finalizing here covers every pre-flight failure exactly
-	// once. Gate on a genuine queued→failed transition + a delegation child with
-	// no stored result, so non-delegation jobs (PR/issue asks) are byte-identical
-	// and an already-terminal/cancelled child is never force-finalized.
-	if transitioned && state == workflow.JobFailed {
+	// once. Gate on a genuine queued→(failed|blocked) transition + a delegation
+	// child with no stored result, so non-delegation jobs (PR/issue asks) are
+	// byte-identical and an already-terminal/cancelled child is never
+	// force-finalized.
+	//
+	// JobBlocked is included alongside JobFailed: a queued delegation child that
+	// fails an executor pre-flight check returning a BlockedError (a same-branch
+	// sibling branch-lock conflict, an empty implement branch, a missing
+	// action/repo capability, an unsubscribed agent — all from
+	// ensureJobExecutorAllowed/e.block) is routed by handleRunJobError to
+	// finishQueuedJob(..., JobBlocked, ...). Both failed and blocked are genuine
+	// terminal failures the engine already finalizes (FinalizeTimedOutDelegationChild
+	// accepts JobRunning/JobFailed/JobBlocked), so both must advance the parent DAG
+	// or the blocked class strands the parent — the exact #409 bug. JobCancelled is
+	// deliberately excluded: the engine switch rejects it and a cancelled child
+	// must follow the cancelled path.
+	if transitioned && (state == workflow.JobFailed || state == workflow.JobBlocked) {
 		return w.finalizePreflightDelegationChild(ctx, jobID, cause)
 	}
 	return nil

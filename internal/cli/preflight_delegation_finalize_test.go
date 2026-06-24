@@ -41,14 +41,23 @@ const preflightChildBranch = "task-005"
 
 // newPreflightHarness seeds a repo + coordinator/child agents and a worker whose
 // CheckoutValidator stages a worktree-less-checkout pre-flight failure (the #409
-// trigger). failPolicy is the child delegation's failure_policy.
+// trigger). failPolicy is the child delegation's failure_policy. The failing leg
+// delegates a `review` action (no write/branch-lock setup needed).
 func newPreflightHarness(t *testing.T, failPolicy string) *preflightHarness {
+	t.Helper()
+	return newPreflightHarnessForAction(t, failPolicy, "review")
+}
+
+// newPreflightHarnessForAction is newPreflightHarness with the failing leg's
+// delegated action overridable (e.g. "implement" for the read-only-implement
+// finding), so a single shared harness covers every pre-flight failure class.
+func newPreflightHarnessForAction(t *testing.T, failPolicy string, failingAction string) *preflightHarness {
 	t.Helper()
 	store := daemonWorkerStore(t)
 	checkout := t.TempDir()
 	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", checkout)
 	seedDaemonWorkerAgent(t, store, "coord", runtime.ShellRuntime, "unused", []string{"ask"}, "jerryfane/gitmoot")
-	seedDaemonWorkerAgent(t, store, "api", runtime.ShellRuntime, "unused", []string{"review"}, "jerryfane/gitmoot")
+	seedDaemonWorkerAgent(t, store, "api", runtime.ShellRuntime, "unused", []string{failingAction}, "jerryfane/gitmoot")
 	seedDaemonWorkerAgent(t, store, "ui", runtime.ShellRuntime, "unused", []string{"review"}, "jerryfane/gitmoot")
 
 	notifier := &recordingEscalationNotifier{}
@@ -65,7 +74,7 @@ func newPreflightHarness(t *testing.T, failPolicy string) *preflightHarness {
 	worker.WorkflowFactory = func(string) workflow.Engine { return engine }
 
 	h := &preflightHarness{store: store, worker: worker, engine: engine, notifier: notifier, checkout: checkout}
-	h.seedPreflightCoordinator(t, failPolicy)
+	h.seedPreflightCoordinator(t, failPolicy, failingAction)
 	return h
 }
 
@@ -77,7 +86,7 @@ func checkoutMismatch(branch string) error {
 // failPolicy plus an independent sibling, then advances it once so both children
 // are dispatched (JobQueued, ParentJobID set, Result nil) — the exact pre-flight
 // state of a worktree-less delegation child.
-func (h *preflightHarness) seedPreflightCoordinator(t *testing.T, failPolicy string) {
+func (h *preflightHarness) seedPreflightCoordinator(t *testing.T, failPolicy string, failingAction string) {
 	t.Helper()
 	ctx := context.Background()
 	coordinator := db.Job{ID: "parent-job", Agent: "coord", Type: "ask", State: string(workflow.JobSucceeded)}
@@ -91,7 +100,7 @@ func (h *preflightHarness) seedPreflightCoordinator(t *testing.T, failPolicy str
 			Decision: "approved",
 			Summary:  "done",
 			Delegations: []workflow.Delegation{
-				{ID: "api", Agent: "api", Action: "review", Prompt: "build api", FailurePolicy: failPolicy},
+				{ID: "api", Agent: "api", Action: failingAction, Prompt: "build api", FailurePolicy: failPolicy},
 				{ID: "ui", Agent: "ui", Action: "review", Prompt: "build ui"},
 			},
 		},
@@ -285,6 +294,25 @@ func TestPreflightDelegationChildFailurePolicies(t *testing.T) {
 			if gotContinuation != tc.wantContinue {
 				t.Fatalf("continuation enqueued = %v, want %v", gotContinuation, tc.wantContinue)
 			}
+
+			if tc.wantSiblingUp {
+				// continue's distinguishing, load-bearing signal: the failing leg is
+				// finalized WITHOUT taking down the independent sibling. The sibling
+				// stays queued (runnable, not blocked) and result-less — proving the
+				// failure_policy stopped only this branch, not the whole tree (the
+				// block_parent case above would instead block the shared task).
+				sibling := mustWorkerJob(t, h.store, "parent-job/delegation/ui")
+				if sibling.State != string(workflow.JobQueued) {
+					t.Fatalf("sibling state = %q, want queued (continue must not block the independent sibling)", sibling.State)
+				}
+				sp, err := daemonJobPayload(sibling)
+				if err != nil {
+					t.Fatalf("daemonJobPayload(sibling) returned error: %v", err)
+				}
+				if sp.Result != nil {
+					t.Fatalf("sibling result = %+v, want nil (the sibling was not touched by the failing leg)", sp.Result)
+				}
+			}
 		})
 	}
 }
@@ -392,5 +420,264 @@ func TestFinishQueuedJobNonDelegationUnaffected(t *testing.T) {
 	job := mustWorkerJob(t, store, "ask-job")
 	if job.State != string(workflow.JobFailed) {
 		t.Fatalf("job state = %q, want failed", job.State)
+	}
+}
+
+// TestPreflightDelegationChildBlockedAdvancesParent is the load-bearing #409
+// regression for the BLOCKED class (finding 1): a delegation child that fails an
+// executor pre-flight check returning a BlockedError (here, the agent lacks the
+// delegated action's capability) is routed by handleRunJobError to
+// finishQueuedJob(..., JobBlocked, ...). Before the gate was widened to include
+// JobBlocked the child stranded `blocked` with Result == nil and the parent DAG
+// never advanced — the exact #409 bug for blocked pre-flight failures. With the
+// fix the engine finalizes the blocked child (synthetic result + DAG advance) so
+// the escalate_human failure_policy fires.
+func TestPreflightDelegationChildBlockedAdvancesParent(t *testing.T) {
+	ctx := context.Background()
+	h := newPreflightHarness(t, "escalate_human")
+	// Let checkout + adapter bring-up SUCCEED so the failure happens INSIDE
+	// engine.RunJob at ensureJobExecutorAllowed (the BlockedError class), not at a
+	// finishQueuedJob(JobFailed) site. The stub adapter is never invoked because
+	// ensureJobExecutorAllowed blocks first.
+	h.worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		return h.checkout, nil
+	}
+	h.worker.AdapterFactory = func(runtime.Agent, string) (workflow.DeliveryAdapter, error) {
+		return cockpitStubAdapter{}, nil
+	}
+	// Strip the api agent's "review" capability so ensureJobExecutorAllowed returns
+	// e.block(...) -> BlockedError; handleRunJobError then routes the still-queued
+	// child to finishQueuedJob(JobBlocked).
+	if err := h.store.UpsertAgent(ctx, db.Agent{
+		Name: "api", Role: "worker", Runtime: runtime.ShellRuntime, RuntimeRef: "unused",
+		RepoScope: "jerryfane/gitmoot", Capabilities: []string{"ask"},
+		AutonomyPolicy: runtime.AutonomyPolicyAuto, HealthStatus: "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent(api, no review cap) returned error: %v", err)
+	}
+
+	h.runChildTick(t)
+
+	child := mustWorkerJob(t, h.store, "parent-job/delegation/api")
+	// The child landed BLOCKED (not failed) — the class the un-widened gate missed.
+	if child.State != string(workflow.JobBlocked) {
+		t.Fatalf("child state = %q, want blocked", child.State)
+	}
+	cp, err := daemonJobPayload(child)
+	if err != nil {
+		t.Fatalf("daemonJobPayload(child) returned error: %v", err)
+	}
+	// The synthetic result is the proof the engine finalized the result-less,
+	// blocked child so advanceDelegations could run.
+	if cp.Result == nil || cp.Result.Decision != "failed" {
+		t.Fatalf("child result = %+v, want a synthetic failed result", cp.Result)
+	}
+	// The finalize bridge ran exactly once.
+	if got := countWorkerJobEvents(t, h.store, "parent-job/delegation/api", "delegation_timeout_finalized"); got != 1 {
+		t.Fatalf("delegation_timeout_finalized events = %d, want 1", got)
+	}
+	// The DAG advanced and escalate_human fired: the shared parent task is paused
+	// awaiting a human and the human was notified once with the resume context.
+	if got := workerTaskState(t, h.store, "task-5"); got != string(workflow.TaskAwaitingHuman) {
+		t.Fatalf("task state = %q, want awaiting_human (DAG advanced for the blocked child)", got)
+	}
+	if len(h.notifier.calls) != 1 {
+		t.Fatalf("notifier calls = %d, want 1", len(h.notifier.calls))
+	}
+	if c := h.notifier.calls[0]; c.CoordinatorJobID != "parent-job" || c.DelegationID != "api" {
+		t.Fatalf("notifier request = %+v, want coordinator parent-job / delegation api", c)
+	}
+
+	// Idempotency: a second worker tick over the now-finalized blocked child is a
+	// no-op — the child already has a result, so finalize re-enters cleanly with no
+	// second finalize and no second notification.
+	child2 := mustWorkerJob(t, h.store, "parent-job/delegation/api")
+	if err := h.worker.run(ctx, child2); err != nil {
+		t.Fatalf("second worker.run(child) returned error: %v", err)
+	}
+	if got := countWorkerJobEvents(t, h.store, "parent-job/delegation/api", "delegation_timeout_finalized"); got != 1 {
+		t.Fatalf("delegation_timeout_finalized events after second tick = %d, want 1 (idempotent)", got)
+	}
+	if len(h.notifier.calls) != 1 {
+		t.Fatalf("notifier calls after second tick = %d, want 1 (idempotent)", len(h.notifier.calls))
+	}
+}
+
+// TestPreflightReadOnlyImplementDelegationChildAdvancesParent is the load-bearing
+// regression for finding 2: a coordinator that delegates an `implement` action to
+// a read-only-autonomy agent short-circuits at the readOnlyImplementationBlocked
+// branch in run() — BEFORE CheckoutValidator/RunJob — via markJobPermissionBlocked
+// (a direct queued->blocked transition, NOT finishQueuedJob) plus
+// blockTaskForPermissionBlockedJob (which only blocks the task). Without routing
+// this delegation child through the finalize helper the parent DAG never advances
+// and the failure_policy never fires — #409 via a separate code path that
+// widening the finishQueuedJob gate does NOT cover.
+func TestPreflightReadOnlyImplementDelegationChildAdvancesParent(t *testing.T) {
+	ctx := context.Background()
+	// The failing leg delegates an `implement` action; its agent (api) is then made
+	// read-only, so run() takes the readOnlyImplementationBlocked branch.
+	h := newPreflightHarnessForAction(t, "escalate_human", "implement")
+	// A panicking CheckoutValidator proves the short-circuit fires BEFORE checkout
+	// (the finding-2 path never reaches finishQueuedJob).
+	h.worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		t.Fatal("read-only implement block must short-circuit before CheckoutValidator")
+		return "", nil
+	}
+	// Re-register api as a read-only implement agent so
+	// readOnlyImplementationBlocked(job.Type, agent) is true.
+	if err := h.store.UpsertAgent(ctx, db.Agent{
+		Name: "api", Role: "worker", Runtime: runtime.CodexRuntime, RuntimeRef: "unused",
+		RepoScope: "jerryfane/gitmoot", Capabilities: []string{"implement"},
+		AutonomyPolicy: runtime.AutonomyPolicyReadOnly, HealthStatus: "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent(api, read-only implement) returned error: %v", err)
+	}
+
+	child := mustWorkerJob(t, h.store, "parent-job/delegation/api")
+	if err := h.worker.run(ctx, child); err != nil {
+		t.Fatalf("worker.run(read-only implement child) returned error: %v", err)
+	}
+
+	child = mustWorkerJob(t, h.store, "parent-job/delegation/api")
+	// The child is permission-blocked (the existing behavior, preserved)...
+	if child.State != string(workflow.JobBlocked) {
+		t.Fatalf("child state = %q, want blocked", child.State)
+	}
+	cp, err := daemonJobPayload(child)
+	if err != nil {
+		t.Fatalf("daemonJobPayload(child) returned error: %v", err)
+	}
+	// ...AND the finalize ran: a synthetic result was attached so advanceDelegations
+	// could drive the parent DAG.
+	if cp.Result == nil || cp.Result.Decision != "failed" {
+		t.Fatalf("child result = %+v, want a synthetic failed result (finalize must run for a delegation child)", cp.Result)
+	}
+	if got := countWorkerJobEvents(t, h.store, "parent-job/delegation/api", "delegation_timeout_finalized"); got != 1 {
+		t.Fatalf("delegation_timeout_finalized events = %d, want 1", got)
+	}
+	// The DAG advanced and escalate_human fired for the read-only-implement leg.
+	if got := workerTaskState(t, h.store, "task-5"); got != string(workflow.TaskAwaitingHuman) {
+		t.Fatalf("task state = %q, want awaiting_human (DAG advanced for the read-only implement child)", got)
+	}
+	if len(h.notifier.calls) != 1 {
+		t.Fatalf("notifier calls = %d, want 1", len(h.notifier.calls))
+	}
+
+	// Idempotency: a second tick is a no-op (child already has a result).
+	child2 := mustWorkerJob(t, h.store, "parent-job/delegation/api")
+	if err := h.worker.run(ctx, child2); err != nil {
+		t.Fatalf("second worker.run(child) returned error: %v", err)
+	}
+	if got := countWorkerJobEvents(t, h.store, "parent-job/delegation/api", "delegation_timeout_finalized"); got != 1 {
+		t.Fatalf("delegation_timeout_finalized events after second tick = %d, want 1 (idempotent)", got)
+	}
+	if len(h.notifier.calls) != 1 {
+		t.Fatalf("notifier calls after second tick = %d, want 1 (idempotent)", len(h.notifier.calls))
+	}
+}
+
+// TestPreflightReadOnlyImplementNonDelegationUnaffected pins the byte-identical
+// guarantee for finding 2: a NON-delegation read-only implement job (no
+// ParentJobID) is permission-blocked exactly as before — no synthetic result, no
+// finalize, no engine call.
+func TestPreflightReadOnlyImplementNonDelegationUnaffected(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", t.TempDir())
+	seedDaemonWorkerAgentWithPolicy(t, store, "lead", runtime.CodexRuntime, "unused", []string{"implement"}, "jerryfane/gitmoot", runtime.AutonomyPolicyReadOnly)
+	job := db.Job{ID: "impl-job", Agent: "lead", Type: "implement", State: string(workflow.JobQueued), Payload: mustJobPayload(t, workflow.JobPayload{
+		Repo: "jerryfane/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead",
+	})}
+	if err := store.CreateJobWithEvent(ctx, job, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
+		t.Fatalf("CreateJobWithEvent returned error: %v", err)
+	}
+
+	worker := defaultJobWorker(store, io.Discard)
+	// A WorkflowFactory that fails proves the non-delegation permission-block path
+	// never touches the engine.
+	worker.WorkflowFactory = func(string) workflow.Engine {
+		t.Fatal("non-delegation permission-block must not build an engine")
+		return workflow.Engine{}
+	}
+
+	if err := worker.run(ctx, mustWorkerJob(t, store, "impl-job")); err != nil {
+		t.Fatalf("worker.run(non-delegation implement) returned error: %v", err)
+	}
+	got := mustWorkerJob(t, store, "impl-job")
+	if got.State != string(workflow.JobBlocked) {
+		t.Fatalf("job state = %q, want blocked", got.State)
+	}
+	cp, err := daemonJobPayload(got)
+	if err != nil {
+		t.Fatalf("daemonJobPayload returned error: %v", err)
+	}
+	if cp.Result != nil {
+		t.Fatalf("non-delegation permission-blocked job must NOT get a synthetic result: %+v", cp.Result)
+	}
+	if n := countWorkerJobEvents(t, store, "impl-job", "delegation_timeout_finalized"); n != 0 {
+		t.Fatalf("delegation_timeout_finalized events = %d, want 0 for a non-delegation job", n)
+	}
+}
+
+// TestPreflightEphemeralDelegationChildAdvancesParent is the load-bearing test for
+// finding 3: an EPHEMERAL delegation child whose pre-flight fails goes through the
+// ephemeral wrapper at run() (~2083-2093) — an `ephemeral_worker_failed` event +
+// finishQueuedJob(JobFailed) + postJobResultComment + a cleanupTempWorker defer —
+// which is NOT byte-identical routing to the other finishQueuedJob sites. Assert
+// that this wrapper still finalizes the delegation child (synthetic result + DAG
+// advance + failure_policy).
+func TestPreflightEphemeralDelegationChildAdvancesParent(t *testing.T) {
+	h := newPreflightHarness(t, "escalate_human")
+	// Mark the failing leg ephemeral. startEphemeralWorker calls the harness's
+	// failing CheckoutValidator (the #409 pre-flight trigger) BEFORE starting any
+	// runtime, so run() takes the ephemeral failure branch -> finishQueuedJob.
+	markWorkerJobEphemeral(t, h.store, "parent-job/delegation/api", &workflow.EphemeralSpec{
+		Runtime:      runtime.CodexRuntime,
+		Capabilities: []string{"review"},
+	})
+
+	h.runChildTick(t)
+
+	child := mustWorkerJob(t, h.store, "parent-job/delegation/api")
+	if child.State != string(workflow.JobFailed) {
+		t.Fatalf("child state = %q, want failed", child.State)
+	}
+	cp, err := daemonJobPayload(child)
+	if err != nil {
+		t.Fatalf("daemonJobPayload(child) returned error: %v", err)
+	}
+	// The synthetic result proves the ephemeral wrapper's finishQueuedJob still
+	// finalized the result-less delegation child.
+	if cp.Result == nil || cp.Result.Decision != "failed" {
+		t.Fatalf("child result = %+v, want a synthetic failed result", cp.Result)
+	}
+	// The ephemeral wrapper recorded its distinguishing event AND the finalize ran.
+	if got := countWorkerJobEvents(t, h.store, "parent-job/delegation/api", "ephemeral_worker_failed"); got != 1 {
+		t.Fatalf("ephemeral_worker_failed events = %d, want 1 (the ephemeral wrapper path was taken)", got)
+	}
+	if got := countWorkerJobEvents(t, h.store, "parent-job/delegation/api", "delegation_timeout_finalized"); got != 1 {
+		t.Fatalf("delegation_timeout_finalized events = %d, want 1", got)
+	}
+	// The DAG advanced and escalate_human fired.
+	if got := workerTaskState(t, h.store, "task-5"); got != string(workflow.TaskAwaitingHuman) {
+		t.Fatalf("task state = %q, want awaiting_human (DAG advanced for the ephemeral child)", got)
+	}
+	if len(h.notifier.calls) != 1 {
+		t.Fatalf("notifier calls = %d, want 1", len(h.notifier.calls))
+	}
+}
+
+// markWorkerJobEphemeral attaches an EphemeralSpec to a seeded delegation child's
+// stored payload so run() takes the ephemeral materialization branch.
+func markWorkerJobEphemeral(t *testing.T, store *db.Store, jobID string, spec *workflow.EphemeralSpec) {
+	t.Helper()
+	job := mustWorkerJob(t, store, jobID)
+	payload, err := daemonJobPayload(job)
+	if err != nil {
+		t.Fatalf("daemonJobPayload(%s) returned error: %v", jobID, err)
+	}
+	payload.Ephemeral = spec
+	if err := store.UpdateJobPayload(context.Background(), jobID, mustJobPayload(t, payload)); err != nil {
+		t.Fatalf("UpdateJobPayload(%s ephemeral) returned error: %v", jobID, err)
 	}
 }
