@@ -594,7 +594,7 @@ The panelists in `review-panel` and every producer and verify leg in
 `decompose-and-verify` and `verifier` are **ephemeral** workers: Gitmoot creates
 each from the delegation's `ephemeral` spec, runs it, and disposes of it once the
 child job finishes. Ephemeral workers are leaf-only — they return findings, never their own
-delegations — so a recipe's fan-out is exactly one level deep. In both recipes the
+delegations — so a recipe's fan-out is exactly one level deep. In all three recipes the
 delegations never set `agent`, because `agent` and `ephemeral` are mutually
 exclusive. Once every leg is terminal, Gitmoot enqueues one continuation back to
 the coordinator to merge the results (the panel verdict, or the verify gate plus
