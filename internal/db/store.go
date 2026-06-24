@@ -802,6 +802,33 @@ func (s *Store) RemoveAgent(ctx context.Context, name string) (bool, error) {
 // the message text.
 var ErrAgentHasActiveJobs = errors.New("agent has queued or running jobs")
 
+// rowQuerier is the QueryRowContext shape shared by *sql.DB and *sql.Tx, so
+// countActiveJobsTx can run on either a plain connection or inside a transaction.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// countActiveJobsTx is the single source of the queued/running busy count for an
+// agent. Both AgentActiveJobCount (own connection) and DeleteAgentChecked (inside
+// its delete transaction) call it, so the SQL and the ('queued','running') state
+// list live in exactly one place and can't drift.
+func countActiveJobsTx(ctx context.Context, q rowQuerier, name string) (int, error) {
+	var active int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE agent = ? AND state IN ('queued', 'running')`, name).Scan(&active); err != nil {
+		return 0, err
+	}
+	return active, nil
+}
+
+// AgentActiveJobCount returns how many queued or running jobs reference the
+// named agent. It is the restart rebind's busy pre-flight; it shares its query
+// with DeleteAgentChecked via countActiveJobsTx so both refuse an agent with
+// in-flight work identically (callers wrap ErrAgentHasActiveJobs to classify the
+// refusal).
+func (s *Store) AgentActiveJobCount(ctx context.Context, name string) (int, error) {
+	return countActiveJobsTx(ctx, s.db, name)
+}
+
 // DeleteAgentChecked removes an agent (and its instances) unless queued or
 // running jobs still reference it, in which case it refuses (wrapping
 // ErrAgentHasActiveJobs) so in-flight work is never orphaned.
@@ -815,8 +842,11 @@ func (s *Store) DeleteAgentChecked(ctx context.Context, name string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE agent = ? AND state IN ('queued', 'running')`, name).Scan(&active); err != nil {
+	// Same query as AgentActiveJobCount, but run on tx so the check + the deletes
+	// below stay in one transaction (atomic). countActiveJobsTx is the shared
+	// source of the SQL/state-list.
+	active, err := countActiveJobsTx(ctx, tx, name)
+	if err != nil {
 		return err
 	}
 	if active > 0 {

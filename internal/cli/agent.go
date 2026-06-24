@@ -27,6 +27,12 @@ var newRuntimeFactory = func() runtime.Factory {
 
 var agentDoctorRunner subprocess.Runner = subprocess.ExecRunner{}
 
+// runtimeStartAdapterFor builds the runtime adapter `agent restart` re-runs
+// Start on. It is a package var so tests can inject a fake adapter (the start
+// path's own seams generate runtime-specific refs that are hard to assert on);
+// production wires it straight to runtimeStartAdapter.
+var runtimeStartAdapterFor = runtimeStartAdapter
+
 func runAgent(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printAgentUsage(stdout)
@@ -59,6 +65,8 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		return runAgentList(args[1:], stdout, stderr)
 	case "remove":
 		return runAgentRemove(args[1:], stdout, stderr)
+	case "restart":
+		return runAgentRestart(args[1:], stdout, stderr)
 	case "doctor":
 		return runAgentDoctor(args[1:], stdout, stderr)
 	case "allow":
@@ -93,6 +101,7 @@ func printAgentUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot agent show <name> [--json]")
 	fmt.Fprintln(w, "  gitmoot agent list")
 	fmt.Fprintln(w, "  gitmoot agent remove <name>")
+	fmt.Fprintln(w, "  gitmoot agent restart <name>      # abandon + replace the runtime session (finish in-flight asks first)")
 	fmt.Fprintln(w, "  gitmoot agent doctor <name>")
 }
 
@@ -1736,6 +1745,123 @@ func runAgentRemove(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "removed %s\n", name)
+	return 0
+}
+
+// runAgentRestart rebinds a registered agent to a fresh runtime session in
+// place: it re-runs adapter.Start for a new runtime_ref and persists ONLY that
+// ref plus health="unknown", preserving every other field by reading the
+// existing record, mutating two fields, and writing it back (UpsertAgent's
+// ON CONFLICT is a full-row PUT). Pure preservation — no override flags, no
+// rebuild-from-flags. The old session is abandoned, not torn down (the
+// runtime_ref is a local resume handle).
+func runAgentRestart(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("agent restart", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		fs.Usage()
+		if len(args) == 0 {
+			fmt.Fprintln(stderr, "agent restart requires exactly one name")
+			return 2
+		}
+		return 0
+	}
+	name := args[0]
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "agent restart requires exactly one name")
+		return 2
+	}
+
+	var (
+		existing db.Agent
+		record   db.Repo
+		cached   db.AgentTemplate
+	)
+	// Load + busy pre-flight: resolve the existing agent and its checkout, and
+	// refuse an agent with queued/running jobs BEFORE calling adapter.Start so a
+	// refusal leaves runtime_ref untouched and never starts a session. This is a
+	// best-effort pre-flight guard, NOT atomic with the rebind: the count and the
+	// later runtime_ref write happen in separate store sessions with adapter.Start
+	// between them, so a job enqueued in that window isn't re-checked. That is
+	// benign for this manual recovery verb — restart abandons and replaces the
+	// session rather than orphaning work.
+	if err := withStore(*home, func(store *db.Store) error {
+		var err error
+		existing, err = store.GetAgent(context.Background(), name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("agent %q not found; use agent start to create it", name)
+		}
+		if err != nil {
+			return err
+		}
+		if existing.Runtime == runtime.ShellRuntime {
+			return fmt.Errorf("agent %q uses the shell runtime, which has no startable session", name)
+		}
+		active, err := store.AgentActiveJobCount(context.Background(), name)
+		if err != nil {
+			return err
+		}
+		if active > 0 {
+			return fmt.Errorf("agent %s has %d queued or running job(s); cancel them first: %w", name, active, db.ErrAgentHasActiveJobs)
+		}
+		// No runtime-session-lock guard here: the production runtime:<rt>:<ref>
+		// session lock never records an OwnerPID (see acquireRuntimeSessionLock),
+		// so a live foreground `agent ask` can't be distinguished from a stranded
+		// lock at this layer. Restart doesn't need to: it mints a NEW session (new
+		// runtime_ref → new lock key), so any old/stranded runtime:<rt>:<oldref>
+		// lock is simply left to self-clear on its TTL. A real session guard
+		// (record OwnerPID+host on acquisition, then a same-host liveness check) is
+		// a separate follow-up. The jobs-busy check above is the effective guard.
+		record, err = store.GetRepo(context.Background(), existing.RepoScope)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if existing.TemplateID != "" {
+			cached, err = loadInstalledTemplate(context.Background(), store, existing.TemplateID)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		fmt.Fprintf(stderr, "agent restart: %v\n", err)
+		return 1
+	}
+
+	adapter, err := runtimeStartAdapterFor(newRuntimeFactory(), existing.Runtime, record.CheckoutPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load adapter: %v\n", err)
+		return 1
+	}
+	started, err := adapter.Start(context.Background(), runtime.StartRequest{
+		Agent:  runtimeAgent(existing),
+		Prompt: agentStartupPrompt(runtimeAgent(existing), cached),
+	})
+	if err != nil {
+		// adapter.Start failed: write NOTHING — runtime_ref + metadata stay as loaded.
+		fmt.Fprintf(stderr, "start runtime: %v\n", err)
+		return 1
+	}
+
+	// Rebind by read-modify-write: mutate ONLY runtime_ref + health on the
+	// already-loaded record so the full-row upsert preserves everything else.
+	existing.RuntimeRef = strings.TrimSpace(started.RuntimeRef)
+	existing.HealthStatus = "unknown"
+	if err := withStore(*home, func(store *db.Store) error {
+		return store.UpsertAgent(context.Background(), existing)
+	}); err != nil {
+		fmt.Fprintf(stderr, "agent restart: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "restarted %s (%s); session: %s\n", existing.Name, existing.Runtime, existing.RuntimeRef)
+	fmt.Fprintf(stdout, "note: this abandons and replaces %s's current runtime session; finish any in-flight foreground `agent ask` first\n", existing.Name)
 	return 0
 }
 
