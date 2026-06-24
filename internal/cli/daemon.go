@@ -219,12 +219,13 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 		defaultJobWorker(store, stdout, *home).applyOrchestratePolicy(&engine)
 		fmt.Fprintf(stdout, "watching %s every %s\n", repo.FullName(), poll.String())
 		return runSingleRepoSupervisor(ctx, *home, daemon.Daemon{
-			Repo:         repo,
-			PollInterval: *poll,
-			Store:        store,
-			GitHub:       gh,
-			Workflow:     &engine,
-			WatchIssues:  *watchIssues,
+			Repo:          repo,
+			PollInterval:  *poll,
+			Store:         store,
+			GitHub:        gh,
+			Workflow:      &engine,
+			WatchIssues:   *watchIssues,
+			EscalationTTL: resolveEscalationTTL(*home),
 		}, store, *workers, usePool, session, stdout)
 	})
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -1108,6 +1109,7 @@ type registeredRepoPoller struct {
 	Stdout          io.Writer
 	RecoveryOnly    bool
 	WatchIssues     bool
+	EscalationTTL   time.Duration
 	CheckoutLocks   *repoCheckoutLocks
 	GitHubClient    func(checkout string) github.Client
 	WorkflowFactory func(store *db.Store, gh github.Client, checkout string) *workflow.Engine
@@ -1115,16 +1117,49 @@ type registeredRepoPoller struct {
 
 func defaultRegisteredRepoPoller(store *db.Store, workers int, dryRun bool, stdout io.Writer, home string) registeredRepoPoller {
 	return registeredRepoPoller{
-		Store:        store,
-		Workers:      workers,
-		DryRun:       dryRun,
-		Stdout:       stdout,
-		GitHubClient: func(checkout string) github.Client { return github.NewClient(checkout) },
+		Store:         store,
+		Workers:       workers,
+		DryRun:        dryRun,
+		Stdout:        stdout,
+		EscalationTTL: resolveEscalationTTL(home),
+		GitHubClient:  func(checkout string) github.Client { return github.NewClient(checkout) },
 		WorkflowFactory: func(store *db.Store, gh github.Client, checkout string) *workflow.Engine {
 			engine := daemonWorkflowEngine(store, gh, checkout, home)
+			// Apply only the escalate_human notifier handle from policy (#340),
+			// keeping the budget/inlining knobs out of this path so its existing
+			// behavior is unchanged. The notifier itself is already wired by
+			// daemonWorkflowEngine; this just sets the configured @-handle.
+			if notifier, ok := engine.EscalationNotifier.(*daemonEscalationNotifier); ok && notifier != nil {
+				if policy, err := defaultJobWorker(store, stdout, home).orchestratePolicy(); err == nil {
+					notifier.Handle = policy.EscalationHandle
+				}
+			}
 			return &engine
 		},
 	}
+}
+
+// resolveEscalationTTL reads the [orchestrate].escalation_ttl policy (#340),
+// falling back to DefaultEscalationTTL when unset and to 0 (scan disabled) only
+// on a hard parse failure, so the auto-finalize backstop is on by default.
+func resolveEscalationTTL(home string) time.Duration {
+	policy := config.DefaultOrchestratePolicy()
+	if strings.TrimSpace(home) != "" {
+		if paths, err := initializedPaths(home); err == nil {
+			if loaded, err := config.LoadOrchestratePolicy(paths); err == nil {
+				policy = loaded
+			}
+		}
+	}
+	raw := strings.TrimSpace(policy.EscalationTTL)
+	if raw == "" {
+		raw = config.DefaultEscalationTTL
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil || ttl <= 0 {
+		return 0
+	}
+	return ttl
 }
 
 func pollRegisteredReposWithPoller(ctx context.Context, poller registeredRepoPoller, schedule registeredRepoSchedule, now time.Time, fallbackPoll time.Duration) (time.Duration, error) {
@@ -1200,11 +1235,12 @@ func (p registeredRepoPoller) pollRepo(ctx context.Context, repoRecord db.Repo, 
 		}
 	}
 	d := daemon.Daemon{
-		Repo:        repo,
-		Store:       store,
-		GitHub:      gh,
-		Workflow:    engine,
-		WatchIssues: p.WatchIssues,
+		Repo:          repo,
+		Store:         store,
+		GitHub:        gh,
+		Workflow:      engine,
+		WatchIssues:   p.WatchIssues,
+		EscalationTTL: p.EscalationTTL,
 	}
 	if recoveryOnly {
 		err = d.PollRecoveryCommandsOnce(ctx)
@@ -3260,6 +3296,10 @@ func (w jobWorker) advanceJob(ctx context.Context, job db.Job) error {
 	}
 	engine := w.WorkflowFactory(checkout)
 	if err := engine.AdvanceJob(ctx, job.ID); err != nil {
+		var awaiting workflow.AwaitingHumanError
+		if errors.As(err, &awaiting) {
+			return w.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "advance_awaiting_human", Message: err.Error()})
+		}
 		var blocked workflow.BlockedError
 		if errors.As(err, &blocked) {
 			return w.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "advance_blocked", Message: err.Error()})
@@ -3342,6 +3382,9 @@ func (w jobWorker) applyOrchestratePolicy(engine *workflow.Engine) {
 	engine.MaxInlineArtifactBytes = policy.InlineArtifactMaxBytes
 	engine.MaxDelegationTokenBudget = policy.MaxDelegationTokenBudget
 	engine.MaxDelegationCostUSD = policy.MaxDelegationCostUSD
+	if notifier, ok := engine.EscalationNotifier.(*daemonEscalationNotifier); ok && notifier != nil {
+		notifier.Handle = policy.EscalationHandle
+	}
 }
 
 // workflowHome resolves the GITMOOT_HOME root used to place per-delegation
@@ -3375,6 +3418,10 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, ho
 		Store:                   store,
 		MergeGate:               daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout},
 		ImplementationFinalizer: daemonImplementationFinalizer{Store: store, GitHub: gh, FallbackCheckout: checkout},
+		// escalate_human (#340): @-tag the human on the tree's PR/issue when a leg
+		// pauses awaiting a decision. Best-effort and nil-safe in the engine; the
+		// handle is filled in from policy by applyOrchestratePolicy.
+		EscalationNotifier: &daemonEscalationNotifier{Store: store, GitHub: gh},
 		PayloadRefresher: func(ctx context.Context, job db.Job, payload workflow.JobPayload) (workflow.JobPayload, error) {
 			return refreshDaemonJobPayload(ctx, store, checkout, job, payload)
 		},
@@ -3391,6 +3438,88 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, ho
 		engine.DelegationWorktrees = gitutil.Client{Dir: checkout}
 	}
 	return engine
+}
+
+// daemonEscalationNotifier implements workflow.EscalationNotifier (#340): when a
+// delegation tree pauses awaiting a human, it @-tags that human in a GitHub
+// comment on the tree's PR (or the issue carrying the coordinator) with the
+// resume instructions. Best-effort: any lookup/post failure is returned to the
+// engine, which already treats notifier errors as non-fatal (the pause itself is
+// durable via the task state + recorded event + dashboard Attention).
+type daemonEscalationNotifier struct {
+	Store  *db.Store
+	GitHub github.Client
+	// Handle is the configured escalation_handle (a GitHub login without the @).
+	// Empty falls back to the PR author, then the repo owner.
+	Handle string
+}
+
+func (n *daemonEscalationNotifier) NotifyEscalation(ctx context.Context, request workflow.EscalationRequest) error {
+	if n == nil || n.Store == nil || n.GitHub == nil {
+		return nil
+	}
+	repoFull := strings.TrimSpace(request.Repo)
+	pull := request.PullRequest
+	owner := ""
+	// The engine seam leaves PR/repo best-effort; the coordinator job's payload is
+	// the source of truth for both, so load it when either is missing.
+	if repoFull == "" || pull <= 0 {
+		if job, err := n.Store.GetJob(ctx, request.CoordinatorJobID); err == nil {
+			if payload, perr := daemonJobPayload(job); perr == nil {
+				if repoFull == "" {
+					repoFull = strings.TrimSpace(payload.Repo)
+				}
+				if pull <= 0 {
+					pull = payload.PullRequest
+				}
+			}
+		}
+	}
+	if repoFull == "" || pull <= 0 {
+		// No issue/PR to post on; the durable pause (state + event + Attention)
+		// still stands. Nothing to notify.
+		return nil
+	}
+	repo, err := daemon.ParseRepository(repoFull)
+	if err != nil {
+		return err
+	}
+	owner = repo.Owner
+
+	// Default @-handle: the configured escalation_handle, else the repo owner (the
+	// human who owns the tree). The PullRequest type carries no author field, so
+	// the owner is the available, always-present human to tag.
+	handle := strings.TrimPrefix(strings.TrimSpace(n.Handle), "@")
+	if handle == "" {
+		handle = owner
+	}
+
+	body := buildEscalationComment(handle, request)
+	_, err = n.GitHub.PostIssueComment(ctx, repo, int64(pull), body)
+	return err
+}
+
+// buildEscalationComment renders the @-tag escalation comment body (#340).
+func buildEscalationComment(handle string, request workflow.EscalationRequest) string {
+	var b strings.Builder
+	if strings.TrimSpace(handle) != "" {
+		b.WriteString("@" + strings.TrimPrefix(handle, "@") + " ")
+	}
+	b.WriteString("Gitmoot paused a delegation tree awaiting your decision (escalate_human).\n\n")
+	if d := strings.TrimSpace(request.DelegationID); d != "" {
+		b.WriteString(fmt.Sprintf("- failing leg: `%s`\n", d))
+	}
+	if r := strings.TrimSpace(request.Reason); r != "" {
+		b.WriteString(fmt.Sprintf("- reason: %s\n", r))
+	}
+	if q := strings.TrimSpace(request.Question); q != "" {
+		b.WriteString(fmt.Sprintf("- question: %s\n", q))
+	}
+	b.WriteString("\nResume with one of:\n")
+	b.WriteString(fmt.Sprintf("- `/gitmoot resume %s retry <instructions>` — re-run the failing leg with your guidance\n", request.CoordinatorJobID))
+	b.WriteString(fmt.Sprintf("- `/gitmoot resume %s continue` — proceed the coordinator with what completed\n", request.CoordinatorJobID))
+	b.WriteString(fmt.Sprintf("- `/gitmoot resume %s abort` — stop and synthesize a best-effort final result\n", request.CoordinatorJobID))
+	return b.String()
 }
 
 type daemonImplementationFinalizer struct {
@@ -4000,6 +4129,14 @@ func (w jobWorker) handleRunJobError(ctx context.Context, jobID string, cause er
 	}
 	payload, payloadErr := daemonJobPayload(latest)
 	if payloadErr == nil && payload.Result != nil {
+		var awaiting workflow.AwaitingHumanError
+		if errors.As(cause, &awaiting) {
+			// escalate_human (#340): the parent tree paused durably awaiting a human;
+			// the child delivered a result and the pause (task state + event +
+			// notification) is already recorded. Treat this as the expected terminal
+			// outcome, not a failure to propagate.
+			return w.Store.AddJobEvent(ctx, db.JobEvent{JobID: latest.ID, Kind: "advance_awaiting_human", Message: cause.Error()})
+		}
 		var blocked workflow.BlockedError
 		if errors.As(cause, &blocked) {
 			return w.Store.AddJobEvent(ctx, db.JobEvent{JobID: latest.ID, Kind: "advance_blocked", Message: cause.Error()})
@@ -4020,6 +4157,13 @@ func (w jobWorker) handleRunJobError(ctx context.Context, jobID string, cause er
 		// recovery blindly re-queues it.
 		finalized, finalizeErr := w.finalizeTimedOutDelegationChild(ctx, latest, cause)
 		if finalizeErr != nil {
+			var awaiting workflow.AwaitingHumanError
+			if errors.As(finalizeErr, &awaiting) {
+				// escalate_human failure_policy paused the shared parent task awaiting
+				// a human (#340); the child is finalized and the DAG advanced, so this
+				// is the expected durable-pause outcome, not an error to propagate.
+				return nil
+			}
 			var blocked workflow.BlockedError
 			if errors.As(finalizeErr, &blocked) {
 				// block_parent failure_policy blocked the shared parent task; the

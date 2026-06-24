@@ -63,8 +63,26 @@ Delegation fields:
   only after every listed sibling succeeds. Each entry must reference a known
   sibling in the same result, may not be self-referential, and may not form a
   cycle — delegations form a DAG, and cycles are rejected.
-- `failure_policy` (optional): one of `block_parent`, `continue`, or
-  `escalate`. Defaults to `block_parent` when omitted.
+- `failure_policy` (optional): one of `block_parent`, `continue`, `escalate`, or
+  `escalate_human`. Defaults to `block_parent` when omitted.
+  - `block_parent` — a failed child blocks the shared parent task (terminal).
+  - `continue` — independent siblings keep running; only this branch's dependents
+    are skipped.
+  - `escalate` — hand every child outcome to the **coordinator** continuation to
+    decide autonomously (no human).
+  - `escalate_human` — a **durable human-in-the-loop pause** (#340). On a child
+    failure the parent task enters the resumable `awaiting_human` state, **no
+    continuation is enqueued, and the tree consumes zero tokens/compute** until a
+    human resumes it. The daemon @-tags the human in a GitHub comment (default
+    handle: the repo owner, or `[orchestrate].escalation_handle`) and the
+    dashboard lists the tree under **Attention**. A human resumes with
+    `/gitmoot resume <coordinatorJobID> retry|continue|abort [instructions]`:
+    `retry` re-runs the failing leg with the instructions folded in, `continue`
+    proceeds the coordinator continuation (now human-approved), and `abort`
+    routes to the graceful finalize continuation. A never-answered escalation is
+    auto-finalized after `[orchestrate].escalation_ttl` (default 24h); paused
+    time is excluded from the per-root wall-clock budget, and a paused tree is
+    never counted as a budget failure.
 - `synthesis_rule` (optional): one of `summary`, `vote`, or `quorum`.
 - `quorum` (optional): an integer `K` (`> 0`), required when `synthesis_rule`
   is `quorum`. The coordinator continuation proceeds only if at least `K`

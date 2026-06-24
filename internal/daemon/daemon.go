@@ -29,6 +29,10 @@ type Daemon struct {
 	// PollOnce also polls open non-PR issues and routes `@<agent> ask …`
 	// comments to jobs. Default false keeps the PR-only behavior unchanged.
 	WatchIssues bool
+	// EscalationTTL bounds how long a tree may sit paused awaiting a human before
+	// PollOnce auto-finalizes it gracefully (#340). 0 disables the scan, keeping
+	// behavior unchanged for trees that never use escalate_human.
+	EscalationTTL time.Duration
 }
 
 func (d Daemon) Run(ctx context.Context) error {
@@ -120,6 +124,14 @@ func (d Daemon) PollOnce(ctx context.Context) error {
 	}
 	if d.WatchIssues {
 		if err := d.PollIssuesOnce(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	// escalate_human TTL scan (#340): auto-finalize trees that have sat paused
+	// awaiting a human past the configured TTL. No-op when the engine is unset or
+	// EscalationTTL is 0, so default behavior is unchanged.
+	if d.Workflow != nil && d.EscalationTTL > 0 {
+		if _, err := d.Workflow.AutoFinalizeExpiredEscalations(ctx, d.EscalationTTL); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -729,7 +741,7 @@ func (d Daemon) handleRecoveryComment(ctx context.Context, pull github.PullReque
 
 func onlyJobRecoveryCommands(commands []Command) bool {
 	for _, command := range commands {
-		if command.Action != "retry" && command.Action != "cancel" && command.Action != "help" {
+		if command.Action != "retry" && command.Action != "cancel" && command.Action != "help" && command.Action != "resume" {
 			return false
 		}
 	}
@@ -751,6 +763,8 @@ func (d Daemon) handleCommand(ctx context.Context, pull github.PullRequest, comm
 		return d.handleRetryCommand(ctx, pull, command)
 	case "cancel":
 		return d.handleCancelCommand(ctx, pull, command)
+	case "resume":
+		return d.handleResumeCommand(ctx, pull, command)
 	}
 
 	agent, err := d.Store.GetAgent(ctx, command.Agent)
@@ -825,6 +839,7 @@ func (d Daemon) handleHelpCommand(ctx context.Context, pull github.PullRequest) 
 		"- `/gitmoot status`",
 		"- `/gitmoot retry <job-id>`",
 		"- `/gitmoot cancel <job-id>`",
+		"- `/gitmoot resume <job-id> <retry|continue|abort> [instructions]`",
 		"- `/gitmoot merge`",
 	}
 	agents, err := d.Store.ListAgents(ctx)
@@ -876,6 +891,29 @@ func (d Daemon) handleCancelCommand(ctx context.Context, pull github.PullRequest
 		return d.ack(ctx, pull.Number, fmt.Sprintf("Gitmoot could not cancel job `%s`: %v.", command.JobID, err))
 	}
 	return d.ack(ctx, pull.Number, fmt.Sprintf("Gitmoot cancelled job `%s`.", job.ID))
+}
+
+// handleResumeCommand resolves a tree paused at awaiting_human (#340) via
+// `/gitmoot resume <jobID> retry|continue|abort [instructions]`. It is
+// authorize-commenter gated by the caller (handleComment / handleRecoveryComment)
+// and job-scope gated here, exactly like retry/cancel. retry re-enqueues the
+// failed leg with the human's instructions; continue proceeds the coordinator
+// continuation; abort routes to the #305 graceful finalize.
+func (d Daemon) handleResumeCommand(ctx context.Context, pull github.PullRequest, command Command) error {
+	if d.Workflow == nil {
+		return d.ack(ctx, pull.Number, "Gitmoot cannot resume this tree because the workflow engine is not configured.")
+	}
+	if err := d.validateJobCommandScope(ctx, pull, command.JobID); err != nil {
+		return d.ack(ctx, pull.Number, fmt.Sprintf("Gitmoot could not resume job `%s`: %v.", command.JobID, err))
+	}
+	decision, ok := workflow.ParseResumeDecision(command.Decision)
+	if !ok {
+		return d.ack(ctx, pull.Number, fmt.Sprintf("Gitmoot could not resume job `%s`: decision must be retry, continue, or abort.", command.JobID))
+	}
+	if err := d.Workflow.ResolveEscalation(ctx, command.JobID, decision, command.Instructions); err != nil {
+		return d.ack(ctx, pull.Number, fmt.Sprintf("Gitmoot could not resume job `%s`: %v.", command.JobID, err))
+	}
+	return d.ack(ctx, pull.Number, fmt.Sprintf("Gitmoot resumed job `%s` with `%s`.", command.JobID, decision))
 }
 
 func (d Daemon) validateJobCommandScope(ctx context.Context, pull github.PullRequest, jobID string) error {

@@ -260,6 +260,21 @@ func (m Model) attentionListRows() []listRow {
 		}
 	}
 
+	// Awaiting human (#340): trees paused for a human decision. Display-only (the
+	// resume verb lives on the tree's PR/issue or `gitmoot resume`), so these are
+	// static rows that do not consume the selectable itemIdx space.
+	if n := len(m.snap.AwaitingHuman); n > 0 {
+		rows = append(rows, staticRow(0, "Awaiting human ("+strconv.Itoa(n)+")"))
+		for _, t := range m.snap.AwaitingHuman {
+			line := attentionRepoLabel(t.Repo) + "  task " + t.TaskID
+			if strings.TrimSpace(t.Title) != "" {
+				line += "  " + mutedStyle.Render(truncate(t.Title, 40))
+			}
+			rows = append(rows, staticRow(1, line))
+			rows = append(rows, staticRow(2, mutedStyle.Render("resume: /gitmoot resume <jobID> retry|continue|abort")))
+		}
+	}
+
 	// Locks are display-only context (no actions), shown as static lines.
 	if stale := staleLocks(m.snap.ResourceLocks); len(stale) > 0 {
 		rows = append(rows, staticRow(0, "Stale locks ("+strconv.Itoa(len(stale))+")"))

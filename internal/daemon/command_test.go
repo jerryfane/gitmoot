@@ -115,3 +115,44 @@ func TestValidateRejectsUnsupportedCommand(t *testing.T) {
 		t.Fatal("Validate accepted unsupported action")
 	}
 }
+
+// TestParseCommandResume pins the #340 resume grammar:
+// `/gitmoot resume <jobID> <retry|continue|abort> [instructions]`.
+func TestParseCommandResume(t *testing.T) {
+	command, ok := ParseCommand("/gitmoot resume job-1 retry use the staging endpoint")
+	if !ok {
+		t.Fatal("ParseCommand did not parse resume command")
+	}
+	if command.Action != "resume" || command.JobID != "job-1" || command.Decision != "retry" || command.Instructions != "use the staging endpoint" {
+		t.Fatalf("command = %+v", command)
+	}
+
+	// Decision normalizes case; instructions are optional.
+	command, ok = ParseCommand("/gitmoot resume job-2 CONTINUE")
+	if !ok {
+		t.Fatal("ParseCommand did not parse resume continue command")
+	}
+	if command.Decision != "continue" || command.Instructions != "" {
+		t.Fatalf("command = %+v", command)
+	}
+
+	// Missing the decision verb is not a valid resume command.
+	if _, ok := ParseCommand("/gitmoot resume job-3"); ok {
+		t.Fatal("ParseCommand accepted resume without a decision")
+	}
+}
+
+func TestValidateResume(t *testing.T) {
+	if err := (Command{Action: "resume", JobID: "job-1", Decision: "retry"}).Validate(); err != nil {
+		t.Fatalf("Validate rejected a valid resume: %v", err)
+	}
+	if err := (Command{Action: "resume", Decision: "retry"}).Validate(); err == nil {
+		t.Fatal("Validate accepted resume without a job id")
+	}
+	if err := (Command{Action: "resume", JobID: "job-1", Decision: "bogus"}).Validate(); err == nil {
+		t.Fatal("Validate accepted resume with an invalid decision")
+	}
+	if err := (Command{Action: "resume", JobID: "job-1"}).Validate(); err == nil {
+		t.Fatal("Validate accepted resume without a decision")
+	}
+}

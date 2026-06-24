@@ -30,8 +30,17 @@ type Snapshot struct {
 	ResourceLocks  []ResourceLock
 	Prompts        []db.InteractivePrompt
 	JobRows        []JobRow
+	AwaitingHuman  []AwaitingHumanTask
 	Activity       []ActivityRoot
 	Config         ConfigView
+}
+
+// AwaitingHumanTask is one delegation tree paused at awaiting_human (#340), shown
+// in the Attention page so an operator knows a `/gitmoot resume` is needed.
+type AwaitingHumanTask struct {
+	TaskID string
+	Repo   string
+	Title  string
 }
 
 // ActivityRoot is one live delegation tree on the Activity page: a root

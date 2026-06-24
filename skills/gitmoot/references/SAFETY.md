@@ -60,7 +60,9 @@ cannot recurse or fan out forever:
   one root is bounded in duration (measured from the root job's creation); a
   coordinator that tries to fan out after the tree has run this long is refused
   with a `delegation_walltime_exceeded` event. A generous runaway backstop, not a
-  tight deadline.
+  tight deadline. **Time a tree spends paused awaiting a human** (the
+  `escalate_human` failure_policy, below) **is excluded** from this measurement, so
+  a slow human response is never punished as a runaway.
 - Per-root token budget (cost) `[orchestrate].max_delegation_token_budget`,
   **off by default** (`0` = unlimited): when set to a positive value, the whole
   tree under one root is bounded by cumulative token usage (input + output across
@@ -92,6 +94,16 @@ cannot recurse or fan out forever:
   continuation routes through the same finalize path below (a
   `delegation_killed` event is emitted), and the daemon stops starting queued
   children of the killed root.
+- Human-in-the-loop pause (`escalate_human` failure_policy, #340): when a child
+  fails under `escalate_human`, the parent task enters the resumable
+  `awaiting_human` state, a one-shot `delegation_escalation_requested` event is
+  recorded, the human is @-tagged in a GitHub comment, and **no continuation is
+  enqueued** — the tree consumes zero tokens/compute while it waits. A paused tree
+  is **not** a budget failure. A human resumes with
+  `/gitmoot resume <coordinatorJobID> retry|continue|abort [instructions]`
+  (authorize-commenter gated, exactly like `/gitmoot retry`/`cancel`); a
+  never-answered escalation is auto-finalized through the graceful finalize path
+  below after `[orchestrate].escalation_ttl` (default 24h).
 
 When a bound trips, the offending delegations are not dispatched and the parent
 receives a typed lifecycle event explaining why (for example, the delegation tree

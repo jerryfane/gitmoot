@@ -276,6 +276,28 @@ func TestAttentionLocksOnlyNoNeedsAttentionItems(t *testing.T) {
 	}
 }
 
+// TestAttentionShowsAwaitingHuman pins the #340 Attention surface: a tree paused
+// at awaiting_human renders under an "Awaiting human" section with the resume
+// hint, even when there are no actionable prompts/jobs.
+func TestAttentionShowsAwaitingHuman(t *testing.T) {
+	deps := Deps{Load: func() (Snapshot, error) { return Snapshot{}, nil }}
+	snap := Snapshot{
+		Daemon:        Daemon{Running: true},
+		AwaitingHuman: []AwaitingHumanTask{{TaskID: "task-5", Repo: "jerryfane/gitmoot", Title: "Parent"}},
+	}
+	m := attentionModel(t, deps, snap)
+	view := m.View()
+	if !strings.Contains(view, "Awaiting human (1)") {
+		t.Fatalf("expected Awaiting human (1) header:\n%s", view)
+	}
+	if !strings.Contains(view, "task-5") {
+		t.Fatalf("expected the paused task id:\n%s", view)
+	}
+	if !strings.Contains(view, "/gitmoot resume") {
+		t.Fatalf("expected the resume hint:\n%s", view)
+	}
+}
+
 func TestAttentionCursorClampedOnRefresh(t *testing.T) {
 	deps := Deps{Load: func() (Snapshot, error) { return Snapshot{}, nil }}
 	m := attentionModel(t, deps, promptSnap(choicePrompt(), textPrompt()))

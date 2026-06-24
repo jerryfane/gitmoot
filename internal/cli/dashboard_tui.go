@@ -577,6 +577,9 @@ func toTUISnapshot(s dashboardSnapshot) tui.Snapshot {
 		})
 		jobs = append(jobs, row.Job)
 	}
+	for _, t := range s.awaitingHuman {
+		out.AwaitingHuman = append(out.AwaitingHuman, tui.AwaitingHumanTask{TaskID: t.TaskID, Repo: t.Repo, Title: t.Title})
+	}
 	out.Activity = buildDashboardActivity(jobs)
 	return out
 }

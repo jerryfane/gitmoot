@@ -53,5 +53,11 @@ cockpit_mode = "auto"
 cockpit_session = ""
 cockpit_max_panes = 4
 cockpit_pane_key = "job"
+# escalate_human failure_policy (#340): when a delegation pauses awaiting a human,
+# the daemon @-tags escalation_handle (default: the repo owner) in a comment with
+# the resume instructions. escalation_ttl auto-finalizes a never-answered pause
+# (Go duration; default 24h). Both optional.
+escalation_handle = ""
+escalation_ttl = ""
 `, paths.Database, paths.Logs, paths.Workspaces, paths.Evals, paths.ArtifactBlobs)
 }

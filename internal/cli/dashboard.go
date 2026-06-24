@@ -21,6 +21,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/skillopt"
+	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
 // dashboardListCap is how many entries each list shows in styled mode before
@@ -52,6 +53,9 @@ type dashboardSnapshot struct {
 	// jobRows carries per-job rows (and, for blocked/failed jobs, the latest
 	// event message) for the TUI's Jobs page. Unexported for the same reason.
 	jobRows []dashboardJobRow
+	// awaitingHuman carries the tasks paused at awaiting_human (#340) for the
+	// TUI's Attention page. Unexported so --json/--plain stay byte-stable.
+	awaitingHuman []dashboardAwaitingHuman
 	// daemonDetail carries the persisted daemon flags/workdir and a tail of
 	// recent log errors for the TUI's Health page. Unexported so --json and
 	// the plain renderer stay byte-stable.
@@ -75,6 +79,14 @@ type dashboardJobRow struct {
 	db.Job
 	LatestEvent string
 	Repo        string // parsed from the payload for reportable jobs (attention grouping)
+}
+
+// dashboardAwaitingHuman is one task paused at awaiting_human (#340), shown in the
+// TUI's Attention page with the resume hint.
+type dashboardAwaitingHuman struct {
+	TaskID string
+	Repo   string
+	Title  string
 }
 
 type dashboardResourceLock struct {
@@ -467,6 +479,9 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 		for _, task := range tasks {
 			if strings.TrimSpace(task.WorktreePath) != "" {
 				snapshot.Worktrees = append(snapshot.Worktrees, dashboardWorktree{Task: task.ID, Repo: task.RepoFullName, Path: task.WorktreePath})
+			}
+			if task.State == string(workflow.TaskAwaitingHuman) {
+				snapshot.awaitingHuman = append(snapshot.awaitingHuman, dashboardAwaitingHuman{TaskID: task.ID, Repo: task.RepoFullName, Title: task.Title})
 			}
 		}
 		locks, err := store.ListBranchLocks(ctx, "")

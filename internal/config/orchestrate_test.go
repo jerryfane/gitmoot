@@ -121,6 +121,59 @@ cockpit_mode = "auto"
 	}
 }
 
+// TestLoadOrchestratePolicyEscalationKeys pins #340: escalation_handle and
+// escalation_ttl parse from [orchestrate]; absent keys keep the empty defaults;
+// the handle drops a leading @; and a non-duration ttl is rejected.
+func TestLoadOrchestratePolicyEscalationKeys(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[orchestrate]
+escalation_handle = "@octocat"
+escalation_ttl = "36h"
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	policy, err := LoadOrchestratePolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadOrchestratePolicy returned error: %v", err)
+	}
+	if policy.EscalationHandle != "octocat" {
+		t.Fatalf("EscalationHandle = %q, want octocat (leading @ stripped)", policy.EscalationHandle)
+	}
+	if policy.EscalationTTL != "36h" {
+		t.Fatalf("EscalationTTL = %q, want 36h", policy.EscalationTTL)
+	}
+
+	// Absent keys keep the empty defaults even with the section present.
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[orchestrate]
+cockpit_mode = "auto"
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	policy, err = LoadOrchestratePolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadOrchestratePolicy returned error: %v", err)
+	}
+	if policy.EscalationHandle != "" || policy.EscalationTTL != "" {
+		t.Fatalf("absent escalation keys should default empty, got handle=%q ttl=%q", policy.EscalationHandle, policy.EscalationTTL)
+	}
+
+	// A non-duration ttl is rejected.
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[orchestrate]
+escalation_ttl = "soon"
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	if _, err := LoadOrchestratePolicy(paths); err == nil {
+		t.Fatal("LoadOrchestratePolicy accepted an invalid escalation_ttl")
+	}
+}
+
 // TestLoadOrchestratePolicyInlineArtifactKeys pins #368: both inline-artifact keys
 // parse from [orchestrate], and absent keys default off.
 func TestLoadOrchestratePolicyInlineArtifactKeys(t *testing.T) {

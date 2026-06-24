@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -24,6 +25,14 @@ type Engine struct {
 	JobID                   func(JobRequest) string
 	PayloadRefresher        func(context.Context, db.Job, JobPayload) (JobPayload, error)
 	ImplementationFinalizer ImplementationFinalizer
+	// EscalationNotifier is the injected, best-effort seam (mirroring
+	// ImplementationFinalizer) the engine calls when a delegation fails under the
+	// escalate_human failure_policy and the tree pauses awaiting a human (#340).
+	// The daemon implements it to @-tag the human in a PR/issue comment with the
+	// resume instructions. It is optional: when nil the pause still happens (the
+	// dashboard "Attention" section and the recorded event remain), only the
+	// GitHub notification is skipped. A notifier error never fails the pause.
+	EscalationNotifier EscalationNotifier
 	// Home is the resolved GITMOOT_HOME root used to place per-delegation
 	// worktrees. DelegationWorktrees is the checkout-bound git client that
 	// performs the worktree-add. Both are optional: when either is unset, the
@@ -137,12 +146,58 @@ type ImplementationFinalizer interface {
 	FinalizeImplementation(ctx context.Context, job db.Job, payload JobPayload) (JobPayload, error)
 }
 
+// EscalationRequest carries the context the EscalationNotifier needs to notify a
+// human that a delegation tree has paused awaiting their decision (#340).
+type EscalationRequest struct {
+	// CoordinatorJobID is the paused coordinator job; the human resumes the tree
+	// with `/gitmoot resume <CoordinatorJobID> retry|continue|abort`.
+	CoordinatorJobID string
+	// DelegationID is the failing leg that triggered the escalation.
+	DelegationID string
+	// ChildJobID is the failed child job id for that leg (best-effort; may be
+	// empty if the child could not be resolved).
+	ChildJobID string
+	// Reason is the child's failure summary (why the leg failed).
+	Reason string
+	// Question is the human-facing escalation question (the delegation's prompt),
+	// so the notification can quote what is being asked of the human.
+	Question string
+	// Repo/PullRequest/Branch/TaskID/TaskTitle locate the tree's PR or issue so
+	// the notifier can post the @-tag comment in the right place.
+	Repo        string
+	PullRequest int
+	Branch      string
+	TaskID      string
+	TaskTitle   string
+}
+
+// EscalationNotifier is the injected seam the engine calls (best-effort) when a
+// tree pauses awaiting a human (#340). The daemon implements it to post a GitHub
+// comment that @-tags the human with the resume instructions.
+type EscalationNotifier interface {
+	NotifyEscalation(ctx context.Context, request EscalationRequest) error
+}
+
 type BlockedError struct {
 	Reason string
 }
 
 func (e BlockedError) Error() string {
 	return "workflow blocked: " + e.Reason
+}
+
+// AwaitingHumanError is returned by pauseAwaitingHuman when a delegation fails
+// under the escalate_human failure_policy (#340). It is distinct from
+// BlockedError so the engine and daemon can tell a durable human-in-the-loop
+// pause (resumable via `/gitmoot resume`) apart from a terminal block. Like
+// BlockedError it propagates up through AdvanceJob as an AdvanceError, so the
+// agent's already-delivered result is preserved while the tree waits.
+type AwaitingHumanError struct {
+	Reason string
+}
+
+func (e AwaitingHumanError) Error() string {
+	return "workflow awaiting human: " + e.Reason
 }
 
 // AdvanceError wraps an error that occurred while advancing a job *after* the
@@ -602,8 +657,11 @@ func (e Engine) rootJobID(job db.Job, payload JobPayload) string {
 
 // rootWallClockExceeded reports whether the coordination tree rooted at rootID has
 // been running longer than MaxDelegationWallClock, measured from the root job's
-// created_at, and the elapsed duration. It fails open: any lookup/parse problem
-// returns (false, 0) so a clock or timestamp hiccup never blocks dispatch.
+// created_at MINUS any time the tree spent paused awaiting a human (#340), and the
+// adjusted elapsed duration. Excluding paused time means a tree a human took hours
+// to answer is not punished as a runaway: only active wall-clock counts. It fails
+// open: any lookup/parse problem returns (false, 0) so a clock or timestamp hiccup
+// never blocks dispatch.
 func (e Engine) rootWallClockExceeded(ctx context.Context, rootID string) (bool, time.Duration) {
 	createdAt, err := e.Store.JobCreatedAt(ctx, rootID)
 	if err != nil {
@@ -613,8 +671,85 @@ func (e Engine) rootWallClockExceeded(ctx context.Context, rootID string) (bool,
 	if err != nil {
 		return false, 0
 	}
-	elapsed := e.now().UTC().Sub(start)
+	now := e.now().UTC()
+	elapsed := now.Sub(start) - e.rootPausedDuration(ctx, rootID, now)
+	if elapsed < 0 {
+		elapsed = 0
+	}
 	return elapsed > MaxDelegationWallClock, elapsed
+}
+
+// rootPausedDuration sums the wall-clock time the coordination tree rooted at
+// rootID spent paused awaiting a human across every job in the tree (#340). For
+// each job that recorded a delegation_escalation_requested event, the pause runs
+// from its paused_at until the matching delegation_escalation_resolved event's
+// resolved_at (or until now if still paused). It fails open: any lookup/parse
+// hiccup contributes 0 to the sum, so the wall-clock backstop never blocks
+// dispatch on a bad timestamp. A tree with no escalation contributes 0, keeping
+// default behavior byte-identical.
+func (e Engine) rootPausedDuration(ctx context.Context, rootID string, now time.Time) time.Duration {
+	jobs, err := e.Store.ListJobs(ctx)
+	if err != nil {
+		return 0
+	}
+	var total time.Duration
+	for _, job := range jobs {
+		inTree := job.ID == rootID
+		if !inTree {
+			payload, err := unmarshalPayload(job.Payload)
+			if err != nil {
+				continue
+			}
+			inTree = payload.RootJobID == rootID
+		}
+		if !inTree {
+			continue
+		}
+		total += e.jobPausedDuration(ctx, job.ID, now)
+	}
+	return total
+}
+
+// jobPausedDuration returns how long a single coordinator job spent (or has been)
+// paused awaiting a human, derived from its escalation events. A job with no
+// escalation contributes 0.
+func (e Engine) jobPausedDuration(ctx context.Context, jobID string, now time.Time) time.Duration {
+	events, err := e.Store.ListJobEvents(ctx, jobID)
+	if err != nil {
+		return 0
+	}
+	var pausedAt, resolvedAt time.Time
+	havePaused, haveResolved := false, false
+	for _, ev := range events {
+		switch ev.Kind {
+		case escalationRequestedEvent:
+			var rec EscalationRecord
+			if json.Unmarshal([]byte(ev.Message), &rec) == nil && strings.TrimSpace(rec.PausedAt) != "" {
+				if t, err := parseJobTimestamp(rec.PausedAt); err == nil {
+					pausedAt, havePaused = t, true
+				}
+			}
+		case escalationResolvedEvent:
+			var rec EscalationRecord
+			if json.Unmarshal([]byte(ev.Message), &rec) == nil && strings.TrimSpace(rec.PausedAt) != "" {
+				// Resolved events reuse the PausedAt field to carry resolved_at.
+				if t, err := parseJobTimestamp(rec.PausedAt); err == nil {
+					resolvedAt, haveResolved = t, true
+				}
+			}
+		}
+	}
+	if !havePaused {
+		return 0
+	}
+	end := now
+	if haveResolved {
+		end = resolvedAt
+	}
+	if dur := end.Sub(pausedAt); dur > 0 {
+		return dur
+	}
+	return 0
 }
 
 // parseJobTimestamp parses a jobs.created_at value. SQLite's CURRENT_TIMESTAMP
@@ -1577,6 +1712,18 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 			continue
 		case "escalate":
 			escalate = true
+		case "escalate_human":
+			// Durable human-in-the-loop pause (#340): set TaskAwaitingHuman,
+			// record the one-shot escalation event, notify the human best-effort,
+			// and return an AwaitingHumanError so NO continuation is enqueued and
+			// the tree consumes zero compute until an operator resumes it. As with
+			// block_parent, once a continuation is already in flight (an earlier
+			// escalate sibling fired it) the tree is already proceeding
+			// autonomously, so fold this leg in rather than contradict it.
+			if continuationAlreadyEnqueued {
+				continue
+			}
+			return e.pauseAwaitingHuman(ctx, parentJob, parentPayload, ref, d, child)
 		default: // block_parent (also the empty default)
 			if continuationAlreadyEnqueued {
 				continue
@@ -2000,8 +2147,10 @@ func delegationFailurePolicy(d Delegation) string {
 }
 
 // delegationFailureHandledByPolicy reports whether the named delegation declares
-// a continue/escalate failure_policy, meaning a failure of its child is governed
-// by the delegation graph rather than blocking the shared parent task.
+// a continue/escalate/escalate_human failure_policy, meaning a failure of its
+// child is governed by the delegation graph (siblings keep running, the
+// coordinator continuation absorbs it, or the tree pauses awaiting a human)
+// rather than blocking the shared parent task.
 func delegationFailureHandledByPolicy(parentResult *AgentResult, delegationID string) bool {
 	if parentResult == nil || strings.TrimSpace(delegationID) == "" {
 		return false
@@ -2011,7 +2160,7 @@ func delegationFailureHandledByPolicy(parentResult *AgentResult, delegationID st
 			continue
 		}
 		switch delegationFailurePolicy(d) {
-		case "continue", "escalate":
+		case "continue", "escalate", "escalate_human":
 			return true
 		default:
 			return false
@@ -2941,6 +3090,400 @@ func (e Engine) reviewApprovalAlreadyAdvanced(ctx context.Context, ref taskRef) 
 		return false, err
 	}
 	return task.State == string(TaskReadyToMerge) || task.State == string(TaskMerged), nil
+}
+
+// Escalation event kinds (#340). The requested event is the one-shot pause
+// marker (idempotent: a second escalate_human pass observing it re-notifies
+// nothing and re-records nothing); the resolved event is recorded by the resume
+// path when an operator answers.
+const (
+	escalationRequestedEvent = "delegation_escalation_requested"
+	escalationResolvedEvent  = "delegation_escalation_resolved"
+)
+
+// EscalationRecord is the structured payload stored in a
+// delegation_escalation_requested event message, so the resume path can resolve
+// the failing leg and child job, and the wall-clock backstop can exclude the
+// paused duration. It is JSON-encoded into the event message (job_events has no
+// dedicated columns); PausedAt is RFC3339-UTC.
+type EscalationRecord struct {
+	DelegationID string `json:"delegation_id"`
+	ChildJobID   string `json:"child_job_id,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	Question     string `json:"question,omitempty"`
+	PausedAt     string `json:"paused_at,omitempty"`
+}
+
+// pauseAwaitingHuman is the escalate_human analogue of block (#340): it sets the
+// shared parent task to TaskAwaitingHuman, records a one-shot
+// delegation_escalation_requested event (idempotent via the ListJobEvents
+// once-guard), notifies the human best-effort through the injected
+// EscalationNotifier, and returns an AwaitingHumanError so the caller enqueues NO
+// continuation. The tree therefore consumes zero compute until an operator
+// resumes it with `/gitmoot resume <coordinator> retry|continue|abort`.
+func (e Engine) pauseAwaitingHuman(ctx context.Context, parentJob db.Job, parentPayload JobPayload, ref taskRef, d Delegation, child db.Job) error {
+	reason := childFailureReason(child)
+	awaitErr := AwaitingHumanError{Reason: fmt.Sprintf("delegation %q failed (failure_policy escalate_human): %s", d.ID, reason)}
+
+	// Once the pause marker exists, this is an idempotent re-advance (a concurrent
+	// child completion, or the same child's AdvanceJob re-running): keep the task
+	// in awaiting_human and return the same pause error, but re-record nothing and
+	// re-notify nobody.
+	events, err := e.Store.ListJobEvents(ctx, parentJob.ID)
+	if err != nil {
+		return err
+	}
+	for _, ev := range events {
+		if ev.Kind == escalationRequestedEvent {
+			return awaitErr
+		}
+	}
+
+	if err := e.setTaskState(ctx, ref, TaskAwaitingHuman); err != nil {
+		return err
+	}
+
+	record := EscalationRecord{
+		DelegationID: d.ID,
+		ChildJobID:   child.ID,
+		Reason:       reason,
+		Question:     strings.TrimSpace(d.Prompt),
+		PausedAt:     e.now().UTC().Format(time.RFC3339),
+	}
+	encoded, marshalErr := json.Marshal(record)
+	message := awaitErr.Reason
+	if marshalErr == nil {
+		message = string(encoded)
+	}
+	if err := e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   parentJob.ID,
+		Kind:    escalationRequestedEvent,
+		Message: message,
+	}); err != nil {
+		return err
+	}
+
+	// Notify the human best-effort: a nil notifier (ask-path/tests) or a notifier
+	// error never fails the pause — the dashboard "Attention" section and the
+	// recorded event are the durable source of truth; the comment is a courtesy.
+	if e.EscalationNotifier != nil {
+		_ = e.EscalationNotifier.NotifyEscalation(ctx, EscalationRequest{
+			CoordinatorJobID: parentJob.ID,
+			DelegationID:     d.ID,
+			ChildJobID:       child.ID,
+			Reason:           reason,
+			Question:         strings.TrimSpace(d.Prompt),
+			Repo:             firstNonEmptyString(ref.Repo, parentPayload.Repo),
+			PullRequest:      parentPayload.PullRequest,
+			Branch:           firstNonEmptyString(ref.Branch, parentPayload.Branch),
+			TaskID:           ref.ID,
+			TaskTitle:        ref.Title,
+		})
+	}
+
+	return awaitErr
+}
+
+// firstNonEmptyString returns the first non-blank value, or "".
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// loadEscalation returns the structured escalation record recorded on a paused
+// coordinator job, and whether one exists. It tolerates a legacy/plain-text
+// message (pre-JSON) by returning a record with only the raw reason, so a resume
+// still routes.
+func (e Engine) loadEscalation(ctx context.Context, coordinatorJobID string) (EscalationRecord, bool, error) {
+	events, err := e.Store.ListJobEvents(ctx, coordinatorJobID)
+	if err != nil {
+		return EscalationRecord{}, false, err
+	}
+	var rec EscalationRecord
+	found := false
+	for _, ev := range events {
+		if ev.Kind != escalationRequestedEvent {
+			continue
+		}
+		found = true
+		if json.Unmarshal([]byte(ev.Message), &rec) != nil {
+			rec = EscalationRecord{Reason: ev.Message}
+		}
+	}
+	if !found {
+		return EscalationRecord{}, false, nil
+	}
+	return rec, true, nil
+}
+
+// escalationResolved reports whether a paused coordinator already had its
+// escalation resolved (a resume verb ran). The resume path is authorize-gated
+// and idempotency-guarded by this check.
+func (e Engine) escalationResolved(ctx context.Context, coordinatorJobID string) (bool, error) {
+	events, err := e.Store.ListJobEvents(ctx, coordinatorJobID)
+	if err != nil {
+		return false, err
+	}
+	for _, ev := range events {
+		if ev.Kind == escalationResolvedEvent {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ResumeDecision is one of the three human resume verbs for a paused tree (#340).
+type ResumeDecision string
+
+const (
+	// ResumeRetry re-enqueues the failing delegation leg with the human's
+	// instructions folded into its prompt.
+	ResumeRetry ResumeDecision = "retry"
+	// ResumeContinue proceeds the coordinator continuation (today's escalate path,
+	// now human-approved): the coordinator synthesizes every child outcome.
+	ResumeContinue ResumeDecision = "continue"
+	// ResumeAbort routes to the #305 graceful finalize continuation for a terminal
+	// best-effort synthesis of whatever completed.
+	ResumeAbort ResumeDecision = "abort"
+)
+
+// validResumeDecision normalizes and validates a resume verb.
+func validResumeDecision(decision string) (ResumeDecision, bool) {
+	switch ResumeDecision(strings.ToLower(strings.TrimSpace(decision))) {
+	case ResumeRetry:
+		return ResumeRetry, true
+	case ResumeContinue:
+		return ResumeContinue, true
+	case ResumeAbort:
+		return ResumeAbort, true
+	default:
+		return "", false
+	}
+}
+
+// ParseResumeDecision is the exported normalizer the daemon uses to validate the
+// human's resume verb before calling ResolveEscalation (#340).
+func ParseResumeDecision(decision string) (ResumeDecision, bool) {
+	return validResumeDecision(decision)
+}
+
+// ResolveEscalation resumes a tree paused at TaskAwaitingHuman (#340). The
+// coordinatorJobID is the job that recorded the escalation (the resume target the
+// notification quoted). decision selects the verb; instructions is the human's
+// optional guidance, folded into the retried leg's prompt (retry) and recorded on
+// the resolution event (all verbs). It is idempotent: a second resume on an
+// already-resolved coordinator is a no-op. It clears TaskAwaitingHuman and records
+// a delegation_escalation_resolved event carrying resolved_at so the wall-clock
+// backstop can close the pause window. The caller (daemon handleResumeCommand) is
+// authorize-commenter gated.
+func (e Engine) ResolveEscalation(ctx context.Context, coordinatorJobID string, decision ResumeDecision, instructions string) error {
+	if err := e.validate(); err != nil {
+		return err
+	}
+	verb, ok := validResumeDecision(string(decision))
+	if !ok {
+		return fmt.Errorf("invalid resume decision %q; want retry|continue|abort", decision)
+	}
+
+	rec, exists, err := e.loadEscalation(ctx, coordinatorJobID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("job %s has no pending human escalation", coordinatorJobID)
+	}
+	resolved, err := e.escalationResolved(ctx, coordinatorJobID)
+	if err != nil {
+		return err
+	}
+	if resolved {
+		// Already answered: idempotent no-op so a duplicate comment poll cannot
+		// re-run the verb (which could double-enqueue a leg or continuation).
+		return nil
+	}
+
+	parentJob, parentPayload, err := e.jobPayload(ctx, coordinatorJobID)
+	if err != nil {
+		return err
+	}
+	if parentPayload.Result == nil {
+		return fmt.Errorf("job %s has no result to resume", coordinatorJobID)
+	}
+	ref := taskRefFromPayload(parentPayload)
+
+	switch verb {
+	case ResumeRetry:
+		if err := e.resumeRetryLeg(ctx, parentJob, parentPayload, rec, instructions); err != nil {
+			return err
+		}
+	case ResumeContinue:
+		children, err := e.childDelegationJobs(ctx, parentJob.ID)
+		if err != nil {
+			return err
+		}
+		if err := e.maybeEnqueueContinuation(ctx, parentJob, parentPayload, parentPayload.Result, children, ref); err != nil {
+			return err
+		}
+	case ResumeAbort:
+		reason := "human aborted the escalation"
+		if strings.TrimSpace(instructions) != "" {
+			reason = "human aborted the escalation: " + strings.TrimSpace(instructions)
+		}
+		if err := e.enqueueFinalizeContinuation(ctx, parentJob, parentPayload, reason); err != nil {
+			return err
+		}
+	}
+
+	// Clear the pause: move the task out of awaiting_human. retry/continue re-arm
+	// the delegation machinery (the next child completion advances the DAG, or the
+	// continuation runs), so move to reviewing-ish "implementing" intent; abort's
+	// finalize continuation will settle the task itself. We use planned as a
+	// neutral non-terminal state so the dashboard stops listing it under Attention.
+	if err := e.setTaskState(ctx, ref, TaskPlanned); err != nil {
+		return err
+	}
+
+	resolution := EscalationRecord{
+		DelegationID: rec.DelegationID,
+		ChildJobID:   rec.ChildJobID,
+		Reason:       string(verb),
+		Question:     strings.TrimSpace(instructions),
+		PausedAt:     e.now().UTC().Format(time.RFC3339), // reused as resolved_at
+	}
+	message := string(verb)
+	if encoded, marshalErr := json.Marshal(resolution); marshalErr == nil {
+		message = string(encoded)
+	}
+	return e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   coordinatorJobID,
+		Kind:    escalationResolvedEvent,
+		Message: message,
+	})
+}
+
+// resumeRetryLeg re-enqueues the failing delegation leg of a paused tree with the
+// human's instructions folded into its prompt, under a deterministic resume id so
+// a duplicate resume cannot double-enqueue it. It is the retry verb's worker.
+func (e Engine) resumeRetryLeg(ctx context.Context, parentJob db.Job, parentPayload JobPayload, rec EscalationRecord, instructions string) error {
+	d, ok := findDelegation(parentPayload.Result.Delegations, rec.DelegationID)
+	if !ok {
+		return fmt.Errorf("escalated delegation %q not found on job %s", rec.DelegationID, parentJob.ID)
+	}
+	if instr := strings.TrimSpace(instructions); instr != "" {
+		d.Prompt = strings.TrimSpace(d.Prompt) + "\n\nHuman guidance on resume: " + instr
+	}
+	artifactDir, err := delegationArtifactDir(e.ArtifactRoot, parentJob.ID, parentPayload.Result)
+	if err != nil {
+		return err
+	}
+	request := e.delegationRequest(parentJob, parentPayload, d)
+	request.ID = parentJob.ID + "/delegation/" + d.ID + "/resume"
+	request.Instructions = strings.TrimSpace(d.Prompt)
+	request.DelegationArtifactDir = artifactDir
+	if err := e.allocateAndEnqueueDelegation(ctx, parentJob, parentPayload, d, request, taskRefFromPayload(parentPayload)); err != nil {
+		return err
+	}
+	return e.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID:   parentJob.ID,
+		Kind:    "delegation_escalation_retry",
+		Message: fmt.Sprintf("human resume retry re-enqueued delegation %q as job %s", d.ID, request.ID),
+	})
+}
+
+// findDelegation returns the delegation with the given id from a result's set.
+func findDelegation(delegations []Delegation, id string) (Delegation, bool) {
+	for _, d := range delegations {
+		if d.ID == id {
+			return d, true
+		}
+	}
+	return Delegation{}, false
+}
+
+// AutoFinalizeExpiredEscalations scans for trees paused awaiting a human past the
+// TTL and gracefully finalizes them (#340): a never-answered escalation must not
+// strand a tree forever. For each coordinator with an unresolved
+// delegation_escalation_requested whose paused_at is older than ttl, it routes to
+// the #305 finalize continuation (synthesize what completed), clears
+// TaskAwaitingHuman, and records a delegation_escalation_resolved event tagged
+// "ttl" (so wall-clock pause accounting closes too). ttl <= 0 disables the scan.
+// It returns the number of trees finalized. Idempotent: an already-resolved
+// escalation is skipped, and the finalize continuation has a deterministic id.
+func (e Engine) AutoFinalizeExpiredEscalations(ctx context.Context, ttl time.Duration) (int, error) {
+	if err := e.validate(); err != nil {
+		return 0, err
+	}
+	if ttl <= 0 {
+		return 0, nil
+	}
+	jobs, err := e.Store.ListJobs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	now := e.now().UTC()
+	finalized := 0
+	for _, job := range jobs {
+		rec, exists, err := e.loadEscalation(ctx, job.ID)
+		if err != nil {
+			return finalized, err
+		}
+		if !exists {
+			continue
+		}
+		resolved, err := e.escalationResolved(ctx, job.ID)
+		if err != nil {
+			return finalized, err
+		}
+		if resolved {
+			continue
+		}
+		pausedAt, perr := parseJobTimestamp(rec.PausedAt)
+		if perr != nil {
+			// Without a parseable paused_at we cannot age the pause; skip rather than
+			// finalize prematurely.
+			continue
+		}
+		if now.Sub(pausedAt) < ttl {
+			continue
+		}
+		coordinatorJob, payload, err := e.jobPayload(ctx, job.ID)
+		if err != nil {
+			return finalized, err
+		}
+		if payload.Result == nil {
+			continue
+		}
+		reason := fmt.Sprintf("escalation TTL of %s elapsed with no human response", ttl)
+		if err := e.enqueueFinalizeContinuation(ctx, coordinatorJob, payload, reason); err != nil {
+			return finalized, err
+		}
+		if err := e.setTaskState(ctx, taskRefFromPayload(payload), TaskPlanned); err != nil {
+			return finalized, err
+		}
+		resolution := EscalationRecord{
+			DelegationID: rec.DelegationID,
+			ChildJobID:   rec.ChildJobID,
+			Reason:       "ttl",
+			PausedAt:     now.Format(time.RFC3339), // reused as resolved_at
+		}
+		message := "ttl"
+		if encoded, marshalErr := json.Marshal(resolution); marshalErr == nil {
+			message = string(encoded)
+		}
+		if err := e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    escalationResolvedEvent,
+			Message: message,
+		}); err != nil {
+			return finalized, err
+		}
+		finalized++
+	}
+	return finalized, nil
 }
 
 func (e Engine) block(ctx context.Context, ref taskRef, reason string) error {

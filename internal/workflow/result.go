@@ -324,7 +324,7 @@ func validateDelegationLifecycle(d Delegation) error {
 		return fmt.Errorf("delegation %q retry must be >= 0", d.ID)
 	}
 	switch strings.ToLower(strings.TrimSpace(d.FailurePolicy)) {
-	case "", "block_parent", "continue", "escalate":
+	case "", "block_parent", "continue", "escalate", "escalate_human":
 	default:
 		return fmt.Errorf("delegation %q failure_policy %q is invalid", d.ID, d.FailurePolicy)
 	}
