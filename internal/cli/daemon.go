@@ -377,7 +377,30 @@ func runDaemonStatus(args []string, stdout, stderr io.Writer) int {
 	if pid > 0 {
 		writeLine(stdout, "%s", daemonClaudeAuthLine(paths))
 	}
+	writeLine(stdout, "%s", daemonAdmissionLine(paths))
 	return 0
+}
+
+// daemonAdmissionLine reports the configured host-global admission budget caps
+// (#365) for `gitmoot daemon status`. It is intentionally a single additive line
+// (no edits to existing lines) so it composes with #444's status edits. When the
+// budget is off (both caps 0/unset, the default) it says so; the in-flight
+// reservation gauge lives in the daemon process, not the status CLI, so only the
+// configured caps are surfaced here.
+func daemonAdmissionLine(paths config.Paths) string {
+	policy, err := config.LoadAdmissionPolicy(paths)
+	if err != nil || !policy.Enabled() {
+		return "admission budget: off"
+	}
+	sessions := "off"
+	if policy.MaxConcurrentSessions > 0 {
+		sessions = fmt.Sprintf("%d", policy.MaxConcurrentSessions)
+	}
+	memory := "off"
+	if policy.MaxMemoryGB > 0 {
+		memory = fmt.Sprintf("%gGB", policy.MaxMemoryGB)
+	}
+	return fmt.Sprintf("admission budget: max_concurrent_sessions=%s max_memory_gb=%s", sessions, memory)
 }
 
 // daemonClaudeAuthLine reports the running daemon's Claude background-auth state
@@ -913,6 +936,7 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 		worker := defaultJobWorker(store, stdout, home)
 		worker.CommenterFactory = worker.defaultCommenter
 		worker.UsePool = usePool
+		worker.Admission = worker.loadAdmissionBudget()
 		checkoutLocks := &repoCheckoutLocks{}
 		poller.CheckoutLocks = checkoutLocks
 		var workerErr <-chan error
@@ -974,6 +998,7 @@ func runSingleRepoSupervisor(ctx context.Context, home string, d daemon.Daemon, 
 	worker := defaultJobWorker(store, stdout, home)
 	worker.CommenterFactory = worker.defaultCommenter
 	worker.UsePool = usePool
+	worker.Admission = worker.loadAdmissionBudget()
 	var checkoutLock sync.Mutex
 	workerErr := startSupervisorWorkerLoop(ctx, daemonWorkerLoopInterval, func(now time.Time) error {
 		checkoutLock.Lock()
@@ -1328,6 +1353,13 @@ type jobWorker struct {
 	// UsePool selects the opt-in continuous worker-pool scheduler (#394,
 	// --scheduler=pool) over the default per-tick wg.Wait() barrier.
 	UsePool bool
+	// Admission is the opt-in, host-global memory-aware concurrency budget (#365)
+	// the scheduler consults before dispatching each session job. nil means the
+	// feature is OFF (no [admission] config) ⇒ scheduling is byte-identical to a
+	// build without admission accounting. The supervisors attach it at startup;
+	// it is a shared pointer across all per-repo dispatch passes so the cap is
+	// process-global (host-global for the normal single-daemon deployment).
+	Admission *admissionBudget
 }
 
 const daemonRunningJobStaleAfter = 30 * time.Minute
@@ -1588,13 +1620,34 @@ func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repo
 		}
 		pending = remaining
 
-		errs := make(chan error, len(queued))
-		var wg sync.WaitGroup
+		// Host-global admission gate (#365): reserve a session slot + RAM estimate
+		// for each selected job BEFORE dispatching it. A job that does not fit the
+		// budget is left queued — defer it back to `pending` so it is retried on the
+		// next loop iteration once this batch's reservations are released in the
+		// goroutine defers (worker.Admission is nil ⇒ Reserve always admits, so the
+		// default path is byte-identical). If nothing was admitted this pass we
+		// return: the deferred jobs stay queued in the DB for the next daemon tick,
+		// when a freed slot can admit them (avoids spinning on an unfittable job).
+		admitted := make([]db.Job, 0, len(queued))
 		for _, job := range queued {
+			if worker.Admission.Reserve(job.ID, worker.admissionEstimateGB(ctx, job)) {
+				admitted = append(admitted, job)
+				continue
+			}
+			pending = append([]db.Job{job}, pending...)
+		}
+		if len(admitted) == 0 {
+			return nil
+		}
+
+		errs := make(chan error, len(admitted))
+		var wg sync.WaitGroup
+		for _, job := range admitted {
 			job := job
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer worker.Admission.Release(job.ID)
 				errs <- worker.run(ctx, job)
 			}()
 		}
@@ -1661,6 +1714,7 @@ func runQueuedJobsForRepoPool(ctx context.Context, worker jobWorker, limit int, 
 	}
 
 	type finished struct {
+		jobID        string
 		checkoutKey  string
 		runtimeKey   string
 		worktreePath string
@@ -1678,6 +1732,11 @@ func runQueuedJobsForRepoPool(ctx context.Context, worker jobWorker, limit int, 
 		if f.runtimeKey != "" {
 			delete(inflightRuntimes, f.runtimeKey)
 		}
+		// Release the host-global admission reservation (#365) keyed by job ID,
+		// alongside the checkout/runtime release. Release is idempotent and a nil
+		// budget is a no-op, so this is safe on every reap path incl. panic
+		// recovery and shutdown (mirrors the worktree cleanup discipline).
+		worker.Admission.Release(f.jobID)
 		running--
 		// Dispose an auto-created isolation worktree (#394 part 2). Best-effort and
 		// on a non-cancellable context so it still runs during daemon shutdown; both
@@ -1719,6 +1778,14 @@ func runQueuedJobsForRepoPool(ctx context.Context, worker jobWorker, limit int, 
 				queued, remaining := selectRunnableQueuedJobsSeeded(ctx, worker.Store, pending, slots, policy, inflightCheckouts, inflightRuntimes)
 				for _, job := range queued {
 					job := job
+					// Host-global admission gate (#365): reserve a session slot + RAM
+					// estimate before claiming any checkout/runtime key or a worker slot.
+					// A job that does not fit the budget is skipped (left queued) and the
+					// pool re-queries on the next pass once a reap frees a slot — never
+					// failed/dropped. A nil budget always admits ⇒ byte-identical default.
+					if !worker.Admission.Reserve(job.ID, worker.admissionEstimateGB(ctx, job)) {
+						continue
+					}
 					checkoutKey := queuedJobCheckoutKey(ctx, worker.Store, job)
 					runtimeKey := queuedJobRuntimeResourceKey(ctx, worker.Store, job)
 					inflightCheckouts[checkoutKey] = true
@@ -1728,7 +1795,7 @@ func runQueuedJobsForRepoPool(ctx context.Context, worker jobWorker, limit int, 
 					running++
 					dispatched++
 					go func() {
-						done <- finished{checkoutKey: checkoutKey, runtimeKey: runtimeKey, err: runPoolJobRecovered(ctx, worker, job)}
+						done <- finished{jobID: job.ID, checkoutKey: checkoutKey, runtimeKey: runtimeKey, err: runPoolJobRecovered(ctx, worker, job)}
 					}()
 				}
 				// #394 part 2: a read-only job left blocked ONLY by a contended same-repo
@@ -1751,8 +1818,14 @@ func runQueuedJobsForRepoPool(ctx context.Context, worker jobWorker, limit int, 
 					if runtimeKey != "" && (inflightRuntimes[runtimeKey] || runtimeResourceLocked(ctx, worker.Store, runtimeKey)) {
 						continue // also runtime-contended; leave it to the runtime/temp-worker path
 					}
+					// Host-global admission gate (#365): reserve before creating the
+					// isolation worktree so a deferred job leaves no orphan worktree behind.
+					if !worker.Admission.Reserve(job.ID, worker.admissionEstimateGB(ctx, job)) {
+						continue
+					}
 					iso, ok := worker.allocatePoolIsolationWorktree(ctx, job, payload)
 					if !ok {
+						worker.Admission.Release(job.ID)
 						continue
 					}
 					inflightCheckouts[iso.checkoutKey] = true
@@ -1762,7 +1835,7 @@ func runQueuedJobsForRepoPool(ctx context.Context, worker jobWorker, limit int, 
 					running++
 					dispatched++
 					go func() {
-						done <- finished{checkoutKey: iso.checkoutKey, runtimeKey: iso.runtimeKey, worktreePath: iso.worktreePath, repoCheckout: iso.repoCheckout, err: runPoolJobRecovered(ctx, worker, iso.job)}
+						done <- finished{jobID: iso.job.ID, checkoutKey: iso.checkoutKey, runtimeKey: iso.runtimeKey, worktreePath: iso.worktreePath, repoCheckout: iso.repoCheckout, err: runPoolJobRecovered(ctx, worker, iso.job)}
 					}()
 				}
 			}
@@ -2339,6 +2412,74 @@ func (w jobWorker) parallelSessionPolicy() (config.ParallelSessionPolicy, error)
 		return config.ParallelSessionPolicy{}, err
 	}
 	return config.LoadParallelSessionPolicy(paths)
+}
+
+// admissionPolicy loads the host-level [admission] budget config, mirroring
+// parallelSessionPolicy: an implicit/empty config home uses the defaults
+// (both caps 0 ⇒ off), and an explicit home loads from the config file.
+func (w jobWorker) admissionPolicy() (config.AdmissionPolicy, error) {
+	if !w.ConfigHomeExplicit && strings.TrimSpace(w.ConfigHome) == "" {
+		return config.DefaultAdmissionPolicy(), nil
+	}
+	paths, err := initializedPaths(w.ConfigHome)
+	if err != nil {
+		return config.AdmissionPolicy{}, err
+	}
+	return config.LoadAdmissionPolicy(paths)
+}
+
+// loadAdmissionBudget builds the opt-in *admissionBudget from the [admission]
+// config, returning nil when the feature is off (both caps 0/unset) or the
+// config cannot be loaded — nil keeps scheduling byte-identical to today. The
+// supervisors call this once at startup and share the returned pointer across all
+// per-repo dispatch passes so the cap is process-global.
+func (w jobWorker) loadAdmissionBudget() *admissionBudget {
+	policy, err := w.admissionPolicy()
+	if err != nil {
+		return nil
+	}
+	return newAdmissionBudget(policy)
+}
+
+// perJobMemoryEstimateGB maps a queued job's runtime to its configured RAM
+// estimate (GB) for the memory admission gate (#365). A job whose runtime has no
+// resumable session key — exactly the runtimes already exempt from the runtime
+// session lock (queuedJobRuntimeResourceKey returns "") — contributes 0 and is
+// not memory-accounted. Otherwise it returns the per-runtime prior, falling back
+// to default_memory_gb for a session runtime not explicitly mapped.
+func perJobMemoryEstimateGB(ctx context.Context, store *db.Store, job db.Job, policy config.AdmissionPolicy) float64 {
+	if queuedJobRuntimeResourceKey(ctx, store, job) == "" {
+		return 0
+	}
+	if store == nil {
+		return policy.DefaultMemoryGB
+	}
+	agent, err := store.GetAgent(ctx, job.Agent)
+	if err != nil {
+		return policy.DefaultMemoryGB
+	}
+	switch strings.TrimSpace(runtimeAgent(agent).Runtime) {
+	case runtime.CodexRuntime:
+		return policy.CodexMemoryGB
+	case runtime.ClaudeRuntime:
+		return policy.ClaudeMemoryGB
+	case runtime.KimiRuntime:
+		return policy.KimiMemoryGB
+	default:
+		return policy.DefaultMemoryGB
+	}
+}
+
+// admissionEstimateGB resolves the per-job memory estimate for THIS worker's
+// configured admission policy. It is a thin convenience used at the dispatch
+// reserve points; a load error degrades to the default estimate so a transient
+// config read never silently disables the memory gate.
+func (w jobWorker) admissionEstimateGB(ctx context.Context, job db.Job) float64 {
+	policy, err := w.admissionPolicy()
+	if err != nil {
+		policy = config.DefaultAdmissionPolicy()
+	}
+	return perJobMemoryEstimateGB(ctx, w.Store, job, policy)
 }
 
 // orchestratePolicy loads the host-level [orchestrate] cockpit policy, mirroring
