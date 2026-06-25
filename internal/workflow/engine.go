@@ -1828,6 +1828,34 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 		return err
 	}
 
+	// #438: structured sibling of the #419 prose block. Now that a child has
+	// finished, augment context-manifest.json with the result-reference fields for
+	// every SUCCEEDED delegation so a downstream reader can reference an upstream
+	// output by structured JSON rather than re-parsing the prose block. The
+	// just-finished child is already in the children map read above, so the enriched
+	// view reflects the current succeeded set (later re-reads in this pass only add
+	// newly-enqueued, not-yet-succeeded dependents). It is gated on
+	// InjectUpstreamDepContext so the flag-off path never re-writes the manifest and
+	// stays byte-identical to today, and the write is idempotent (deterministic,
+	// sorted JSON) so repeated passes over a stable succeeded set produce no churn.
+	// Best-effort like the dispatch artifact write: a manifest write failure must
+	// not block draining ready dependents.
+	if e.InjectUpstreamDepContext {
+		if augmentedDir, augErr := augmentDelegationManifest(e.ArtifactRoot, parentJob.ID, parentResult, children, dedupWinners, e); augErr != nil {
+			_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+				JobID:   parentJob.ID,
+				Kind:    "delegation_manifest_augment_failed",
+				Message: fmt.Sprintf("augment delegation manifest: %v", augErr),
+			})
+		} else if augmentedDir != "" {
+			_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+				JobID:   parentJob.ID,
+				Kind:    "delegation_manifest_augmented",
+				Message: fmt.Sprintf("delegation manifest augmented at %s", augmentedDir),
+			})
+		}
+	}
+
 	// Retry pass: a delegation that failed but has retry budget left is
 	// re-enqueued as a fresh child before any failure_policy is applied, so its
 	// failure is absorbed by the retry rather than blocking/escalating. A
