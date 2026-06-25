@@ -664,6 +664,42 @@ func TestPreflightReadOnlyImplementEmitsJobBlocked(t *testing.T) {
 	}
 }
 
+// TestPreflightAutoImplementIsPermissionBlocked closes the #452 gap: an implement
+// job whose agent has the default auto policy (no write granted headlessly) is
+// permission-blocked at dispatch with the same job.blocked event + actionable
+// message as the read-only case — instead of running and producing no files.
+func TestPreflightAutoImplementIsPermissionBlocked(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", t.TempDir())
+	seedDaemonWorkerAgentWithPolicy(t, store, "lead", runtime.CodexRuntime, "unused", []string{"implement"}, "jerryfane/gitmoot", runtime.AutonomyPolicyAuto)
+	job := db.Job{ID: "impl-auto-job", Agent: "lead", Type: "implement", State: string(workflow.JobQueued), Payload: mustJobPayload(t, workflow.JobPayload{
+		Repo: "jerryfane/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead", RootJobID: "root-impl",
+	})}
+	if err := store.CreateJobWithEvent(ctx, job, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
+		t.Fatalf("CreateJobWithEvent returned error: %v", err)
+	}
+
+	sink := &recordingSink{}
+	worker := defaultJobWorker(store, io.Discard)
+	worker.EventSinkOverride = sink
+
+	if err := worker.run(ctx, mustWorkerJob(t, store, "impl-auto-job")); err != nil {
+		t.Fatalf("worker.run(auto implement) returned error: %v", err)
+	}
+	if got := mustWorkerJob(t, store, "impl-auto-job"); got.State != string(workflow.JobBlocked) {
+		t.Fatalf("job state = %q, want blocked", got.State)
+	}
+
+	blocked := sink.byType(events.EventJobBlocked)
+	if len(blocked) != 1 {
+		t.Fatalf("job.blocked emissions = %d, want exactly 1; all=%+v", len(blocked), sink.events)
+	}
+	if blocked[0].Detail != agentPermissionBlockedMessage {
+		t.Fatalf("detail = %q, want the permission-blocked message", blocked[0].Detail)
+	}
+}
+
 // TestPreflightEphemeralDelegationChildAdvancesParent is the load-bearing test for
 // finding 3: an EPHEMERAL delegation child whose pre-flight fails goes through the
 // ephemeral wrapper at run() (~2083-2093) — an `ephemeral_worker_failed` event +
