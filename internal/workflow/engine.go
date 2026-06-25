@@ -3563,7 +3563,7 @@ func (e Engine) preflightDelegation(ctx context.Context, request JobRequest) err
 	// scope. Only validate that the spec runtime is a real agent runtime (never
 	// shell); the daemon materializes the worker from the spec.
 	if request.Ephemeral != nil {
-		return validateEphemeralSpec(request.DelegationID, request.Ephemeral)
+		return validateEphemeralSpec(request.DelegationID, request.Action, request.Ephemeral)
 	}
 	// Check existence FIRST so a legitimately-named agent literally called
 	// "claude" (GetAgent hits) is never mistaken for the runtime-name mixup below.
@@ -4004,7 +4004,7 @@ func (e Engine) ensureAgentAllowedWithBranchOwner(ctx context.Context, request J
 	// agent runtime (never shell), then fall through to the shared branch-lock path
 	// so an ephemeral implement still serializes on its branch like any other.
 	if request.Ephemeral != nil {
-		if err := validateEphemeralSpec(request.DelegationID, request.Ephemeral); err != nil {
+		if err := validateEphemeralSpec(request.DelegationID, request.Action, request.Ephemeral); err != nil {
 			return e.block(ctx, ref, err.Error())
 		}
 		if request.Action == "implement" {
@@ -4030,6 +4030,14 @@ func (e Engine) ensureAgentAllowedWithBranchOwner(ctx context.Context, request J
 		return e.block(ctx, ref, fmt.Sprintf("agent %q lacks %q capability", agent.Name, request.Action))
 	}
 	if request.Action == "implement" {
+		// Fail-closed: an implement job whose agent grants no headless write
+		// (auto/empty or read-only) is BLOCKED here — at the universal dispatch
+		// preflight — rather than running to completion and producing no files. This
+		// catches pre-existing agents and later policy edits, using the same shared
+		// guidance the CLI emits at start/subscribe.
+		if err := runtime.ImplementWritePolicyError([]string{request.Action}, agent.AutonomyPolicy); err != nil {
+			return e.block(ctx, ref, err.Error())
+		}
 		if err := e.ensureBranchLock(ctx, request.Repo, request.Branch, branchOwner, ref); err != nil {
 			return err
 		}
