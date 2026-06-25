@@ -3548,11 +3548,12 @@ func (w jobWorker) defaultWorkflow(checkout string) workflow.Engine {
 
 // applyOrchestratePolicy sets the engine's opt-in [orchestrate] fields — the
 // artifact-body inlining knobs, the upstream-dep-context injection toggle (#419),
-// the per-root delegation token (#338 Part B) and dollar-cost (#380) budgets, and
-// the result-aware non-progress streak threshold (#339) — from the host policy. It
-// is fail-safe: any load error leaves the engine with its defaults (inlining off,
-// upstream-dep injection off, both budgets 0 = unlimited, streak threshold 0 =
-// engine default) rather than failing engine construction.
+// the per-root delegation token (#338 Part B) and dollar-cost (#380) budgets, the
+// result-aware non-progress streak threshold (#339), and the verify→replan
+// attempt cap (#439) — from the host policy. It is fail-safe: any load error
+// leaves the engine with its defaults (inlining off, upstream-dep injection off,
+// both budgets 0 = unlimited, streak threshold and verify cap 0 = engine default)
+// rather than failing engine construction.
 func (w jobWorker) applyOrchestratePolicy(engine *workflow.Engine) {
 	policy, err := w.orchestratePolicy()
 	if err != nil {
@@ -3564,6 +3565,7 @@ func (w jobWorker) applyOrchestratePolicy(engine *workflow.Engine) {
 	engine.MaxDelegationTokenBudget = policy.MaxDelegationTokenBudget
 	engine.MaxDelegationCostUSD = policy.MaxDelegationCostUSD
 	engine.MaxDelegationNonProgressStreak = policy.MaxDelegationNonProgressStreak
+	engine.MaxVerifyReplanAttempts = policy.MaxVerifyReplanAttempts
 	if notifier, ok := engine.EscalationNotifier.(*daemonEscalationNotifier); ok && notifier != nil {
 		notifier.Handle = policy.EscalationHandle
 	}

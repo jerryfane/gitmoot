@@ -30,7 +30,7 @@ var DelegationFailurePolicies = []string{"block_parent", "continue", "escalate",
 
 // DelegationSynthesisRules are the allowed values of Delegation.SynthesisRule
 // (the empty string falls back to the default and is accepted separately).
-var DelegationSynthesisRules = []string{"summary", "vote", "quorum"}
+var DelegationSynthesisRules = []string{"summary", "vote", "quorum", "verify"}
 
 // EphemeralRuntimes are the allowed values of EphemeralSpec.Runtime. They are a
 // subset of the registered runtimes: an ephemeral worker is never a raw shell.

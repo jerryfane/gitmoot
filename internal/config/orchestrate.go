@@ -74,6 +74,13 @@ type OrchestratePolicy struct {
 	// default (2), so default behavior is unchanged. The daemon wires this into
 	// Engine.MaxDelegationNonProgressStreak at startup.
 	MaxDelegationNonProgressStreak int
+	// MaxVerifyReplanAttempts is the per-root cap on the engine-level verify→replan
+	// corrective loop (#439): how many bounded replan continuations the engine issues
+	// on a FAILED verify verdict before routing to the #305 graceful finalize
+	// continuation. 0 (the default) means use the engine's built-in default (2), so
+	// default behavior is unchanged. The daemon wires this into
+	// Engine.MaxVerifyReplanAttempts at startup.
+	MaxVerifyReplanAttempts int
 }
 
 // DefaultEscalationTTL is the fallback time a paused-for-human tree may sit
@@ -94,6 +101,7 @@ func DefaultOrchestratePolicy() OrchestratePolicy {
 		EscalationHandle:               "",
 		EscalationTTL:                  "",
 		MaxDelegationNonProgressStreak: 0,
+		MaxVerifyReplanAttempts:        0,
 	}
 }
 
@@ -181,6 +189,10 @@ func applyOrchestratePolicyField(policy *OrchestratePolicy, key string, value st
 		parsed, err := strconv.Atoi(value)
 		policy.MaxDelegationNonProgressStreak = parsed
 		return err
+	case "max_verify_replan_attempts":
+		parsed, err := strconv.Atoi(value)
+		policy.MaxVerifyReplanAttempts = parsed
+		return err
 	default:
 		return nil
 	}
@@ -217,6 +229,9 @@ func validateOrchestratePolicy(policy OrchestratePolicy) error {
 	}
 	if policy.MaxDelegationNonProgressStreak < 0 {
 		return fmt.Errorf("orchestrate.max_delegation_non_progress_streak must be 0 (engine default) or positive")
+	}
+	if policy.MaxVerifyReplanAttempts < 0 {
+		return fmt.Errorf("orchestrate.max_verify_replan_attempts must be 0 (engine default) or positive")
 	}
 	return nil
 }
