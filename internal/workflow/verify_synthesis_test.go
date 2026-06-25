@@ -293,23 +293,153 @@ func TestEngineVerifyMissingChildFailsVerdict(t *testing.T) {
 	dels := []Delegation{
 		{ID: "check", Agent: "verifier", Action: "review", Prompt: "verify", SynthesisRule: "verify"},
 	}
-	if verifyVerdictPassed(dels, children, childPayloads) {
+	// The verify leg here has no deps, so it WAS dispatchable: a missing child is a
+	// genuinely missing verification and must fail the verdict.
+	if verifyVerdictPassed(dels, children, childPayloads, nil) {
 		t.Fatal("a missing verify child must fail the verdict")
 	}
 	// A succeeded verify child passes; a changes_requested decision fails.
 	children["check"] = db.Job{ID: "c", State: string(JobSucceeded)}
-	if !verifyVerdictPassed(dels, children, childPayloads) {
+	if !verifyVerdictPassed(dels, children, childPayloads, nil) {
 		t.Fatal("a succeeded verify child must pass the verdict")
 	}
 	children["check"] = db.Job{ID: "c", State: string(JobFailed)}
 	childPayloads["check"] = JobPayload{Result: &AgentResult{Decision: "changes_requested"}}
-	if verifyVerdictPassed(dels, children, childPayloads) {
+	if verifyVerdictPassed(dels, children, childPayloads, nil) {
 		t.Fatal("a changes_requested verify child must fail the verdict")
 	}
 	childPayloads["check"] = JobPayload{Result: &AgentResult{Decision: "approved"}}
 	children["check"] = db.Job{ID: "c", State: string(JobFailed)}
-	if !verifyVerdictPassed(dels, children, childPayloads) {
+	if !verifyVerdictPassed(dels, children, childPayloads, nil) {
 		t.Fatal("an approved verify decision must pass the verdict even when the job state is not succeeded")
+	}
+}
+
+// seedDepsBoundVerifyCoordinator inserts a completed coordinator whose verify leg
+// DEPENDS ON the producer (the canonical decompose-and-verify shape: the verifier
+// only runs after the producer succeeds). producerPolicy sets the producer's
+// failure_policy so a caller can exercise both the "continue" and "escalate"
+// upstream-failure paths in which the producer fails and the deps-bound verify leg
+// therefore never gets a child.
+func seedDepsBoundVerifyCoordinator(t *testing.T, store *db.Store, producerPolicy string) {
+	t.Helper()
+	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-005",
+		TaskID:    "task-5",
+		TaskTitle: "Parent",
+		Sender:    "coord",
+		Result: &AgentResult{
+			Decision: "approved",
+			Summary:  "done",
+			Delegations: []Delegation{
+				{ID: "produce", Agent: "producer", Action: "implement", Prompt: "build it", FailurePolicy: producerPolicy},
+				{ID: "check", Agent: "verifier", Action: "review", Prompt: "verify it", Deps: []string{"produce"}, SynthesisRule: "verify"},
+			},
+		},
+	})
+}
+
+// TestEngineVerifyLegNeverRanUnderContinueDoesNotReplan pins the #439 review fix:
+// when the producer fails under failure_policy "continue", the deps-bound verify
+// leg never enqueues (it is permanently blocked), so the verify VERDICT must NOT be
+// read as a failure. The engine must fall through to the normal continuation — no
+// verify_replan_warning, no carried VerifyAttempt — letting the upstream failure
+// policy drive the outcome rather than fabricating a failed verdict from a verifier
+// that never ran.
+func TestEngineVerifyLegNeverRanUnderContinueDoesNotReplan(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	seedDepsBoundVerifyCoordinator(t, store, "continue")
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// The producer fails under continue: the deps-bound verify leg is permanently
+	// blocked and never enqueues, so the batch resolves and the continuation fires.
+	completeDelegationChild(t, store, "parent-job/delegation/produce", JobFailed, AgentResult{Decision: "failed", Summary: "producer broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/produce"); err != nil {
+		t.Fatalf("AdvanceJob(produce) returned error: %v", err)
+	}
+
+	// The verify child must never have been enqueued.
+	if jobExists(t, store, "parent-job/delegation/check") {
+		t.Fatal("the deps-bound verify leg must not enqueue after its producer failed")
+	}
+	// The continuation IS enqueued (batch resolved), but it is the NORMAL one.
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("the continue-gated batch must enqueue a continuation once it resolves")
+	}
+	cont, err := unmarshalPayload(mustJob(t, store, delegationContinuationID("parent-job")).Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if cont.DelegationFinalize {
+		t.Fatal("a verify leg that never ran must NOT route to a finalize continuation")
+	}
+	if cont.VerifyAttempt != 0 {
+		t.Fatalf("a verify leg that never ran must NOT burn a verify attempt: VerifyAttempt = %d, want 0", cont.VerifyAttempt)
+	}
+	if got := countJobEvents(t, store, "parent-job", "verify_replan_warning"); got != 0 {
+		t.Fatalf("verify_replan_warning events = %d, want 0 when the verify leg never ran", got)
+	}
+	if got := countJobEvents(t, store, "parent-job", "verify_replan_exhausted"); got != 0 {
+		t.Fatalf("verify_replan_exhausted events = %d, want 0 when the verify leg never ran", got)
+	}
+}
+
+// TestEngineVerifyLegNeverRanUnderEscalateDoesNotReplan pins the same #439 review
+// fix on the escalate path: the producer fails under failure_policy "escalate", so
+// the engine enqueues the continuation immediately (before the deps-bound verify
+// leg could ever run). With no verify child, the verdict must be SKIPPED (the leg
+// is permanently blocked), not fabricated as a failure — no verify_replan_warning,
+// no burned VerifyAttempt — leaving the escalate path to drive the outcome.
+func TestEngineVerifyLegNeverRanUnderEscalateDoesNotReplan(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+
+	seedDepsBoundVerifyCoordinator(t, store, "escalate")
+	if err := engine.AdvanceJob(ctx, "parent-job"); err != nil {
+		t.Fatalf("AdvanceJob(parent) returned error: %v", err)
+	}
+
+	// The producer fails under escalate: the continuation is enqueued immediately,
+	// before the deps-bound verify leg ever runs.
+	completeDelegationChild(t, store, "parent-job/delegation/produce", JobFailed, AgentResult{Decision: "failed", Summary: "producer broke"})
+	if err := engine.AdvanceJob(ctx, "parent-job/delegation/produce"); err != nil {
+		t.Fatalf("AdvanceJob(produce) returned error: %v", err)
+	}
+
+	if jobExists(t, store, "parent-job/delegation/check") {
+		t.Fatal("the deps-bound verify leg must not enqueue after its producer failed under escalate")
+	}
+	if !jobExists(t, store, delegationContinuationID("parent-job")) {
+		t.Fatal("escalate must enqueue a continuation immediately on producer failure")
+	}
+	cont, err := unmarshalPayload(mustJob(t, store, delegationContinuationID("parent-job")).Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if cont.DelegationFinalize {
+		t.Fatal("a verify leg that never ran (escalate) must NOT route to a finalize continuation")
+	}
+	if cont.VerifyAttempt != 0 {
+		t.Fatalf("a verify leg that never ran (escalate) must NOT burn a verify attempt: VerifyAttempt = %d, want 0", cont.VerifyAttempt)
+	}
+	if got := countJobEvents(t, store, "parent-job", "verify_replan_warning"); got != 0 {
+		t.Fatalf("verify_replan_warning events = %d, want 0 when the verify leg never ran (escalate)", got)
+	}
+	if got := countJobEvents(t, store, "parent-job", "verify_replan_exhausted"); got != 0 {
+		t.Fatalf("verify_replan_exhausted events = %d, want 0 when the verify leg never ran (escalate)", got)
 	}
 }
 

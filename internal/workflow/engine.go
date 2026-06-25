@@ -2187,7 +2187,11 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 	// This sits AFTER the continuationEnqueued top-guard and the non-progress check
 	// and emits delegation_continuation_enqueued for its own request, so it occupies
 	// the single continuation slot and a re-advance never double-enqueues.
-	if delegationSynthesisRequiresVerify(parentResult.Delegations) && !verifyVerdictPassed(parentResult.Delegations, children, childPayloads) {
+	// dedupWinners mirrors advanceDelegations: a fingerprint-deduped verify leg
+	// never owns its own child, so the verdict must resolve it against its winning
+	// sibling rather than reading the absent child as a failed verdict.
+	dedupWinners := dedupedDelegationWinners(parentResult.Delegations, children, events)
+	if delegationSynthesisRequiresVerify(parentResult.Delegations) && !verifyVerdictPassed(parentResult.Delegations, children, childPayloads, dedupWinners) {
 		attemptCap := e.verifyReplanAttemptCap()
 		if parentPayload.VerifyAttempt >= attemptCap {
 			_ = e.Store.AddJobEvent(ctx, db.JobEvent{
@@ -3201,19 +3205,41 @@ func delegationSynthesisRequiresVerify(delegations []Delegation) bool {
 // parsed result — otherwise the succeeded-state short-circuit vote/quorum use would
 // read every changes_requested verdict as a pass and defeat the gate. The
 // succeeded-state check is kept only as a fallback for a verify leg that finished
-// in a succeeded state without a parsed result. A missing verify child (no job, or
-// a non-succeeded job without a parsed result) fails the verdict, so an absent or
-// crashed verification is never read as a pass. Non-verify legs are ignored here
-// (the conservative ordering runs the vote/quorum gates first). No engine-side
-// verify subprocess or second model call is made: the engine reads the
-// already-completed verdict the verify leg reported.
-func verifyVerdictPassed(delegations []Delegation, children map[string]db.Job, childPayloads map[string]JobPayload) bool {
+// in a succeeded state without a parsed result.
+//
+// A verify leg with NO child is interpreted by whether it could ever have run.
+// A leg whose deps terminally failed (delegationPermanentlyBlocked, the same
+// predicate allDelegationsResolved uses) or that was folded into a fingerprint
+// dedup winner NEVER RAN: verification was not performed, so its outcome is
+// already governed by the upstream failure policy (continue/escalate) and it must
+// be SKIPPED here, not read as a failed verdict — otherwise the engine would
+// fabricate a failed verdict from an absent verifier and fire a premature
+// verify→replan continuation claiming verification failed when it never happened
+// (#439 review). Only a verify leg that WAS dispatchable yet has no terminal child
+// (a genuinely missing/crashed verification) fails the verdict, so an absent
+// verification of work that actually ran is never read as a pass. Non-verify legs
+// are ignored here (the conservative ordering runs the vote/quorum gates first).
+// No engine-side verify subprocess or second model call is made: the engine reads
+// the already-completed verdict the verify leg reported.
+func verifyVerdictPassed(delegations []Delegation, children map[string]db.Job, childPayloads map[string]JobPayload, dedupWinners map[string]db.Job) bool {
+	byID := delegationsByID(delegations)
 	for _, d := range delegations {
 		if delegationSynthesisRule(d) != "verify" {
 			continue
 		}
 		child, ok := children[d.ID]
 		if !ok {
+			// A verify leg that never ran (its deps terminally failed, or it was
+			// folded into a dedup winner) is governed by the upstream failure policy,
+			// not by this verdict: skip it rather than fabricating a failed verdict.
+			if _, deduped := dedupWinners[d.ID]; deduped {
+				continue
+			}
+			if delegationPermanentlyBlocked(d, children, byID, dedupWinners, map[string]bool{}) {
+				continue
+			}
+			// Dispatchable verify leg with no terminal child: a genuinely missing or
+			// crashed verification fails the verdict.
 			return false
 		}
 		// Decision-first: when the verify leg produced a parsed result, its decision
