@@ -84,6 +84,56 @@ func TestNewEventRedactsEveryStringField(t *testing.T) {
 	}
 }
 
+func TestNewEventScrubsAbsolutePathsFromDetail(t *testing.T) {
+	// The injected redact func (workflow.RedactCommentText) only strips secrets;
+	// absolute checkout/worktree paths in a pre-flight failure detail must not
+	// leave the box (#446 frozen criterion). NewEvent collapses them to <path>
+	// even when redact is nil, so the scrub is unconditional.
+	cases := map[string]struct {
+		mustNotContain []string
+		mustContain    []string
+	}{
+		"checkout /root/.gitmoot/repos/owner__repo/main is dirty": {
+			mustNotContain: []string{"/root/.gitmoot", "/root"},
+			mustContain:    []string{"<path>", "is dirty"},
+		},
+		"worktree add /root/.gitmoot/worktrees/some-job failed": {
+			mustNotContain: []string{"/root/.gitmoot/worktrees", "/root"},
+			mustContain:    []string{"<path>", "failed"},
+		},
+	}
+	for detail, want := range cases {
+		ev := NewEvent(EventJobFailed, "j", "r", "o/r", "failed", detail, time.Now(), nil)
+		for _, frag := range want.mustNotContain {
+			if strings.Contains(ev.Detail, frag) {
+				t.Fatalf("detail %q still contains absolute path fragment %q: %q", detail, frag, ev.Detail)
+			}
+		}
+		for _, frag := range want.mustContain {
+			if !strings.Contains(ev.Detail, frag) {
+				t.Fatalf("detail %q missing expected fragment %q: %q", detail, frag, ev.Detail)
+			}
+		}
+	}
+
+	// A URL is not an absolute filesystem path and must survive intact.
+	ev := NewEvent(EventJobFinished, "j", "r", "o/r", "succeeded", "see https://github.com/owner/repo for details", time.Now(), nil)
+	if !strings.Contains(ev.Detail, "https://github.com/owner/repo") {
+		t.Fatalf("URL was mangled by the path scrubber: %q", ev.Detail)
+	}
+
+	// Scrubbing runs AFTER redaction: a secret and a path in the same detail are
+	// both removed.
+	redact := func(s string) string { return strings.ReplaceAll(s, "ghp_secretsecretsecret00", "[REDACTED]") }
+	ev = NewEvent(EventJobFailed, "j", "r", "o/r", "failed", "token ghp_secretsecretsecret00 at /root/.gitmoot/x/y", time.Now(), redact)
+	if strings.Contains(ev.Detail, "ghp_secretsecretsecret00") || strings.Contains(ev.Detail, "/root/.gitmoot") {
+		t.Fatalf("secret or path leaked: %q", ev.Detail)
+	}
+	if !strings.Contains(ev.Detail, "[REDACTED]") || !strings.Contains(ev.Detail, "<path>") {
+		t.Fatalf("expected both redaction marker and path placeholder: %q", ev.Detail)
+	}
+}
+
 func TestNewEventRepoIsOwnerRepoOnly(t *testing.T) {
 	cases := map[string]string{
 		"jerryfane/gitmoot":            "jerryfane/gitmoot",

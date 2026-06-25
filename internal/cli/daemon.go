@@ -2228,6 +2228,15 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 		if err := blockTaskForPermissionBlockedJob(ctx, w.Store, job); err != nil {
 			return err
 		}
+		// Best-effort outbound emit (#446): this PRE-FLIGHT queued->blocked
+		// permission transition is daemon-owned (it never reaches the engine's
+		// Mailbox chokepoint), exactly like the MID-RUN permission block in
+		// handleRunJobError which already emits job.blocked. Emit here too so both
+		// halves of the permission-blocked terminal case are covered; gated on the
+		// genuine transition above, nil-safe when [events] is OFF. The following
+		// finalizePreflightDelegationChild only attaches a synthetic result
+		// (savePayload, no transition), so it never re-emits.
+		emitDaemonTerminalEvent(ctx, w.eventSink(), w.Store, job.ID, events.EventJobBlocked, string(workflow.JobBlocked), agentPermissionBlockedMessage)
 		_ = w.postJobResultComment(ctx, job.ID, agent, "", errors.New(agentPermissionBlockedMessage))
 		writeLine(w.Stdout, "job %s blocked: %s", job.ID, agentPermissionBlockedMessage)
 		// A read-only implement DELEGATION child short-circuits to blocked here,

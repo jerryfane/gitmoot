@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -136,6 +137,105 @@ func TestEngineEmitsJobFailedOnFailedDecision(t *testing.T) {
 	}
 	if failed[0].Status != "failed" || failed[0].Detail != "could not finish" {
 		t.Fatalf("job.failed event = %+v", failed[0])
+	}
+}
+
+// TestEngineEmitsJobFailedOnDeliveryFailure proves the most common failure mode
+// — a runtime delivery error that never produces a parseable result — emits
+// exactly one job.failed. This exercises the m.fail -> m.finish path (NOT
+// finishWithPayload), the gap the #446 review found: finish now carries the
+// emit symmetrically, so a delivery failure is no longer silently dropped.
+func TestEngineEmitsJobFailedOnDeliveryFailure(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	sink := &recordingSink{}
+	engine := testEngine(store)
+	engine.EventSink = sink
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	// A delivery error: Deliver returns an error, so Mailbox.Run takes the m.fail
+	// branch and never reaches finishWithPayload.
+	adapter := &fakeDelivery{err: errors.New("codex transport failure")}
+	if _, err := (Mailbox{Store: store}).Enqueue(ctx, JobRequest{
+		ID:        "review-job",
+		Agent:     "audit",
+		Action:    "review",
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-9",
+		TaskID:    "task-9",
+		TaskTitle: "Review",
+		RootJobID: "root-9",
+	}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+
+	// RunJob returns the delivery error; the running->failed transition (and its
+	// emit) happens inside Mailbox.fail -> finish regardless.
+	if _, err := engine.RunJob(ctx, "review-job", agent, adapter); err == nil {
+		t.Fatalf("RunJob with a delivery error returned nil, want the delivery error")
+	}
+	job := mustJob(t, store, "review-job")
+	if job.State != string(JobFailed) {
+		t.Fatalf("job state = %q, want failed", job.State)
+	}
+
+	if got := sink.byType(events.EventJobFinished); len(got) != 0 {
+		t.Fatalf("job.finished emissions = %d, want 0 for a delivery failure", len(got))
+	}
+	failed := sink.byType(events.EventJobFailed)
+	if len(failed) != 1 {
+		t.Fatalf("job.failed emissions = %d, want exactly 1; all=%+v", len(failed), sink.snapshot())
+	}
+	ev := failed[0]
+	if ev.JobID != "review-job" || ev.RootID != "root-9" || ev.Repo != "jerryfane/gitmoot" || ev.Status != "failed" {
+		t.Fatalf("job.failed event = %+v", ev)
+	}
+	// The transition message ("delivery failed: ...") is surfaced as the detail
+	// since the failed delivery left no result to summarize.
+	if !strings.Contains(ev.Detail, "delivery failed") {
+		t.Fatalf("detail = %q, want it to carry the delivery-failure message", ev.Detail)
+	}
+}
+
+// TestEngineEmitsJobFailedOnMalformedOutputAfterRepair proves the second
+// finish-path failure mode — a parse failure that survives the repair retry —
+// also emits exactly one job.failed (parse error, not delivery error).
+func TestEngineEmitsJobFailedOnMalformedOutputAfterRepair(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	sink := &recordingSink{}
+	engine := testEngine(store)
+	engine.EventSink = sink
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	// Two un-parseable outputs: the first triggers the repair retry, the second
+	// (also malformed) drives m.fail -> finish with a parse error.
+	adapter := &fakeDelivery{outputs: []string{"not json", "still not json"}}
+	if _, err := (Mailbox{Store: store}).Enqueue(ctx, JobRequest{
+		ID:        "review-job",
+		Agent:     "audit",
+		Action:    "review",
+		Repo:      "jerryfane/gitmoot",
+		Branch:    "task-9",
+		TaskID:    "task-9",
+		TaskTitle: "Review",
+	}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+
+	if _, err := engine.RunJob(ctx, "review-job", agent, adapter); err == nil {
+		t.Fatalf("RunJob with malformed output returned nil, want a parse error")
+	}
+	job := mustJob(t, store, "review-job")
+	if job.State != string(JobFailed) {
+		t.Fatalf("job state = %q, want failed", job.State)
+	}
+	failed := sink.byType(events.EventJobFailed)
+	if len(failed) != 1 {
+		t.Fatalf("job.failed emissions = %d, want exactly 1; all=%+v", len(failed), sink.snapshot())
+	}
+	if got := sink.byType(events.EventJobFinished); len(got) != 0 {
+		t.Fatalf("job.finished emissions = %d, want 0 for a malformed-output failure", len(got))
 	}
 }
 

@@ -17,11 +17,14 @@ import (
 type Mailbox struct {
 	Store *db.Store
 	// emitTerminal, when set, is called best-effort AFTER a genuine running->
-	// terminal transition in finishWithPayload (#446). It is the single
-	// chokepoint the engine uses to emit job.finished/job.failed/job.blocked, so
-	// the success/advance path and the timeout-finalize path both fan out exactly
-	// once. It is nil-safe: when unset (the default, no EventSink configured) no
-	// event is constructed or emitted and behavior is byte-identical. The hook is
+	// terminal transition in BOTH finishWithPayload (success/advance + timeout-
+	// finalize) and finish (the m.fail delivery/parse-failure path) (#446). Wiring
+	// both is what makes the whole terminal set fan out exactly once: the
+	// success/advance path emits job.finished, and the most common failure mode —
+	// a runtime delivery error, timeout, or malformed-output-after-repair — emits
+	// job.failed/job.blocked through finish rather than being silently dropped. It
+	// is nil-safe: when unset (the default, no EventSink configured) no event is
+	// constructed or emitted and behavior is byte-identical. The hook is
 	// fire-and-forget — it must never block or fail the finish.
 	emitTerminal func(ctx context.Context, jobID string, state JobState, payload JobPayload)
 }
@@ -349,7 +352,43 @@ func (m Mailbox) finish(ctx context.Context, jobID string, state JobState, messa
 		}
 		return fmt.Errorf("job %q is %s, not running", jobID, latest.State)
 	}
+	// Best-effort outbound emit on the genuine running->terminal transition, wired
+	// symmetrically with finishWithPayload (#446). m.fail (delivery failure,
+	// malformed-output-after-repair) reaches a terminal state through THIS path,
+	// not finishWithPayload, so without this the most common runtime failure mode
+	// silently never emits job.failed/job.blocked. finish has no payload arg, so
+	// load the stored one for full root_id/repo; when it carries no Result (the
+	// usual delivery-failure case) synthesize a transient one from the transition
+	// message so detail is a meaningful, redacted failure summary. Gated on
+	// transitioned==true (fires exactly once) and nil-safe (no EventSink => no-op,
+	// byte-identical). The load failure degrades gracefully to an id-rooted emit
+	// rather than dropping the event or failing the finish.
+	if m.emitTerminal != nil {
+		payload := m.loadTerminalEmitPayload(ctx, jobID, message)
+		m.emitTerminal(ctx, jobID, state, payload)
+	}
 	return nil
+}
+
+// loadTerminalEmitPayload loads the stored payload for a finish-path terminal
+// emit, ensuring a non-nil Result so the emit detail carries a failure summary.
+// A delivery/parse failure transitions via finish without a stored Result; the
+// transition message (e.g. "delivery failed: ...") is the only failure context,
+// so synthesize a transient Result from it (in-memory only — never persisted).
+// On any load error it returns a minimal payload so the emit still fires.
+func (m Mailbox) loadTerminalEmitPayload(ctx context.Context, jobID, message string) JobPayload {
+	job, err := m.Store.GetJob(ctx, jobID)
+	if err != nil {
+		return JobPayload{Result: &AgentResult{Summary: strings.TrimSpace(message)}}
+	}
+	payload, err := unmarshalPayload(job.Payload)
+	if err != nil {
+		return JobPayload{Result: &AgentResult{Summary: strings.TrimSpace(message)}}
+	}
+	if payload.Result == nil {
+		payload.Result = &AgentResult{Summary: strings.TrimSpace(message)}
+	}
+	return payload
 }
 
 func (m Mailbox) finishWithPayload(ctx context.Context, jobID string, state JobState, message string, payload JobPayload) error {

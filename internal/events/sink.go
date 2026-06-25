@@ -19,6 +19,7 @@ package events
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -106,6 +107,15 @@ type RedactFunc func(string) string
 // absolute checkout path can never leak; ts defaults to time.Now() when zero.
 // The constructor — not the transport — owns redaction, so a Sink just
 // serializes and ships.
+//
+// detail is additionally scrubbed of absolute filesystem paths AFTER the
+// injected secret redaction (scrubAbsolutePaths): the injected redact func
+// (workflow.RedactCommentText) only strips secrets/tokens, but pre-flight
+// causes routinely embed absolute checkout/worktree paths (CheckoutValidator
+// errors, `git worktree add /root/.gitmoot/...`). Collapsing them to <path>
+// here — the single chokepoint both the engine and daemon pass through —
+// upholds the "no absolute paths/secrets/raw runtime output leave the box"
+// acceptance criterion for every emit site at once (#446).
 func NewEvent(eventType EventType, jobID, rootID, repo, status, detail string, ts time.Time, redact RedactFunc) Event {
 	if ts.IsZero() {
 		ts = time.Now()
@@ -118,7 +128,7 @@ func NewEvent(eventType EventType, jobID, rootID, repo, status, detail string, t
 		Repo:          ownerRepoOnly(repo),
 		Status:        strings.TrimSpace(status),
 		Timestamp:     ts.UTC().Format(time.RFC3339),
-		Detail:        redactString(strings.TrimSpace(detail), redact),
+		Detail:        scrubAbsolutePaths(redactString(strings.TrimSpace(detail), redact)),
 	}
 }
 
@@ -137,6 +147,26 @@ func redactString(value string, redact RedactFunc) string {
 		return value
 	}
 	return redact(value)
+}
+
+// absolutePathPattern matches an absolute Unix filesystem path: a `/` that is
+// not preceded by another path/URL character (so the `//` of `https://host` is
+// left intact — the leading `https:` is a non-`/` char before the first slash,
+// and the second slash is excluded by requiring a name segment after the
+// matched slash) followed by one or more `name/` segments and a trailing name.
+// It collapses host home layout (`/root/.gitmoot/...`), usernames, and worktree
+// paths embedded in failure detail to a single `<path>` placeholder. It runs
+// AFTER secret redaction so a `[REDACTED]` token already substituted for a
+// secret is never re-scanned as a path. Path-like fragments WITHOUT a separator
+// after the leading slash (a bare `/`) are left untouched.
+var absolutePathPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_./:-])(/[^\s/<>]+(?:/[^\s/<>]+)+/?)`)
+
+// scrubAbsolutePaths collapses absolute filesystem paths in a redacted detail
+// string to `<path>`, so host-layout/checkout/worktree paths never leave the
+// box. It preserves the single non-path leading character the pattern captures
+// (whitespace/punctuation before the path) so surrounding text stays readable.
+func scrubAbsolutePaths(value string) string {
+	return absolutePathPattern.ReplaceAllString(value, "${1}<path>")
 }
 
 // ownerRepoOnly trims a repo reference to its trailing owner/repo, dropping any

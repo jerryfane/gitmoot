@@ -71,8 +71,12 @@ Every outbound string field is redacted at event construction through the same
 redactor Gitmoot uses for off-box PR/issue comments and bug reports
 (`workflow.RedactCommentText`): GitHub tokens, OpenAI keys, AWS secrets, and
 `api_key`/`token`/`secret`/`password` assignments are replaced with
-`[REDACTED]`. `repo` is reduced to `owner/repo` only. No absolute paths, raw
-runtime output, or secrets leave the box.
+`[REDACTED]`. The `detail` field is then additionally scrubbed of absolute
+filesystem paths — host home layout, checkout and worktree paths embedded in
+pre-flight failure detail (e.g. `git worktree add /root/.gitmoot/...`) collapse
+to `<path>` — so host layout and usernames never leak. `repo` is reduced to
+`owner/repo` only. No absolute paths, raw runtime output, or secrets leave the
+box.
 
 ## Best-effort delivery
 
