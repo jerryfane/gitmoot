@@ -113,19 +113,23 @@ func (a KimiAdapter) newRuntimeRef() (string, error) {
 }
 
 func kimiPermissionArgs(agent Agent) []string {
-	// Kimi's `-p` prompt mode already runs non-interactively and auto-approves
-	// tool calls. The --yolo and --auto flags cannot be combined with -p, so we
-	// pass no extra permission flags. Read-only enforcement is handled by the
-	// agent's capabilities and Gitmoot's dispatch/lock logic.
+	// Kimi's `-p` prompt mode runs non-interactively. Kimi CLI >= v1.48 requires
+	// `--print` for `--output-format stream-json` ("Output format is only supported
+	// for print UI"); without it the CLI errors out (exit 2). --yolo/--auto cannot
+	// be combined with -p, so --print is the only flag we add; read-only enforcement
+	// is handled by the agent's capabilities and Gitmoot's dispatch/lock logic.
 	_ = agent
-	return nil
+	return []string{"--print"}
 }
 
 type kimiStreamEvent struct {
-	Role      string `json:"role"`
-	Type      string `json:"type"`
-	Content   string `json:"content"`
-	SessionID string `json:"session_id"`
+	Role string `json:"role"`
+	Type string `json:"type"`
+	// Content is a plain JSON string when thinking is off, or an array of typed
+	// blocks ([{"type":"text","text":...},{"type":"think","think":...}]) when
+	// thinking is on (Kimi CLI >= v1.48). Decoded via kimiContentText.
+	Content   json.RawMessage `json:"content"`
+	SessionID string          `json:"session_id"`
 	// Usage carries best-effort token counts when Kimi's stream emits a usage or
 	// result event (#338 Part B). The field set mirrors the common LLM-CLI shape
 	// (input_tokens/output_tokens). It is nil/zero on events that carry no usage,
@@ -159,6 +163,11 @@ func parseKimiStreamJSON(output string) (string, string, kimiUsage, error) {
 		}
 		var event kimiStreamEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			// Kimi CLI >= v1.48 prints the resume hint as a plain-text line rather
+			// than a structured meta event. Capture the session id from it.
+			if id := kimiResumeIDFromText(line); id != "" {
+				sessionID = id
+			}
 			continue
 		}
 		if event.Usage != nil {
@@ -166,7 +175,7 @@ func parseKimiStreamJSON(output string) (string, string, kimiUsage, error) {
 		}
 		switch event.Role {
 		case "assistant":
-			contentParts = append(contentParts, event.Content)
+			contentParts = append(contentParts, kimiContentText(event.Content))
 		case "meta":
 			if event.Type == "session.resume_hint" && event.SessionID != "" {
 				sessionID = event.SessionID
@@ -179,8 +188,60 @@ func parseKimiStreamJSON(output string) (string, string, kimiUsage, error) {
 	return strings.Join(contentParts, ""), sessionID, usage, nil
 }
 
+// kimiContentText extracts assistant text from a Kimi stream event's content
+// field. With thinking off it is a plain JSON string; with thinking on (Kimi CLI
+// >= v1.48) it is an array of typed blocks, e.g.
+// [{"type":"text","text":"..."},{"type":"think","think":"..."}]. Only "text"
+// blocks contribute to the response; "think" reasoning blocks are skipped so they
+// never pollute the gitmoot_result payload.
+func kimiContentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var b strings.Builder
+		for _, bl := range blocks {
+			if bl.Type == "text" {
+				b.WriteString(bl.Text)
+			}
+		}
+		return b.String()
+	}
+	return ""
+}
+
 func isKimiSessionID(ref string) bool {
-	return strings.HasPrefix(ref, "session_")
+	// Older Kimi CLI emitted "session_"-prefixed ids. Kimi CLI >= v1.48 uses a
+	// bare UUID (e.g. "cc9d5c55-6eb7-495e-a86a-634b1699ef1f"); `kimi -r/-S <uuid>`
+	// resumes it. Accept both forms.
+	return strings.HasPrefix(ref, "session_") || isUUID(ref)
+}
+
+// kimiResumeIDFromText extracts the session id from Kimi's plain-text resume
+// hint, e.g. "To resume this session: kimi -r <uuid>". Kimi CLI >= v1.48 prints
+// this line instead of a structured session.resume_hint stream event.
+func kimiResumeIDFromText(line string) string {
+	const marker = "kimi -r "
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(line[i+len(marker):])
+	if j := strings.IndexAny(rest, " \t"); j >= 0 {
+		rest = rest[:j]
+	}
+	if isUUID(rest) {
+		return rest
+	}
+	return ""
 }
 
 func kimiCommandError(result subprocess.Result, err error) error {
