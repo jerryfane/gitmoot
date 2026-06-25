@@ -412,9 +412,12 @@ trips, the offending delegations are dropped rather than dispatched.
   corrected set. A coordinator that keeps naming bad agents is bounded by
   `MaxDelegationNonProgressStreak` → after a corrective nudge it routes to the
   graceful finalize rather than looping. The set is retryable once the agent names
-  are corrected, without recreating the root job. The failure also surfaces in
-  `gitmoot job list` and the `delegation preflight failures` count in
-  `gitmoot daemon status`.
+  are corrected, without recreating the root job. Because the coordinator now ends
+  `succeeded` (not blocked), the failure is surfaced from the
+  `delegation_preflight_failed` event — not the job state — in `gitmoot job list`
+  (a trailing `PREFLIGHT_FAILED:` column), the `gitmoot dashboard` **Attention**
+  page (the coordinator is flagged with its reason regardless of state), and the
+  `delegation preflight failures` count in `gitmoot daemon status`.
 - **Operator kill switch**: `gitmoot job kill <root-job-id>` lets an operator
   terminate a runaway tree by its root id from outside. It is the **first**
   backstop, so operator action wins over every budget cap. The kill is graceful —

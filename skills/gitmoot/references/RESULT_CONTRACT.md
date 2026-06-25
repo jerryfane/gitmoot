@@ -328,7 +328,12 @@ Delegation trees are bounded so they cannot run forever:
   coordinator that keeps naming bad agents is bounded by
   `MaxDelegationNonProgressStreak` → after a corrective nudge it routes to the
   graceful finalize instead of looping. The set is retryable once the agent names
-  are corrected; no need to recreate the root job.
+  are corrected; no need to recreate the root job. Because the coordinator now ends
+  `succeeded` (not blocked), the failure is surfaced from the
+  `delegation_preflight_failed` event — not the job state — in `gitmoot job list`
+  (a trailing `PREFLIGHT_FAILED:` column), the `gitmoot dashboard` **Attention**
+  page (flagged with its reason regardless of state), and the `delegation preflight
+  failures` count in `gitmoot daemon status`.
 - Operator kill switch: `gitmoot job kill <root-job-id>` terminates a runaway
   tree by its root id from outside. It is the **first** backstop (operator action
   wins over every budget cap) and is graceful — in-flight jobs finish, the
