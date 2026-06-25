@@ -121,6 +121,26 @@ func TestInspectDaemonTreatsLiveNonDaemonPIDAsStale(t *testing.T) {
 	}
 }
 
+// TestInspectDaemonClaudeAuthFailsOpenWithoutDaemon guards the #427 fail-open
+// contract: with no running daemon, the auth snapshot reports neither running nor
+// detected so doctor/dashboard/daemon-status fall back to the shell-local check
+// instead of implying the daemon is unauthenticated.
+func TestInspectDaemonClaudeAuthFailsOpenWithoutDaemon(t *testing.T) {
+	paths := testPaths(t)
+
+	snapshot := InspectDaemonClaudeAuth(paths)
+
+	if snapshot.Running {
+		t.Fatalf("daemon auth Running = true, want false without a daemon")
+	}
+	if snapshot.Detected {
+		t.Fatalf("daemon auth Detected = true, want false without a readable daemon env")
+	}
+	if snapshot.Auth.Ready() {
+		t.Fatalf("daemon auth Ready = true, want false when env is undetected")
+	}
+}
+
 func TestFormatSnapshotQuotesLockMetadata(t *testing.T) {
 	text := FormatSnapshot(Snapshot{
 		Daemon:     DaemonSnapshot{State: DaemonRunning, PID: 42},

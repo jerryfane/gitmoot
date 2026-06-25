@@ -12,6 +12,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
@@ -113,6 +114,47 @@ func BuildSnapshot(ctx context.Context, paths config.Paths, repoFullName string)
 		})
 	}
 	return snapshot, nil
+}
+
+// DaemonAuthSnapshot reports the running daemon's Claude auth env, best-effort.
+// The signal that actually matters for background Claude jobs is the daemon's own
+// environment (not the shell that ran `gitmoot doctor`), so this reads the live
+// daemon process's environment. It is fail-open and OS-gated: outside Linux, or
+// when /proc is unreadable, Detected is false and callers fall back to the
+// shell-local check (issue #427).
+type DaemonAuthSnapshot struct {
+	// Running reports whether a daemon process was located at all.
+	Running bool
+	// PID is the daemon process id when Running.
+	PID int
+	// Detected reports whether the daemon's environment could be read. When false,
+	// Auth is zero and callers must not treat it as "daemon has no token".
+	Detected bool
+	// Auth is the daemon's Claude auth env (only meaningful when Detected).
+	Auth runtime.ClaudeAuthEnv
+}
+
+// InspectDaemonClaudeAuth locates the running daemon and reports its Claude auth
+// environment, best-effort. It never returns an error: a missing daemon,
+// unreadable /proc, or non-Linux host all degrade to Detected=false so the
+// caller can fall back to the shell-local check. Secrets are never returned —
+// only the presence/absence booleans on ClaudeAuthEnv.
+func InspectDaemonClaudeAuth(paths config.Paths) DaemonAuthSnapshot {
+	daemon := InspectDaemon(paths)
+	snapshot := DaemonAuthSnapshot{
+		PID:     daemon.PID,
+		Running: daemon.State == DaemonRunning,
+	}
+	if !snapshot.Running || daemon.PID <= 0 {
+		return snapshot
+	}
+	lookup, ok := readProcessEnviron(daemon.PID)
+	if !ok {
+		return snapshot
+	}
+	snapshot.Detected = true
+	snapshot.Auth = runtime.InspectClaudeAuthEnv(lookup)
+	return snapshot
 }
 
 func InspectDaemon(paths config.Paths) DaemonSnapshot {

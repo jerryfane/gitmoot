@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
+	"github.com/jerryfane/gitmoot/internal/config"
 	gitutil "github.com/jerryfane/gitmoot/internal/git"
+	"github.com/jerryfane/gitmoot/internal/presence"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/subprocess"
 )
@@ -28,6 +31,12 @@ type Checker struct {
 	// The one-shot `gitmoot doctor` (root.go) sets this true; the dashboard leaves
 	// it false so a refresh never spawns claude.
 	LiveProbe bool
+	// Paths locates the running daemon for the daemon-aware claude auth check
+	// (issue #427). When unset, the daemon check is skipped and only the
+	// shell-local check is reported. The signal that actually matters for Claude
+	// background jobs is the daemon's own environment, not the shell that ran
+	// `gitmoot doctor`.
+	Paths config.Paths
 }
 
 // Run returns the global (cwd-independent) checks followed by the per-repo
@@ -43,15 +52,22 @@ func (c Checker) Run(ctx context.Context) []Check {
 // anywhere, so the dashboard renders them once.
 func (c Checker) GlobalChecks(ctx context.Context) []Check {
 	runner := c.runner()
-	return []Check{
+	checks := []Check{
 		c.command(ctx, runner, "git", true, "--version"),
 		c.command(ctx, runner, "gh", true, "--version"),
 		c.command(ctx, runner, "codex", true, "--version"),
 		c.command(ctx, runner, "claude", false, "--help"),
 		c.command(ctx, runner, "kimi", false, "--version"),
-		c.claudeAuthEnv(ctx),
-		c.ghAuth(ctx, runner),
 	}
+	// The daemon is what actually runs Claude background jobs, so report its auth
+	// state first when it can be detected (issue #427). The shell-local check
+	// follows, clearly labeled, so a warn in a terminal can't be mistaken for "the
+	// daemon is broken".
+	if daemon, ok := c.claudeAuthDaemon(); ok {
+		checks = append(checks, daemon)
+	}
+	checks = append(checks, c.claudeAuthEnv(ctx), c.ghAuth(ctx, runner))
+	return checks
 }
 
 // RepoChecks returns the per-repo diagnostics (origin remote resolves, base
@@ -125,9 +141,49 @@ func (c Checker) baseBranch(ctx context.Context, runner subprocess.Runner, dir s
 	return Check{Name: "base branch", OK: true, Required: true, Detail: branch}
 }
 
+// claudeShellAuthLabel prefixes the shell-local claude auth detail so a warn in
+// one terminal can't be mistaken for "the daemon is broken": the env-based check
+// only ever reflects the shell that ran the command, not the daemon that runs
+// background jobs (issue #427).
+const claudeShellAuthLabel = "current shell (not the daemon)"
+
+// claudeAuthDaemon reports the running daemon's Claude auth state, best-effort.
+// The daemon is what actually runs Claude background jobs, so its environment —
+// not the invoking shell — is the signal that matters. It is OS-gated and
+// fail-open (Linux /proc only): when the daemon isn't running or its environment
+// can't be read it returns ok=false and the caller falls back to the shell-local
+// check. Secrets are never printed (masked set/unset only).
+func (c Checker) claudeAuthDaemon() (Check, bool) {
+	if strings.TrimSpace(c.Paths.Home) == "" {
+		return Check{}, false
+	}
+	return claudeAuthDaemonCheck(presence.InspectDaemonClaudeAuth(c.Paths))
+}
+
+// claudeAuthDaemonCheck builds the daemon-aware claude auth Check from an already
+// inspected snapshot. It is split from claudeAuthDaemon so the Detected=true
+// branches (Check name/detail, pid prefix, masked set/unset, warn vs ok) are
+// testable without a live daemon or readable /proc (issue #427). Secrets never
+// reach the detail — only daemon.Auth.MaskedDetail()'s set/unset booleans.
+func claudeAuthDaemonCheck(daemon presence.DaemonAuthSnapshot) (Check, bool) {
+	if !daemon.Detected {
+		return Check{}, false
+	}
+	masked := daemon.Auth.MaskedDetail()
+	detail := "running daemon (pid " + strconv.Itoa(daemon.PID) + "): " + masked
+	if daemon.Auth.Ready() {
+		if warning := daemon.Auth.Warning(); warning != "" {
+			detail += "; " + warning
+		}
+		return Check{Name: "claude auth (daemon)", OK: true, Required: false, Detail: detail}, true
+	}
+	detail += "; " + runtime.ClaudeBackgroundTokenMessage
+	return Check{Name: "claude auth (daemon)", OK: false, Required: false, Detail: detail}, true
+}
+
 func (c Checker) claudeAuthEnv(ctx context.Context) Check {
 	auth := runtime.InspectClaudeAuthEnv(os.LookupEnv)
-	masked := auth.MaskedDetail()
+	masked := claudeShellAuthLabel + ": " + auth.MaskedDetail()
 	if auth.Ready() {
 		detail := masked
 		if warning := auth.Warning(); warning != "" {
