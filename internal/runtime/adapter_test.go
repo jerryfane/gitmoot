@@ -297,6 +297,12 @@ func TestIsClaudeSessionMissing(t *testing.T) {
 	if !isClaudeSessionMissing(missing) {
 		t.Fatal("expected dead-session stderr to be classified as session-missing")
 	}
+	// Pin the disjointness invariant in both directions: the canonical
+	// session-missing sample must NOT be classified as an auth failure, so the
+	// self-heal path can never be entered for (or suppressed by) an auth error.
+	if isClaudeAuthFailure(missing) {
+		t.Fatal("session-missing sample must NOT be classified as an auth failure")
+	}
 	for name, result := range map[string]subprocess.Result{
 		"auth via stderr 401": {Stderr: `{"error":{"type":"authentication_error","message":"401 Invalid authentication credentials"}}`},
 		"auth via type":       {Stderr: "authentication_error"},

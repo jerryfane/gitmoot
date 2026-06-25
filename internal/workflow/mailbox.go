@@ -253,6 +253,13 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 		return AgentResult{}, firstErr
 	}
 	m.persistRefreshedRuntimeRef(ctx, job.ID, agent, firstRefreshedRef)
+	// If the first delivery self-healed a dead session (#443), adopt the freshly
+	// minted ref in-memory so a subsequent repair retry resumes the new session
+	// rather than re-resuming the dead UUID (which would self-heal a second time
+	// and orphan the first healed session).
+	if firstRefreshedRef != "" {
+		agent.RuntimeRef = firstRefreshedRef
+	}
 	payload.RawOutputs = append(payload.RawOutputs, firstRaw)
 
 	result, parseErr := ExtractAgentResult(firstRaw)
