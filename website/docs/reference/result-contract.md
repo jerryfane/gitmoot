@@ -137,8 +137,8 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
     comments on the tree's **open** PR or issue (it watches open PRs/issues); the
     dashboard **Attention** section and the `escalation_ttl` backstop cover a tree
     whose PR/issue is no longer open.
-- `synthesis_rule` (optional): one of `summary`, `vote`, or `quorum`. It tells
-  the coordinator how to combine the children's results.
+- `synthesis_rule` (optional): one of `summary`, `vote`, `quorum`, or `verify`.
+  It tells the coordinator how to combine the children's results.
 - `quorum` (optional): an integer `K` (`> 0`), required when `synthesis_rule` is
   `quorum`. The coordinator continuation proceeds only if at least `K` children
   reach an approving decision; otherwise the parent blocks, exactly as a failed
@@ -146,6 +146,23 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
   delegations (every child must approve). `K` is an integer count only — no
   fractions or percentages — and must not exceed the number of delegations (a
   larger `K` is unsatisfiable and is rejected).
+
+  **`verify` — engine-enforced verify→replan (#439).** Where `vote`/`quorum`
+  **block** the parent on failure (a terminal dead-end), `verify` does NOT block:
+  when every child has resolved, the engine derives a pass/fail **verdict** from
+  the `verify`-tagged leg(s) — a verify leg passes iff its decision approves
+  (`approved`/`implemented`), and a `changes_requested`/`failed` or missing verify
+  leg fails it — and on a **failed** verdict enqueues a single **bounded corrective
+  "replan" continuation** (autonomous self-correction) instead of the normal
+  synthesis continuation. The verify→replan loop is bounded by a dedicated per-root
+  attempt cap (default **2**, configurable via
+  `[orchestrate].max_verify_replan_attempts`); on exhaustion it routes to the
+  graceful **finalize** continuation like every other backstop, never an unbounded
+  loop. All existing structural bounds (depth/width/jobs/wall-clock/token/cost)
+  still apply. The verdict is read mechanically from the already-completed verify
+  leg (see below): the engine adds **no** new verify subprocess or second model
+  call. `verify` requires no `quorum` field. A set that does not tag a `verify` leg
+  behaves exactly as before.
 
   **Produce vs. independent check.** The `synthesis_rule`s above reconcile what
   the producers **self-report** — `summary` merges their summaries, `vote`/`quorum`
@@ -162,13 +179,25 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
   toward their own outputs that a different-model judge does not share. It is the
   same separation as [ROMA](https://github.com/sentient-agi/ROMA)'s Verifier
   (`VerifierSignature: (goal, candidate_output) -> verdict + feedback`), where a
-  failed verdict drives a re-plan instead of trusting the producer. Route a failed
-  verdict with `failure_policy: escalate` (autonomous correction in the coordinator
-  continuation) or `escalate_human` (a human-in-the-loop pause); the merge gate
-  independently blocks merge on the non-ready decision. The built-in
-  [`verifier` and `decompose-and-verify` recipes](../workflows/coordinator-recipes-workflow.md)
-  are templates for this — no new engine primitive is involved (`ephemeral`,
-  `failure_policy`, and the merge gate already ship).
+  failed verdict drives a re-plan instead of trusting the producer.
+
+  There are **two ways** to drive the failed verdict back into a re-plan:
+
+  - **Template pattern (#421).** Tag the verify leg with `failure_policy: escalate`
+    (autonomous correction in the coordinator continuation) or `escalate_human` (a
+    human-in-the-loop pause); the **coordinator** hand-rolls the verify→replan loop
+    in its continuation. The merge gate independently blocks merge on the non-ready
+    decision. The built-in
+    [`verifier` and `decompose-and-verify` recipes](../workflows/coordinator-recipes-workflow.md)
+    are templates for this — no new engine primitive is involved (`ephemeral`,
+    `failure_policy`, and the merge gate already ship).
+  - **Engine-enforced rule (#439).** Tag the verify leg with
+    `synthesis_rule: verify` (see above). The **engine** derives the verdict from
+    the verify leg and, on a fail, enqueues the bounded replan continuation itself —
+    so the verify→replan loop and its attempt cap are enforced engine-side rather
+    than depending on the coordinator to drive them. Use this when you want the
+    self-correction loop guaranteed and bounded by the engine; use the template
+    pattern when you want full coordinator control over how the failure is routed.
 - `timeout` (optional): a Go duration string that must be positive (for example,
   `10m`).
 - `retry` (optional): an integer that must be `>= 0`.

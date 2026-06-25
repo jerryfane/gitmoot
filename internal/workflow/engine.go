@@ -120,12 +120,32 @@ type Engine struct {
 	// summary repeats. <= 0 means use defaultMaxDelegationNonProgressStreak (2); it
 	// is configurable per-root alongside the depth/width/budget bounds.
 	MaxDelegationNonProgressStreak int
+	// MaxVerifyReplanAttempts bounds the engine-level verify→replan corrective loop
+	// (#439): when a delegation set declares synthesis_rule "verify" and the
+	// verify-tagged legs reach a FAILED verdict, the engine — instead of blocking
+	// (vote/quorum) — enqueues a bounded corrective "replan" continuation so the
+	// coordinator can self-correct. This is the dedicated per-root cap on how many
+	// such replan attempts may fire before the loop routes to the #305 graceful
+	// finalize continuation (verify_replan_exhausted) rather than looping forever.
+	// It is layered ON TOP OF all existing structural bounds (depth/width/total
+	// jobs/wall-clock/token/cost), which still count every replan continuation as a
+	// generation. <= 0 means use defaultMaxVerifyReplanAttempts (2); it only ever
+	// matters once a set actually tags a verify leg, so default behavior for every
+	// existing set is byte-identical. It is sourced from the host
+	// [orchestrate].max_verify_replan_attempts config at daemon startup.
+	MaxVerifyReplanAttempts int
 }
 
 // defaultMaxDelegationNonProgressStreak is the streak threshold used when the
 // engine's MaxDelegationNonProgressStreak is unset (<= 0): two consecutive
 // non-progress generations trip the result-aware loop detector (#339).
 const defaultMaxDelegationNonProgressStreak = 2
+
+// defaultMaxVerifyReplanAttempts is the verify→replan attempt cap used when the
+// engine's MaxVerifyReplanAttempts is unset (<= 0): the engine issues at most two
+// bounded corrective replan continuations on a failed verify verdict before
+// routing to the #305 graceful finalize continuation (#439).
+const defaultMaxVerifyReplanAttempts = 2
 
 // nonProgressStreakThreshold returns the configured result-aware non-progress
 // streak threshold, falling back to defaultMaxDelegationNonProgressStreak when
@@ -135,6 +155,16 @@ func (e Engine) nonProgressStreakThreshold() int {
 		return e.MaxDelegationNonProgressStreak
 	}
 	return defaultMaxDelegationNonProgressStreak
+}
+
+// verifyReplanAttemptCap returns the configured verify→replan attempt cap,
+// falling back to defaultMaxVerifyReplanAttempts when unset so a zero-valued
+// Engine keeps the documented default (#439).
+func (e Engine) verifyReplanAttemptCap() int {
+	if e.MaxVerifyReplanAttempts > 0 {
+		return e.MaxVerifyReplanAttempts
+	}
+	return defaultMaxVerifyReplanAttempts
 }
 
 // now returns the engine's current time, defaulting to time.Now when Now is unset.
@@ -2142,6 +2172,96 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 		return nil
 	}
 
+	// synthesis_rule "verify" (#439): unlike vote/quorum (which BLOCK on failure),
+	// verify derives a pass/fail VERDICT from the verify-tagged legs and, on a
+	// FAILED verdict, enqueues a BOUNDED corrective "replan" continuation so the
+	// coordinator can self-correct — the verify→replan loop is enforced by the
+	// engine rather than left to the coordinator. The verdict is mechanical: any
+	// verify-tagged leg that did NOT reach an approving outcome (the same test
+	// vote/quorum use) fails it (a missing verify child also fails). On a PASSED
+	// verdict this falls through to the normal synthesis continuation below,
+	// byte-identical to the pre-change path. The loop is bounded by a dedicated
+	// per-root VerifyAttempt cap: below the cap a verify_replan_warning + corrective
+	// replan continuation fire; at/over the cap it routes to the #305 graceful
+	// finalize continuation (verify_replan_exhausted) like every other backstop.
+	// This sits AFTER the continuationEnqueued top-guard and the non-progress check
+	// and emits delegation_continuation_enqueued for its own request, so it occupies
+	// the single continuation slot and a re-advance never double-enqueues.
+	// dedupWinners mirrors advanceDelegations: a fingerprint-deduped verify leg
+	// never owns its own child, so the verdict must resolve it against its winning
+	// sibling rather than reading the absent child as a failed verdict.
+	dedupWinners := dedupedDelegationWinners(parentResult.Delegations, children, events)
+	if delegationSynthesisRequiresVerify(parentResult.Delegations) && !verifyVerdictPassed(parentResult.Delegations, children, childPayloads, dedupWinners) {
+		attemptCap := e.verifyReplanAttemptCap()
+		if parentPayload.VerifyAttempt >= attemptCap {
+			_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+				JobID:   parentJob.ID,
+				Kind:    "verify_replan_exhausted",
+				Message: fmt.Sprintf("verify→replan attempt cap of %d reached for job %s; finalizing instead of replanning", attemptCap, parentJob.ID),
+			})
+			// Graceful finalize (#305): give the coordinator one terminal continuation
+			// to synthesize a best-effort result rather than looping on a failed verdict.
+			return e.enqueueFinalizeContinuation(ctx, parentJob, parentPayload, fmt.Sprintf("verify→replan attempt cap of %d reached", attemptCap))
+		}
+
+		attempt := parentPayload.VerifyAttempt + 1
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   parentJob.ID,
+			Kind:    "verify_replan_warning",
+			Message: fmt.Sprintf("independent verification failed (attempt %d/%d); sending a corrective replan continuation for job %s", attempt, attemptCap, parentJob.ID),
+		})
+		replanRequest := JobRequest{
+			ID:              delegationContinuationID(parentJob.ID),
+			Agent:           parentJob.Agent,
+			Action:          "ask",
+			Model:           parentPayload.Model,
+			Phase:           parentPayload.Phase,
+			Repo:            parentPayload.Repo,
+			Branch:          parentPayload.Branch,
+			PullRequest:     parentPayload.PullRequest,
+			HeadSHA:         parentPayload.HeadSHA,
+			GoalID:          parentPayload.GoalID,
+			TaskID:          parentPayload.TaskID,
+			TaskTitle:       parentPayload.TaskTitle,
+			LeadAgent:       parentPayload.LeadAgent,
+			Reviewers:       parentPayload.Reviewers,
+			Sender:          parentJob.Agent,
+			Instructions:    buildVerifyReplanContinuationPrompt(goal, parentResult, children, childPayloads, attempt, attemptCap),
+			Constraints:     parentPayload.Constraints,
+			ParentJobID:     parentJob.ID,
+			DelegationDepth: parentPayload.DelegationDepth + 1,
+			DelegatedBy:     parentJob.Agent,
+			RootJobID:       e.rootJobID(parentJob, parentPayload),
+			// Consume one verify attempt so a still-failing verdict next generation
+			// climbs toward the cap and eventually finalizes.
+			VerifyAttempt: attempt,
+			// Carry the non-progress carry-forward fields so a genuine corrective replan
+			// is not misclassified as a loop: record this generation's progressDigest and
+			// thread the (sub-threshold) streak/window forward exactly like the normal
+			// continuation below. A real verdict-driven replan IS a new generation.
+			RecentDelegationHashes: appendDelegationHashWindow(parentPayload.RecentDelegationHashes, canonicalDelegationSetHash(parentResult.Delegations)),
+			DelegationRepeatCount:  0,
+			NonProgressStreak:      nonProgressStreak,
+			LastProgressDigest:     digest,
+			Cockpit:                parentPayload.Cockpit,
+			CockpitSession:         parentPayload.CockpitSession,
+			CockpitPaneKey:         parentPayload.CockpitPaneKey,
+		}
+		if err := e.enqueue(ctx, replanRequest); err != nil {
+			return fmt.Errorf("enqueue verify replan continuation for %q: %w", parentJob.ID, err)
+		}
+		// The replan continuation IS the coordinator's single continuation, so it
+		// occupies the continuation slot: emit delegation_continuation_enqueued so a
+		// re-advance hits the continuationEnqueued top-guard rather than re-running
+		// the verify gate (and never double-enqueues a normal continuation).
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   parentJob.ID,
+			Kind:    "delegation_continuation_enqueued",
+			Message: fmt.Sprintf("verify replan continuation occupies the continuation slot for job %s", replanRequest.ID),
+		})
+		return nil
+	}
+
 	request := JobRequest{
 		ID:          delegationContinuationID(parentJob.ID),
 		Agent:       parentJob.Agent,
@@ -2655,7 +2775,7 @@ const maxUpstreamDepSummaryPreviewBytes = 280
 // deps[] as real dataflow. For each of d's succeeded DIRECT deps (sorted by id for
 // stable output), it emits a header line —
 //
-//	- dep <id> (agent <a>, action <act>): <decision> — <summary preview> (<PR>) [changes_made: N] [head <sha7>]
+//   - dep <id> (agent <a>, action <act>): <decision> — <summary preview> (<PR>) [changes_made: N] [head <sha7>]
 //
 // then the dep's artifact_body as a fenced, byte-budgeted block reusing
 // appendInlineArtifactBody (the SAME per-body cap and shared aggregate budget the
@@ -2865,6 +2985,61 @@ func buildCorrectiveContinuationPrompt(goal string, parentResult *AgentResult) s
 	return builder.String()
 }
 
+// buildVerifyReplanContinuationPrompt is the bounded corrective continuation sent
+// when the engine-level verify gate (#439) derives a FAILED verdict from the
+// verify-tagged legs. Unlike the finalize prompt it is NOT terminal — it asks the
+// coordinator to REPLAN: fix the issues the independent verification surfaced and
+// re-run the work. It is goal-anchored (#418), surfaces each verify leg's
+// decision/summary so the replan can target the fix, and states the remaining
+// attempt budget (after this attempt the loop routes to a best-effort finalize).
+func buildVerifyReplanContinuationPrompt(goal string, parentResult *AgentResult, children map[string]db.Job, childPayloads map[string]JobPayload, attempt, attemptCap int) string {
+	var builder strings.Builder
+	builder.WriteString(goalAnchorHeader(goal))
+	builder.WriteString("Independent verification FAILED: at least one verify leg reported the work is not yet correct.\n\n")
+	// Surface the verify legs' findings so the coordinator can target the fix
+	// rather than re-running blind. Only the verify-tagged legs are listed (the
+	// failing verdict is derived from them).
+	if parentResult != nil {
+		wrote := false
+		for _, d := range parentResult.Delegations {
+			if delegationSynthesisRule(d) != "verify" {
+				continue
+			}
+			if !wrote {
+				builder.WriteString("Verification findings:\n")
+				wrote = true
+			}
+			decision := "missing"
+			summary := ""
+			if child, ok := children[d.ID]; ok {
+				decision = child.State
+			}
+			if payload, ok := childPayloads[d.ID]; ok && payload.Result != nil {
+				if strings.TrimSpace(payload.Result.Decision) != "" {
+					decision = payload.Result.Decision
+				}
+				summary = strings.TrimSpace(payload.Result.Summary)
+			}
+			fmt.Fprintf(&builder, "- verify leg %q (agent %s): %s", d.ID, d.Agent, decision)
+			if summary != "" {
+				fmt.Fprintf(&builder, " — %s", summary)
+			}
+			builder.WriteString("\n")
+		}
+		if wrote {
+			builder.WriteString("\n")
+		}
+	}
+	fmt.Fprintf(&builder, "This is verify→replan attempt %d of %d. Address the verification findings above, then re-delegate the corrective work. ", attempt, attemptCap)
+	if attempt >= attemptCap {
+		builder.WriteString("This is the LAST attempt: if verification fails again you will be asked to synthesize a best-effort final result.\n\n")
+	} else {
+		builder.WriteString("\n\n")
+	}
+	builder.WriteString(goalSynthesisClosing(goal))
+	return builder.String()
+}
+
 // buildFinalizeContinuationPrompt is the terminal continuation sent when a
 // termination backstop trips. It tells the coordinator it has hit a limit and
 // cannot delegate further, asks it to synthesize a best-effort final result from
@@ -3005,6 +3180,83 @@ func delegationDecisionApproves(decision string) bool {
 	default:
 		return false
 	}
+}
+
+// delegationSynthesisRequiresVerify reports whether any delegation in the batch
+// declares synthesis_rule "verify", which makes the coordinator continuation
+// subject to the engine-level verify→replan gate (#439). Unlike vote/quorum it
+// does NOT block on failure; it issues a bounded corrective replan continuation.
+func delegationSynthesisRequiresVerify(delegations []Delegation) bool {
+	for _, d := range delegations {
+		if delegationSynthesisRule(d) == "verify" {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyVerdictPassed derives the v1 verify VERDICT (#439) mechanically from the
+// verify-tagged legs (synthesis_rule == "verify"): it returns false iff any such
+// leg reached a NON-approving outcome. The verdict is DECISION-driven, reusing the
+// approving-outcome test (delegationDecisionApproves) over the #421 convention that
+// a verify leg returns approved on a pass and changes_requested on a fail. Because
+// a review's changes_requested decision maps to a SUCCEEDED job state
+// (stateForDecision), the decision is consulted FIRST whenever the leg produced a
+// parsed result — otherwise the succeeded-state short-circuit vote/quorum use would
+// read every changes_requested verdict as a pass and defeat the gate. The
+// succeeded-state check is kept only as a fallback for a verify leg that finished
+// in a succeeded state without a parsed result.
+//
+// A verify leg with NO child is interpreted by whether it could ever have run.
+// A leg whose deps terminally failed (delegationPermanentlyBlocked, the same
+// predicate allDelegationsResolved uses) or that was folded into a fingerprint
+// dedup winner NEVER RAN: verification was not performed, so its outcome is
+// already governed by the upstream failure policy (continue/escalate) and it must
+// be SKIPPED here, not read as a failed verdict — otherwise the engine would
+// fabricate a failed verdict from an absent verifier and fire a premature
+// verify→replan continuation claiming verification failed when it never happened
+// (#439 review). Only a verify leg that WAS dispatchable yet has no terminal child
+// (a genuinely missing/crashed verification) fails the verdict, so an absent
+// verification of work that actually ran is never read as a pass. Non-verify legs
+// are ignored here (the conservative ordering runs the vote/quorum gates first).
+// No engine-side verify subprocess or second model call is made: the engine reads
+// the already-completed verdict the verify leg reported.
+func verifyVerdictPassed(delegations []Delegation, children map[string]db.Job, childPayloads map[string]JobPayload, dedupWinners map[string]db.Job) bool {
+	byID := delegationsByID(delegations)
+	for _, d := range delegations {
+		if delegationSynthesisRule(d) != "verify" {
+			continue
+		}
+		child, ok := children[d.ID]
+		if !ok {
+			// A verify leg that never ran (its deps terminally failed, or it was
+			// folded into a dedup winner) is governed by the upstream failure policy,
+			// not by this verdict: skip it rather than fabricating a failed verdict.
+			if _, deduped := dedupWinners[d.ID]; deduped {
+				continue
+			}
+			if delegationPermanentlyBlocked(d, children, byID, dedupWinners, map[string]bool{}) {
+				continue
+			}
+			// Dispatchable verify leg with no terminal child: a genuinely missing or
+			// crashed verification fails the verdict.
+			return false
+		}
+		// Decision-first: when the verify leg produced a parsed result, its decision
+		// is the verdict (approved => pass, changes_requested/failed/blocked => fail).
+		if payload, ok := childPayloads[d.ID]; ok && payload.Result != nil {
+			if !delegationDecisionApproves(payload.Result.Decision) {
+				return false
+			}
+			continue
+		}
+		// No parsed result: fall back to the job state — a succeeded leg with no
+		// verdict is treated as a pass, anything else (failed/blocked/queued) fails.
+		if child.State != string(JobSucceeded) {
+			return false
+		}
+	}
+	return true
 }
 
 func (e Engine) preflightDelegation(ctx context.Context, request JobRequest) error {

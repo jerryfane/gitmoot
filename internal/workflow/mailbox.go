@@ -55,6 +55,7 @@ type JobRequest struct {
 	DelegationRepeatCount  int
 	NonProgressStreak      int
 	LastProgressDigest     string
+	VerifyAttempt          int
 	DelegationFinalize     bool
 	Model                  string
 	Phase                  string
@@ -102,6 +103,7 @@ type JobPayload struct {
 	DelegationRepeatCount  int            `json:"delegation_repeat_count,omitempty"`
 	NonProgressStreak      int            `json:"non_progress_streak,omitempty"`
 	LastProgressDigest     string         `json:"last_progress_digest,omitempty"`
+	VerifyAttempt          int            `json:"verify_attempt,omitempty"`
 	DelegationFinalize     bool           `json:"delegation_finalize,omitempty"`
 	Model                  string         `json:"model,omitempty"`
 	Phase                  string         `json:"phase,omitempty"`
@@ -168,6 +170,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		DelegationRepeatCount:  request.DelegationRepeatCount,
 		NonProgressStreak:      request.NonProgressStreak,
 		LastProgressDigest:     request.LastProgressDigest,
+		VerifyAttempt:          request.VerifyAttempt,
 		DelegationFinalize:     request.DelegationFinalize,
 		Model:                  request.Model,
 		Phase:                  request.Phase,
