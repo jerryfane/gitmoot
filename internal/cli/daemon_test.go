@@ -5868,7 +5868,7 @@ func TestParallelizableSerialJobsCountsDistinctRuntimeSessions(t *testing.T) {
 	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "a", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1})
 	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "b", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 2})
 	worker := defaultJobWorker(store, io.Discard)
-	if got := parallelizableSerialJobs(ctx, worker, "owner/repo", ""); got != 2 {
+	if got, _ := parallelizableSerialJobs(ctx, worker, "owner/repo", ""); got != 2 {
 		t.Fatalf("parallelizableSerialJobs = %d, want 2", got)
 	}
 }
@@ -5883,7 +5883,7 @@ func TestParallelizableSerialJobsCollapsesSameSession(t *testing.T) {
 	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "a", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1})
 	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "a", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 2})
 	worker := defaultJobWorker(store, io.Discard)
-	if got := parallelizableSerialJobs(ctx, worker, "owner/repo", ""); got != 1 {
+	if got, _ := parallelizableSerialJobs(ctx, worker, "owner/repo", ""); got != 1 {
 		t.Fatalf("parallelizableSerialJobs = %d, want 1 (same session collapses)", got)
 	}
 }
@@ -5898,6 +5898,7 @@ func TestWarnSerializedParallelJobsEmitsRelaunchCommand(t *testing.T) {
 	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "b", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 2})
 	var out bytes.Buffer
 	worker := defaultJobWorker(store, &out)
+	resetPreflightWarnThrottle()
 	// Serializing config (single worker) with 2 parallelizable jobs warns.
 	warnSerializedParallelJobs(ctx, worker, 1, "owner/repo", "")
 	got := out.String()
@@ -5906,6 +5907,38 @@ func TestWarnSerializedParallelJobsEmitsRelaunchCommand(t *testing.T) {
 	}
 	if !strings.Contains(got, "--parallel 2") {
 		t.Fatalf("warning = %q, want exact relaunch command with --parallel 2", got)
+	}
+}
+
+func TestWarnSerializedParallelJobsRateLimitsUnchangedBacklog(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "a", runtime.CodexRuntime, "session-a", []string{"ask"}, "owner/repo")
+	seedDaemonWorkerAgent(t, store, "b", runtime.CodexRuntime, "session-b", []string{"ask"}, "owner/repo")
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "a", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "b", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 2})
+	var out bytes.Buffer
+	worker := defaultJobWorker(store, &out)
+	resetPreflightWarnThrottle()
+	// First tick warns.
+	warnSerializedParallelJobs(ctx, worker, 1, "owner/repo", "")
+	if !strings.Contains(out.String(), "will run serially") {
+		t.Fatalf("first tick = %q, want a warning", out.String())
+	}
+	// Second consecutive tick with the SAME backlog must stay quiet.
+	out.Reset()
+	warnSerializedParallelJobs(ctx, worker, 1, "owner/repo", "")
+	if out.Len() != 0 {
+		t.Fatalf("second tick re-emitted for an unchanged backlog: %q", out.String())
+	}
+	// A changed parallelizable set (new distinct session) re-warns.
+	seedDaemonWorkerAgent(t, store, "c", runtime.CodexRuntime, "session-c", []string{"ask"}, "owner/repo")
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-c", Agent: "c", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 3})
+	out.Reset()
+	warnSerializedParallelJobs(ctx, worker, 1, "owner/repo", "")
+	if !strings.Contains(out.String(), "will run serially") {
+		t.Fatalf("changed backlog = %q, want a fresh warning", out.String())
 	}
 }
 
@@ -5929,10 +5962,10 @@ func TestSerializingConfig(t *testing.T) {
 		limit   int
 		want    bool
 	}{
-		{false, 1, true},  // barrier, single worker
-		{false, 4, true},  // barrier serializes regardless of workers
-		{true, 1, true},   // pool but single worker
-		{true, 4, false},  // pool + multi worker: parallel-capable
+		{false, 1, true}, // barrier, single worker
+		{false, 4, true}, // barrier serializes regardless of workers
+		{true, 1, true},  // pool but single worker
+		{true, 4, false}, // pool + multi worker: parallel-capable
 	}
 	for _, tc := range cases {
 		if got := serializingConfig(tc.usePool, tc.limit); got != tc.want {

@@ -69,6 +69,9 @@ current scheduler config; relaunch with: gitmoot daemon restart --parallel 3
 section). Two jobs on the same agent session are *not* counted as parallelizable,
 because they serialize regardless of the scheduler.
 
+The warning is rate-limited: it is re-logged only when the parallelizable set
+changes, not on every poll, so a steady backlog does not spam the daemon log.
+
 ## What actually runs in parallel (two serialization layers)
 
 Parallelism under `pool` is bounded by **two** independent locks, not one:

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1746,11 +1747,21 @@ func serializingConfig(usePool bool, limit int) bool {
 // that could run concurrently but won't under a serializing config (#444):
 // distinct runtime sessions among same-repo dep-unblocked queued jobs. Jobs with
 // no resolvable runtime session key are counted individually (each is its own
-// would-be parallel slot). The count is what the preflight warns on (≥2).
-func parallelizableSerialJobs(ctx context.Context, worker jobWorker, repoFilter string, rootFilter string) int {
+// would-be parallel slot). The count is what the preflight warns on (≥2). The
+// returned signature uniquely identifies the parallelizable session set so the
+// preflight can de-duplicate an unchanged backlog across ticks.
+func parallelizableSerialJobs(ctx context.Context, worker jobWorker, repoFilter string, rootFilter string) (int, string) {
 	pending, err := listPendingQueuedJobs(ctx, worker, repoFilter, rootFilter)
 	if err != nil {
-		return 0
+		return 0, ""
+	}
+	// Cheap short-circuit: with fewer than 2 pending same-repo jobs there can
+	// never be ≥2 parallelizable slots, so skip the per-job session lookups
+	// (queuedJobRuntimeResourceKey → Store.GetAgent) entirely. This keeps the
+	// common-case (default single-worker, empty/small backlog) off the DB hot
+	// path beyond the single ListQueuedJobs the listing already performs.
+	if len(pending) < 2 {
+		return 0, ""
 	}
 	sessions := map[string]bool{}
 	noSession := 0
@@ -1758,25 +1769,80 @@ func parallelizableSerialJobs(ctx context.Context, worker jobWorker, repoFilter 
 		key := queuedJobRuntimeResourceKey(ctx, worker.Store, job)
 		if key == "" {
 			noSession++
+			// Each session-less job is its own parallel slot; key it by job ID
+			// so the dedup signature still reflects backlog changes.
+			sessions["job:"+job.ID] = true
 			continue
 		}
 		sessions[key] = true
 	}
-	return len(sessions) + noSession
+	count := len(sessions) + noSession
+	if count < 2 {
+		return count, ""
+	}
+	keys := make([]string, 0, len(sessions))
+	for k := range sessions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return count, strings.Join(keys, "\n")
+}
+
+// preflightWarnThrottle de-duplicates the serializing-config preflight warning
+// (#444) across worker ticks. runQueuedJobsForRepo is called once per poll
+// (default 30s), so a steady backlog under a serializing config would otherwise
+// re-log the identical line every tick. We re-emit only when the parallelizable
+// session set changes or a quiet interval has elapsed, keyed by repo filter.
+type preflightWarnState struct {
+	signature string
+	at        time.Time
+}
+
+var (
+	preflightWarnMu     sync.Mutex
+	preflightWarnByRepo = map[string]preflightWarnState{}
+	preflightWarnReWarn = 30 * time.Minute
+)
+
+// resetPreflightWarnThrottle clears the preflight de-dup state. Test-only.
+func resetPreflightWarnThrottle() {
+	preflightWarnMu.Lock()
+	defer preflightWarnMu.Unlock()
+	preflightWarnByRepo = map[string]preflightWarnState{}
+}
+
+// shouldEmitPreflightWarn reports whether the warning for this repo/signature
+// should be emitted now, recording the decision so an unchanged backlog stays
+// quiet until either the session set changes or preflightWarnReWarn elapses.
+func shouldEmitPreflightWarn(repoKey string, signature string, now time.Time) bool {
+	preflightWarnMu.Lock()
+	defer preflightWarnMu.Unlock()
+	prev, ok := preflightWarnByRepo[repoKey]
+	if ok && prev.signature == signature && now.Sub(prev.at) < preflightWarnReWarn {
+		return false
+	}
+	preflightWarnByRepo[repoKey] = preflightWarnState{signature: signature, at: now}
+	return true
 }
 
 // warnSerializedParallelJobs emits an actionable preflight warning when ≥2
 // parallelizable jobs are queued under a serializing config (#444), printing the
-// exact relaunch command. It is best-effort and never blocks the tick.
+// exact relaunch command. It is best-effort and never blocks the tick, and is
+// rate-limited so an unchanged backlog does not re-log every poll.
 func warnSerializedParallelJobs(ctx context.Context, worker jobWorker, limit int, repoFilter string, rootFilter string) {
-	count := parallelizableSerialJobs(ctx, worker, repoFilter, rootFilter)
+	count, signature := parallelizableSerialJobs(ctx, worker, repoFilter, rootFilter)
 	if count < 2 {
 		return
 	}
 	repo := strings.TrimSpace(repoFilter)
 	target := "the daemon"
+	repoKey := "*"
 	if repo != "" {
 		target = repo
+		repoKey = repo
+	}
+	if !shouldEmitPreflightWarn(repoKey, signature, time.Now()) {
+		return
 	}
 	workers := limit
 	if workers < count {

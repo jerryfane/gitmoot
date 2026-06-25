@@ -51,7 +51,9 @@ gitmoot daemon start --workers 5 --scheduler barrier
 
   "Parallelizable" is counted conservatively: same repo, dependency-unblocked, and
   **distinct runtime sessions** (see below). Two jobs on the same agent session are
-  not counted, because they serialize regardless of the scheduler.
+  not counted, because they serialize regardless of the scheduler. The warning is
+  rate-limited — it is re-logged only when the parallelizable set changes, not on
+  every poll — so a steady backlog does not spam the daemon log.
 
 ## What actually runs in parallel (two serialization layers)
 
