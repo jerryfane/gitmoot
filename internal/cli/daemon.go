@@ -1764,19 +1764,19 @@ func parallelizableSerialJobs(ctx context.Context, worker jobWorker, repoFilter 
 		return 0, ""
 	}
 	sessions := map[string]bool{}
-	noSession := 0
 	for _, job := range pending {
 		key := queuedJobRuntimeResourceKey(ctx, worker.Store, job)
 		if key == "" {
-			noSession++
 			// Each session-less job is its own parallel slot; key it by job ID
-			// so the dedup signature still reflects backlog changes.
+			// so the dedup signature still reflects backlog changes. The job-ID
+			// key already makes it a distinct entry in `sessions`, so it must NOT
+			// also be counted separately or the slot would be double-counted.
 			sessions["job:"+job.ID] = true
 			continue
 		}
 		sessions[key] = true
 	}
-	count := len(sessions) + noSession
+	count := len(sessions)
 	if count < 2 {
 		return count, ""
 	}

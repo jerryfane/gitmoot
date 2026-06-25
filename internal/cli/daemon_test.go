@@ -5888,6 +5888,41 @@ func TestParallelizableSerialJobsCollapsesSameSession(t *testing.T) {
 	}
 }
 
+func TestParallelizableSerialJobsCountsSessionlessJobsOnce(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	// ShellRuntime agents have no resumable runtime session key, so each queued
+	// job is its own would-be parallel slot. The session-less branch must count
+	// each such job EXACTLY ONCE (regression: it previously both incremented a
+	// noSession counter AND inserted a job-ID-keyed entry, double-counting).
+	seedDaemonWorkerAgent(t, store, "a", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
+	seedDaemonWorkerAgent(t, store, "b", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "a", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "b", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 2})
+	worker := defaultJobWorker(store, io.Discard)
+	if got, _ := parallelizableSerialJobs(ctx, worker, "owner/repo", ""); got != 2 {
+		t.Fatalf("parallelizableSerialJobs = %d, want 2 (two session-less jobs, counted once each)", got)
+	}
+}
+
+func TestParallelizableSerialJobsMixesKeyedAndSessionlessOnce(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	// One keyed (codex session) job + one session-less (shell) job -> two distinct
+	// parallel slots. The session-less job must not be double-counted alongside the
+	// keyed one (regression guard: previously returned 3).
+	seedDaemonWorkerAgent(t, store, "a", runtime.CodexRuntime, "session-a", []string{"ask"}, "owner/repo")
+	seedDaemonWorkerAgent(t, store, "b", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "a", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "b", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 2})
+	worker := defaultJobWorker(store, io.Discard)
+	if got, _ := parallelizableSerialJobs(ctx, worker, "owner/repo", ""); got != 2 {
+		t.Fatalf("parallelizableSerialJobs = %d, want 2 (keyed + session-less, no double count)", got)
+	}
+}
+
 func TestWarnSerializedParallelJobsEmitsRelaunchCommand(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
