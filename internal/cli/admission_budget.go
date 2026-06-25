@@ -31,7 +31,27 @@ type admissionBudget struct {
 	maxMemoryGB   float64 // 0 = memory gate off
 	reservedCount int
 	reservedMemGB float64
-	reservations  map[string]float64 // jobID -> reserved GB (idempotency)
+	reservations  map[string]reservation // jobID -> what it holds (idempotency)
+}
+
+// reservation is what a single admitted job holds in the budget. session records
+// whether the job consumed a max_concurrent_sessions slot — only session jobs
+// (queuedJobRuntimeResourceKey != "") do; a non-session job (shell runtime, or an
+// agent with no resumable runtime session) is "treated as 0 RAM / not
+// session-counted" per the frozen goal, so Release decrements symmetrically only
+// what Reserve actually charged.
+type reservation struct {
+	session bool
+	memGB   float64
+}
+
+// admissionEstimate is the per-job admission cost, computed lazily by the
+// dispatch call site ONLY for an active (non-nil) budget. session is true iff the
+// job holds a resumable runtime session (so it counts against
+// max_concurrent_sessions); memGB is its RAM estimate (0 for a non-session job).
+type admissionEstimate struct {
+	session bool
+	memGB   float64
 }
 
 // newAdmissionBudget returns an *admissionBudget for the policy, or nil when both
@@ -44,18 +64,26 @@ func newAdmissionBudget(policy config.AdmissionPolicy) *admissionBudget {
 	return &admissionBudget{
 		maxSessions:  policy.MaxConcurrentSessions,
 		maxMemoryGB:  policy.MaxMemoryGB,
-		reservations: map[string]float64{},
+		reservations: map[string]reservation{},
 	}
 }
 
-// Reserve atomically admits the job, reserving one session slot and estGB of RAM,
-// and reports whether it was admitted. A nil budget (feature off) always admits
-// without accounting. A job ID already reserved (in flight) is admitted again as
-// a no-op so a re-dispatch is safe. Otherwise the job is admitted only if BOTH
-// the session-count cap and the memory cap (each, when set) would still hold; a
-// job that does not fit is NOT reserved and false is returned (the caller leaves
-// it queued).
-func (b *admissionBudget) Reserve(jobID string, estGB float64) bool {
+// Reserve atomically admits the job, reserving (if it is a session job) one
+// session slot plus its RAM estimate, and reports whether it was admitted. A nil
+// budget (feature off) always admits without accounting AND WITHOUT EVALUATING
+// est — keeping the default (no [admission] config) dispatch path byte-identical:
+// the estimate is a thunk so its config read + DB lookups are skipped entirely on
+// the off path (and for an already-in-flight job).
+//
+// est is computed at most once, only after the nil/idempotency checks, and only
+// when at least one gate is active. A non-session estimate (session=false) does
+// NOT consume a max_concurrent_sessions slot — it is "not session-counted" per
+// the frozen goal — and contributes 0 RAM. A job ID already reserved (in flight)
+// is admitted again as a no-op so a re-dispatch is safe. Otherwise the job is
+// admitted only if BOTH the session-count cap and the memory cap (each, when set)
+// would still hold; a job that does not fit is NOT reserved and false is returned
+// (the caller leaves it queued).
+func (b *admissionBudget) Reserve(jobID string, est func() admissionEstimate) bool {
 	if b == nil {
 		return true
 	}
@@ -64,15 +92,19 @@ func (b *admissionBudget) Reserve(jobID string, estGB float64) bool {
 	if _, ok := b.reservations[jobID]; ok {
 		return true
 	}
-	if b.maxSessions > 0 && b.reservedCount+1 > b.maxSessions {
+	e := est()
+	// A non-session job neither consumes a session slot nor checks the session cap.
+	if e.session && b.maxSessions > 0 && b.reservedCount+1 > b.maxSessions {
 		return false
 	}
-	if b.maxMemoryGB > 0 && b.reservedMemGB+estGB > b.maxMemoryGB {
+	if b.maxMemoryGB > 0 && b.reservedMemGB+e.memGB > b.maxMemoryGB {
 		return false
 	}
-	b.reservedCount++
-	b.reservedMemGB += estGB
-	b.reservations[jobID] = estGB
+	if e.session {
+		b.reservedCount++
+	}
+	b.reservedMemGB += e.memGB
+	b.reservations[jobID] = reservation{session: e.session, memGB: e.memGB}
 	return true
 }
 
@@ -87,12 +119,14 @@ func (b *admissionBudget) Release(jobID string) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	estGB, ok := b.reservations[jobID]
+	r, ok := b.reservations[jobID]
 	if !ok {
 		return
 	}
-	b.reservedCount--
-	b.reservedMemGB -= estGB
+	if r.session {
+		b.reservedCount--
+	}
+	b.reservedMemGB -= r.memGB
 	delete(b.reservations, jobID)
 }
 

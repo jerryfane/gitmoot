@@ -4301,37 +4301,43 @@ claude_memory_gb = 0.85
 	}
 }
 
-// TestPerJobMemoryEstimateGB maps each session runtime to its configured RAM
-// estimate and a non-session runtime (shell) to 0.
-func TestPerJobMemoryEstimateGB(t *testing.T) {
+// TestPerJobAdmissionEstimate maps each session runtime to its configured RAM
+// estimate (and marks it session-counted), and a non-session runtime (shell, or a
+// session runtime with no ref) to 0 RAM AND not session-counted.
+func TestPerJobAdmissionEstimate(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
 	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
 	seedDaemonWorkerAgent(t, store, "codex-agent", runtime.CodexRuntime, "ref-1", []string{"ask"}, "owner/repo")
 	seedDaemonWorkerAgent(t, store, "claude-agent", runtime.ClaudeRuntime, "ref-2", []string{"ask"}, "owner/repo")
 	seedDaemonWorkerAgent(t, store, "kimi-agent", runtime.KimiRuntime, "ref-3", []string{"ask"}, "owner/repo")
-	// A shell agent has no resumable runtime session key ⇒ contributes 0 (matches
-	// its exemption from the runtime session lock).
+	// A shell agent has no resumable runtime session key ⇒ contributes 0 and is not
+	// session-counted (matches its exemption from the runtime session lock).
 	seedDaemonWorkerAgent(t, store, "shell-agent", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
-	// A codex agent with an empty runtime ref also has no session key ⇒ 0.
+	// A codex agent with an empty runtime ref also has no session key ⇒ 0 / not counted.
 	seedDaemonWorkerAgent(t, store, "codex-no-ref", runtime.CodexRuntime, "", []string{"ask"}, "owner/repo")
 
 	policy := config.AdmissionPolicy{CodexMemoryGB: 0.2, ClaudeMemoryGB: 0.85, KimiMemoryGB: 0.5, DefaultMemoryGB: 0.7}
 	cases := []struct {
-		agent string
-		want  float64
+		agent       string
+		wantMemGB   float64
+		wantSession bool
 	}{
-		{"codex-agent", 0.2},
-		{"claude-agent", 0.85},
-		{"kimi-agent", 0.5},
-		{"shell-agent", 0},
-		{"codex-no-ref", 0},
+		{"codex-agent", 0.2, true},
+		{"claude-agent", 0.85, true},
+		{"kimi-agent", 0.5, true},
+		{"shell-agent", 0, false},
+		{"codex-no-ref", 0, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.agent, func(t *testing.T) {
 			job := db.Job{ID: "job-" + tc.agent, Agent: tc.agent}
-			if got := perJobMemoryEstimateGB(ctx, store, job, policy); got != tc.want {
-				t.Fatalf("perJobMemoryEstimateGB(%s) = %v, want %v", tc.agent, got, tc.want)
+			got := perJobAdmissionEstimate(ctx, store, job, policy)
+			if got.memGB != tc.wantMemGB {
+				t.Fatalf("perJobAdmissionEstimate(%s).memGB = %v, want %v", tc.agent, got.memGB, tc.wantMemGB)
+			}
+			if got.session != tc.wantSession {
+				t.Fatalf("perJobAdmissionEstimate(%s).session = %v, want %v", tc.agent, got.session, tc.wantSession)
 			}
 		})
 	}

@@ -1630,7 +1630,8 @@ func runQueuedJobsForRepo(ctx context.Context, worker jobWorker, limit int, repo
 		// when a freed slot can admit them (avoids spinning on an unfittable job).
 		admitted := make([]db.Job, 0, len(queued))
 		for _, job := range queued {
-			if worker.Admission.Reserve(job.ID, worker.admissionEstimateGB(ctx, job)) {
+			job := job
+			if worker.Admission.Reserve(job.ID, func() admissionEstimate { return worker.admissionEstimate(ctx, job) }) {
 				admitted = append(admitted, job)
 				continue
 			}
@@ -1783,7 +1784,7 @@ func runQueuedJobsForRepoPool(ctx context.Context, worker jobWorker, limit int, 
 					// A job that does not fit the budget is skipped (left queued) and the
 					// pool re-queries on the next pass once a reap frees a slot — never
 					// failed/dropped. A nil budget always admits ⇒ byte-identical default.
-					if !worker.Admission.Reserve(job.ID, worker.admissionEstimateGB(ctx, job)) {
+					if !worker.Admission.Reserve(job.ID, func() admissionEstimate { return worker.admissionEstimate(ctx, job) }) {
 						continue
 					}
 					checkoutKey := queuedJobCheckoutKey(ctx, worker.Store, job)
@@ -1820,7 +1821,7 @@ func runQueuedJobsForRepoPool(ctx context.Context, worker jobWorker, limit int, 
 					}
 					// Host-global admission gate (#365): reserve before creating the
 					// isolation worktree so a deferred job leaves no orphan worktree behind.
-					if !worker.Admission.Reserve(job.ID, worker.admissionEstimateGB(ctx, job)) {
+					if !worker.Admission.Reserve(job.ID, func() admissionEstimate { return worker.admissionEstimate(ctx, job) }) {
 						continue
 					}
 					iso, ok := worker.allocatePoolIsolationWorktree(ctx, job, payload)
@@ -2441,45 +2442,51 @@ func (w jobWorker) loadAdmissionBudget() *admissionBudget {
 	return newAdmissionBudget(policy)
 }
 
-// perJobMemoryEstimateGB maps a queued job's runtime to its configured RAM
-// estimate (GB) for the memory admission gate (#365). A job whose runtime has no
-// resumable session key — exactly the runtimes already exempt from the runtime
-// session lock (queuedJobRuntimeResourceKey returns "") — contributes 0 and is
-// not memory-accounted. Otherwise it returns the per-runtime prior, falling back
-// to default_memory_gb for a session runtime not explicitly mapped.
-func perJobMemoryEstimateGB(ctx context.Context, store *db.Store, job db.Job, policy config.AdmissionPolicy) float64 {
+// perJobAdmissionEstimate maps a queued job's runtime to its admission cost
+// (#365): whether it holds a resumable runtime session (so it counts against
+// max_concurrent_sessions) and its configured RAM estimate (GB). A job whose
+// runtime has no resumable session key — exactly the runtimes already exempt from
+// the runtime session lock (queuedJobRuntimeResourceKey returns "") — is "not
+// session-counted" and contributes 0 RAM, per the frozen goal. Otherwise the job
+// is session-counted and its RAM is the per-runtime prior, falling back to
+// default_memory_gb for a session runtime not explicitly mapped.
+func perJobAdmissionEstimate(ctx context.Context, store *db.Store, job db.Job, policy config.AdmissionPolicy) admissionEstimate {
 	if queuedJobRuntimeResourceKey(ctx, store, job) == "" {
-		return 0
+		return admissionEstimate{session: false, memGB: 0}
 	}
 	if store == nil {
-		return policy.DefaultMemoryGB
+		return admissionEstimate{session: true, memGB: policy.DefaultMemoryGB}
 	}
 	agent, err := store.GetAgent(ctx, job.Agent)
 	if err != nil {
-		return policy.DefaultMemoryGB
+		return admissionEstimate{session: true, memGB: policy.DefaultMemoryGB}
 	}
 	switch strings.TrimSpace(runtimeAgent(agent).Runtime) {
 	case runtime.CodexRuntime:
-		return policy.CodexMemoryGB
+		return admissionEstimate{session: true, memGB: policy.CodexMemoryGB}
 	case runtime.ClaudeRuntime:
-		return policy.ClaudeMemoryGB
+		return admissionEstimate{session: true, memGB: policy.ClaudeMemoryGB}
 	case runtime.KimiRuntime:
-		return policy.KimiMemoryGB
+		return admissionEstimate{session: true, memGB: policy.KimiMemoryGB}
 	default:
-		return policy.DefaultMemoryGB
+		return admissionEstimate{session: true, memGB: policy.DefaultMemoryGB}
 	}
 }
 
-// admissionEstimateGB resolves the per-job memory estimate for THIS worker's
-// configured admission policy. It is a thin convenience used at the dispatch
-// reserve points; a load error degrades to the default estimate so a transient
-// config read never silently disables the memory gate.
-func (w jobWorker) admissionEstimateGB(ctx context.Context, job db.Job) float64 {
+// admissionEstimate resolves the per-job admission cost (session-ness + RAM) for
+// THIS worker's configured admission policy. It is the thunk handed to
+// admissionBudget.Reserve at the dispatch reserve points: Reserve invokes it ONLY
+// when the budget is active (non-nil) and the job is not already in flight, so on
+// the default (no [admission] config) off path it is never called and the
+// dispatch loop does ZERO extra config-file I/O or DB lookups — keeping that path
+// byte-identical. A load error degrades to the default policy so a transient
+// config read never silently disables a gate.
+func (w jobWorker) admissionEstimate(ctx context.Context, job db.Job) admissionEstimate {
 	policy, err := w.admissionPolicy()
 	if err != nil {
 		policy = config.DefaultAdmissionPolicy()
 	}
-	return perJobMemoryEstimateGB(ctx, w.Store, job, policy)
+	return perJobAdmissionEstimate(ctx, w.Store, job, policy)
 }
 
 // orchestratePolicy loads the host-level [orchestrate] cockpit policy, mirroring
