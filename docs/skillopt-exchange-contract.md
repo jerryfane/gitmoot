@@ -263,6 +263,56 @@ manual (the harvester writes only `eval_runs` / `eval_review_items` /
 subject to the configurable `[skillopt].auto_promote` policy (#463) when that
 lands — weighted-low + judge-tagged, **not** barred from promotion.
 
+### Promotion policy + notifications (off by default)
+
+When a candidate becomes **pending** (after `skillopt import` or `train
+continue`), gitmoot can (a) **notify** over the [event stream](events.md) and
+(b) optionally **auto-promote** it — both **off by default** and **additive**
+(#471). Importing **never** promotes: the import write only ever creates the
+pending version; the notify + auto-promote is a separate, config-gated step that
+runs *after* import returns and, on a guardrails pass, calls the same
+`gitmoot skillopt candidate promote` machinery.
+
+**Notifications (always-on when `[events]` is configured).** Every newly-pending
+candidate emits a single **`candidate.awaiting_promotion`** event carrying the
+version id (`job_id`), template id (`root_id`), and a redacted score/samples/CI
+reason — independent of the auto-promote policy, so a human is notified even in
+the manual default. The dashboard **Attention** page also lists every pending
+candidate (read-only), so candidates are visible locally even with `[events]`
+off. A successful auto-promotion additionally emits **`candidate.auto_promoted`**
+so the change can be reviewed or rolled back (`gitmoot skillopt candidate` /
+template revert) even in full-auto.
+
+**Auto-promote (gated on guardrails, fail-safe).** With `auto_promote = true`, a
+candidate is auto-promoted **only when every configured guardrail holds**; **any**
+uncertainty fails safe to *notify, don't promote*:
+
+```toml
+[skillopt]
+auto_promote = false                      # default false = manual, byte-identical
+auto_promote_min_samples = 0              # UNSET = hard "do not promote" (NOT 0)
+auto_promote_min_score = 0.0              # UNSET, or a candidate with no score = do not promote
+auto_promote_require_external_ci = false  # require >= 1 real-external-CI feedback event in the eval_run
+auto_promote_require_measured_judge = false  # PARSED but DEFERRED (#344): true => fail safe to no-promote
+auto_promote_canary = false               # PARSED but DEFERRED (canary follow-on): true => fail safe to no-promote
+```
+
+- `auto_promote_min_samples` — the count of `feedback_events` in the candidate's
+  eval_run must meet this floor. **Unset is a hard do-not-promote, never `0`**, so
+  flipping `auto_promote` on without a sample floor never promotes (a sparse
+  `skillopt import` with no resolvable eval_run also fails safe to notify-only).
+- `auto_promote_min_score` — the candidate's `summary.score` must be `>=` this.
+  **Unset, or a candidate with no score, is a hard do-not-promote.**
+- `auto_promote_require_external_ci` — at least one eval_run feedback event must
+  record a merge that passed **genuine external CI** (not the no-CI near-neutral
+  band). It reuses the harvester's own real-CI vocabulary, so it never rewards an
+  empty gate.
+- `auto_promote_require_measured_judge` and `auto_promote_canary` are **parsed but
+  deferred**: there is no judge↔human calibration source yet (gated on #344) and
+  the sampled-traffic canary + auto-rollback do not exist, so setting either to
+  `true` **forces notify-only** today. They are documented so a user can write the
+  knob forward-compatibly.
+
 ## Ranked Exploration Workflow
 
 Use ranked exploration when the template is still ambiguous and humans need to

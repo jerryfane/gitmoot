@@ -47,6 +47,21 @@ const (
 	// carries the redacted question.
 	EventJobNeedsAttention EventType = "job.needs_attention"
 
+	// EventCandidateAwaitingPromotion is emitted once when a SkillOpt template
+	// candidate becomes PENDING (the post-import notify, #471): a new pending
+	// agent_template_version is awaiting a human (or auto-promote) decision. JobID
+	// is the pending version id, RootID the template id, Status "awaiting_promotion",
+	// Detail a redacted score/samples/CI reason. Always emitted (when [events] is
+	// configured) independent of the auto-promote policy.
+	EventCandidateAwaitingPromotion EventType = "candidate.awaiting_promotion"
+	// EventCandidateAutoPromoted is emitted once when the off-by-default
+	// [skillopt].auto_promote policy auto-promotes a pending candidate to current
+	// (#471), AFTER the existing PromoteAgentTemplateVersion write. JobID is the
+	// promoted version id, RootID the template id, Status "auto_promoted", Detail a
+	// redacted reason naming the guardrails that passed, so a human can review or
+	// roll back even in full-auto.
+	EventCandidateAutoPromoted EventType = "candidate.auto_promoted"
+
 	// Reserved for the graduate step (parsed/enumerated but NOT emitted by the
 	// pilot). Listed so downstream consumers can switch over them forward-
 	// compatibly without a schema bump when they start arriving.

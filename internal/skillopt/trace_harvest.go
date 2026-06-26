@@ -58,6 +58,31 @@ const (
 	scoreChangesRequestedStep = 0.2
 )
 
+// realExternalCIPhrase is the canonical marker phrase the harvester writes into a
+// real-CI positive feedback event's Reasoning (the scoreMergedRealCI band: a
+// merge that passed a genuine non-gitmoot/ external CI). It is the SINGLE source
+// of truth shared between the harvester (which writes it) and
+// FeedbackEventIsRealExternalCIPositive (which the #471 auto-promote external-CI
+// guardrail reads), so the guardrail never re-hardcodes the 0.5 near-neutral band
+// or its own copy of the phrase — if the band/phrasing changes, both move together.
+const realExternalCIPhrase = "passing external CI"
+
+// FeedbackEventIsRealExternalCIPositive reports whether a harvested auto-trace
+// feedback event records a merge that passed GENUINE external CI (the
+// scoreMergedRealCI band), as opposed to a near-neutral empty-gate merge
+// (scoreMergedNoCI / "no external CI") or any negative. The #471 auto-promote
+// external-CI guardrail uses it to require at least one real-CI positive in the
+// candidate's eval_run; it mirrors the harvester's own vocabulary via the shared
+// realExternalCIPhrase rather than re-deriving the 0.5 band, so the two cannot
+// drift. A choice of "a" (the positive baseline-champion choice) whose Reasoning
+// carries the real-CI marker is the only thing that counts.
+func FeedbackEventIsRealExternalCIPositive(event db.FeedbackEvent) bool {
+	if strings.TrimSpace(event.Choice) != "a" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(event.Reasoning), strings.ToLower(realExternalCIPhrase))
+}
+
 // CombinedStatusReader is the minimal GitHub read the no-CI guard needs (#465):
 // the combined commit status at a head SHA AND the PR's check-runs. github.Client
 // satisfies it. It is its own narrow interface so the harvester can be unit-tested
@@ -222,7 +247,7 @@ func (h *OutcomeHarvester) project(ctx context.Context, payload workflow.JobPayl
 	case workflow.OutcomeMerged:
 		if h.mergeHasRealCI(ctx, outcome) {
 			return positiveSignal(scoreMergedRealCI,
-				fmt.Sprintf("PR #%d merged with passing external CI.", outcome.PullRequest)), "a"
+				fmt.Sprintf("PR #%d merged with %s.", outcome.PullRequest, realExternalCIPhrase)), "a"
 		}
 		return positiveSignal(scoreMergedNoCI,
 			fmt.Sprintf("PR #%d merged through an empty gate (no external CI); near-neutral, not a strong positive.", outcome.PullRequest)), "a"

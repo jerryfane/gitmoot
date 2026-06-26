@@ -1,0 +1,161 @@
+package skillopt
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/jerryfane/gitmoot/internal/db"
+)
+
+func intPtr(v int) *int           { return &v }
+func floatPtr(v float64) *float64 { return &v }
+
+// realCIFeedback is a feedback event the harvester would write for a merge that
+// passed genuine external CI (choice "a", the real-CI marker phrase).
+func realCIFeedback() db.FeedbackEvent {
+	return db.FeedbackEvent{Choice: "a", Reasoning: "PR #7 merged with " + realExternalCIPhrase + "."}
+}
+
+// noCIFeedback is a feedback event for a near-neutral empty-gate merge (choice
+// "a" but NO external CI) — it must NOT count as a real-CI positive.
+func noCIFeedback() db.FeedbackEvent {
+	return db.FeedbackEvent{Choice: "a", Reasoning: "PR #7 merged through an empty gate (no external CI); near-neutral, not a strong positive."}
+}
+
+func candidateWithScore(score float64) CandidatePackage {
+	return CandidatePackage{Summary: CandidateSummary{Score: &score}}
+}
+
+func TestEvaluateAutoPromote(t *testing.T) {
+	cases := []struct {
+		name        string
+		policy      config.SkillOptPolicy
+		candidate   CandidatePackage
+		feedback    []db.FeedbackEvent
+		wantPromote bool
+		reasonHas   string
+	}{
+		{
+			name:        "off by default never promotes",
+			policy:      config.SkillOptPolicy{AutoPromote: false, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.5)},
+			candidate:   candidateWithScore(0.99),
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "auto_promote is off",
+		},
+		{
+			name:        "all guardrails pass promotes",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.9), AutoPromoteRequireExternalCI: true},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: true,
+			reasonHas:   "external CI",
+		},
+		{
+			name:        "all guardrails pass reason mentions score and samples",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.9), AutoPromoteRequireExternalCI: true},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{realCIFeedback(), realCIFeedback()},
+			wantPromote: true,
+			reasonHas:   "samples",
+		},
+		{
+			name:        "nil score fails safe",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.5)},
+			candidate:   CandidatePackage{Summary: CandidateSummary{Score: nil}},
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "no score",
+		},
+		{
+			name:        "samples below min no promote",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(3), AutoPromoteMinScore: floatPtr(0.5)},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "below auto_promote_min_samples",
+		},
+		{
+			name:        "unset min_samples is hard do-not-promote not zero",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: nil, AutoPromoteMinScore: floatPtr(0.5)},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "auto_promote_min_samples is not set",
+		},
+		{
+			name:        "unset min_score is hard do-not-promote",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: nil},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "auto_promote_min_score is not set",
+		},
+		{
+			name:        "score below min no promote",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.9)},
+			candidate:   candidateWithScore(0.5),
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "below auto_promote_min_score",
+		},
+		{
+			name:        "require external ci but only near-neutral no promote",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.5), AutoPromoteRequireExternalCI: true},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{noCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "no eval_run feedback recorded a real external-CI pass",
+		},
+		{
+			name:        "external ci satisfied by one real positive among near-neutral",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.5), AutoPromoteRequireExternalCI: true},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{noCIFeedback(), realCIFeedback()},
+			wantPromote: true,
+			reasonHas:   "external CI confirmed",
+		},
+		{
+			name:        "require measured judge fails safe deferred",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.5), AutoPromoteRequireMeasuredJudge: true},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "require_measured_judge",
+		},
+		{
+			name:        "canary fails safe deferred",
+			policy:      config.SkillOptPolicy{AutoPromote: true, AutoPromoteMinSamples: intPtr(1), AutoPromoteMinScore: floatPtr(0.5), AutoPromoteCanary: true},
+			candidate:   candidateWithScore(0.96),
+			feedback:    []db.FeedbackEvent{realCIFeedback()},
+			wantPromote: false,
+			reasonHas:   "canary",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := EvaluateAutoPromote(tc.policy, tc.candidate, tc.feedback)
+			if decision.Promote != tc.wantPromote {
+				t.Fatalf("Promote = %v, want %v (reason: %q)", decision.Promote, tc.wantPromote, decision.Reason)
+			}
+			if tc.reasonHas != "" && !strings.Contains(decision.Reason, tc.reasonHas) {
+				t.Fatalf("reason %q does not contain %q", decision.Reason, tc.reasonHas)
+			}
+		})
+	}
+}
+
+func TestFeedbackEventIsRealExternalCIPositive(t *testing.T) {
+	if !FeedbackEventIsRealExternalCIPositive(realCIFeedback()) {
+		t.Fatalf("real-CI positive should be detected")
+	}
+	if FeedbackEventIsRealExternalCIPositive(noCIFeedback()) {
+		t.Fatalf("near-neutral empty-gate merge must NOT count as real CI")
+	}
+	// A negative (choice "b") carrying the phrase still must not count.
+	if FeedbackEventIsRealExternalCIPositive(db.FeedbackEvent{Choice: "b", Reasoning: realExternalCIPhrase}) {
+		t.Fatalf("a negative choice must never be a real-CI positive")
+	}
+}
