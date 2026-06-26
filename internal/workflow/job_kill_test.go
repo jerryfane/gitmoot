@@ -152,8 +152,10 @@ func TestKillDelegationTreeResolvesChildToRoot(t *testing.T) {
 
 // TestKillDelegationTreeReleasesLocksAndTerminalizesQueuedChildren pins the
 // companion cleanup defects #479 + #480: a kill releases the resource/branch
-// locks owned by every tree job and eagerly cancels the tree's QUEUED child
-// legs, while leaving running children and queued continuations untouched.
+// locks owned by every NON-RUNNING tree job (root + just-cancelled queued legs)
+// and eagerly cancels the tree's QUEUED child legs, while leaving running
+// children — and crucially the locks they still hold — untouched, plus queued
+// continuations.
 func TestKillDelegationTreeReleasesLocksAndTerminalizesQueuedChildren(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
@@ -230,16 +232,25 @@ func TestKillDelegationTreeReleasesLocksAndTerminalizesQueuedChildren(t *testing
 		t.Fatalf("continuation state = %q, want %q (must still run finalize)", got, JobQueued)
 	}
 
-	// (#479) No locks remain owned by any tree job.
+	// (#479) Locks of NON-RUNNING tree jobs are released (root + the just-cancelled
+	// queued leg c1), but the RUNNING leg c2 keeps its lock (branch:c) so a competing
+	// same-key job cannot start against its still-live runtime session / working tree.
 	locks, err := store.ListResourceLocks(ctx)
 	if err != nil {
 		t.Fatalf("ListResourceLocks returned error: %v", err)
 	}
-	treeOwners := map[string]bool{"root": true, "root/delegation/c1": true, "root/delegation/c2": true}
+	releasedOwners := map[string]bool{"root": true, "root/delegation/c1": true}
+	c2LockOwned := false
 	for _, l := range locks {
-		if treeOwners[l.OwnerJobID] {
-			t.Fatalf("lock %q still owned by tree job %q after kill", l.ResourceKey, l.OwnerJobID)
+		if releasedOwners[l.OwnerJobID] {
+			t.Fatalf("lock %q still owned by non-running tree job %q after kill", l.ResourceKey, l.OwnerJobID)
 		}
+		if l.OwnerJobID == "root/delegation/c2" && l.ResourceKey == "branch:c" {
+			c2LockOwned = true
+		}
+	}
+	if !c2LockOwned {
+		t.Fatal("the RUNNING child leg c2 must KEEP its lock (branch:c) after a graceful kill")
 	}
 
 	// Existing behavior preserved.

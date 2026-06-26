@@ -2415,6 +2415,13 @@ func queuedJobMatchesSession(job db.Job, rootFilter string) bool {
 // Delegation child legs set DelegationID (delegationRequest), so a non-empty
 // DelegationID is what marks a job as skippable work. A payload-parse miss or
 // store error fails open (returns false) so a hiccup never silently strands a job.
+//
+// NOTE: the same child-leg classification invariant (RootJobID != "" &&
+// RootJobID != job.ID && DelegationID != "") is re-implemented inline in
+// workflow.KillDelegationTree (internal/workflow/job_kill.go, #480) to eagerly
+// cancel queued child legs at kill time. The cli->workflow import direction
+// prevents sharing one helper, so if the classification rules here change, update
+// the workflow site too — the two MUST stay in lockstep.
 func queuedChildOfKilledRoot(ctx context.Context, store *db.Store, job db.Job) bool {
 	if store == nil {
 		return false
