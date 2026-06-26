@@ -59,11 +59,23 @@ const (
 )
 
 // CombinedStatusReader is the minimal GitHub read the no-CI guard needs (#465):
-// the combined commit status at a merged head SHA. github.Client satisfies it.
-// It is its own narrow interface so the harvester can be unit-tested with a stub
-// and so the skillopt package depends only on the read it actually uses.
+// the combined commit status at a head SHA AND the PR's check-runs. github.Client
+// satisfies it. It is its own narrow interface so the harvester can be unit-tested
+// with a stub and so the skillopt package depends only on the reads it actually
+// uses.
+//
+// Both reads are required because the merge gate's ensureStatuses
+// (internal/workflow/merge_gate.go) counts BOTH external commit-statuses (legacy
+// Travis/Jenkins, via GetCombinedStatus.Statuses) AND external check-runs (modern
+// GitHub Actions, via ListPullRequestChecks) as real CI, and only writes the
+// synthetic gitmoot/ci commit-status when BOTH external counts are zero. A no-CI
+// guard that read only commit-statuses would misclassify the dominant
+// Actions-only configuration (zero legacy statuses, CI reported as check-runs) as
+// no-real-CI and under-reward a genuine CI pass — so the guard mirrors the gate
+// and consults check-runs too.
 type CombinedStatusReader interface {
 	GetCombinedStatus(ctx context.Context, repo github.Repository, ref string) (github.CombinedStatus, error)
+	ListPullRequestChecks(ctx context.Context, repo github.Repository, number int64) ([]github.PullRequestCheck, error)
 }
 
 // OutcomeHarvester implements workflow.OutcomeHarvester (#465, Mode A): on a
@@ -235,13 +247,19 @@ func (h *OutcomeHarvester) project(ctx context.Context, payload workflow.JobPayl
 	}
 }
 
-// mergeHasRealCI reports whether the merged head carries a GENUINE external CI
-// success — a non-gitmoot/ commit status that succeeded — so the no-CI guard can
-// distinguish a real CI pass (strong+) from an empty-gate merge (near-neutral).
-// It reads the combined status at the merged head SHA best-effort: a nil reader,
-// a read error, or the synthetic gitmoot/ci context (with no external status) all
-// degrade to false (no real CI), so a missing read is never rewarded as a strong
-// positive (#465).
+// mergeHasRealCI reports whether the PR head carries a GENUINE external CI success
+// so the no-CI guard can distinguish a real CI pass (strong+) from an empty-gate
+// merge (near-neutral). It mirrors the merge gate's own ensureStatuses detection:
+// a non-gitmoot/ commit status that succeeded (legacy Travis/Jenkins) OR a
+// non-gitmoot/ check-run that passed (modern GitHub Actions) counts as real CI.
+//
+// It reads at the PR HEAD SHA (Outcome.HeadSHA = payload.HeadSHA) — the SHA the
+// merge gate evaluated and posted statuses/checks at — NOT the merge commit;
+// GitHub does not copy statuses/checks onto the merge commit, so a read there
+// would always be empty. Both reads are best-effort: a nil reader, a read error,
+// no PR number, or only the synthetic gitmoot/ci context (with no external CI)
+// all degrade to false (no real CI), so a missing read is never rewarded as a
+// strong positive (#465).
 func (h *OutcomeHarvester) mergeHasRealCI(ctx context.Context, outcome workflow.Outcome) bool {
 	if h.Status == nil {
 		return false
@@ -254,22 +272,53 @@ func (h *OutcomeHarvester) mergeHasRealCI(ctx context.Context, outcome workflow.
 	if !ok {
 		return false
 	}
-	status, err := h.Status.GetCombinedStatus(ctx, repo, head)
+	if status, err := h.Status.GetCombinedStatus(ctx, repo, head); err == nil {
+		for _, item := range status.Statuses {
+			context := strings.TrimSpace(item.Context)
+			if context == "" || strings.HasPrefix(context, "gitmoot/") {
+				// gitmoot/* (including the synthetic gitmoot/ci and the merge-gate context)
+				// are not external CI; skip them.
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(item.State), "success") {
+				return true
+			}
+		}
+	}
+	// Also consult GitHub Actions check-runs (the dominant modern CI model), which
+	// report as check-runs NOT commit-statuses, mirroring ensureStatuses'
+	// externalCheckCount. A passing non-gitmoot/merge-gate check is real CI.
+	if outcome.PullRequest <= 0 {
+		return false
+	}
+	checks, err := h.Status.ListPullRequestChecks(ctx, repo, int64(outcome.PullRequest))
 	if err != nil {
 		return false
 	}
-	for _, item := range status.Statuses {
-		context := strings.TrimSpace(item.Context)
-		if context == "" || strings.HasPrefix(context, "gitmoot/") {
-			// gitmoot/* (including the synthetic gitmoot/ci and the merge-gate context)
-			// are not external CI; skip them.
+	for _, check := range checks {
+		name := strings.TrimSpace(check.Name)
+		if name == "" || strings.HasPrefix(name, "gitmoot/") {
+			// gitmoot/* checks (e.g. gitmoot/merge-gate) are not external CI; skip them.
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(item.State), "success") {
+		if checkPassed(check) {
 			return true
 		}
 	}
 	return false
+}
+
+// checkPassed reports whether a GitHub Actions check-run passed, mirroring the
+// merge gate's checkPassed (internal/workflow/merge_gate.go): prefer the rolled-up
+// bucket ("pass"/"skipping"), else the conclusion-style state. Keeping the same
+// semantics keeps the no-CI guard's "real CI" definition identical to the gate's.
+func checkPassed(check github.PullRequestCheck) bool {
+	bucket := strings.ToLower(strings.TrimSpace(check.Bucket))
+	if bucket != "" {
+		return bucket == "pass" || bucket == "skipping"
+	}
+	state := strings.ToLower(strings.TrimSpace(check.State))
+	return state == "success" || state == "skipped" || state == "neutral"
 }
 
 // changesRequestedScore grades a changes_requested negative by fix-round count

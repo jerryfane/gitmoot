@@ -474,7 +474,8 @@ table is intentionally **not** implemented yet; the budget is in raw tokens.
 When `[skillopt].auto_trace_enabled = true` (default `false`), gitmoot derives
 template-learning feedback from the **verifiable outcomes** an implement job
 reaches — merged with passing CI vs. blocked at the merge gate, review
-`changes_requested`, or a later revert — and writes a synthetic
+`changes_requested` (a later revert is supported by the harvester but not yet
+fired by any engine/daemon path — see the contract doc) — and writes a synthetic
 `FeedbackEvent` (`source = auto-trace`, `reviewer = gitmoot-auto`, A/B `choice`,
 `feedback_source = automatic_trace`) into a dedicated per-template-version
 `auto-trace:<version>` eval run. This is **additive** (`contract_version` stays

@@ -191,7 +191,12 @@ mirrors the off-by-default `[events]` stream.
 - **Reverted** → corrective negative. A later revert of a previously-merged PR
   **re-upserts the same** `UNIQUE(run_id, item_id, reviewer, source, source_url)`
   row, flipping the earlier positive `choice = a` to `choice = b` **in place**
-  (the row count is unchanged).
+  (the row count is unchanged). **Not yet wired:** the projection and the
+  in-place corrective upsert are implemented and unit-tested, but no engine or
+  daemon path detects a revert and fires the `reverted` outcome today, so in a
+  running daemon a merged-then-reverted PR keeps its prior positive until revert
+  detection is wired (a follow-on). The corrective-overwrite mechanics above are
+  reachable only by invoking the harvester directly with a `reverted` outcome.
 
 **Scope.** Only implement-family jobs that carry a template attribution are
 harvested; coordinator continuation jobs (which produce no diff of their own) and

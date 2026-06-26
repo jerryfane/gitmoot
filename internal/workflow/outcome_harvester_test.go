@@ -78,6 +78,7 @@ func TestEngineHarvestsMergedOutcomeOnce(t *testing.T) {
 		Repo:        "jerryfane/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
+		HeadSHA:     "head123",
 		TaskID:      "task-7",
 		TaskTitle:   "Workflow Engine",
 		LeadAgent:   "lead",
@@ -96,8 +97,11 @@ func TestEngineHarvestsMergedOutcomeOnce(t *testing.T) {
 	if got[0].Kind != OutcomeMerged {
 		t.Fatalf("outcome kind = %q, want merged", got[0].Kind)
 	}
-	if got[0].HeadSHA != "merge123" {
-		t.Fatalf("outcome head sha = %q, want the merge commit", got[0].HeadSHA)
+	// The no-CI guard reads statuses/checks at the PR HEAD SHA (where the merge gate
+	// posted them), NOT the merge commit — GitHub does not copy them onto the merge
+	// commit, so reading there would always look like no CI.
+	if got[0].HeadSHA != "head123" {
+		t.Fatalf("outcome head sha = %q, want the PR head SHA head123", got[0].HeadSHA)
 	}
 	if got[0].PullRequest != 7 || got[0].Repo != "jerryfane/gitmoot" {
 		t.Fatalf("outcome attribution = %+v", got[0])
@@ -115,7 +119,7 @@ func TestEngineHarvestsBlockedOutcomeOnce(t *testing.T) {
 	store := openEngineStore(t)
 	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
 	engine := testEngine(store)
-	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Reason: "external CI failed"}}
+	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Reason: "external CI failed", BlockClass: MergeBlockQuality}}
 	harvester := &recordingHarvester{}
 	engine.OutcomeHarvester = harvester
 	seedImplementJobForHarvest(t, store)
@@ -144,6 +148,47 @@ func TestEngineHarvestsBlockedOutcomeOnce(t *testing.T) {
 	}
 	if got[0].Reason != "external CI failed" {
 		t.Fatalf("blocked outcome reason = %q", got[0].Reason)
+	}
+}
+
+// TestEngineSkipsTransientBlockHarvest proves a transient/infra merge-gate block
+// (BlockClass=MergeBlockTransient: branch staleness, dirty local worktree, …) is
+// NOT harvested — only authoritative template-quality blocks score a negative, so
+// branch-staleness/infra noise is never mis-attributed to the template (#465
+// INFRA-NOISE-FILTERED). The block transition itself still happens.
+func TestEngineSkipsTransientBlockHarvest(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{
+		Reason:     "pull request is not mergeable; rebase or update the branch",
+		BlockClass: MergeBlockTransient,
+	}}
+	harvester := &recordingHarvester{}
+	engine.OutcomeHarvester = harvester
+	seedImplementJobForHarvest(t, store)
+	insertCompletedJob(t, store, db.Job{
+		ID:    "review-job",
+		Agent: "audit",
+		Type:  "review",
+	}, JobPayload{
+		Repo:        "jerryfane/gitmoot",
+		Branch:      "task-7",
+		PullRequest: 7,
+		TaskID:      "task-7",
+		TaskTitle:   "Workflow Engine",
+		LeadAgent:   "lead",
+		Result:      &AgentResult{Decision: "approved", Summary: "looks good"},
+	})
+
+	err := engine.AdvanceJob(ctx, "review-job")
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("AdvanceJob error = %v, want a blocked transition", err)
+	}
+	if got := harvester.snapshot(); len(got) != 0 {
+		t.Fatalf("transient block must not be harvested, got %+v", got)
 	}
 }
 

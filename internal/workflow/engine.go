@@ -286,7 +286,36 @@ type MergeDecision struct {
 	Merged         bool
 	MergeCommitSHA string
 	Reason         string
+	// BlockClass classifies a not-ready block (Ready=false) so the Mode-A
+	// trace-harvester (#465) only scores AUTHORITATIVE template-quality rejections as
+	// a negative and skips transient/infra blocks (branch staleness, dirty local
+	// worktree, missing-SHA/base, freshness-unknown). It is the zero value
+	// (MergeBlockNone) for a ready/merged decision and is purely advisory — it never
+	// changes the block/merge transition itself, so behavior is byte-identical when
+	// the harvester is off.
+	BlockClass MergeBlockClass
 }
+
+// MergeBlockClass classifies a merge-gate block (#465 INFRA-NOISE-FILTERED).
+type MergeBlockClass int
+
+const (
+	// MergeBlockNone is the zero value (a ready/merged decision, or a block whose
+	// class was not set). The harvester treats an unclassified block conservatively
+	// as transient (no negative) so a missed classification under-rewards rather than
+	// pollutes the corpus with a false negative.
+	MergeBlockNone MergeBlockClass = iota
+	// MergeBlockQuality is an authoritative template-quality rejection — external CI
+	// failed, the latest review captured a blocking result, or the PR was closed
+	// without merging. These are the only blocks the harvester scores as a negative.
+	MergeBlockQuality
+	// MergeBlockTransient is an operational/branch-staleness/infra condition (not
+	// mergeable; rebase, dirty local worktree, missing head/base SHA, branch update
+	// conflict, freshness unknown) that says nothing about template quality. The
+	// harvester skips it so branch-staleness and daemon-machine state are not
+	// mis-attributed to the template.
+	MergeBlockTransient
+)
 
 type MergeGate interface {
 	Evaluate(ctx context.Context, request MergeRequest) (MergeDecision, error)
@@ -346,8 +375,8 @@ type OutcomeKind string
 
 const (
 	// OutcomeMerged is reported after a PR merges through the merge gate (a
-	// positive). The harvester applies the no-CI guard at MergeCommitSHA/HeadSHA
-	// before scoring it as a strong positive.
+	// positive). The harvester applies the no-CI guard at the PR HEAD SHA (where the
+	// gate posted statuses/checks) before scoring it as a strong positive.
 	OutcomeMerged OutcomeKind = "merged"
 	// OutcomeBlocked is reported when the merge gate rejects the action
 	// (decision not ready) — an authoritative gate-fail negative.
@@ -359,6 +388,17 @@ const (
 	// OutcomeReverted is reported when a previously-merged PR's work is later
 	// reverted — a delayed, corrective negative that overwrites the prior positive
 	// in place on the same UNIQUE feedback key.
+	//
+	// NOT YET WIRED (#465): the harvester's projection + corrective in-place upsert
+	// for this kind are implemented and unit-tested (the same per-PR item_id
+	// re-upserts and flips choice a->b), but NO engine/daemon code path constructs
+	// an Outcome{Kind: OutcomeReverted} today — there is no revert detection in
+	// AdvanceJob, runMergeGate, or the daemon PR-watcher. The corrective-on-revert
+	// flow is therefore reachable only via a direct Harvest call (tests); a
+	// production revert does not yet overwrite the prior positive. Wiring real
+	// revert detection (the daemon observing a revert PR/commit of a previously
+	// harvested merge, re-firing harvestOutcomeForMergeGate for the reverted PR) is
+	// a follow-on; see CORRECTIVE-ON-REVERT in docs/skillopt-exchange-contract.md.
 	OutcomeReverted OutcomeKind = "reverted"
 )
 
@@ -376,8 +416,11 @@ type Outcome struct {
 	// PullRequest is the PR number, used (with Repo) to build the deterministic
 	// per-PR feedback item_id / source_url UNIQUE key.
 	PullRequest int
-	// HeadSHA is the merged head commit (for OutcomeMerged) the harvester reads the
-	// combined status at for the no-CI guard. It falls back to the payload HeadSHA.
+	// HeadSHA is the PR HEAD SHA (for OutcomeMerged) the harvester reads the combined
+	// status / check-runs at for the no-CI guard — the SHA the merge gate evaluated
+	// and posted statuses/checks at, NOT the merge commit (GitHub does not copy
+	// statuses/checks onto the merge commit). It falls back to the merge commit SHA
+	// only when the payload head SHA is empty.
 	HeadSHA string
 	// Reason is the merge-gate rejection reason for OutcomeBlocked (free text from
 	// merge_gates.Reason), surfaced verbatim in the negative feedback reasoning.
@@ -4215,12 +4258,18 @@ func (e Engine) runMergeGate(ctx context.Context, reviewer string, payload JobPa
 		// e.block returns a BlockedError on SUCCESS (the task is durably blocked) and
 		// a plain error only on a store failure. Harvest the verifiable negative (#465)
 		// only when the block transition itself succeeded — i.e. the returned error is
-		// a BlockedError — then propagate that BlockedError unchanged. A real store
-		// error skips the harvest and returns up. Best-effort and nil-safe: a harvest
-		// error can never affect the (already-durable) block.
+		// a BlockedError — AND the block is an AUTHORITATIVE template-quality rejection
+		// (external CI failed, blocking review captured, closed-without-merge). A
+		// transient/infra block (branch staleness, dirty local worktree, missing
+		// head/base SHA, freshness-unknown) says nothing about template quality, so it
+		// is NOT harvested — otherwise branch-staleness/infra noise would be
+		// mis-attributed to the template as a false Hard=0 negative (#465
+		// INFRA-NOISE-FILTERED). A real store error skips the harvest and returns up.
+		// Best-effort and nil-safe: a harvest error can never affect the (already-
+		// durable) block.
 		err := e.block(ctx, ref, reason)
 		var blocked BlockedError
-		if errors.As(err, &blocked) {
+		if errors.As(err, &blocked) && decision.BlockClass == MergeBlockQuality {
 			e.harvestOutcomeForMergeGate(ctx, payload, Outcome{
 				Kind:        OutcomeBlocked,
 				Repo:        payload.Repo,
@@ -4235,12 +4284,15 @@ func (e Engine) runMergeGate(ctx context.Context, reviewer string, payload JobPa
 		if err := e.setTaskState(ctx, ref, TaskMerged); err != nil {
 			return decision, err
 		}
-		// Verifiable positive (#465): a merge through the gate. The merged head SHA
-		// is carried so the harvester's no-CI guard can read GetCombinedStatus and
-		// demote an empty-gate (gitmoot/ci synthetic) merge to near-neutral.
-		mergedHead := strings.TrimSpace(decision.MergeCommitSHA)
+		// Verifiable positive (#465): a merge through the gate. Carry the PR HEAD SHA
+		// (not the merge commit) so the harvester's no-CI guard can read
+		// GetCombinedStatus/ListPullRequestChecks at the SHA the merge gate actually
+		// evaluated and posted statuses/checks at — GitHub does not copy them onto the
+		// new merge commit, so reading the merge commit would always look like no CI.
+		// Fall back to the merge commit only if the head SHA is somehow empty.
+		mergedHead := strings.TrimSpace(payload.HeadSHA)
 		if mergedHead == "" {
-			mergedHead = payload.HeadSHA
+			mergedHead = strings.TrimSpace(decision.MergeCommitSHA)
 		}
 		e.harvestOutcomeForMergeGate(ctx, payload, Outcome{
 			Kind:        OutcomeMerged,

@@ -12,11 +12,15 @@ import (
 )
 
 // stubStatusReader is a CombinedStatusReader stub for the no-CI guard tests. It
-// returns a canned CombinedStatus (or an error) regardless of repo/ref.
+// returns a canned CombinedStatus and canned PR check-runs (or errors) regardless
+// of repo/ref.
 type stubStatusReader struct {
-	status github.CombinedStatus
-	err    error
-	calls  int
+	status     github.CombinedStatus
+	err        error
+	calls      int
+	checks     []github.PullRequestCheck
+	checksErr  error
+	checkCalls int
 }
 
 func (s *stubStatusReader) GetCombinedStatus(_ context.Context, _ github.Repository, _ string) (github.CombinedStatus, error) {
@@ -25,6 +29,14 @@ func (s *stubStatusReader) GetCombinedStatus(_ context.Context, _ github.Reposit
 		return github.CombinedStatus{}, s.err
 	}
 	return s.status, nil
+}
+
+func (s *stubStatusReader) ListPullRequestChecks(_ context.Context, _ github.Repository, _ int64) ([]github.PullRequestCheck, error) {
+	s.checkCalls++
+	if s.checksErr != nil {
+		return nil, s.checksErr
+	}
+	return s.checks, nil
 }
 
 // realCIStatus is a combined status with a passing external (non-gitmoot/) check.
@@ -192,6 +204,66 @@ func TestHarvestMergedNoCINearNeutral(t *testing.T) {
 	events := feedbackForVersion(t, store, version.ID)
 	if len(events) != 1 || events[0].Choice != "a" {
 		t.Fatalf("expected one choice=a feedback row, got %+v", events)
+	}
+}
+
+// TestHarvestMergedActionsCheckIsStrongPositive asserts the dominant GitHub
+// Actions configuration — CI reported as a passing CHECK-RUN with ZERO external
+// commit-statuses (only the synthetic gitmoot/ci status) — is still scored a
+// strong positive (score 1.0, choice "a"). This is the regression the original
+// status-only guard missed: it read only CombinedStatus.Statuses and never
+// consulted ListPullRequestChecks, so an Actions-only merge looked like no-CI.
+func TestHarvestMergedActionsCheckIsStrongPositive(t *testing.T) {
+	ctx := context.Background()
+	store := newTraceStore(t)
+	version, payload := installTraceTemplate(t, store, "planner")
+	// Empty-gate commit status (only gitmoot/ci) but a PASSING external Actions check.
+	status := &stubStatusReader{
+		status: noCIStatus(),
+		checks: []github.PullRequestCheck{
+			{Name: "build", Bucket: "pass"},
+		},
+	}
+	h := NewOutcomeHarvester(store, status)
+
+	outcome := workflow.Outcome{Kind: workflow.OutcomeMerged, Repo: "owner/repo", PullRequest: 7, HeadSHA: "deadbeef"}
+	if err := h.Harvest(ctx, implementJob(), payload, outcome); err != nil {
+		t.Fatalf("Harvest returned error: %v", err)
+	}
+	if status.checkCalls != 1 {
+		t.Fatalf("expected exactly one check-runs read, got %d", status.checkCalls)
+	}
+	signal, choice := h.project(ctx, payload, outcome)
+	if choice != "a" || !signal.HasScore || signal.Score != scoreMergedRealCI {
+		t.Fatalf("merged+Actions-check projection = %+v choice=%q, want score=%v choice=a", signal, choice, scoreMergedRealCI)
+	}
+	events := feedbackForVersion(t, store, version.ID)
+	if len(events) != 1 || events[0].Choice != "a" {
+		t.Fatalf("expected one choice=a feedback row, got %+v", events)
+	}
+}
+
+// TestHarvestMergedFailingActionsCheckIsNotRealCI asserts a FAILING (or only
+// gitmoot/) check-run is NOT treated as real CI, so a no-external-success merge
+// stays near-neutral. This guards against rewarding a merge whose only check did
+// not pass.
+func TestHarvestMergedFailingActionsCheckIsNotRealCI(t *testing.T) {
+	ctx := context.Background()
+	store := newTraceStore(t)
+	_, payload := installTraceTemplate(t, store, "planner")
+	status := &stubStatusReader{
+		status: noCIStatus(),
+		checks: []github.PullRequestCheck{
+			{Name: "build", Bucket: "fail"},
+			{Name: "gitmoot/merge-gate", Bucket: "pass"}, // gitmoot/ checks do not count
+		},
+	}
+	h := NewOutcomeHarvester(store, status)
+
+	outcome := workflow.Outcome{Kind: workflow.OutcomeMerged, Repo: "owner/repo", PullRequest: 7, HeadSHA: "deadbeef"}
+	signal, choice := h.project(ctx, payload, outcome)
+	if choice != "a" || signal.Score != scoreMergedNoCI {
+		t.Fatalf("failing-check merge score = %v choice=%q, want near-neutral %v choice=a", signal.Score, choice, scoreMergedNoCI)
 	}
 }
 
