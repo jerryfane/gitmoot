@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"strings"
 
 	"github.com/jerryfane/gitmoot/internal/config"
@@ -19,6 +20,21 @@ import (
 // (rate>0, managed, action==ask, above floor) already passed, so an off-path ask
 // never even draws — keeping the hot path byte-identical.
 var liveABSampler = func() float64 { return rand.Float64() }
+
+// liveABInteractive reports whether the current ask is a genuine interactive TTY
+// session (both stdin AND stdout are character devices). It is a var seam so
+// tests can force interactive/non-interactive. The interceptor is gated on it so
+// a piped / scripted / redirected ask is NEVER intercepted: the A/B block can
+// only be presented (and the pick read) on a real terminal, never blocking an
+// unattended ask on fmt.Scanln nor polluting a redirected stdout. Combined with
+// the request.JSONOutput gate this keeps both `--json` and any non-tty ask
+// byte-identical to a plain single Mailbox.Run.
+var liveABInteractive = func() bool {
+	in, errIn := os.Stdin.Stat()
+	out, errOut := os.Stdout.Stat()
+	return errIn == nil && errOut == nil &&
+		in.Mode()&os.ModeCharDevice != 0 && out.Mode()&os.ModeCharDevice != 0
+}
 
 // liveABPolicyLoader is a var seam over LoadSkillOptABPolicy so tests can supply
 // a policy without writing a config file. It returns the off-by-default policy
@@ -67,6 +83,16 @@ func maybeRunLiveAB(ctx context.Context, store *db.Store, request localAgentDisp
 	}
 	if !managed {
 		// Shell / unmanaged / bespoke traffic stays byte-identical.
+		return false, nil
+	}
+	// Interactive-only gate (#482): the A/B presentation prints to stdout and reads
+	// a pick from stdin, so it can only fire on a genuine TTY. A `--json` ask or any
+	// piped / redirected / scripted (e.g. fully-unattended) ask is a pure no-op here
+	// — it never presents the "[live A/B] ..." block (which would corrupt the JSON
+	// stream) and never runs the second challenger Deliver, falling through to the
+	// single Mailbox.Run with byte-identical output. This is a cheap gate placed
+	// before any I/O so a non-interactive ask never even loads the policy.
+	if request.JSONOutput || !liveABInteractive() {
 		return false, nil
 	}
 	policy := liveABPolicyLoader(request.Home)
@@ -135,11 +161,20 @@ func runLiveABChallenger(ctx context.Context, store *db.Store, request localAgen
 		return fmt.Errorf("live_ab resolve paths: %w", err)
 	}
 
+	// CRITICAL (#482, goal Risk #4): the challenger Deliver MUST run on a
+	// forked/throwaway session, NEVER the agent's live RuntimeRef. Reusing
+	// agent.RuntimeRef would resume the user's real session a SECOND time (codex
+	// always `exec resume`s in Deliver; claude/kimi resume a pinned ref), injecting
+	// the challenger's "Template instructions:\n..." turn into the user's ongoing
+	// conversation and poisoning the resume_hint — so the NEXT genuine ask resumes a
+	// contaminated thread. An EMPTY RuntimeRef is the forked-session signal:
+	// realSkillOptABDeliver mints a fresh throwaway session via adapter.Start, so the
+	// agent's live session is never touched.
 	abAgent := runtime.Agent{
 		Name:           agent.Name,
 		Role:           firstNonEmpty(agent.Role, "ask"),
 		Runtime:        agent.Runtime,
-		RuntimeRef:     agent.RuntimeRef,
+		RuntimeRef:     "", // forked/throwaway session — never the agent's live ref
 		RepoScope:      agent.RepoScope,
 		TemplateID:     agent.TemplateID,
 		Capabilities:   agent.Capabilities,

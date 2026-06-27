@@ -45,6 +45,12 @@ type localAgentDispatchRequest struct {
 	SelectedAction         string
 	SelectedActionReason   string
 	ExecutionPath          string
+	// JSONOutput is true when the caller will emit machine-readable JSON (e.g.
+	// `agent ask --json`). The live-A/B interceptor (#482) MUST stay byte-clean for
+	// these consumers: it never presents the A/B block (which would prepend
+	// "[live A/B] ..." to the JSON object and break parsing) and never runs the
+	// second challenger Deliver, falling through to the plain single ask.
+	JSONOutput bool
 }
 
 type localAgentJobOutput struct {
