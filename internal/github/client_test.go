@@ -528,6 +528,47 @@ func TestGetPullRequestBodyDefaultsEmpty(t *testing.T) {
 	}
 }
 
+// TestListRecentClosedPullRequestsDecodesMergedAt proves the bounded closed-PR
+// scan (#467) decodes the LIST endpoint's real merged shape: a merged PR comes
+// back as state="closed" with merged_at set and NO `merged` boolean. revert
+// detection gates on merged_at, so this field must survive decoding.
+func TestListRecentClosedPullRequestsDecodesMergedAt(t *testing.T) {
+	runner := &fakeRunner{
+		results: []subprocess.Result{{
+			Stdout: `[{"number": 20, "title": "Revert \"Task 7\"", "state": "closed", "merged_at": "2026-06-27T12:00:00Z", "html_url": "https://github.com/jerryfane/gitmoot/pull/20", "body": "Reverts #7", "head": {"ref": "revert-task-7"}, "base": {"ref": "main"}}]`,
+		}},
+	}
+	client := GhClient{Runner: runner}
+
+	pulls, err := client.ListRecentClosedPullRequests(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"})
+	if err != nil {
+		t.Fatalf("ListRecentClosedPullRequests returned error: %v", err)
+	}
+	if len(pulls) != 1 {
+		t.Fatalf("pulls = %d, want 1", len(pulls))
+	}
+	if pulls[0].MergedAt != "2026-06-27T12:00:00Z" {
+		t.Fatalf("merged_at = %q, want the merge timestamp", pulls[0].MergedAt)
+	}
+	if pulls[0].Merged {
+		t.Fatalf("list endpoint must not set Merged; got %v", pulls[0].Merged)
+	}
+
+	// The scan must be BOUNDED: a single page (no --paginate) sorted by recency.
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner calls = %d, want 1", len(runner.calls))
+	}
+	args := strings.Join(runner.calls[0], " ")
+	if strings.Contains(args, "--paginate") {
+		t.Fatalf("recent closed scan must NOT paginate the whole history; args = %q", args)
+	}
+	for _, want := range []string{"state=closed", "sort=updated", "direction=desc", "per_page="} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("recent closed scan args missing %q; args = %q", want, args)
+		}
+	}
+}
+
 func TestCompareCommitsUsesEscapedCompareEndpoint(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{

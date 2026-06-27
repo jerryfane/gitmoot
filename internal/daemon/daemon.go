@@ -604,18 +604,25 @@ func (d Daemon) revertedOriginalPR(pull github.PullRequest) (int, bool) {
 	return number, true
 }
 
-// harvestRevertsOnce scans CLOSED PRs for merged GitHub Revert-button PRs and
-// fires the corrective OutcomeReverted harvest for each (#467). It is called from
-// PollOnce ONLY when RevertDetectionEnabled, so the off path issues no extra
-// GitHub read and parses no bodies (byte-identical). A merged revert PR is closed
-// (the "open" loop above never sees it), so the merged-revert anchor lives here in
-// the closed set. Best-effort: a list error returns up for firstErr collection but
-// per-PR harvest errors are collected and never abort the scan.
+// harvestRevertsOnce scans recently-closed PRs for merged GitHub Revert-button
+// PRs and fires the corrective OutcomeReverted harvest for each (#467). It is
+// called from PollOnce ONLY when RevertDetectionEnabled, so the off path issues no
+// extra GitHub read and parses no bodies (byte-identical). A merged revert PR is
+// closed (the "open" loop above never sees it), so the merged-revert anchor lives
+// here in the closed set.
+//
+// BOUNDED COST: it uses ListRecentClosedPullRequests (one page of the
+// most-recently-updated closed PRs, no --paginate) rather than walking the repo's
+// entire closed-PR history every tick. A freshly-merged revert is recently
+// updated, so it lands at the top of that window; steady-state polling is a single
+// fixed GitHub request, not O(all-closed-PRs). Best-effort: a list error returns
+// up for firstErr collection but per-PR harvest errors are collected and never
+// abort the scan.
 func (d Daemon) harvestRevertsOnce(ctx context.Context) error {
 	if d.Workflow == nil {
 		return nil
 	}
-	closed, err := d.GitHub.ListPullRequests(ctx, d.Repo, "closed")
+	closed, err := d.GitHub.ListRecentClosedPullRequests(ctx, d.Repo)
 	if err != nil {
 		return err
 	}
@@ -667,10 +674,19 @@ func (d Daemon) harvestRevertIfAny(ctx context.Context, pull github.PullRequest)
 }
 
 // revertPullMerged reports whether a polled revert PR has LANDED, so the corrective
-// overwrite only fires on a merged revert (#467). github.ListPullRequests(state)
-// surfaces Merged on closed PRs; a "merged" state string or the Merged flag both
-// count.
+// overwrite only fires on a merged revert (#467).
+//
+// CRITICAL: these PRs come from the GitHub LIST endpoint
+// (ListPullRequests state="closed"), which reports merged PRs as state="closed"
+// and OMITS the top-level `merged` boolean — `merged` is computed only on the
+// single-PR GET endpoint. The list's ONLY merged signal is `merged_at`, so the
+// non-empty MergedAt check is the load-bearing one against real GitHub data; the
+// Merged flag and "merged" state string are kept only as belt-and-suspenders for
+// the single-PR shape and never fire on a list item.
 func revertPullMerged(pull github.PullRequest) bool {
+	if strings.TrimSpace(pull.MergedAt) != "" {
+		return true
+	}
 	if pull.Merged {
 		return true
 	}

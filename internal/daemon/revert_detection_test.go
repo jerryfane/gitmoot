@@ -44,6 +44,33 @@ func TestRevertedOriginalPRParsesBody(t *testing.T) {
 	}
 }
 
+// TestRevertPullMergedGatesOnMergedAt locks in the merged-ness gate (#467): the
+// GitHub LIST endpoint reports a merged PR as state="closed" with merged_at set
+// and NO `merged` boolean, so MergedAt is the load-bearing signal. Trusting only
+// the list `Merged` flag (always false on a list) would make the whole feature a
+// silent no-op against real GitHub.
+func TestRevertPullMergedGatesOnMergedAt(t *testing.T) {
+	cases := []struct {
+		name string
+		pull github.PullRequest
+		want bool
+	}{
+		{"real list merged shape (closed + merged_at, no Merged)", github.PullRequest{State: "closed", MergedAt: "2026-06-27T12:00:00Z"}, true},
+		{"closed not merged (no merged_at)", github.PullRequest{State: "closed"}, false},
+		{"open", github.PullRequest{State: "open"}, false},
+		{"single-PR detail shape (Merged flag)", github.PullRequest{State: "closed", Merged: true}, true},
+		{"merged state string", github.PullRequest{State: "merged"}, true},
+		{"blank merged_at is not merged", github.PullRequest{State: "closed", MergedAt: "   "}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := revertPullMerged(tc.pull); got != tc.want {
+				t.Fatalf("revertPullMerged(%+v) = %v, want %v", tc.pull, got, tc.want)
+			}
+		})
+	}
+}
+
 // seedHarvestedPositive installs a template, a completed implement job attributed
 // to its version, the original PR row, and writes the ORIGINAL merge's choice=a
 // auto-trace feedback row (by running the harvester's merge path), returning the
@@ -147,6 +174,12 @@ func revertDaemonEngine(store *db.Store) *workflow.Engine {
 // RevertDetectionEnabled, a merged revert PR (body `Reverts #7`) in the closed set
 // flips the original PR's auto-trace row a -> b in place (count unchanged), and a
 // second poll is idempotent.
+//
+// CRITICAL: the closed fixture mirrors the REAL GitHub LIST shape — State:"closed"
+// with merged_at set and NO Merged boolean (the list endpoint omits `merged` and
+// reports merged PRs as state="closed"). This exercises the production path that
+// gates merged-ness on MergedAt; trusting the list's Merged would be a silent
+// no-op against real GitHub (the original review finding).
 func TestPollOnceCorrectsOnMergedRevert(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
@@ -162,14 +195,16 @@ func TestPollOnceCorrectsOnMergedRevert(t *testing.T) {
 		pullsByState: map[string][]github.PullRequest{
 			"open": {},
 			"closed": {{
-				Number:  20,
-				Title:   `Revert "Task 7"`,
-				State:   "merged",
-				Merged:  true,
-				URL:     "https://github.com/jerryfane/gitmoot/pull/20",
-				Body:    "Reverts #7",
-				HeadRef: "revert-task-7",
-				BaseRef: "main",
+				Number: 20,
+				Title:  `Revert "Task 7"`,
+				// Real LIST shape: merged PRs come back as state="closed" with a
+				// merged_at timestamp and NO `merged` boolean.
+				State:    "closed",
+				MergedAt: "2026-06-27T12:00:00Z",
+				URL:      "https://github.com/jerryfane/gitmoot/pull/20",
+				Body:     "Reverts #7",
+				HeadRef:  "revert-task-7",
+				BaseRef:  "main",
 			}},
 		},
 		comments: map[int64][]github.IssueComment{},
@@ -249,7 +284,7 @@ func TestPollOnceDisabledIsByteIdentical(t *testing.T) {
 		pullsByState: map[string][]github.PullRequest{
 			"open": {},
 			"closed": {{
-				Number: 20, State: "merged", Merged: true, Body: "Reverts #7",
+				Number: 20, State: "closed", MergedAt: "2026-06-27T12:00:00Z", Body: "Reverts #7",
 				HeadRef: "revert-task-7", BaseRef: "main",
 			}},
 		},
@@ -270,9 +305,12 @@ func TestPollOnceDisabledIsByteIdentical(t *testing.T) {
 	}
 }
 
-// countingClosedListGitHub counts "closed"-state ListPullRequests calls so the
-// off-path byte-identical test can prove no extra GitHub read happens when revert
-// detection is disabled.
+// countingClosedListGitHub counts bounded closed-PR list calls so the off-path
+// byte-identical test can prove no extra GitHub read happens when revert detection
+// is disabled. The revert scan reads closed PRs via the bounded
+// ListRecentClosedPullRequests (#467), so that is the call counted; a plain
+// "closed" ListPullRequests (used by retryClosedReadyToMerge) is counted too as a
+// belt-and-suspenders guard.
 type countingClosedListGitHub struct {
 	*fakeGitHub
 	closedListCalls int
@@ -283,4 +321,9 @@ func (c *countingClosedListGitHub) ListPullRequests(ctx context.Context, repo gi
 		c.closedListCalls++
 	}
 	return c.fakeGitHub.ListPullRequests(ctx, repo, state)
+}
+
+func (c *countingClosedListGitHub) ListRecentClosedPullRequests(ctx context.Context, repo github.Repository) ([]github.PullRequest, error) {
+	c.closedListCalls++
+	return c.fakeGitHub.ListRecentClosedPullRequests(ctx, repo)
 }

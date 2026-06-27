@@ -2317,6 +2317,7 @@ type fakeGitHub struct {
 	listPullRequestsCalls int
 	listPullRequestsErrs  []error
 	listIssuesCalls       int
+	recentClosedCalls     int
 }
 
 type postedComment struct {
@@ -2363,6 +2364,18 @@ func (f *fakeGitHub) ListPullRequests(_ context.Context, _ github.Repository, st
 	}
 	if f.pullsByState != nil {
 		return append([]github.PullRequest(nil), f.pullsByState[state]...), nil
+	}
+	return append([]github.PullRequest(nil), f.pulls...), nil
+}
+
+// ListRecentClosedPullRequests models the bounded closed-PR scan (#467): the fake
+// simply returns the "closed"-state fixtures (the test fixtures are already small,
+// so a single page covers them). It counts calls so the off-path byte-identical
+// test can prove no closed read happens when revert detection is disabled.
+func (f *fakeGitHub) ListRecentClosedPullRequests(_ context.Context, _ github.Repository) ([]github.PullRequest, error) {
+	f.recentClosedCalls++
+	if f.pullsByState != nil {
+		return append([]github.PullRequest(nil), f.pullsByState["closed"]...), nil
 	}
 	return append([]github.PullRequest(nil), f.pulls...), nil
 }
