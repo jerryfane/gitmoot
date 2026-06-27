@@ -60,6 +60,24 @@ func resolveRevertDetectionEnabled(home string) bool {
 	return policy.RevertDetectionEnabled()
 }
 
+// canaryRoutingEnabled resolves the #484 canary ROUTING gate for a home: true only
+// when [skillopt].auto_promote_canary AND a valid auto_promote_canary_sample are
+// configured (config.SkillOptPolicy.CanaryEnabled()). It is the SAME gate the
+// daemon's regression comparator (daemonOutcomeHarvesterWithCanary) uses, so the
+// routing and comparator seams turn on and off together — disabling the knob (or
+// unsetting the sample) and restarting stops BOTH sampled routing and
+// graduate/rollback, so a stranded canary row can never keep serving traffic. It is
+// FAIL-SAFE to false on any config-load error, mirroring the other gates. With
+// canary off (the default) every Mailbox is constructed with CanaryEnabled=false,
+// so routeCanary returns before its query and resolution is byte-identical.
+func canaryRoutingEnabled(home string) bool {
+	policy, err := loadSkillOptPolicy(home)
+	if err != nil {
+		return false
+	}
+	return policy.CanaryEnabled()
+}
+
 // daemonReviewLegDispatcher returns the best-effort cross-family review-leg
 // dispatcher for this home (#469), or nil when the review knob is OFF — the
 // default, or any config-load failure (fail-safe to disabled). ReviewEnabled()

@@ -1303,7 +1303,11 @@ func (d Daemon) enqueueJob(ctx context.Context, request workflow.JobRequest) (db
 	if !errors.Is(err, sql.ErrNoRows) {
 		return db.Job{}, false, err
 	}
-	job, err := (workflow.Mailbox{Store: d.Store}).Enqueue(ctx, request)
+	// Gate the #484 canary routing seam on the SAME policy the daemon's engine
+	// (and its regression comparator) is gated on, so a stranded canary is never
+	// sampled once the knob is off. The engine carries the resolved flag.
+	canaryEnabled := d.Workflow != nil && d.Workflow.CanaryEnabled
+	job, err := (workflow.Mailbox{Store: d.Store, CanaryEnabled: canaryEnabled}).Enqueue(ctx, request)
 	return job, true, err
 }
 

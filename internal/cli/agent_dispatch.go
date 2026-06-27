@@ -148,7 +148,7 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		}
 		recipeTemplate = &tmpl
 	}
-	job, err := (workflow.Mailbox{Store: store}).Enqueue(ctx, workflow.JobRequest{
+	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home)}).Enqueue(ctx, workflow.JobRequest{
 		ID:                     localAgentJobID(request.Action, agent.Name),
 		Agent:                  agent.Name,
 		Action:                 request.Action,
@@ -344,7 +344,7 @@ func buildLocalAgentJobOutput(latest db.Job, request localAgentDispatchRequest) 
 }
 
 func enqueuePermissionBlockedLocalAgentJob(ctx context.Context, store *db.Store, request localAgentDispatchRequest, repo string, defaultBranch string, agentName string) (localAgentJobOutput, error) {
-	job, err := (workflow.Mailbox{Store: store}).Enqueue(ctx, workflow.JobRequest{
+	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home)}).Enqueue(ctx, workflow.JobRequest{
 		ID:           localAgentJobID(request.Action, agentName),
 		Agent:        agentName,
 		Action:       request.Action,
