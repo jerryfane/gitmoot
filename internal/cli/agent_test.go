@@ -661,13 +661,17 @@ func TestRunAgentAskWarnsButDoesNotBlockOrchestration(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"agent", "ask", "planner", "create branch, commit, push, and open PR", "--home", home, "--repo", "owner/repo"}, &stdout, &stderr)
 	// The guard must not hard-block (rc 2). It falls through to dispatch and
-	// then fails downstream because the agent does not exist (rc 1), which
-	// confirms it reached dispatch rather than being blocked by the guard.
-	if code == 2 {
-		t.Fatalf("exit code = %d, ask was blocked by the workflow-orchestration guard", code)
+	// then fails downstream because the agent does not exist (rc 1). Asserting
+	// rc 1 *and* the "agent ask:" dispatch-error prefix positively confirms it
+	// reached dispatch rather than returning a non-2 code before the guard.
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (guard bypassed, downstream dispatch failure)", code)
 	}
 	if !strings.Contains(stderr.String(), "read-only") {
 		t.Fatalf("stderr = %q, want the read-only warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "agent ask:") {
+		t.Fatalf("stderr = %q, want the dispatch-error prefix confirming dispatch was reached", stderr.String())
 	}
 }
 

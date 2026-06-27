@@ -250,7 +250,7 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		// can never self-deadlock on "session is busy".
 		handled, abErr := maybeRunLiveAB(runCtx, store, request, agent, job, adapter, managed.OK)
 		if abErr != nil {
-			return localAgentJobOutput{}, abErr
+			return localAgentJobOutput{}, foregroundAskTimeoutError(runCtx, jobTimeout, abErr)
 		}
 		if !handled {
 			if _, err := (workflow.Mailbox{Store: store}).Run(runCtx, job.ID, runtimeAgent(agent), adapter); err != nil {
