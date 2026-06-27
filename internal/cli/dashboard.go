@@ -39,6 +39,7 @@ type dashboardSnapshot struct {
 	Repos           []dashboardRepo         `json:"repos"`
 	Agents          []dashboardAgent        `json:"agents"`
 	RuntimeSessions []dashboardSession      `json:"runtime_sessions"`
+	ActiveJobs      []dashboardActiveJob    `json:"active_jobs"`
 	Jobs            dashboardJobs           `json:"jobs"`
 	Worktrees       []dashboardWorktree     `json:"worktrees"`
 	BranchLocks     []dashboardBranchLock   `json:"branch_locks"`
@@ -152,6 +153,20 @@ type dashboardSession struct {
 type dashboardJobs struct {
 	Total   int            `json:"total"`
 	ByState map[string]int `json:"by_state"`
+}
+
+// dashboardActiveJob is one in-flight job (queued or running) surfaced in the
+// dashboard's live "active work" view (#505). Without it a running `@agent ask`
+// is invisible — the jobs table otherwise holds mostly terminal rows. It is
+// built from the already-loaded jobs slice (no extra DB round-trip); the held
+// runtime-session lock (resource_locks key prefix "runtime:") is the reliable
+// "session busy" signal and is already surfaced in the resource_locks section.
+type dashboardActiveJob struct {
+	ID    string `json:"id"`
+	Agent string `json:"agent"`
+	Repo  string `json:"repo,omitempty"`
+	Type  string `json:"type"`
+	State string `json:"state"`
 }
 
 type dashboardWorktree struct {
@@ -389,6 +404,7 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 		Repos:           []dashboardRepo{},
 		Agents:          []dashboardAgent{},
 		RuntimeSessions: []dashboardSession{},
+		ActiveJobs:      []dashboardActiveJob{},
 		Worktrees:       []dashboardWorktree{},
 		BranchLocks:     []dashboardBranchLock{},
 		TrainSessions:   []dashboardTrainSession{},
@@ -450,6 +466,9 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 			return err
 		}
 		snapshot.Jobs.Total = len(jobs)
+		// Live "active work" view (#505): reuse the already-loaded jobs slice (no
+		// extra DB round-trip) so a running @agent ask is visible while it runs.
+		snapshot.ActiveJobs = buildDashboardActiveJobs(jobs)
 		// One batched read of every job's latest event; blocked/failed rows
 		// surface WHY in the attention list.
 		latestEvents, err := store.LatestJobEvents(ctx)
@@ -593,6 +612,30 @@ func buildDashboardSnapshot(home string, paths config.Paths) (dashboardSnapshot,
 	return snapshot, nil
 }
 
+// buildDashboardActiveJobs projects the already-loaded jobs slice into the live
+// active-work view (#505), keeping only in-flight jobs (queued/running) and
+// excluding terminal rows. The repo is parsed from the job payload (the same
+// shape used elsewhere in the snapshot). It is pure (no store access) so it is
+// unit-tested directly. The result is always non-nil so the --json output is
+// `[]` rather than null when nothing is in flight.
+func buildDashboardActiveJobs(jobs []db.Job) []dashboardActiveJob {
+	active := []dashboardActiveJob{}
+	for _, job := range jobs {
+		if job.State != "queued" && job.State != "running" {
+			continue
+		}
+		entry := dashboardActiveJob{ID: job.ID, Agent: job.Agent, Type: job.Type, State: job.State}
+		var p struct {
+			Repo string `json:"repo"`
+		}
+		if err := json.Unmarshal([]byte(job.Payload), &p); err == nil {
+			entry.Repo = strings.TrimSpace(p.Repo)
+		}
+		active = append(active, entry)
+	}
+	return active
+}
+
 func printDashboardSnapshot(stdout io.Writer, st style.Style, snapshot dashboardSnapshot, home string, all bool) {
 	printDashboardAttention(stdout, st, snapshot, home)
 
@@ -634,6 +677,13 @@ func printDashboardSnapshot(stdout io.Writer, st style.Style, snapshot dashboard
 			writeLine(stdout, "  %s [%s] %s %s", session.Name, session.Runtime, emptyText(session.Repo), session.State)
 		}
 	}
+
+	dashboardSectionHeader(stdout, st, "active_jobs", len(snapshot.ActiveJobs))
+	activeJobs, hidden := dashboardTruncate(st, all, snapshot.ActiveJobs)
+	for _, job := range activeJobs {
+		writeLine(stdout, "  %s %s [%s] %s %s", job.ID, job.Agent, job.Type, emptyText(job.Repo), dashboardJobStateColor(st, job.State))
+	}
+	dashboardMore(stdout, st, hidden)
 
 	dashboardSectionHeader(stdout, st, "jobs", snapshot.Jobs.Total)
 	for _, state := range sortedKeys(snapshot.Jobs.ByState) {

@@ -377,6 +377,81 @@ func TestTailDaemonLogErrors(t *testing.T) {
 	}
 }
 
+func TestBuildDashboardActiveJobsKeepsInFlightOnly(t *testing.T) {
+	jobs := []db.Job{
+		{ID: "j-run", Agent: "planner", Type: "ask", State: "running", Payload: `{"repo":"o/r"}`},
+		{ID: "j-queued", Agent: "impl", Type: "implement", State: "queued", Payload: `{"repo":"o/x"}`},
+		{ID: "j-succeeded", Agent: "planner", Type: "ask", State: "succeeded", Payload: `{"repo":"o/r"}`},
+		{ID: "j-failed", Agent: "impl", Type: "implement", State: "failed", Payload: `{"repo":"o/r"}`},
+		{ID: "j-blocked", Agent: "impl", Type: "review", State: "blocked", Payload: `{"repo":"o/r"}`},
+		{ID: "j-cancelled", Agent: "impl", Type: "review", State: "cancelled", Payload: `{"repo":"o/r"}`},
+		{ID: "j-badpayload", Agent: "x", Type: "ask", State: "running", Payload: "not json"},
+	}
+	active := buildDashboardActiveJobs(jobs)
+	if active == nil {
+		t.Fatal("active jobs must be non-nil for stable JSON")
+	}
+	gotIDs := map[string]dashboardActiveJob{}
+	for _, j := range active {
+		gotIDs[j.ID] = j
+	}
+	if len(active) != 3 {
+		t.Fatalf("expected 3 in-flight jobs, got %d: %+v", len(active), active)
+	}
+	for _, terminal := range []string{"j-succeeded", "j-failed", "j-blocked", "j-cancelled"} {
+		if _, ok := gotIDs[terminal]; ok {
+			t.Fatalf("terminal job %s must be excluded from active jobs", terminal)
+		}
+	}
+	run, ok := gotIDs["j-run"]
+	if !ok {
+		t.Fatal("running job j-run missing from active jobs")
+	}
+	if run.Agent != "planner" || run.Type != "ask" || run.State != "running" || run.Repo != "o/r" {
+		t.Fatalf("running job fields wrong: %+v", run)
+	}
+	if q := gotIDs["j-queued"]; q.State != "queued" || q.Repo != "o/x" {
+		t.Fatalf("queued job fields wrong: %+v", q)
+	}
+	// An unparseable payload still surfaces the job, just with an empty repo.
+	if bad, ok := gotIDs["j-badpayload"]; !ok || bad.Repo != "" {
+		t.Fatalf("job with bad payload should surface with empty repo: %+v", bad)
+	}
+}
+
+func TestBuildDashboardActiveJobsEmpty(t *testing.T) {
+	active := buildDashboardActiveJobs(nil)
+	if active == nil {
+		t.Fatal("active jobs must be non-nil even with no jobs")
+	}
+	if len(active) != 0 {
+		t.Fatalf("expected no active jobs, got %d", len(active))
+	}
+}
+
+func TestDashboardRendersActiveJobsSection(t *testing.T) {
+	home := dashboardTestHome(t)
+	store, err := db.Open(config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if err := store.CreateJob(context.Background(), db.Job{ID: "live-1", Agent: "planner", Type: "ask", State: "running", Payload: `{"repo":"o/r"}`}); err != nil {
+		t.Fatalf("CreateJob returned error: %v", err)
+	}
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"dashboard", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("dashboard exit code = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"active_jobs: 1", "live-1", "planner"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dashboard output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestBuildDashboardDaemonDetailNoMeta(t *testing.T) {
 	dir := t.TempDir()
 	state := daemonState{
