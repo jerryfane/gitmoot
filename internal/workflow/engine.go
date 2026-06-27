@@ -2168,6 +2168,28 @@ func (e Engine) integrationDepBranches(ctx context.Context, job db.Job, payload 
 	return branches, nil
 }
 
+// declaresImplementDep reports whether delegation d depends on at least one
+// non-read-only (implement) sibling. Used to distinguish a read-only delegation
+// that LEGITIMATELY runs on the base checkout (no implement deps) from one that
+// EXPECTS an integration worktree (it deps on an implement leg) — so that when no
+// leg branch resolves we can fail closed rather than silently review the base.
+func (e Engine) declaresImplementDep(payload JobPayload, d Delegation) bool {
+	deps := compactStrings(d.Deps)
+	if len(deps) == 0 || payload.Result == nil {
+		return false
+	}
+	byID := make(map[string]Delegation, len(payload.Result.Delegations))
+	for _, sib := range payload.Result.Delegations {
+		byID[strings.TrimSpace(sib.ID)] = sib
+	}
+	for _, dep := range deps {
+		if sib, ok := byID[dep]; ok && !readOnlyDelegationAction(sib.Action) {
+			return true
+		}
+	}
+	return false
+}
+
 // commitDelegationLeg commits an implement delegation leg's worktree changes to
 // its own branch when the leg has its own per-delegation worktree but no task/PR
 // finalizer (a PR-less local orchestrate, where the finalizer never runs and the
@@ -2286,6 +2308,22 @@ func (e Engine) allocateAndEnqueueDelegation(ctx context.Context, job db.Job, pa
 				Message: fmt.Sprintf("delegation %q runs in an integration worktree merging %d implement leg(s)", request.DelegationID, len(legBranches)),
 			})
 		}
+	} else if e.declaresImplementDep(payload, d) {
+		// Fail closed (#19): this read-only delegation depends on an implement leg,
+		// but integrationDepBranches resolved ZERO leg branches above — the leg's
+		// branch was not readable (e.g. transient store contention under several
+		// daemons sharing one DB, or the leg branch not yet committed/visible).
+		// Falling through to the BASE checkout here would make the reviewer judge
+		// code WITHOUT the implemented change, producing false verdicts (the observed
+		// "council reviewed the base, not the integration worktree" bug). Refuse to
+		// review base; block so the build surfaces/retries rather than silently
+		// shipping reviews of stale code.
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "delegation_integration_unresolved",
+			Message: fmt.Sprintf("delegation %q depends on an implement leg but no leg branch was resolvable; refusing to review the base checkout", request.DelegationID),
+		})
+		return e.block(ctx, ref, fmt.Sprintf("delegation %q depends on an implement leg but its integration worktree could not be built (no leg branch resolved); refusing to review the base checkout", request.DelegationID))
 	} else if readOnlyFanoutNeedsWorktree(payload, d) {
 		// Read-only fan-out: >=2 read-only siblings share the parent repo and would
 		// otherwise serialize on the repo:<repo> checkout key (only one runs per

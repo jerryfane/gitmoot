@@ -491,7 +491,14 @@ type sqlExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-const sqliteBusyTimeoutMillis = 5000
+// 15s (raised from 5s): several repo-scoped daemons can share one ~/.gitmoot DB
+// file, and WAL permits only one writer process at a time. A burst (e.g. a
+// plan-by-N fan-out all writing results plus a coordinator continuation across
+// processes) could exceed a 5s wait and surface "database is locked" (SQLITE_BUSY),
+// which in turn made dependent reads return stale data. A longer wait lets the
+// burst drain instead of erroring. (For many concurrent projects, also give each
+// daemon its own home via GITMOOT_HOME_DIR so they do not share a DB at all.)
+const sqliteBusyTimeoutMillis = 15000
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
