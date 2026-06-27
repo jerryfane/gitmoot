@@ -1067,7 +1067,7 @@ func enqueueAndResolve(t *testing.T, mailbox Mailbox, jobID string) JobPayload {
 func TestMailboxCanaryRoutingHitsCanary(t *testing.T) {
 	store := openTestStore(t)
 	seedCanaryAgent(t, store, 1.0)
-	mailbox := Mailbox{Store: store, CanaryRand: func() float64 { return 0.0 }}
+	mailbox := Mailbox{Store: store, CanaryEnabled: true, CanaryRand: func() float64 { return 0.0 }}
 	payload := enqueueAndResolve(t, mailbox, "job-canary")
 	if payload.TemplateResolvedCommit != "commit-v2" || payload.TemplateContent != "v2 content" {
 		t.Fatalf("draw below sample must route to canary, got commit=%q content=%q", payload.TemplateResolvedCommit, payload.TemplateContent)
@@ -1082,10 +1082,28 @@ func TestMailboxCanaryRoutingHitsCanary(t *testing.T) {
 func TestMailboxCanaryRoutingMissesCanary(t *testing.T) {
 	store := openTestStore(t)
 	seedCanaryAgent(t, store, 0.5)
-	mailbox := Mailbox{Store: store, CanaryRand: func() float64 { return 0.9 }}
+	mailbox := Mailbox{Store: store, CanaryEnabled: true, CanaryRand: func() float64 { return 0.9 }}
 	payload := enqueueAndResolve(t, mailbox, "job-champ")
 	if payload.TemplateResolvedCommit != "commit-v1" || payload.TemplateContent != "v1 content" {
 		t.Fatalf("draw at/above sample must route to champion, got commit=%q content=%q", payload.TemplateResolvedCommit, payload.TemplateContent)
+	}
+}
+
+// TestMailboxCanaryDisabledIgnoresLiveCanary proves the #484 routing seam is gated
+// on the SAME policy the daemon's comparator uses: with an ACTIVE canary row but
+// CanaryEnabled=false (the knob off), even a forced-hit draw (0.0) resolves the
+// champion, never the canary. This is what stops a canary that outlived the
+// manager from continuing to serve sampled traffic with no auto-rollback once the
+// knob is turned off.
+func TestMailboxCanaryDisabledIgnoresLiveCanary(t *testing.T) {
+	store := openTestStore(t)
+	seedCanaryAgent(t, store, 1.0)
+	// CanaryEnabled defaults false; a forced-hit rng would route if the gate were
+	// open, so resolving the champion proves the gate short-circuits before the draw.
+	mailbox := Mailbox{Store: store, CanaryRand: func() float64 { return 0.0 }}
+	payload := enqueueAndResolve(t, mailbox, "job-gated")
+	if payload.TemplateResolvedCommit != "commit-v1" || payload.TemplateContent != "v1 content" {
+		t.Fatalf("canary disabled must resolve champion, got commit=%q content=%q", payload.TemplateResolvedCommit, payload.TemplateContent)
 	}
 }
 
@@ -1120,7 +1138,7 @@ func TestMailboxCanaryOffByDefaultByteIdentical(t *testing.T) {
 func TestMailboxCanaryRoutingConcurrent(t *testing.T) {
 	store := openTestStore(t)
 	seedCanaryAgent(t, store, 0.5)
-	mailbox := Mailbox{Store: store} // real global rng — concurrency-safe
+	mailbox := Mailbox{Store: store, CanaryEnabled: true} // real global rng — concurrency-safe
 	const n = 40
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {

@@ -1990,9 +1990,12 @@ func TestRepositoryMethods(t *testing.T) {
 	if review.State != "promoted" || review.DecidedAt == "" {
 		t.Fatalf("review after promote = %+v", review)
 	}
-	rejected, err := store.RejectAgentTemplateVersion(ctx, newerPending.ID, "too verbose")
+	rejected, changed, err := store.RejectAgentTemplateVersion(ctx, newerPending.ID, "too verbose")
 	if err != nil {
 		t.Fatalf("RejectAgentTemplateVersion returned error: %v", err)
+	}
+	if !changed {
+		t.Fatalf("first reject must report changed=true")
 	}
 	if rejected.State != "rejected" {
 		t.Fatalf("rejected = %+v", rejected)

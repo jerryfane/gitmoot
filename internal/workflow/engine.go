@@ -93,6 +93,16 @@ type Engine struct {
 	Home                string
 	DelegationWorktrees WorktreeManager
 	DelegationCheckout  string
+	// CanaryEnabled gates the #484 canary ROUTING seam (Mailbox.routeCanary) on the
+	// SAME [skillopt] policy.CanaryEnabled() the daemon's regression comparator
+	// (daemonOutcomeHarvesterWithCanary) is gated on, so both seams turn on/off
+	// together. It is resolved ONCE at daemon-engine construction
+	// (daemonWorkflowEngine) and propagated into every Mailbox the engine builds via
+	// mailbox(). Default false (the engine's zero value and every test/ask-path
+	// Engine) means routing is off and resolution is byte-identical — a canary row
+	// left behind by a since-disabled run is never sampled, so it can never serve
+	// traffic without the comparator that would graduate or roll it back.
+	CanaryEnabled bool
 	// ArtifactRoot is the filesystem root under which delegation artifacts
 	// (delegations/<parent-job-id>/brief.md and context-manifest.json) are
 	// written when a coordinator returns delegations that request artifacts.
@@ -274,7 +284,7 @@ func (e Engine) now() time.Time {
 // path is byte-identical. The hook maps the terminal JobState to the event_type,
 // resolves root_id from the payload, and ships a redacted event fire-and-forget.
 func (e Engine) mailbox() Mailbox {
-	mb := Mailbox{Store: e.Store}
+	mb := Mailbox{Store: e.Store, CanaryEnabled: e.CanaryEnabled}
 	if e.EventSink == nil {
 		return mb
 	}
@@ -4206,7 +4216,7 @@ func (e Engine) enqueue(ctx context.Context, request JobRequest) error {
 	if request.ID == "" {
 		request.ID = e.jobID(request)
 	}
-	_, err := (Mailbox{Store: e.Store}).Enqueue(ctx, request)
+	_, err := e.mailbox().Enqueue(ctx, request)
 	if err == nil {
 		return nil
 	}

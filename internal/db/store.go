@@ -1474,24 +1474,31 @@ func (s *Store) UpdateAgentTemplateMetadata(ctx context.Context, templateID stri
 	return s.GetAgentTemplate(ctx, templateID)
 }
 
-func (s *Store) RejectAgentTemplateVersion(ctx context.Context, versionID string, reason string) (AgentTemplateVersion, error) {
+// RejectAgentTemplateVersion retires a pending (#471) or canary (#484) candidate.
+// The returned changed bool reports whether THIS call performed the rejection
+// transition: it is false in the idempotent already-rejected branch and true when
+// the row actually moved to `rejected`. Callers that emit a one-shot side effect on
+// rejection (the #484 candidate.rolled_back event) MUST gate it on changed so a
+// concurrent / post-crash re-run does not double-fire.
+func (s *Store) RejectAgentTemplateVersion(ctx context.Context, versionID string, reason string) (AgentTemplateVersion, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AgentTemplateVersion{}, err
+		return AgentTemplateVersion{}, false, err
 	}
 	defer tx.Rollback()
 	target, err := getAgentTemplateVersionByIDTx(ctx, tx, versionID)
 	if err != nil {
-		return AgentTemplateVersion{}, err
+		return AgentTemplateVersion{}, false, err
 	}
-	// Idempotent: an already-rejected target is a no-op success so the #484 canary
-	// auto-rollback (which rejects the regressing canary) can be re-run safely after
-	// a crash without erroring.
+	// Idempotent: an already-rejected target is a no-op success (changed=false) so
+	// the #484 canary auto-rollback (which rejects the regressing canary) can be
+	// re-run safely after a crash — or raced by a concurrent harvest — without
+	// erroring AND without re-firing the rolled_back event.
 	if target.State == "rejected" {
 		if err := tx.Commit(); err != nil {
-			return AgentTemplateVersion{}, err
+			return AgentTemplateVersion{}, false, err
 		}
-		return target, nil
+		return target, false, nil
 	}
 	// A `pending` candidate rejects directly (#471); a `canary` candidate (#484) is
 	// retired by the auto-rollback. A canary never holds current_version_id (the
@@ -1499,29 +1506,33 @@ func (s *Store) RejectAgentTemplateVersion(ctx context.Context, versionID string
 	// champion live — no current pointer changes. The canary fraction/window are
 	// cleared so no stale routing state remains.
 	if target.State != "pending" && target.State != "canary" {
-		return AgentTemplateVersion{}, fmt.Errorf("agent template version %s is %s, not pending or canary", target.ID, target.State)
+		return AgentTemplateVersion{}, false, fmt.Errorf("agent template version %s is %s, not pending or canary", target.ID, target.State)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agent_template_versions SET state = 'rejected', updated_at = CURRENT_TIMESTAMP, canary_sample = 0, canary_started_at = '' WHERE id = ?`, target.ID); err != nil {
-		return AgentTemplateVersion{}, err
+		return AgentTemplateVersion{}, false, err
 	}
 	latestID, err := latestSelectableVersionID(ctx, tx, target.TemplateID)
 	if err != nil {
-		return AgentTemplateVersion{}, err
+		return AgentTemplateVersion{}, false, err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE agent_templates SET latest_version_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, latestID, target.TemplateID)
 	if err != nil {
-		return AgentTemplateVersion{}, err
+		return AgentTemplateVersion{}, false, err
 	}
 	if err := requireAffected(result, "agent template", target.TemplateID); err != nil {
-		return AgentTemplateVersion{}, err
+		return AgentTemplateVersion{}, false, err
 	}
 	if err := upsertAgentTemplateCandidateReviewDecisionTx(ctx, tx, target, "rejected", reason); err != nil {
-		return AgentTemplateVersion{}, err
+		return AgentTemplateVersion{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return AgentTemplateVersion{}, err
+		return AgentTemplateVersion{}, false, err
 	}
-	return s.GetAgentTemplateVersionByID(ctx, target.ID)
+	version, err := s.GetAgentTemplateVersionByID(ctx, target.ID)
+	if err != nil {
+		return AgentTemplateVersion{}, false, err
+	}
+	return version, true, nil
 }
 
 // RevertAgentTemplateVersion makes a previously superseded version current

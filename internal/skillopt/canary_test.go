@@ -124,7 +124,7 @@ func TestEvaluateCanaryRegression(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			verdict := EvaluateCanaryRegression(tc.canary, tc.champion, tc.minSamples, tc.canaryUnavailable, tc.championUnavailable)
+			verdict := EvaluateCanaryRegression(tc.canary, tc.champion, "", tc.minSamples, tc.canaryUnavailable, tc.championUnavailable)
 			if verdict.Decision != tc.want {
 				t.Fatalf("Decision = %q, want %q (reason: %q)", verdict.Decision, tc.want, verdict.Reason)
 			}
@@ -133,6 +133,73 @@ func TestEvaluateCanaryRegression(t *testing.T) {
 			}
 		})
 	}
+}
+
+// at sets a feedback event's CreatedAt to an RFC3339 instant so the bounded-window
+// comparator can include/exclude it.
+func at(event db.FeedbackEvent, ts string) db.FeedbackEvent {
+	event.CreatedAt = ts
+	return event
+}
+
+// TestEvaluateCanaryRegressionWindow proves the comparator bounds BOTH sides to the
+// canary window (CreatedAt >= windowStart): a champion whose stale PRE-window
+// outcomes drag its lifetime mean DOWN no longer produces a low baseline that
+// wrongly graduates a regressing canary. With windowing, only the champion's
+// concurrent (in-window) strong outcomes count, so the regressing canary rolls back.
+func TestEvaluateCanaryRegressionWindow(t *testing.T) {
+	const windowStart = "2026-06-27T12:00:00Z"
+	// Champion: a long history of PRE-window negatives (which drag its lifetime mean
+	// far below parity) PLUS healthy in-window real-CI positives. Lifetime mean =
+	// (25*0.0 + 5*1.0)/30 ≈ 0.167; windowed baseline = 5*1.0/5 = 1.0.
+	champion := append(
+		repeatAt(negFeedback(), 25, "2026-06-01T00:00:00Z"),
+		repeatAt(realCIFeedback(), 5, "2026-06-27T13:00:00Z")...,
+	)
+	// Canary: all in-window negatives (score 0.0) — a genuine regression vs the
+	// windowed champion.
+	canary := repeatAt(negFeedback(), 5, "2026-06-27T13:30:00Z")
+
+	// With windowing the champion baseline is the in-window 1.0, so the canary's 0.0
+	// is materially below (0.0 < 1.0-0.2) => rollback.
+	if v := EvaluateCanaryRegression(canary, champion, windowStart, 3, false, false); v.Decision != CanaryRollback {
+		t.Fatalf("windowed: Decision = %q, want %q (reason: %q)", v.Decision, CanaryRollback, v.Reason)
+	}
+	// WITHOUT a window (empty), the champion's lifetime mean (~0.167) is dragged low
+	// by the pre-window negatives, so the canary's 0.0 is NOT materially below it
+	// (0.0 >= 0.167-0.2) => the regression is MASKED and it GRADUATES. This is the
+	// apples-to-oranges bug the window fixes; asserting it here pins the contrast.
+	if v := EvaluateCanaryRegression(canary, champion, "", 3, false, false); v.Decision != CanaryGraduate {
+		t.Fatalf("lifetime (no window): Decision = %q, want %q (reason: %q)", v.Decision, CanaryGraduate, v.Reason)
+	}
+}
+
+// TestParseCanaryWindowTime proves the window parser accepts both the RFC3339
+// canary_started_at / harvester-default created_at AND SQLite's CURRENT_TIMESTAMP
+// 'YYYY-MM-DD HH:MM:SS' form, all as the same UTC instant.
+func TestParseCanaryWindowTime(t *testing.T) {
+	rfc, ok := parseCanaryWindowTime("2026-06-27T12:00:00Z")
+	if !ok {
+		t.Fatal("RFC3339 must parse")
+	}
+	sqlite, ok := parseCanaryWindowTime("2026-06-27 12:00:00")
+	if !ok {
+		t.Fatal("SQLite datetime must parse")
+	}
+	if !rfc.Equal(sqlite) {
+		t.Fatalf("RFC3339 %v and SQLite %v must be the same instant", rfc, sqlite)
+	}
+	if _, ok := parseCanaryWindowTime("  "); ok {
+		t.Fatal("empty value must not parse (fail-open sentinel)")
+	}
+}
+
+func repeatAt(event db.FeedbackEvent, n int, ts string) []db.FeedbackEvent {
+	out := make([]db.FeedbackEvent, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, at(event, ts))
+	}
+	return out
 }
 
 // TestCanaryVersionScoreBands proves the coarse per-version score reuses the #465

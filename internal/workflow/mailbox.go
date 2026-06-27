@@ -37,6 +37,19 @@ type Mailbox struct {
 	// exists for the resolved template, so when the feature is off the rng is never
 	// drawn and resolution is byte-identical.
 	CanaryRand func() float64
+	// CanaryEnabled gates the #484 canary ROUTING seam on the SAME policy the
+	// daemon's regression comparator uses (config.SkillOptPolicy.CanaryEnabled()),
+	// so the two seams turn on and off together. When false (the default, every
+	// construction site that does not opt in) routeCanary returns immediately —
+	// BEFORE the GetActiveCanaryVersion query — so no traffic is sampled, no rng is
+	// drawn, and the hot Enqueue path is byte-identical to before the feature
+	// existed. This is what stops a canary row from outliving the manager: turning
+	// auto_promote_canary off (or unsetting the sample) and restarting the daemon
+	// disables BOTH the comparator (no graduate/rollback) AND routing (no sampled
+	// traffic), so a stranded canary can never keep serving traffic with no
+	// auto-rollback. It is wired true only where the daemon-resolved policy reports
+	// CanaryEnabled().
+	CanaryEnabled bool
 }
 
 type JobRequest struct {
@@ -277,6 +290,15 @@ func (m Mailbox) templateSnapshot(ctx context.Context, agentName string) (db.Age
 // fallback and resolution is never broken. The random draw is taken ONLY when an
 // active canary actually exists, keeping the no-canary path byte-identical.
 func (m Mailbox) routeCanary(ctx context.Context, agentTemplateRef string, champion db.AgentTemplate) (db.AgentTemplate, bool) {
+	// Config gate (#484): routing is gated on the SAME policy the daemon's
+	// regression comparator uses, so the two seams are consistent. When the knob is
+	// off this returns before the GetActiveCanaryVersion query, so no rng is drawn,
+	// no traffic is sampled, and the path is byte-identical — and a canary row left
+	// behind by a since-disabled run can never keep serving traffic with no
+	// auto-rollback.
+	if !m.CanaryEnabled {
+		return db.AgentTemplate{}, false
+	}
 	templateID, versionRef := db.SplitAgentTemplateReference(agentTemplateRef)
 	// Only the default/current resolution participates in the canary; an explicit
 	// version pin (latest / @vN) is honored verbatim.

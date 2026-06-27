@@ -101,7 +101,11 @@ func (h *canaryRegressionHarvester) evaluate(ctx context.Context, payload workfl
 	if h.minSamples != nil {
 		minSamples = *h.minSamples
 	}
-	verdict := skillopt.EvaluateCanaryRegression(canaryEvents, championEvents, minSamples, canaryErr != nil, championErr != nil)
+	// Bound BOTH event lists to the canary window (canary_started_at) so the
+	// champion baseline is its CONCURRENT outcomes, not its entire-lifetime mean
+	// (#484) — otherwise an old champion's stale lifetime average could wrongly
+	// graduate a regressing canary or roll back a healthy one.
+	verdict := skillopt.EvaluateCanaryRegression(canaryEvents, championEvents, canary.CanaryStartedAt, minSamples, canaryErr != nil, championErr != nil)
 	switch verdict.Decision {
 	case skillopt.CanaryRollback:
 		// Guarantee the prior champion is the live current version BEFORE retiring the
@@ -114,8 +118,16 @@ func (h *canaryRegressionHarvester) evaluate(ctx context.Context, payload workfl
 				return
 			}
 		}
-		rejected, err := h.store.RejectAgentTemplateVersion(ctx, canary.ID, verdict.Reason)
+		rejected, changed, err := h.store.RejectAgentTemplateVersion(ctx, canary.ID, verdict.Reason)
 		if err != nil {
+			return
+		}
+		// Emit candidate.rolled_back ONLY on a real transition (#484): the daemon
+		// runs jobs in a parallel worker pool, so two same-template harvests can race
+		// to roll back the same canary. SQLite serializes the two reject transactions;
+		// the second hits the idempotent already-rejected branch (changed=false), so
+		// gating on changed keeps the "emitted exactly once" contract.
+		if !changed {
 			return
 		}
 		emitCandidateEvent(ctx, h.sink, events.EventCandidateRolledBack, rejected, "rolled_back", verdict.Reason)

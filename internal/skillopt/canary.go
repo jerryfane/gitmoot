@@ -3,6 +3,7 @@ package skillopt
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jerryfane/gitmoot/internal/db"
 )
@@ -62,11 +63,22 @@ const canaryRegressionDelta = 0.2
 
 // EvaluateCanaryRegression is the pure, deterministic, total bounded-window
 // comparator (#484). Given the canary version's and the prior champion's harvested
-// auto-trace feedback events, the minimum sample floor (reusing
+// auto-trace feedback events, the canary window-start (canary_started_at — the
+// timestamp the canary was promoted), the minimum sample floor (reusing
 // AutoPromoteMinSamples — no new knob), and per-side "could not read the feedback"
 // flags, it returns rollback / graduate / continue with a reason. It performs NO
 // I/O and NEVER mutates state: the daemon resolves the two runs, calls this, and
 // acts on the verdict via the EXISTING store rollback/graduate transactions.
+//
+// BOUNDED WINDOW: BOTH event lists are first filtered to the canary window
+// (CreatedAt >= windowStart) so the canary's fresh outcomes are compared against
+// the champion's outcomes OVER THE SAME PERIOD, not the champion's entire-lifetime
+// mean. This makes it a true simultaneous A/B: a long-lived champion whose old
+// outcomes dragged its lifetime mean down (or up) can no longer produce a stale
+// baseline that wrongly graduates a regressing canary (or rolls back a healthy
+// one). When windowStart is empty/unparseable the filter is skipped (fail-open to
+// the prior lifetime baseline), and an event whose own CreatedAt cannot be parsed
+// is kept (never silently dropped).
 //
 // FAIL-SAFE DISCIPLINE (inverted vs. #471's promote: here uncertainty leaves the
 // champion live AND keeps the canary sampling — it never rolls back and never
@@ -85,13 +97,17 @@ const canaryRegressionDelta = 0.2
 // DECISION (only when both sides have read, decisive evidence):
 //   - canary score materially below champion (by >= canaryRegressionDelta) -> rollback.
 //   - otherwise (parity or improvement, within the buffer) -> graduate.
-func EvaluateCanaryRegression(canaryEvents, championEvents []db.FeedbackEvent, minSamples int, canaryUnavailable, championUnavailable bool) CanaryVerdict {
+func EvaluateCanaryRegression(canaryEvents, championEvents []db.FeedbackEvent, windowStart string, minSamples int, canaryUnavailable, championUnavailable bool) CanaryVerdict {
 	if minSamples <= 0 {
 		return CanaryVerdict{Decision: CanaryContinue, Reason: "no canary sample floor configured; holding (keep sampling)"}
 	}
 	if canaryUnavailable {
 		return CanaryVerdict{Decision: CanaryContinue, Reason: "canary feedback unavailable (read error); holding — never roll back on unread evidence"}
 	}
+	// Bound BOTH sides to the canary window so the baseline is the champion's
+	// CONCURRENT outcomes, not its lifetime mean (#484).
+	canaryEvents = withinCanaryWindow(canaryEvents, windowStart)
+	championEvents = withinCanaryWindow(championEvents, windowStart)
 	canaryScore, canarySamples := canaryVersionScore(canaryEvents)
 	if canarySamples < minSamples {
 		return CanaryVerdict{Decision: CanaryContinue, Reason: fmt.Sprintf("only %d canary outcome(s), below min_samples=%d; holding (keep sampling)", canarySamples, minSamples)}
@@ -143,4 +159,60 @@ func canaryVersionScore(events []db.FeedbackEvent) (score float64, samples int) 
 		return 0, 0
 	}
 	return sum / float64(samples), samples
+}
+
+// withinCanaryWindow returns the subset of events whose CreatedAt is at or after
+// the canary window-start, bounding the comparator to a matched A/B window (#484).
+// It is fail-open: an empty/unparseable windowStart returns all events unchanged
+// (the prior lifetime-baseline behavior), and an event whose own CreatedAt cannot
+// be parsed is KEPT rather than silently dropped — windowing must never throw away
+// evidence it cannot timestamp. The returned slice is freshly allocated, so the
+// caller's slices are never mutated.
+func withinCanaryWindow(events []db.FeedbackEvent, windowStart string) []db.FeedbackEvent {
+	start, ok := parseCanaryWindowTime(windowStart)
+	if !ok {
+		return events
+	}
+	filtered := make([]db.FeedbackEvent, 0, len(events))
+	for _, event := range events {
+		created, parsed := parseCanaryWindowTime(event.CreatedAt)
+		if parsed && created.Before(start) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
+}
+
+// canaryWindowTimeLayouts are the timestamp formats the canary window comparator
+// tolerates so the RFC3339 canary_started_at and a feedback_events.created_at in
+// either RFC3339 (the harvester default) or SQLite's CURRENT_TIMESTAMP
+// 'YYYY-MM-DD HH:MM:SS' form all parse to a comparable instant.
+var canaryWindowTimeLayouts = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05",
+}
+
+// parseCanaryWindowTime parses a stored timestamp into a UTC instant, trying the
+// formats canary_started_at and feedback_events.created_at are written in. The
+// SQLite-datetime forms carry no zone and are read as UTC (matching how
+// CURRENT_TIMESTAMP and the RFC3339-UTC default are stored). It returns ok=false
+// for an empty or unrecognized value so the caller can fail open.
+func parseCanaryWindowTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range canaryWindowTimeLayouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC(), true
+		}
+		if parsed, err := time.ParseInLocation(layout, value, time.UTC); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }

@@ -12109,7 +12109,7 @@ func runSkillOptCandidateReject(args []string, stdout, stderr io.Writer) int {
 	var rejected db.AgentTemplateVersion
 	if err := withStore(parsed.home, func(store *db.Store) error {
 		var err error
-		rejected, err = store.RejectAgentTemplateVersion(context.Background(), parsed.versionID, parsed.reason)
+		rejected, _, err = store.RejectAgentTemplateVersion(context.Background(), parsed.versionID, parsed.reason)
 		return err
 	}); err != nil {
 		fmt.Fprintf(stderr, "skillopt candidate reject: %v\n", err)

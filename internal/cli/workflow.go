@@ -425,7 +425,7 @@ func runTaskRun(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fmt.Errorf("resolve task worktree head: %w", err)
 		}
-		startedJob, err = enqueueTaskRunImplementJob(context.Background(), store, started, strings.TrimSpace(*owner), headSHA)
+		startedJob, err = enqueueTaskRunImplementJob(context.Background(), store, started, strings.TrimSpace(*owner), headSHA, paths.Home)
 		return err
 	}); err != nil {
 		fmt.Fprintf(stderr, "run task: %v\n", err)
@@ -446,7 +446,7 @@ func runTaskRun(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func enqueueTaskRunImplementJob(ctx context.Context, store *db.Store, task db.Task, owner string, headSHA string) (db.Job, error) {
+func enqueueTaskRunImplementJob(ctx context.Context, store *db.Store, task db.Task, owner string, headSHA string, home string) (db.Job, error) {
 	baseJobID := taskRunImplementJobID(task.ID, owner)
 	jobID := baseJobID
 	request := taskRunImplementJobRequest(jobID, task, owner, headSHA)
@@ -464,7 +464,7 @@ func enqueueTaskRunImplementJob(ctx context.Context, store *db.Store, task db.Ta
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return db.Job{}, err
 	}
-	return (workflow.Mailbox{Store: store}).Enqueue(ctx, request)
+	return (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(home)}).Enqueue(ctx, request)
 }
 
 func findActiveTaskRunJob(ctx context.Context, store *db.Store, request workflow.JobRequest) (db.Job, bool, error) {

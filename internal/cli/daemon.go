@@ -3375,7 +3375,7 @@ func (w jobWorker) queueTempWorkerMergeBack(ctx context.Context, completedJobID 
 			"Do not edit files, create commits, open pull requests, or dispatch more agents unless the summary explicitly requires follow-up.",
 		},
 	}
-	if _, err := (workflow.Mailbox{Store: w.Store}).Enqueue(ctx, request); err != nil {
+	if _, err := (workflow.Mailbox{Store: w.Store, CanaryEnabled: canaryRoutingEnabled(w.workflowHome())}).Enqueue(ctx, request); err != nil {
 		return err
 	}
 	return w.Store.AddJobEvent(ctx, db.JobEvent{JobID: completedJob.ID, Kind: "temp_worker_merge_back_queued", Message: fmt.Sprintf("queued summary merge-back job %s for %s", mergeBackID, original.Name)})
@@ -4021,6 +4021,12 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, ho
 		PayloadRefresher: func(ctx context.Context, job db.Job, payload workflow.JobPayload) (workflow.JobPayload, error) {
 			return refreshDaemonJobPayload(ctx, store, checkout, job, payload)
 		},
+		// Gate the #484 canary ROUTING seam on the SAME policy.CanaryEnabled() the
+		// OutcomeHarvester's regression comparator above is gated on, so both seams
+		// are consistent: with canary off NO traffic is sampled (Mailbox.routeCanary
+		// returns before its query, byte-identical) AND no comparator runs, so a
+		// stranded canary row can never keep serving traffic with no auto-rollback.
+		CanaryEnabled: canaryRoutingEnabled(home),
 	}
 	if strings.TrimSpace(home) != "" {
 		// Root delegation artifacts under GITMOOT_HOME (alongside worktrees)

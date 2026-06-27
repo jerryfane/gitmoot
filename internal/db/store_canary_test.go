@@ -168,9 +168,12 @@ func TestCanaryRollbackKeepsChampion(t *testing.T) {
 		t.Fatalf("canary promote: %v", err)
 	}
 
-	rejected, err := store.RejectAgentTemplateVersion(ctx, canary.ID, "auto-rollback: regression")
+	rejected, changed, err := store.RejectAgentTemplateVersion(ctx, canary.ID, "auto-rollback: regression")
 	if err != nil {
 		t.Fatalf("reject canary: %v", err)
+	}
+	if !changed {
+		t.Fatalf("first canary reject must report changed=true")
 	}
 	if rejected.State != "rejected" {
 		t.Fatalf("rejected canary state = %q, want rejected", rejected.State)
@@ -186,9 +189,13 @@ func TestCanaryRollbackKeepsChampion(t *testing.T) {
 	if tmpl.VersionID != champion.ID || tmpl.Content != "v1 content" {
 		t.Fatalf("after rollback current = %q content = %q, want champion v1", tmpl.VersionID, tmpl.Content)
 	}
-	// Idempotent: rejecting an already-rejected canary is a no-op success.
-	if _, err := store.RejectAgentTemplateVersion(ctx, canary.ID, "again"); err != nil {
+	// Idempotent: rejecting an already-rejected canary is a no-op success that
+	// reports changed=false so a concurrent/post-crash re-run never re-fires the
+	// rolled_back event (#484).
+	if _, changed, err := store.RejectAgentTemplateVersion(ctx, canary.ID, "again"); err != nil {
 		t.Fatalf("re-reject (idempotent) returned error: %v", err)
+	} else if changed {
+		t.Fatalf("re-reject of an already-rejected canary must report changed=false")
 	}
 	if _, found, _ := store.GetActiveCanaryVersion(ctx, "planner"); found {
 		t.Fatal("no canary should remain active after rollback")
