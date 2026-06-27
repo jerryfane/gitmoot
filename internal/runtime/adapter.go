@@ -376,10 +376,23 @@ func codexSandboxArgs(agent Agent) []string {
 	}
 }
 
-// defaultClaudeRetryBackoff is the pause between Claude delivery attempts when a
-// transient socket-closed failure is retried. ClaudeAdapter.RetryBackoff
+// defaultClaudeRetryBackoff is the base pause between Claude delivery attempts
+// when a transient socket-closed failure is retried. ClaudeAdapter.RetryBackoff
 // overrides it; tests inject a near-zero value to stay fast.
 const defaultClaudeRetryBackoff = 500 * time.Millisecond
+
+// claudeDeliveryMaxAttempts bounds how many times a single Claude delivery is
+// attempted when it keeps hitting the transient socket-closed 401 (#509). A
+// fixed single retry (the old maxAttempts=2) empirically does not clear it, yet
+// a fresh delivery minutes later does, so we retry more and spread the attempts
+// across different transient windows via exponential backoff. Each failing
+// attempt burns ~30-77s, so 4 attempts is ~few min worst case — comfortably
+// inside the managed ask job-timeout (~10m). Only transient errors are retried.
+const claudeDeliveryMaxAttempts = 4
+
+// maxClaudeRetryBackoff caps the exponential per-attempt pause so the backoff
+// never balloons past a sane ceiling on the later attempts.
+const maxClaudeRetryBackoff = 30 * time.Second
 
 type ClaudeAdapter struct {
 	Runner        subprocess.Runner
@@ -423,19 +436,19 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 	model := effectiveModel(agent, job)
 	// The Claude CLI intermittently fails a delivery with a transient
 	// "401 socket connection was closed unexpectedly" under sustained
-	// concurrency; a byte-identical retry typically clears it. Retry once on
-	// that signature only, never on a permanent failure (e.g. an invalid token).
+	// concurrency; a byte-identical retry typically clears it. Retry on that
+	// signature only, never on a permanent failure (e.g. an invalid token).
 	// The retry is safe because the 401 fails before the model turn runs, so the
-	// failed attempt mutates no partial session state.
-	const maxAttempts = 2
+	// failed attempt mutates no partial session state. Use exponential backoff
+	// (see waitRetryBackoff) so retries land in different transient windows.
 	var result subprocess.Result
 	var err error
 	for attempt := 1; ; attempt++ {
 		result, err = a.runClaude(ctx, agent, job, model)
-		if attempt >= maxAttempts || !isTransientClaudeDeliveryError(result, err) {
+		if attempt >= claudeDeliveryMaxAttempts || !isTransientClaudeDeliveryError(result, err) {
 			break
 		}
-		if waitErr := a.waitRetryBackoff(ctx); waitErr != nil {
+		if waitErr := a.waitRetryBackoff(ctx, attempt); waitErr != nil {
 			break
 		}
 	}
@@ -482,18 +495,14 @@ func (a ClaudeAdapter) runClaude(ctx context.Context, agent Agent, job Job, mode
 	return result, err
 }
 
-// waitRetryBackoff pauses before the next delivery attempt, returning early if
-// the context is cancelled so a killed job stops promptly. It uses a stopped
-// timer (not time.After) so the timer is released when ctx wins the race.
-func (a ClaudeAdapter) waitRetryBackoff(ctx context.Context) error {
+// waitRetryBackoff pauses before the next delivery attempt (1-indexed), returning
+// early if the context is cancelled so a killed job stops promptly. It uses a
+// stopped timer (not time.After) so the timer is released when ctx wins the race.
+func (a ClaudeAdapter) waitRetryBackoff(ctx context.Context, attempt int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	backoff := a.RetryBackoff
-	if backoff == 0 {
-		backoff = defaultClaudeRetryBackoff
-	}
-	timer := time.NewTimer(backoff)
+	timer := time.NewTimer(a.retryBackoff(attempt))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -501,6 +510,30 @@ func (a ClaudeAdapter) waitRetryBackoff(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// retryBackoff computes the exponential pause before the next delivery attempt:
+// base * 2^(attempt-1), capped at maxClaudeRetryBackoff. base is RetryBackoff
+// when set (tests inject a tiny value to stay fast) else defaultClaudeRetryBackoff.
+func (a ClaudeAdapter) retryBackoff(attempt int) time.Duration {
+	base := a.RetryBackoff
+	if base <= 0 {
+		base = defaultClaudeRetryBackoff
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	backoff := base
+	for i := 1; i < attempt; i++ {
+		backoff *= 2
+		if backoff >= maxClaudeRetryBackoff {
+			return maxClaudeRetryBackoff
+		}
+	}
+	if backoff > maxClaudeRetryBackoff {
+		return maxClaudeRetryBackoff
+	}
+	return backoff
 }
 
 // isTransientClaudeDeliveryError reports whether a failed Claude delivery is the

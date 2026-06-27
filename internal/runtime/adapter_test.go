@@ -756,23 +756,109 @@ func TestClaudeDeliverSucceedsWithoutRetry(t *testing.T) {
 }
 
 func TestClaudeDeliverRetriesExhausted(t *testing.T) {
-	// Both attempts hit the transient: the bound (maxAttempts=2) must stop after
-	// exactly one retry and surface the final error rather than loop forever.
-	runner := &fakeRunner{
-		results: []subprocess.Result{
-			{Stderr: "401 The socket connection was closed unexpectedly"},
-			{Stderr: "401 The socket connection was closed unexpectedly"},
-		},
-		errs: []error{errors.New("exit 1"), errors.New("exit 1")},
+	// Every attempt hits the transient: the bound (claudeDeliveryMaxAttempts) must
+	// stop after exactly that many tries and surface the final error, never loop.
+	results := make([]subprocess.Result, claudeDeliveryMaxAttempts)
+	errs := make([]error, claudeDeliveryMaxAttempts)
+	for i := range results {
+		results[i] = subprocess.Result{Stderr: "401 The socket connection was closed unexpectedly"}
+		errs[i] = errors.New("exit 1")
 	}
+	runner := &fakeRunner{results: results, errs: errs}
 	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Nanosecond}
 	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err == nil {
 		t.Fatal("Deliver accepted a transient that persisted across all attempts")
 	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("runner called %d times, want exactly 2 (maxAttempts bound): %v", len(runner.calls), runner.calls)
+	if len(runner.calls) != claudeDeliveryMaxAttempts {
+		t.Fatalf("runner called %d times, want exactly %d (claudeDeliveryMaxAttempts bound): %v", len(runner.calls), claudeDeliveryMaxAttempts, runner.calls)
+	}
+}
+
+func TestClaudeDeliverSucceedsOnFinalAttempt(t *testing.T) {
+	// Transient on the first claudeDeliveryMaxAttempts-1 attempts, then a JSON
+	// success on the last: Deliver must recover and call exactly the bound times.
+	results := make([]subprocess.Result, claudeDeliveryMaxAttempts)
+	errs := make([]error, claudeDeliveryMaxAttempts)
+	for i := 0; i < claudeDeliveryMaxAttempts-1; i++ {
+		results[i] = subprocess.Result{Stderr: "401 The socket connection was closed unexpectedly"}
+		errs[i] = errors.New("exit 1")
+	}
+	results[claudeDeliveryMaxAttempts-1] = subprocess.Result{Stdout: `{"result":"recovered"}`}
+	runner := &fakeRunner{results: results, errs: errs}
+	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Nanosecond}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+
+	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
+	if err != nil {
+		t.Fatalf("Deliver returned error: %v", err)
+	}
+	if result.Summary != "recovered" {
+		t.Fatalf("summary = %q, want %q", result.Summary, "recovered")
+	}
+	if len(runner.calls) != claudeDeliveryMaxAttempts {
+		t.Fatalf("runner called %d times, want exactly %d: %v", len(runner.calls), claudeDeliveryMaxAttempts, runner.calls)
+	}
+}
+
+func TestClaudeDeliverStopsRetryOnContextCancelledDuringBackoff(t *testing.T) {
+	// A persistent transient with a large backoff would hang if cancellation were
+	// ignored mid-backoff; cancelling after the first call must stop promptly.
+	results := make([]subprocess.Result, claudeDeliveryMaxAttempts)
+	errs := make([]error, claudeDeliveryMaxAttempts)
+	for i := range results {
+		results[i] = subprocess.Result{Stderr: "401 The socket connection was closed unexpectedly"}
+		errs[i] = errors.New("exit 1")
+	}
+	runner := &fakeRunner{results: results, errs: errs}
+	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Hour}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Cancel shortly after delivery starts so the first backoff is interrupted.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := adapter.Deliver(ctx, agent, Job{Prompt: "review"}); err == nil {
+			t.Error("Deliver accepted transient error under cancelled context")
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Deliver hung instead of honouring context cancellation during backoff")
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner called %d times, want exactly 1 (cancel during backoff must stop): %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestClaudeRetryBackoffExponentialCapped(t *testing.T) {
+	a := ClaudeAdapter{RetryBackoff: time.Second}
+	for _, tt := range []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 1, want: time.Second},
+		{attempt: 2, want: 2 * time.Second},
+		{attempt: 3, want: 4 * time.Second},
+		{attempt: 4, want: 8 * time.Second},
+		{attempt: 10, want: maxClaudeRetryBackoff}, // capped
+	} {
+		if got := a.retryBackoff(tt.attempt); got != tt.want {
+			t.Fatalf("retryBackoff(%d) = %v, want %v", tt.attempt, got, tt.want)
+		}
+	}
+	// Defaults to defaultClaudeRetryBackoff when RetryBackoff is unset.
+	if got := (ClaudeAdapter{}).retryBackoff(1); got != defaultClaudeRetryBackoff {
+		t.Fatalf("default retryBackoff(1) = %v, want %v", got, defaultClaudeRetryBackoff)
 	}
 }
 
