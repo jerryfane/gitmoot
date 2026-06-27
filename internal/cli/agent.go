@@ -569,6 +569,14 @@ func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agen
 		fmt.Fprintf(stderr, "%s: %v\n", label, err)
 		return agentRunOptions{}, false
 	}
+	// --recipe is scoped to the coordinator fan-out surfaces (orchestrate and
+	// `agent run`). The shared parser/dispatch means review/implement would
+	// otherwise silently honor it and override their job template, so reject it
+	// there rather than apply it undocumented.
+	if normalizedRecipe != "" && command != "orchestrate" && command != "run" {
+		fmt.Fprintf(stderr, "%s: recipe is only supported for orchestrate and agent run\n", label)
+		return agentRunOptions{}, false
+	}
 	options.recipe = normalizedRecipe
 	return options, true
 }

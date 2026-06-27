@@ -3107,6 +3107,50 @@ func TestParseAgentRunOptionsCapturesRecipe(t *testing.T) {
 	})
 }
 
+// A valid recipe id that has not been installed must surface
+// loadInstalledTemplate's not-installed error at dispatch time, rather than
+// silently queueing a job with no recipe prompt.
+func TestRunOrchestrateRejectsUninstalledRecipe(t *testing.T) {
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	t.Chdir(repoDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{
+		"agent", "subscribe", "planner",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440099",
+		"--role", "planner",
+		"--repo", "owner/repo",
+		"--capability", "ask",
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("subscribe exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"orchestrate", "planner", "fan out fixes", "--home", home, "--repo", "owner/repo", "--recipe", "review-panel"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("orchestrate exit code = %d, want 1; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "agent template review-panel is not installed") {
+		t.Fatalf("stderr missing not-installed error: %q", stderr.String())
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	jobs, err := store.ListJobs(context.Background())
+	if err != nil {
+		t.Fatalf("ListJobs returned error: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs = %+v, want none (dispatch should fail before enqueue)", jobs)
+	}
+}
+
 func TestParseAgentRunOptionsCapturesCockpit(t *testing.T) {
 	tests := []struct {
 		name        string
