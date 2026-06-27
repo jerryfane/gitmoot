@@ -561,10 +561,10 @@ func defaultReadSkillOptABLine() (string, bool) {
 // (ranking=[winner,loser], source=skillopt-ab) that passes
 // store.validateRankedFeedbackEventOptions.
 func recordSkillOptABPick(ctx context.Context, store *db.Store, paths config.Paths, runID, pickSourceURL, templateID string, champion, challenger skillOptABVariant, championDelivery, challengerDelivery skillOptABDelivery, winnerLabel, loserLabel, prompt string) error {
-	if err := ensureSkillOptABRunRows(ctx, store, paths, runID, templateID, champion, challenger, championDelivery, challengerDelivery, prompt); err != nil {
+	if err := ensureSkillOptABRunRows(ctx, store, paths, runID, skillOptABItemID, templateID, champion, challenger, championDelivery, challengerDelivery, prompt, skillOptABSource, skillOptABFeedbackSource); err != nil {
 		return err
 	}
-	return upsertSkillOptABRankedEvent(ctx, store, runID, winnerLabel, loserLabel, "human", skillOptABSource, pickSourceURL)
+	return upsertSkillOptABRankedEvent(ctx, store, runID, skillOptABItemID, winnerLabel, loserLabel, "human", skillOptABSource, pickSourceURL)
 }
 
 // ensureSkillOptABRunRows idempotently upserts the shared pairwise scaffolding for
@@ -575,12 +575,12 @@ func recordSkillOptABPick(ctx context.Context, store *db.Store, paths config.Pat
 // judge row is self-sufficient when --judge-only skips the human record, and the
 // rows are byte-identical when both run (every write here is an idempotent upsert
 // keyed by (run_id,item_id,label)).
-func ensureSkillOptABRunRows(ctx context.Context, store *db.Store, paths config.Paths, runID, templateID string, champion, challenger skillOptABVariant, championDelivery, challengerDelivery skillOptABDelivery, prompt string) error {
+func ensureSkillOptABRunRows(ctx context.Context, store *db.Store, paths config.Paths, runID, itemID, templateID string, champion, challenger skillOptABVariant, championDelivery, challengerDelivery skillOptABDelivery, prompt, source, feedbackSource string) error {
 	blobStore := artifact.NewStore(paths.ArtifactBlobs)
 
 	metadataJSON, err := json.Marshal(map[string]any{
-		"feedback_source": skillOptABFeedbackSource,
-		"source":          skillOptABSource,
+		"feedback_source": feedbackSource,
+		"source":          source,
 		"champion":        champion.version.ID,
 		"challenger":      challenger.version.ID,
 	})
@@ -599,7 +599,7 @@ func ensureSkillOptABRunRows(ctx context.Context, store *db.Store, paths config.
 	if err := store.UpsertEvalRun(ctx, run); err != nil {
 		return err
 	}
-	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{RunID: runID, ItemID: skillOptABItemID, Title: prompt}); err != nil {
+	if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{RunID: runID, ItemID: itemID, Title: prompt}); err != nil {
 		return err
 	}
 
@@ -612,7 +612,7 @@ func ensureSkillOptABRunRows(ctx context.Context, store *db.Store, paths config.
 		{label: skillOptABChampionLabel, delivery: championDelivery},
 		{label: skillOptABChallengerLabel, delivery: challengerDelivery},
 	} {
-		evalArtifact, err := prepareReviewItemContentArtifact(blobStore, runID, skillOptABItemID, opt.label, []byte(answerOrPlaceholder(opt.delivery.answer)), "text/plain", "text")
+		evalArtifact, err := prepareReviewItemContentArtifact(blobStore, runID, itemID, opt.label, []byte(answerOrPlaceholder(opt.delivery.answer)), "text/plain", "text")
 		if err != nil {
 			return err
 		}
@@ -621,7 +621,7 @@ func ensureSkillOptABRunRows(ctx context.Context, store *db.Store, paths config.
 		}
 		if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{
 			RunID:      runID,
-			ItemID:     skillOptABItemID,
+			ItemID:     itemID,
 			Label:      opt.label,
 			ArtifactID: evalArtifact.ID,
 			Role:       opt.label,
@@ -640,7 +640,7 @@ func ensureSkillOptABRunRows(ctx context.Context, store *db.Store, paths config.
 // (reviewer=skillopt-ab-judge,source=skillopt-ab-judge) as SEPARATE coexisting
 // rows on the same run/item, and what makes repeated picks each persist via a
 // distinct per-pick source_url.
-func upsertSkillOptABRankedEvent(ctx context.Context, store *db.Store, runID, winnerLabel, loserLabel, reviewer, source, sourceURL string) error {
+func upsertSkillOptABRankedEvent(ctx context.Context, store *db.Store, runID, itemID, winnerLabel, loserLabel, reviewer, source, sourceURL string) error {
 	ranking, err := json.Marshal([]string{winnerLabel, loserLabel})
 	if err != nil {
 		return err
@@ -651,7 +651,7 @@ func upsertSkillOptABRankedEvent(ctx context.Context, store *db.Store, runID, wi
 	}
 	return store.UpsertRankedFeedbackEvent(ctx, db.RankedFeedbackEvent{
 		RunID:         runID,
-		ItemID:        skillOptABItemID,
+		ItemID:        itemID,
 		RankingJSON:   string(ranking),
 		TieGroupsJSON: string(tieGroups),
 		Winner:        winnerLabel,
@@ -766,12 +766,12 @@ func runSkillOptABJudge(ctx context.Context, store *db.Store, paths config.Paths
 
 	// Ensure the shared run/item/options exist (idempotent) so the judge row is
 	// self-sufficient even under --judge-only where the human record path never runs.
-	if err := ensureSkillOptABRunRows(ctx, store, paths, runID, templateID, champion, challenger, optionAToDelivery(optionA, optionB, champion), optionAToDelivery(optionA, optionB, challenger), options.prompt); err != nil {
+	if err := ensureSkillOptABRunRows(ctx, store, paths, runID, skillOptABItemID, templateID, champion, challenger, optionAToDelivery(optionA, optionB, champion), optionAToDelivery(optionA, optionB, challenger), options.prompt, skillOptABSource, skillOptABFeedbackSource); err != nil {
 		log.Printf("skillopt ab judge: ensure run rows: %v", err)
 		return
 	}
 	judgeSourceURL := skillOptABJudgeSourceURL(challenger.version.ID)
-	if err := upsertSkillOptABRankedEvent(ctx, store, runID, winnerLabel, loserLabel, skillOptABJudgeReviewer, skillOptABJudgeSource, judgeSourceURL); err != nil {
+	if err := upsertSkillOptABRankedEvent(ctx, store, runID, skillOptABItemID, winnerLabel, loserLabel, skillOptABJudgeReviewer, skillOptABJudgeSource, judgeSourceURL); err != nil {
 		log.Printf("skillopt ab judge: record judge pick: %v", err)
 		return
 	}

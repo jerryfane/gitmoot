@@ -78,6 +78,8 @@ func runSkillOpt(args []string, stdout, stderr io.Writer) int {
 		return runSkillOptTrain(args[1:], stdout, stderr)
 	case "ab":
 		return runSkillOptAB(args[1:], stdout, stderr)
+	case "pairwise":
+		return runSkillOptPairwise(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown skillopt command %q\n\n", args[0])
 		printSkillOptUsage(stderr)
@@ -102,6 +104,7 @@ func printSkillOptUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot skillopt feedback github publish --run <run-id> [--repo owner/repo] [--pr <number>]")
 	fmt.Fprintln(w, "  gitmoot skillopt feedback github sync --run <run-id> [--repo owner/repo] (--issue <number>|--pr <number>)")
 	fmt.Fprintln(w, "  gitmoot skillopt ab <agent> \"<prompt>\" [--challenger <versionId>] [--pick a|b] [--seed N] [--judge] [--judge-only] [--home path]")
+	fmt.Fprintln(w, "  gitmoot skillopt pairwise import <packet-dir> [--packet path] [--secret-map path] [--picks path] [--reviewer name] [--home path] [--json]")
 	fmt.Fprintln(w, "  gitmoot skillopt judge-report [--template id]")
 	fmt.Fprintln(w, "  gitmoot skillopt judge promote --template <id> --task-kind <kind> --file <pkg.json> [--home <h>] [--yes] [--json]")
 	fmt.Fprintln(w, "  gitmoot skillopt train init --name <name> --template <id> --review-repo owner/repo --artifact-kind kind --preview kind (--request text|--request-file path)")
