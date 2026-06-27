@@ -283,12 +283,115 @@ func TestCanaryLifecycleE2E(t *testing.T) {
 		}
 	})
 
+	// wired_through_daemon_config_assembly closes the one uncovered link the other
+	// subtests bypass by hand-wiring: the daemon's config->component glue. Instead of
+	// setting Mailbox.CanaryEnabled directly and hand-building a
+	// &canaryRegressionHarvester{...}, it writes a real [skillopt] canary config into
+	// a fixture home and drives the SAME rollback through canaryRoutingEnabled(home)
+	// (the routing gate, daemon.go/engine.go) and daemonOutcomeHarvesterWithCanary(
+	// store, gh, home) (the harvester assembly, daemon.go). A regression in that glue
+	// — forgetting to wrap (bare base harvester), wiring the wrong minSamples, or a
+	// gate that returns false when the canary policy is on — would now fail here.
+	t.Run("wired_through_daemon_config_assembly", func(t *testing.T) {
+		ctx := context.Background()
+		store, championID, canaryID, championCommit, canaryCommit, agentName := canaryE2EFixture(t)
+		seedAutoTraceFeedback(t, store, "planner", championID, "a", 3)
+
+		// A real, fully-configured canary [skillopt] policy. min_samples=3 is the
+		// daemon regression floor the harvester must read off the policy; sample=0.5
+		// is the routing discriminator the Mailbox must read off the SAME policy.
+		home := writeHarvestConfig(t, "[skillopt]\n"+
+			"auto_trace_enabled = true\n"+
+			"auto_promote = true\n"+
+			"auto_promote_canary = true\n"+
+			"auto_promote_canary_sample = 0.5\n"+
+			"auto_promote_min_samples = 3\n")
+
+		// GATE: the routing seam turns on only because the config configures it. (A
+		// gate that ignored the canary policy — daemon.go:4029/engine.go:287 — would
+		// build every Mailbox with CanaryEnabled=false and the canary would never see
+		// traffic.) Cross-check the OFF case so the gate is not a constant-true.
+		if !canaryRoutingEnabled(home) {
+			t.Fatal("canaryRoutingEnabled = false with a configured canary policy, want true")
+		}
+		offHome := writeHarvestConfig(t, "[skillopt]\nauto_trace_enabled = true\n")
+		if canaryRoutingEnabled(offHome) {
+			t.Fatal("canaryRoutingEnabled = true with canary OFF, want false")
+		}
+
+		// ASSEMBLY: the harvester must be the #484 wrapper (not the bare #465 base)
+		// and must carry the policy's min_samples. A forgotten wrap or wrong floor
+		// (canary_daemon.go:25 / daemon.go:4000) ships silently otherwise.
+		built := daemonOutcomeHarvesterWithCanary(store, github.NoopClient{}, home)
+		wrapper, ok := built.(*canaryRegressionHarvester)
+		if !ok {
+			t.Fatalf("daemonOutcomeHarvesterWithCanary returned %T, want *canaryRegressionHarvester (must wrap the base)", built)
+		}
+		if wrapper.minSamples == nil || *wrapper.minSamples != 3 {
+			t.Fatalf("wrapper minSamples = %v, want the configured 3", wrapper.minSamples)
+		}
+		// With canary OFF the assembly must return the BARE base, never the wrapper.
+		if offBuilt := daemonOutcomeHarvesterWithCanary(store, github.NoopClient{}, offHome); offBuilt == nil {
+			t.Fatal("daemonOutcomeHarvesterWithCanary = nil with auto_trace on, want the bare base")
+		} else if _, isWrapper := offBuilt.(*canaryRegressionHarvester); isWrapper {
+			t.Fatal("daemonOutcomeHarvesterWithCanary wrapped the base with canary OFF, want the bare base")
+		}
+
+		// ROUTING through the config-gated flag, then ROLLBACK through the assembled
+		// harvester. The harvester's internal sink is the daemon's (nil with no
+		// [events] config), so the rollback is asserted on store-observable state
+		// rather than emitted events — the event assertions live in the hand-wired
+		// rollback subtest above.
+		mb := workflow.Mailbox{
+			Store:         store,
+			CanaryEnabled: canaryRoutingEnabled(home),
+			CanaryRand:    scriptedDraws(t, 0.10, 0.20, 0.30, 0.80),
+		}
+		canaryJobs := routeAndAssertSplit(t, mb, agentName, "wired", championCommit, canaryCommit, []routeCase{
+			{pr: 701, canary: true}, {pr: 702, canary: true}, {pr: 703, canary: true}, {pr: 704, canary: false},
+		})
+		if len(canaryJobs) != 3 {
+			t.Fatalf("canary-routed jobs = %d, want 3", len(canaryJobs))
+		}
+		for i, payload := range canaryJobs {
+			job := db.Job{ID: fmt.Sprintf("wired-job-%d", i), Agent: agentName, Type: "implement"}
+			if err := built.Harvest(ctx, job, payload, regressingChangesOutcome(800+i)); err != nil {
+				t.Fatalf("Harvest #%d: %v", i, err)
+			}
+		}
+		assertCanaryFeedbackCount(t, store, canaryID, 3)
+
+		rejected, err := store.GetAgentTemplateVersionByID(ctx, canaryID)
+		if err != nil {
+			t.Fatalf("get canary after rollback: %v", err)
+		}
+		if rejected.State != "rejected" {
+			t.Fatalf("canary state = %q, want rejected (assembled harvester must roll back)", rejected.State)
+		}
+		tmpl, err := store.GetAgentTemplate(ctx, "planner")
+		if err != nil {
+			t.Fatalf("GetAgentTemplate after rollback: %v", err)
+		}
+		if tmpl.VersionID != championID {
+			t.Fatalf("current version = %q, want champion %q (champion must stay live)", tmpl.VersionID, championID)
+		}
+	})
+
 	// rolled_back_emitted_once_under_concurrent_harvest exercises the dedup contract:
 	// the daemon runs jobs in a parallel worker pool, so two same-template harvests
 	// can race to roll back the same canary. RejectAgentTemplateVersion is idempotent
 	// (changed=false on the second), and the decorator gates the emit on changed, so
 	// rolled_back must fire EXACTLY ONCE even when two Harvest() calls race to the
 	// rollback. Still no hand-seeding: the canary samples come only from Harvest.
+	//
+	// ROOT-CAUSE NOTE (so this stays green under -race in CI): db.Open sets
+	// SetMaxOpenConns(1), so the two reject transactions are SERIALIZED at the DB —
+	// the first commits state='rejected' (changed=true, one emit) and the second
+	// reads the already-rejected row (changed=false, no emit). A true double-reject
+	// is therefore impossible, which is why this is reliable under the detector. The
+	// two-goroutine race below exercises the real evaluate->emit path under -race;
+	// the deterministic re-reject assertion at the end pins the underlying
+	// idempotency contract WITHOUT depending on goroutine scheduling.
 	t.Run("rolled_back_emitted_once_under_concurrent_harvest", func(t *testing.T) {
 		ctx := context.Background()
 		store, championID, canaryID, _, canaryCommit, agentName := canaryE2EFixture(t)
@@ -348,6 +451,24 @@ func TestCanaryLifecycleE2E(t *testing.T) {
 		}
 		if rejected.State != "rejected" {
 			t.Fatalf("canary state = %q, want rejected", rejected.State)
+		}
+
+		// DETERMINISTIC dedup pin (scheduling-independent): the exactly-once contract
+		// rests entirely on RejectAgentTemplateVersion being idempotent — a SECOND
+		// reject of the now-rejected canary must report changed=false, which is what
+		// the decorator's `if !changed { return }` gate keys off to suppress the
+		// duplicate emit. Assert that primitive directly so a regression that made
+		// re-reject report changed=true (re-firing rolled_back) is caught even if the
+		// goroutine race above happens not to overlap on a given run.
+		reRejected, changed, err := store.RejectAgentTemplateVersion(ctx, canaryID, "dedup probe")
+		if err != nil {
+			t.Fatalf("re-reject canary: %v", err)
+		}
+		if changed {
+			t.Fatal("re-reject of an already-rejected canary reported changed=true, want false (idempotent dedup)")
+		}
+		if reRejected.State != "rejected" {
+			t.Fatalf("re-reject state = %q, want rejected", reRejected.State)
 		}
 	})
 }
