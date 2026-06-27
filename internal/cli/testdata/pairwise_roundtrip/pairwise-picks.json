@@ -1,0 +1,15 @@
+{
+  "kind": "gitmoot-skillopt-pairwise-picks",
+  "picks": [
+    {
+      "item_id": "val-1",
+      "pick": "B"
+    },
+    {
+      "item_id": "val-2",
+      "pick": "A"
+    }
+  ],
+  "reviewer": "human",
+  "run_id": "run-1"
+}
