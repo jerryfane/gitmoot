@@ -25,6 +25,29 @@ type ReviewLegDispatcher interface {
 	Review(ctx context.Context, implementJob db.Job, implementPayload JobPayload, mergedHead string) (Outcome, bool, error)
 }
 
+// DeterministicCheckerDispatcher is the injected, best-effort, nil-by-default seam
+// (#485) the engine calls after a merge to run an OBJECTIVE, non-LLM
+// deterministic-checker leg ALONGSIDE the subjective cross-family review leg. It
+// runs plain external TOOLS (code duplication, lint, cyclomatic complexity) plus a
+// pure-Go diff-size metric, normalizes each to a [0,1] dimension, and returns an
+// Outcome{Kind: OutcomeReviewed, Objective: true, Rubric: <tool dims>} the engine
+// harvests into the SAME auto-trace run as a THIRD coexisting signal — distinct
+// from the LLM rubric via the Objective tag.
+//
+// It mirrors ReviewLegDispatcher EXACTLY: nil-safe (when nil — the default, no
+// deterministic_checkers_enabled — NO checker leg runs and NO checker row is
+// written, so behavior is byte-identical), DETACHED off the blocking AdvanceJob
+// path (a wedged tool can never stall job advancement), and best-effort (a dispatch
+// error is swallowed and recorded as a deterministic_checkers_failed job event,
+// never returned up). ok=false means NO dimension was producible at all (every
+// checker skipped) so the engine writes no checker row; ok=true returns the
+// objective outcome with whatever dimensions survived. The concrete impl is wired
+// only in cli (gated by deterministic_checkers_enabled AND auto_trace_enabled),
+// keeping the engine free of subprocess/skillopt coupling.
+type DeterministicCheckerDispatcher interface {
+	Check(ctx context.Context, implementJob db.Job, implementPayload JobPayload, mergedHead string) (Outcome, bool, error)
+}
+
 // crossFamilyRotation is the fixed, deterministic family rotation used when no
 // registered different-family reviewer exists and the dispatcher materializes an
 // ephemeral different-family review leg (#469): codex→claude, claude→codex,

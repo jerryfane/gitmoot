@@ -1968,6 +1968,9 @@ func testEngine(store *db.Store) Engine {
 		// Run the detached cross-family review leg SYNCHRONOUSLY in tests so its
 		// dispatch + harvest are deterministic; production defaults to a goroutine.
 		ReviewSpawner: func(fn func()) { fn() },
+		// Likewise run the detached deterministic-checker leg (#485) synchronously so
+		// its dispatch + harvest are deterministic in tests.
+		CheckerSpawner: func(fn func()) { fn() },
 	}
 }
 

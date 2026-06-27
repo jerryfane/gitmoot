@@ -122,10 +122,29 @@ escalation_ttl = ""
 #     row. The judge is cross-family ONLY (skipped — never same-family — when no other
 #     family is available), NEVER touches the promotion bandit, and is never the sole
 #     gate; its trust is DEFERRED to MEASURE-THE-JUDGE (#344). Off ⇒ byte-identical.
+#   deterministic_checkers_enabled (#485): OFF by default; requires auto_trace. When
+#     true, a MERGED implement job additionally runs a best-effort, DETACHED leg of
+#     plain external TOOLS (code duplication, lint, cyclomatic complexity) plus a
+#     pure-Go diff-size metric, normalizes each to a [0,1] dimension, and records a
+#     THIRD coexisting OBJECTIVE feedback row (reviewer gitmoot-checker, item
+#     checker#repo#pr) in the SAME auto-trace run as the verifiable floor and the
+#     cross-family review. These dimensions are TOOL-MEASURED (no LLM) and
+#     un-gameable. DEGRADE-GRACEFULLY: a missing tool binary, no PR-head checkout, a
+#     tool error, or a timeout SKIPS that ONE dimension (no row for it) and NEVER
+#     fails the harvest or blocks the merge; an all-skipped run writes no row.
+#     diff_size is pure-Go and always available; tool dims appear only when their
+#     binary AND a checkout are present. Off ⇒ byte-identical. Promotion stays MANUAL.
+#   deterministic_checkers (#485): optional comma list selecting which checkers run
+#     when enabled (diff_size,duplication,lint,complexity). UNSET/empty ⇒ the safe
+#     default (diff_size only) so a tool-less host runs the always-available metric
+#     and never a heavy tool. Narrow it to run only the cheap dims, or widen it to
+#     opt heavy tools (jscpd/golangci-lint) in. An unknown name is ignored.
 # [skillopt]
 # auto_trace_enabled = false
 # cross_family_review_enabled = false
 # revert_detection_enabled = true
+# deterministic_checkers_enabled = false
+# deterministic_checkers = diff_size
 # auto_promote = false
 # auto_promote_min_samples = 0
 # auto_promote_min_score = 0.0

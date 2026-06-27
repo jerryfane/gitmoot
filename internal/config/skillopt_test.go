@@ -273,6 +273,122 @@ mode_b_judge_enabled = sometimes
 	}
 }
 
+// TestLoadSkillOptPolicyDeterministicCheckersDefaultsDisabled: the #485 objective
+// checker knob is OFF by default and DeterministicCheckersEnabled() is false.
+func TestLoadSkillOptPolicyDeterministicCheckersDefaultsDisabled(t *testing.T) {
+	policy := DefaultSkillOptPolicy()
+	if policy.DeterministicCheckers || policy.DeterministicCheckersEnabled() {
+		t.Fatalf("deterministic checkers must default OFF, got %+v", policy)
+	}
+	if policy.DeterministicCheckerList != nil {
+		t.Fatalf("deterministic_checkers list must default nil, got %+v", policy.DeterministicCheckerList)
+	}
+	// The resolved selector falls back to the safe default set (diff_size only).
+	resolved := policy.ResolvedDeterministicCheckers()
+	if len(resolved) != 1 || resolved[0] != "diff_size" {
+		t.Fatalf("default resolved checkers = %v, want [diff_size]", resolved)
+	}
+}
+
+// TestLoadSkillOptPolicyDeterministicCheckersRequiresAutoTrace:
+// deterministic_checkers_enabled alone (without auto_trace_enabled) is OFF —
+// DeterministicCheckersEnabled() requires BOTH, mirroring ReviewEnabled().
+func TestLoadSkillOptPolicyDeterministicCheckersRequiresAutoTrace(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[skillopt]
+deterministic_checkers_enabled = true
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	policy, err := LoadSkillOptPolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadSkillOptPolicy returned error: %v", err)
+	}
+	if !policy.DeterministicCheckers {
+		t.Fatal("deterministic_checkers_enabled = true should parse")
+	}
+	if policy.DeterministicCheckersEnabled() {
+		t.Fatal("DeterministicCheckersEnabled() must be false without auto_trace_enabled (requires BOTH)")
+	}
+}
+
+// TestLoadSkillOptPolicyDeterministicCheckersEnabledWithBoth: both knobs on =>
+// DeterministicCheckersEnabled().
+func TestLoadSkillOptPolicyDeterministicCheckersEnabledWithBoth(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[skillopt]
+auto_trace_enabled = true
+deterministic_checkers_enabled = true
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	policy, err := LoadSkillOptPolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadSkillOptPolicy returned error: %v", err)
+	}
+	if !policy.DeterministicCheckersEnabled() {
+		t.Fatalf("DeterministicCheckersEnabled() must be true with both knobs on, got %+v", policy)
+	}
+}
+
+// TestLoadSkillOptPolicyParsesDeterministicCheckerList: the comma list selector
+// parses into a trimmed slice and ResolvedDeterministicCheckers returns it verbatim.
+func TestLoadSkillOptPolicyParsesDeterministicCheckerList(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[skillopt]
+auto_trace_enabled = true
+deterministic_checkers_enabled = true
+deterministic_checkers = diff_size, duplication ,lint
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	policy, err := LoadSkillOptPolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadSkillOptPolicy returned error: %v", err)
+	}
+	want := []string{"diff_size", "duplication", "lint"}
+	got := policy.ResolvedDeterministicCheckers()
+	if len(got) != len(want) {
+		t.Fatalf("resolved checkers = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("resolved checkers[%d] = %q, want %q (got %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestLoadSkillOptPolicyRejectsBadDeterministicCheckersBool: a non-bool
+// deterministic_checkers_enabled surfaces a parse error (fail-safe, consistent with
+// applySkillOptPolicyField).
+func TestLoadSkillOptPolicyRejectsBadDeterministicCheckersBool(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[skillopt]
+deterministic_checkers_enabled = perhaps
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	if _, err := LoadSkillOptPolicy(paths); err == nil {
+		t.Fatal("expected an error for a non-bool deterministic_checkers_enabled")
+	}
+}
+
 // TestLoadSkillOptPolicyIgnoresOtherSections proves a config that only sets
 // [events]/[orchestrate] leaves the trace-harvester at its disabled default.
 func TestLoadSkillOptPolicyIgnoresOtherSections(t *testing.T) {

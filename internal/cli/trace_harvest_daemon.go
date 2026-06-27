@@ -8,6 +8,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/github"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/skillopt"
+	"github.com/jerryfane/gitmoot/internal/subprocess"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
@@ -80,6 +81,33 @@ func daemonReviewLegDispatcher(store *db.Store, gh github.Client, checkout strin
 		buildAdapter: buildRuntimeAdapter,
 		authed:       daemonAuthedRuntimes(checkout),
 		checkout:     checkout,
+	}
+}
+
+// daemonDeterministicCheckerDispatcher returns the best-effort OBJECTIVE
+// deterministic-checker dispatcher for this home (#485), or nil when the checker
+// knob is OFF — the default, or any config-load failure (fail-safe to disabled).
+// DeterministicCheckersEnabled() requires BOTH deterministic_checkers_enabled AND
+// auto_trace_enabled, so the objective row is only ever written inside an enabled
+// auto-trace run. When nil, the engine constructs no checker leg and writes no
+// checker row, so daemon behavior is byte-identical. It mirrors
+// daemonReviewLegDispatcher's off-by-default gate. The resolved per-checker selector
+// (defaulted to the safe diff_size-only set) is passed in so an operator can run
+// only the always-available metric on a tool-less host.
+func daemonDeterministicCheckerDispatcher(store *db.Store, gh github.Client, checkout string, home string) workflow.DeterministicCheckerDispatcher {
+	if store == nil {
+		return nil
+	}
+	policy, err := loadSkillOptPolicy(home)
+	if err != nil || !policy.DeterministicCheckersEnabled() {
+		return nil
+	}
+	return &deterministicCheckerDispatcher{
+		store:    store,
+		diff:     gh,
+		runner:   subprocess.ExecRunner{},
+		checkout: checkout,
+		checkers: policy.ResolvedDeterministicCheckers(),
 	}
 }
 

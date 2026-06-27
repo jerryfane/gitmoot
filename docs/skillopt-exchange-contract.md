@@ -273,6 +273,52 @@ manual (the harvester writes only `eval_runs` / `eval_review_items` /
 subject to the configurable `[skillopt].auto_promote` policy (#463) when that
 lands — weighted-low + judge-tagged, **not** barred from promotion.
 
+### Deterministic checker objective signal (off by default)
+
+Setting **both** `[skillopt].auto_trace_enabled = true` **and**
+`[skillopt].deterministic_checkers_enabled = true` (both default `false`) adds an
+**OBJECTIVE, non-LLM** checker leg on every merge — the tool-measured complement to
+the subjective cross-family review. Where the review asks an LLM to *estimate*
+quality, the checker runs plain external **tools** that *measure* it exactly:
+
+- **`diff_size`** — pure-Go, **always available** (no tool, no checkout): parses the
+  PR file patches, counts changed `+/-` hunk lines + changed files, and normalizes
+  against a soft cap so a tight diff scores ~`1.0` and a larger-than-budget one
+  scores lower. It is the one dimension that is never a no-op on a tool-less host.
+- **`duplication`** — code-clone count via `dupl` (else `jscpd`).
+- **`lint`** — issue count via `golangci-lint`.
+- **`complexity`** — over-threshold function count via `gocyclo`.
+
+Each tool dimension is normalized to `[0,1]` (fewer issues → higher). The optional
+`[skillopt].deterministic_checkers` comma list selects which run (default:
+`diff_size` only); widen it to opt heavy tools in. The dimensions map to
+`dimension_scores`, are fused by the **mean-of-dimensions** path, and are written as
+a **third** `FeedbackEvent` in the SAME `auto-trace:<version>` run under a distinct
+item id (`checker#<repo>#<pr>`) and the fixed `gitmoot-checker` reviewer sentinel —
+so it **coexists with** (never overwrites) both the verifiable floor (`gitmoot-auto`,
+`repo#pr`) and the cross-family review (`gitmoot-review`, `review#<repo>#<pr>`) under
+the run's UNIQUE `(run_id,item_id,reviewer,source,source_url)` key. A re-evaluation
+re-upserts the SAME checker row in place (stable row count). The checker eval item
+carries `objective = true`, the projected `checker_score`, and the per-dimension
+`dimension_scores`, while the run keeps `feedback_source = automatic_trace` —
+additive, **no new contract field, `contract_version` stays `1`**.
+
+These dimensions are **objective and un-gameable**, so the export/optimizer weights
+them distinctly from the subjective judge row via the `gitmoot-checker` sentinel +
+the `objective` item tag. The leg runs **off the blocking merge path** (detached,
+timeout-bounded) and is **fail-safe throughout**: a missing tool binary
+(`LookPath` miss), no PR-head checkout, a tool error, or a timeout **SKIPS that one
+dimension** (no row for it) and never errors the harvest, blocks the merge, or
+stalls `AdvanceJob`. An all-skipped run yields an empty rubric ⇒ **no checker row**.
+A dispatch failure records a `deterministic_checkers_failed` job event and is
+swallowed. Promotion stays manual (the leg writes only `eval_runs` /
+`eval_review_items` / `feedback_events`).
+
+> Note: the merge-gate path holds the daemon's own checkout, not a working tree at
+> the PR head, so the tool-backed dimensions are effectively produced only when such
+> a checkout happens to be available; `diff_size` always runs. Plumbing a PR-head
+> worktree through to the tool runners is a documented follow-on.
+
 ### Promotion policy + notifications (off by default)
 
 When a candidate becomes **pending** (after `skillopt import` or `train

@@ -70,6 +70,21 @@ type Engine struct {
 	// is wired only in cli (gated by cross_family_review_enabled AND
 	// auto_trace_enabled), keeping the engine free of runtime/skillopt coupling.
 	ReviewLegDispatcher ReviewLegDispatcher
+	// DeterministicCheckerDispatcher is the injected, best-effort, nil-by-default
+	// seam (#485) the engine calls AFTER a merge harvest to run an OBJECTIVE,
+	// non-LLM deterministic-checker leg (code duplication / lint / cyclomatic
+	// complexity tools + a pure-Go diff-size metric) whose tool-derived dimensions
+	// are projected into the SAME auto-trace run as a THIRD coexisting signal,
+	// distinct from the verifiable floor and the subjective cross-family review. It
+	// mirrors ReviewLegDispatcher EXACTLY: optional and nil-safe (when nil — the
+	// default, no [skillopt].deterministic_checkers_enabled — NO checker leg runs
+	// and NO checker row is written, byte-identical), DETACHED off the blocking
+	// merge path (a wedged tool can never stall AdvanceJob), and best-effort (a
+	// dispatch error is swallowed and recorded as a deterministic_checkers_failed
+	// job event, never returned up). The concrete impl is wired only in cli (gated
+	// by deterministic_checkers_enabled AND auto_trace_enabled), keeping the engine
+	// free of subprocess/skillopt coupling.
+	DeterministicCheckerDispatcher DeterministicCheckerDispatcher
 	// Home is the resolved GITMOOT_HOME root used to place per-delegation
 	// worktrees. DelegationWorktrees is the checkout-bound git client that
 	// performs the worktree-add. Both are optional: when either is unset, the
@@ -186,6 +201,19 @@ type Engine struct {
 	// off a self-contained closure that owns its own bounded, cancellation-detached
 	// context.
 	ReviewSpawner func(func())
+	// CheckerLegTimeout bounds the DETACHED deterministic-checker leg (#485): the
+	// leg shells out to external tools (dupl/jscpd/golangci-lint/gocyclo) that can
+	// be slow, so it must never run unbounded. The detached goroutine's context is
+	// wrapped in this timeout so a wedged tool is reaped rather than leaking
+	// forever. <= 0 means defaultCheckerLegTimeout. It only matters when a
+	// DeterministicCheckerDispatcher is wired (off by default).
+	CheckerLegTimeout time.Duration
+	// CheckerSpawner runs the detached deterministic-checker leg OFF the AdvanceJob
+	// / daemon-poll path so a slow, possibly-wedged external tool can never block
+	// AdvanceJob, the worker tick, or the daemon's checkoutLock. The default (nil)
+	// spawns a goroutine; tests inject a synchronous runner so the checker leg is
+	// deterministic. It mirrors ReviewSpawner.
+	CheckerSpawner func(func())
 }
 
 // defaultMaxDelegationNonProgressStreak is the streak threshold used when the
@@ -204,6 +232,13 @@ const defaultMaxVerifyReplanAttempts = 2
 // cross-family LLM review can legitimately take a few minutes — whose only job is
 // to reap a wedged reviewer so the detached goroutine cannot leak forever.
 const defaultReviewLegTimeout = 10 * time.Minute
+
+// defaultCheckerLegTimeout bounds the detached deterministic-checker leg (#485)
+// when the engine's CheckerLegTimeout is unset (<= 0). It is a generous ceiling —
+// running dupl/jscpd/golangci-lint/gocyclo over a working tree can legitimately
+// take a few minutes — whose only job is to reap a wedged tool so the detached
+// goroutine cannot leak forever.
+const defaultCheckerLegTimeout = 10 * time.Minute
 
 // nonProgressStreakThreshold returns the configured result-aware non-progress
 // streak threshold, falling back to defaultMaxDelegationNonProgressStreak when
@@ -519,6 +554,19 @@ type Outcome struct {
 	// Findings is the reviewer's free-text reasoning, surfaced verbatim in the soft
 	// FeedbackEvent's reasoning.
 	Findings string
+
+	// Objective distinguishes an OBJECTIVE, tool-measured deterministic-checker
+	// outcome (#485) from the SUBJECTIVE cross-family review outcome (#469) WITHOUT a
+	// new OutcomeKind. Both share Kind == OutcomeReviewed and the Rubric/Findings
+	// fields (so they reuse the SAME OutcomeReviewed -> Harvest -> ProjectSignal
+	// path), but the harvester branches on this flag to write the checker row under a
+	// DISTINCT reviewer sentinel (gitmoot-checker) + item-id prefix (checker#) so the
+	// objective row coexists with the verifiable floor AND the subjective review row
+	// instead of overwriting either. It is zero (false) for every existing
+	// merge/block/changes-requested/revert/review path, so those outcomes are
+	// byte-identical to before this field existed (ADDITIVE: Outcome is an internal
+	// non-wire struct, so this touches no exported contract field or ContractVersion).
+	Objective bool
 }
 
 // OutcomeHarvester is the injected, best-effort, nil-by-default seam (#465, Mode
@@ -4414,6 +4462,15 @@ func (e Engine) runMergeGate(ctx context.Context, reviewer string, payload JobPa
 		// and any review-leg failure is swallowed so it can never block or fail the
 		// (already-completed) merge.
 		e.reviewCrossFamilyForMergeGate(ctx, payload, mergedHead)
+		// Objective deterministic-checker signal (#485), DETACHED off the blocking
+		// AdvanceJob / daemon-poll path and strictly best-effort, mirroring the review
+		// leg above: a nil dispatcher (the default, no deterministic_checkers_enabled)
+		// is a no-op, the external tools (dupl/jscpd/golangci-lint/gocyclo) run in
+		// their own bounded, cancellation-detached goroutine so a slow tool can never
+		// stall AdvanceJob / the worker tick / the daemon's checkoutLock, and any
+		// checker-leg failure is swallowed so it can never block or fail the
+		// (already-completed) merge.
+		e.checkDeterministicForMergeGate(ctx, payload, mergedHead)
 		return decision, nil
 	}
 	return decision, e.setTaskState(ctx, ref, TaskReadyToMerge)
@@ -4491,6 +4548,85 @@ func (e Engine) reviewLegTimeout() time.Duration {
 func (e Engine) spawnReviewLeg(fn func()) {
 	if e.ReviewSpawner != nil {
 		e.ReviewSpawner(fn)
+		return
+	}
+	go fn()
+}
+
+// checkDeterministicForMergeGate runs the OBJECTIVE deterministic-checker leg for a
+// just-merged PR and harvests its tool-derived OutcomeReviewed{Objective:true}
+// dimensions into the SAME auto-trace run as a THIRD coexisting, non-LLM signal
+// (#485). It is nil-safe (no dispatcher => no-op, byte-identical) and best-effort,
+// and mirrors reviewCrossFamilyForMergeGate EXACTLY.
+//
+// CRITICAL: the checker leg shells out to external tools that can be slow, so it is
+// DETACHED from the caller's path — it runs in its own goroutine (via
+// spawnCheckerLeg) under a fresh, cancellation-decoupled context bounded by
+// CheckerLegTimeout. This guarantees a wedged tool can NEVER stall AdvanceJob, the
+// daemon worker tick, or the daemon's checkoutLock, and is reaped by the timeout
+// rather than leaking. A dispatch error is swallowed + recorded as a
+// deterministic_checkers_failed job event, NEVER returned up, so a tool failure can
+// never block or fail a job. The outcome is attributed to the IMPLEMENT job that
+// produced the diff (the same implementJobForTask attribution the merge-gate harvest
+// and the review leg use), so the objective row lands on the implementer's template
+// version next to the verifiable floor and the subjective review.
+func (e Engine) checkDeterministicForMergeGate(ctx context.Context, reviewPayload JobPayload, mergedHead string) {
+	if e.DeterministicCheckerDispatcher == nil || e.OutcomeHarvester == nil {
+		return
+	}
+	// Resolve the owning implement job up front (a cheap store read, no tools) so the
+	// detached closure is self-contained. If none resolves, there is nothing to
+	// check/attribute.
+	job, payload, ok := e.implementJobForTask(ctx, reviewPayload)
+	if !ok {
+		return
+	}
+	e.spawnCheckerLeg(func() {
+		// Fresh context decoupled from the caller's ctx (which is cancelled the moment
+		// AdvanceJob returns) yet bounded so a wedged tool is reaped, not leaked.
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.checkerLegTimeout())
+		defer cancel()
+		e.runCheckerLeg(checkCtx, job, payload, mergedHead)
+	})
+}
+
+// runCheckerLeg performs the actual deterministic-checker dispatch + harvest. It is
+// called from the DETACHED goroutine (never on the AdvanceJob path) so its external
+// tool runs cannot block job advancement (#485).
+func (e Engine) runCheckerLeg(ctx context.Context, job db.Job, payload JobPayload, mergedHead string) {
+	outcome, ok, err := e.DeterministicCheckerDispatcher.Check(ctx, job, payload, mergedHead)
+	if err != nil {
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "deterministic_checkers_failed",
+			Message: err.Error(),
+		})
+		return
+	}
+	if !ok {
+		// No producible dimension at all (every checker skipped): skip silently (no
+		// checker row), exactly like an empty-rubric review.
+		return
+	}
+	e.harvestOutcome(ctx, job, payload, outcome)
+}
+
+// checkerLegTimeout returns the configured detached-checker-leg ceiling, defaulting
+// to defaultCheckerLegTimeout when unset so a zero-valued Engine keeps a bounded
+// checker.
+func (e Engine) checkerLegTimeout() time.Duration {
+	if e.CheckerLegTimeout > 0 {
+		return e.CheckerLegTimeout
+	}
+	return defaultCheckerLegTimeout
+}
+
+// spawnCheckerLeg runs fn off the caller's path. The default spawns a goroutine
+// (fire-and-forget, like spawnReviewLeg); tests inject a synchronous runner via the
+// CheckerSpawner hook so the detached checker leg is deterministic.
+func (e Engine) spawnCheckerLeg(fn func()) {
+	if e.CheckerSpawner != nil {
+		e.CheckerSpawner(fn)
 		return
 	}
 	go fn()

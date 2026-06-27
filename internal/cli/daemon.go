@@ -3997,6 +3997,17 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, ho
 		// no config NO review leg runs and NO review row is written — byte-identical.
 		// A review-leg failure never blocks or fails a job; promotion stays manual.
 		ReviewLegDispatcher: daemonReviewLegDispatcher(store, gh, checkout, home),
+		// Off-by-default OBJECTIVE deterministic-checker signal (#485): on a MERGE the
+		// engine additionally runs a best-effort, DETACHED leg of plain external tools
+		// (duplication/lint/complexity) + a pure-Go diff-size metric whose tool-derived
+		// [0,1] dimensions are projected into a THIRD, objective-tagged FeedbackEvent in
+		// the SAME auto-trace run, distinct from the verifiable floor and the subjective
+		// review. daemonDeterministicCheckerDispatcher returns nil unless BOTH
+		// [skillopt].deterministic_checkers_enabled AND auto_trace_enabled are set, so
+		// with no config NO checker leg runs and NO checker row is written —
+		// byte-identical. A missing tool/checkout/timeout SKIPS that dimension and never
+		// blocks or fails the merge; promotion stays manual.
+		DeterministicCheckerDispatcher: daemonDeterministicCheckerDispatcher(store, gh, checkout, home),
 		PayloadRefresher: func(ctx context.Context, job db.Job, payload workflow.JobPayload) (workflow.JobPayload, error) {
 			return refreshDaemonJobPayload(ctx, store, checkout, job, payload)
 		},

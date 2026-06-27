@@ -537,6 +537,36 @@ judge-tagged — *not* barred from promotion); this slice simply preserves the
 current **manual** promotion by writing only `eval_runs` / `eval_review_items` /
 `feedback_events`.
 
+### Deterministic checkers (objective, non-LLM signal, off by default)
+
+When **both** `[skillopt].auto_trace_enabled = true` **and**
+`[skillopt].deterministic_checkers_enabled = true` (both default `false`), a merged
+implement job additionally runs an **objective, tool-measured** checker leg (#485)
+— the complement to the subjective cross-family review. It runs plain external
+**tools** (no LLM): `dupl`/`jscpd` for duplication, `golangci-lint` for lint,
+`gocyclo` for cyclomatic complexity, plus a **pure-Go `diff_size`** metric parsed
+from the PR patches (always available, no tool/checkout needed). Each is normalized
+to `[0,1]` (fewer issues → higher), mapped to `dimension_scores`, fused by the
+mean-of-dimensions path, and written as a **third** `FeedbackEvent` in the SAME
+`auto-trace:<version>` run under the fixed `gitmoot-checker` reviewer sentinel + a
+distinct item id (`checker#<repo>#<pr>`), so it **coexists with** both the
+verifiable floor (`gitmoot-auto`) and the cross-family review (`gitmoot-review`)
+instead of overwriting either. The optional `[skillopt].deterministic_checkers`
+comma list selects which run (default `diff_size` only).
+
+These dimensions are **objective and un-gameable** (tool-measured, not estimated),
+tagged `objective = true` on the eval item (alongside the projected `checker_score`
+and per-dimension `dimension_scores`), so the optimizer weights them distinctly
+from the subjective judge row. The leg is **fail-safe throughout**: a missing tool
+binary, no PR-head checkout, a tool error, or a timeout **SKIPS that one dimension**
+(no row for it) and never errors the harvest, blocks the merge, or stalls the job;
+an all-skipped run writes **no row**. It runs **off the blocking merge path**
+(detached, timeout-bounded); a dispatch failure records a
+`deterministic_checkers_failed` job event. It is additive (`contract_version` stays
+`1`) and **never promotes** (writes only `eval_runs` / `eval_review_items` /
+`feedback_events`). With the knob unset, no checker leg runs and behavior is
+byte-identical.
+
 ### Candidate promotion policy + notifications (off by default)
 
 When a candidate becomes **pending** (after `skillopt import` or `train

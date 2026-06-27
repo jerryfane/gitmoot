@@ -189,6 +189,13 @@ func (h *OutcomeHarvester) Harvest(ctx context.Context, job db.Job, payload work
 		return nil
 	}
 	if outcome.Kind == workflow.OutcomeReviewed {
+		if outcome.Objective {
+			// OBJECTIVE deterministic-checker signal (#485): a THIRD, tool-measured,
+			// non-LLM FeedbackEvent in the SAME auto-trace run under a DISTINCT item id
+			// (checker#repo#pr) + reviewer (gitmoot-checker), so it coexists with BOTH the
+			// verifiable floor AND the subjective review row instead of overwriting either.
+			return h.writeCheckerFeedback(ctx, version, outcome, projectChecker(outcome))
+		}
 		// SOFT cross-family review signal (#469): a SECOND, judge-tagged,
 		// down-weighted FeedbackEvent in the SAME auto-trace run under a distinct item
 		// id + reviewer, so it never overwrites the verifiable floor.

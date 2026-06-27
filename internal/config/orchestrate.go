@@ -475,7 +475,40 @@ type SkillOptPolicy struct {
 	// foreground ask path is byte-identical when this is absent. It is the ONLY
 	// new knob #482 adds; it reuses the existing bandit_min_samples as its floor.
 	LiveABSampleRate *float64
+
+	// DeterministicCheckersEnabled opts the daemon into the Mode A OBJECTIVE,
+	// non-LLM deterministic-checker signal (#485): when true (AND AutoTraceEnabled
+	// is also true), a merged implement job additionally runs a best-effort,
+	// DETACHED leg of plain external TOOLS (code duplication, lint, cyclomatic
+	// complexity) plus a pure-Go diff-size metric, normalizes each to a [0,1]
+	// dimension, and projects them as a THIRD coexisting FeedbackEvent (reviewer
+	// gitmoot-checker) into the SAME auto-trace run as the verifiable floor and the
+	// subjective cross-family review. These dimensions are OBJECTIVE and
+	// un-gameable, so they are tagged distinctly from the LLM rubric. Empty/false
+	// (the default) means OFF: NO checker leg runs and NO checker row is written —
+	// byte-identical to the verifiable-floor-only behavior. It additionally requires
+	// AutoTraceEnabled (a checker row only makes sense inside the auto-trace run);
+	// DeterministicCheckersEnabled() encodes that dependency, mirroring
+	// ReviewEnabled(). The field is named …Enabled because Go forbids a field and
+	// method sharing a name; the DeterministicCheckersEnabled() method below is the
+	// resolved accessor callers use.
+	DeterministicCheckers bool
+
+	// DeterministicCheckerList is the optional per-checker selector (#485): a comma
+	// list of checker names (diff_size, duplication, lint, complexity) the leg runs
+	// when the feature is enabled. nil/empty (the default) means the safe default
+	// set (DefaultDeterministicCheckers) — which an operator can narrow to only the
+	// always-available, tool-less diff_size on a host without dupl/golangci-lint/
+	// gocyclo. An unknown name is ignored (best-effort), never an error.
+	DeterministicCheckerList []string
 }
+
+// DefaultDeterministicCheckers is the safe default checker set used when the
+// per-checker selector is unset (#485). It is diff_size only — the one pure-Go,
+// always-available, tool-less dimension — so enabling the feature on a tool-less
+// host is useful and never a no-op, and a heavy tool (jscpd/golangci-lint) is only
+// ever run when an operator explicitly opts it into the list.
+var DefaultDeterministicCheckers = []string{"diff_size"}
 
 // DefaultBanditMinSamples is the documented default low-traffic floor for the
 // deferred Mode B auto loop (#473). It is NOT applied when bandit_min_samples is
@@ -497,6 +530,8 @@ func DefaultSkillOptPolicy() SkillOptPolicy {
 		BanditMinSamples:                nil,
 		ModeBJudgeEnabled:               false,
 		LiveABSampleRate:                nil,
+		DeterministicCheckers:           false,
+		DeterministicCheckerList:        nil,
 	}
 }
 
@@ -523,6 +558,27 @@ func (p SkillOptPolicy) ReviewEnabled() bool {
 // (byte-identical default), mirroring ReviewEnabled()'s dependency on AutoTraceEnabled.
 func (p SkillOptPolicy) RevertDetectionEnabled() bool {
 	return p.AutoTraceEnabled && (p.RevertDetection == nil || *p.RevertDetection)
+}
+
+// DeterministicCheckersEnabled reports whether the OBJECTIVE deterministic-checker
+// signal (#485) is configured on. It requires BOTH deterministic_checkers_enabled
+// AND auto_trace_enabled (the checker row only makes sense inside the auto-trace
+// run), so enabling the checker knob alone — without the auto-trace harvester — is
+// OFF, mirroring ReviewEnabled()'s AND-dependency. Default false + the AND-gate
+// guarantees byte-identical behavior with no config.
+func (p SkillOptPolicy) DeterministicCheckersEnabled() bool {
+	return p.AutoTraceEnabled && p.DeterministicCheckers
+}
+
+// ResolvedDeterministicCheckers returns the per-checker selector resolved against
+// the safe default (#485): the configured DeterministicCheckerList when non-empty,
+// else DefaultDeterministicCheckers (diff_size only). It is only meaningful when
+// DeterministicCheckersEnabled() is true; callers gate on that first.
+func (p SkillOptPolicy) ResolvedDeterministicCheckers() []string {
+	if len(p.DeterministicCheckerList) > 0 {
+		return p.DeterministicCheckerList
+	}
+	return DefaultDeterministicCheckers
 }
 
 func LoadSkillOptPolicy(paths Paths) (SkillOptPolicy, error) {
@@ -628,7 +684,30 @@ func applySkillOptPolicyField(policy *SkillOptPolicy, key string, value string) 
 		}
 		policy.LiveABSampleRate = &parsed
 		return nil
+	case "deterministic_checkers_enabled":
+		parsed, err := strconv.ParseBool(value)
+		policy.DeterministicCheckers = parsed
+		return err
+	case "deterministic_checkers":
+		policy.DeterministicCheckerList = parseDeterministicCheckerList(value)
+		return nil
 	default:
 		return nil
 	}
+}
+
+// parseDeterministicCheckerList parses the [skillopt].deterministic_checkers
+// per-checker selector — a plain comma list like "diff_size,duplication" — into a
+// trimmed, non-empty slice (#485). An empty value (or one with only blanks) yields
+// nil so ResolvedDeterministicCheckers falls back to the safe default set. It never
+// errors: an unknown name is simply ignored downstream (best-effort), so a typo
+// degrades to fewer dimensions rather than failing the daemon's config load.
+func parseDeterministicCheckerList(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }

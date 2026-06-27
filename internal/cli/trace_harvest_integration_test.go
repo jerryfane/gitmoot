@@ -215,6 +215,9 @@ func chainEngine(store *db.Store, gate workflow.MergeGate) workflow.Engine {
 		// tests so its dispatch + harvest are deterministic; the daemon defaults to a
 		// goroutine (the review is genuinely off the AdvanceJob path in production).
 		ReviewSpawner: func(fn func()) { fn() },
+		// Likewise run the detached deterministic-checker leg (#485) synchronously so
+		// its dispatch + harvest are deterministic in the integration tests.
+		CheckerSpawner: func(fn func()) { fn() },
 	}
 }
 
