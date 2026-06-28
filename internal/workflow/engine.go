@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1435,6 +1436,33 @@ const MaxDelegationDepth = 8
 // refuses further children and records a delegation_budget_exceeded event.
 const MaxDelegationTotalJobs = 64
 
+// envIntOr returns the POSITIVE integer value of env var name, else def.
+func envIntOr(name string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// effectiveMaxDelegationDepth / effectiveMaxDelegationTotalJobs let a deployment
+// whose coordinator legitimately runs LONG continuation chains (e.g. a council
+// coordinator that drives 6 rounds plus up to 4 fix cycles — each round and each
+// fix-cycle continuation increments DelegationDepth, so the default 8 is exhausted
+// after ~1 fix cycle) raise the bounds via env, WITHOUT weakening the safe default
+// for every other gitmoot user. The other backstops (width, wall-clock, token/cost
+// budgets) still bound runaway recursion. Env (positive ints):
+//
+//	GITMOOT_MAX_DELEGATION_DEPTH       (default MaxDelegationDepth = 8)
+//	GITMOOT_MAX_DELEGATION_TOTAL_JOBS  (default MaxDelegationTotalJobs = 64)
+func effectiveMaxDelegationDepth() int {
+	return envIntOr("GITMOOT_MAX_DELEGATION_DEPTH", MaxDelegationDepth)
+}
+func effectiveMaxDelegationTotalJobs() int {
+	return envIntOr("GITMOOT_MAX_DELEGATION_TOTAL_JOBS", MaxDelegationTotalJobs)
+}
+
 // MaxDelegationWidth bounds how many delegations a single coordinator result may
 // fan out in one generation. The total-jobs budget is checked before a batch is
 // dispatched, so it cannot stop one enormous fan-out on its own; this caps the
@@ -1669,26 +1697,28 @@ func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload Job
 		return e.enqueueFinalizeContinuation(ctx, job, payload, "delegation tree killed by operator")
 	}
 
-	if payload.DelegationDepth >= MaxDelegationDepth {
+	maxDepth := effectiveMaxDelegationDepth()
+	if payload.DelegationDepth >= maxDepth {
 		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
 			JobID:   job.ID,
 			Kind:    "delegation_depth_exceeded",
-			Message: fmt.Sprintf("delegation depth %d reached the limit of %d; not dispatching %d delegation(s)", payload.DelegationDepth, MaxDelegationDepth, len(payload.Result.Delegations)),
+			Message: fmt.Sprintf("delegation depth %d reached the limit of %d; not dispatching %d delegation(s)", payload.DelegationDepth, maxDepth, len(payload.Result.Delegations)),
 		})
-		return e.enqueueFinalizeContinuation(ctx, job, payload, fmt.Sprintf("delegation depth limit of %d reached", MaxDelegationDepth))
+		return e.enqueueFinalizeContinuation(ctx, job, payload, fmt.Sprintf("delegation depth limit of %d reached", maxDepth))
 	}
 
 	total, err := e.countRootDelegationJobs(ctx, rootID)
 	if err != nil {
 		return err
 	}
-	if total >= MaxDelegationTotalJobs {
+	maxJobs := effectiveMaxDelegationTotalJobs()
+	if total >= maxJobs {
 		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
 			JobID:   job.ID,
 			Kind:    "delegation_budget_exceeded",
-			Message: fmt.Sprintf("delegation tree for root %s reached the job budget of %d (%d jobs); not dispatching %d delegation(s)", rootID, MaxDelegationTotalJobs, total, len(payload.Result.Delegations)),
+			Message: fmt.Sprintf("delegation tree for root %s reached the job budget of %d (%d jobs); not dispatching %d delegation(s)", rootID, maxJobs, total, len(payload.Result.Delegations)),
 		})
-		return e.enqueueFinalizeContinuation(ctx, job, payload, fmt.Sprintf("per-root job budget of %d reached", MaxDelegationTotalJobs))
+		return e.enqueueFinalizeContinuation(ctx, job, payload, fmt.Sprintf("per-root job budget of %d reached", maxJobs))
 	}
 
 	if exceeded, elapsed := e.rootWallClockExceeded(ctx, rootID); exceeded {
@@ -2122,32 +2152,46 @@ func (e Engine) enqueueDelegation(ctx context.Context, job db.Job, payload JobPa
 	return e.allocateAndEnqueueDelegation(ctx, job, payload, d, request, ref)
 }
 
-// integrationDepBranches returns the per-delegation branches of delegation d's
-// succeeded implement-leg dependencies, so a dependent read-only step (e.g. a
-// decompose-and-verify verify gate) can run against a worktree with those legs
-// merged in rather than the base checkout (issue #332). It returns nil when d has
-// no such deps, in which case the normal read-only paths apply. Read-only deps
-// contribute no branch (they produce no implementation), and a leg that ran in
-// the shared checkout (branch == parent base) is skipped (its work is already on
-// the base).
-func (e Engine) integrationDepBranches(ctx context.Context, job db.Job, payload JobPayload, d Delegation) ([]string, error) {
+type integrationDepResolution struct {
+	branches       []string
+	alreadyOnBase  []string
+	unresolvedDeps []string
+}
+
+// resolveIntegrationDeps classifies delegation d's implement-leg dependencies.
+// Succeeded implement legs on their own branches must be merged into an
+// integration worktree; succeeded implement legs already on the parent base are
+// safe to read from the base checkout; missing/not-succeeded/invalid legs are
+// unresolved and must fail closed so reviewers do not inspect stale code.
+func (e Engine) resolveIntegrationDeps(ctx context.Context, job db.Job, payload JobPayload, d Delegation) (integrationDepResolution, error) {
 	deps := compactStrings(d.Deps)
 	if len(deps) == 0 || payload.Result == nil {
-		return nil, nil
+		return integrationDepResolution{}, nil
 	}
 	byID := make(map[string]Delegation, len(payload.Result.Delegations))
 	for _, sib := range payload.Result.Delegations {
 		byID[strings.TrimSpace(sib.ID)] = sib
 	}
+	hasImplementDep := false
+	for _, dep := range deps {
+		if sib, ok := byID[dep]; ok && !readOnlyDelegationAction(sib.Action) {
+			hasImplementDep = true
+			break
+		}
+	}
+	if !hasImplementDep {
+		return integrationDepResolution{}, nil
+	}
+
 	// Resolve each dep to its winning child job the same way advanceDelegations
 	// does (latest attempt per delegation id), so a leg that succeeded on a retry
 	// contributes its retry branch rather than the failed original.
 	children, err := e.childDelegationJobs(ctx, job.ID)
 	if err != nil {
-		return nil, err
+		return integrationDepResolution{}, err
 	}
 	base := strings.TrimSpace(payload.Branch)
-	var branches []string
+	var result integrationDepResolution
 	for _, dep := range deps {
 		sib, ok := byID[dep]
 		if !ok || readOnlyDelegationAction(sib.Action) {
@@ -2155,17 +2199,41 @@ func (e Engine) integrationDepBranches(ctx context.Context, job db.Job, payload 
 		}
 		legJob, ok := children[dep]
 		if !ok || legJob.State != string(JobSucceeded) {
+			result.unresolvedDeps = append(result.unresolvedDeps, dep)
 			continue
 		}
 		legPayload, err := unmarshalPayload(legJob.Payload)
 		if err != nil {
-			return nil, err
+			result.unresolvedDeps = append(result.unresolvedDeps, dep)
+			continue
 		}
-		if legBranch := strings.TrimSpace(legPayload.Branch); legBranch != "" && legBranch != base {
-			branches = append(branches, legBranch)
+		legBranch := strings.TrimSpace(legPayload.Branch)
+		switch {
+		case legBranch == "":
+			result.unresolvedDeps = append(result.unresolvedDeps, dep)
+		case legBranch == base:
+			result.alreadyOnBase = append(result.alreadyOnBase, dep)
+		default:
+			result.branches = append(result.branches, legBranch)
 		}
 	}
-	return branches, nil
+	return result, nil
+}
+
+// integrationDepBranches returns the per-delegation branches of delegation d's
+// succeeded implement-leg dependencies, so a dependent read-only step (e.g. a
+// decompose-and-verify verify gate) can run against a worktree with those legs
+// merged in rather than the base checkout (issue #332). It returns nil when d has
+// no branch-backed implement deps, in which case the normal read-only paths apply.
+// Read-only deps contribute no branch (they produce no implementation), and a leg
+// that ran in the shared checkout (branch == parent base) is skipped because its
+// work is already on the base.
+func (e Engine) integrationDepBranches(ctx context.Context, job db.Job, payload JobPayload, d Delegation) ([]string, error) {
+	result, err := e.resolveIntegrationDeps(ctx, job, payload, d)
+	if err != nil {
+		return nil, err
+	}
+	return result.branches, nil
 }
 
 // commitDelegationLeg commits an implement delegation leg's worktree changes to
@@ -2246,9 +2314,22 @@ func (e Engine) allocateAndEnqueueDelegation(ctx context.Context, job db.Job, pa
 			// worktree HEAD instead of a stale parent SHA.
 			request.HeadSHA = ""
 		}
-	} else if legBranches, err := e.integrationDepBranches(ctx, job, payload, d); err != nil {
+	} else if integration, err := e.resolveIntegrationDeps(ctx, job, payload, d); err != nil {
 		return err
-	} else if len(legBranches) > 0 {
+	} else if len(integration.unresolvedDeps) > 0 {
+		// Fail closed (#19): this read-only delegation depends on implement legs that
+		// are not safely readable from either the parent base checkout or branch-backed
+		// integration. Falling through to BASE here would make the reviewer judge code
+		// WITHOUT the implemented change. A zero-branch resolution is allowed only when
+		// every implement dep is already on the parent base branch.
+		unresolved := strings.Join(integration.unresolvedDeps, ", ")
+		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "delegation_integration_unresolved",
+			Message: fmt.Sprintf("delegation %q depends on unresolved implement leg(s) %s; refusing to review the base checkout", request.DelegationID, unresolved),
+		})
+		return e.block(ctx, ref, fmt.Sprintf("delegation %q depends on unresolved implement leg(s) %s; refusing to review the base checkout", request.DelegationID, unresolved))
+	} else if len(integration.branches) > 0 {
 		// This read-only delegation (e.g. a decompose-and-verify verify gate) depends
 		// on succeeded implement legs that each live on their own branch. Merge them
 		// into one detached worktree so the dependent sees the combined work instead
@@ -2268,7 +2349,7 @@ func (e Engine) allocateAndEnqueueDelegation(ctx context.Context, job db.Job, pa
 				BaseBranch:   payload.Branch,
 				Checkout:     e.DelegationCheckout,
 				RetryAttempt: request.RetryCount,
-			}, legBranches, manager)
+			}, integration.branches, manager)
 			if err != nil {
 				var blocked BlockedError
 				if errors.As(err, &blocked) {
@@ -2283,7 +2364,7 @@ func (e Engine) allocateAndEnqueueDelegation(ctx context.Context, job db.Job, pa
 			_ = e.Store.AddJobEvent(ctx, db.JobEvent{
 				JobID:   job.ID,
 				Kind:    "delegation_integrated",
-				Message: fmt.Sprintf("delegation %q runs in an integration worktree merging %d implement leg(s)", request.DelegationID, len(legBranches)),
+				Message: fmt.Sprintf("delegation %q runs in an integration worktree merging %d implement leg(s)", request.DelegationID, len(integration.branches)),
 			})
 		}
 	} else if readOnlyFanoutNeedsWorktree(payload, d) {

@@ -213,3 +213,134 @@ func TestAllocateAndEnqueueDelegationRoutesVerifyToIntegrationWorktree(t *testin
 		t.Fatalf("merge calls = %+v, want one merge of the two leg branches", manager.mergeCalls)
 	}
 }
+
+func TestAllocateAndEnqueueDelegationAllowsImplementDepAlreadyOnBase(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	home := t.TempDir()
+	manager := &fakeWorktreeManager{}
+	engine := testEngine(store)
+	engine.Home = home
+	engine.DelegationCheckout = t.TempDir()
+	engine.DelegationWorktrees = manager
+
+	insertCompletedJob(t, store, db.Job{ID: "p/delegation/legA", Agent: "builder", Type: "implement", ParentJobID: "p", DelegationID: "legA"},
+		JobPayload{Repo: "owner/repo", Branch: "task-x", DelegationID: "legA"})
+
+	parentJob := db.Job{ID: "p", Agent: "coord", Type: "ask"}
+	parentPayload := JobPayload{
+		Repo:   "owner/repo",
+		Branch: "task-x",
+		Result: &AgentResult{Delegations: []Delegation{
+			{ID: "legA", Action: "implement"},
+			{ID: "verify", Action: "review", Deps: []string{"legA"}},
+		}},
+	}
+	verify := Delegation{ID: "verify", Agent: "checker", Action: "review", Prompt: "verify the base work", Deps: []string{"legA"}}
+	request := engine.delegationRequest(parentJob, parentPayload, verify)
+
+	if err := engine.allocateAndEnqueueDelegation(ctx, parentJob, parentPayload, verify, request, taskRefFromPayload(parentPayload)); err != nil {
+		t.Fatalf("allocateAndEnqueueDelegation returned error: %v", err)
+	}
+	child, err := unmarshalPayload(mustJob(t, store, "p/delegation/verify").Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if child.Branch != "task-x" {
+		t.Fatalf("verify branch = %q, want parent branch task-x", child.Branch)
+	}
+	if child.WorktreePath != "" {
+		t.Fatalf("verify worktree path = %q, want shared checkout", child.WorktreePath)
+	}
+	if len(manager.mergeCalls) != 0 {
+		t.Fatalf("merge calls = %+v, want none for already-on-base implement dep", manager.mergeCalls)
+	}
+	if got := countJobEvents(t, store, "p", "delegation_integration_unresolved"); got != 0 {
+		t.Fatalf("delegation_integration_unresolved events = %d, want 0", got)
+	}
+}
+
+// TestAllocateAndEnqueueDelegationBlocksWhenImplementLegUnresolved covers the #19
+// fix: a read-only delegation that DEPENDS on an implement leg must NOT silently
+// fall through to the base checkout when no leg branch resolves (e.g. the leg's
+// branch was not readable under store contention). Reviewing base would judge code
+// without the implemented change. It must fail closed (block) instead.
+func TestAllocateAndEnqueueDelegationBlocksWhenImplementLegUnresolved(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	home := t.TempDir()
+	manager := &fakeWorktreeManager{}
+	engine := testEngine(store)
+	engine.Home = home
+	engine.DelegationCheckout = t.TempDir()
+	engine.DelegationWorktrees = manager
+
+	// The implement leg "legA" is declared as a sibling and depended on, but NO
+	// succeeded leg job exists for it -> integrationDepBranches yields 0 branches
+	// while the delegation still declares an implement dep.
+	parentJob := db.Job{ID: "p", Agent: "coord", Type: "ask"}
+	parentPayload := JobPayload{
+		Repo:   "owner/repo",
+		Branch: "task-x",
+		Result: &AgentResult{Delegations: []Delegation{
+			{ID: "legA", Action: "implement"},
+			{ID: "verify", Action: "review", Deps: []string{"legA"}},
+		}},
+	}
+	verify := Delegation{ID: "verify", Agent: "checker", Action: "review", Prompt: "verify", Deps: []string{"legA"}}
+	request := engine.delegationRequest(parentJob, parentPayload, verify)
+
+	err := engine.allocateAndEnqueueDelegation(ctx, parentJob, parentPayload, verify, request, taskRefFromPayload(parentPayload))
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("err = %v, want BlockedError (must fail closed, not review the base checkout)", err)
+	}
+	if len(manager.mergeCalls) != 0 {
+		t.Fatalf("mergeCalls = %d, want 0 (no leg branch to merge)", len(manager.mergeCalls))
+	}
+	if got := countJobEvents(t, store, "p", "delegation_integration_unresolved"); got != 1 {
+		t.Fatalf("delegation_integration_unresolved events = %d, want 1", got)
+	}
+}
+
+func TestAllocateAndEnqueueDelegationBlocksWhenAnyImplementLegUnresolved(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	home := t.TempDir()
+	manager := &fakeWorktreeManager{}
+	engine := testEngine(store)
+	engine.Home = home
+	engine.DelegationCheckout = t.TempDir()
+	engine.DelegationWorktrees = manager
+
+	insertCompletedJob(t, store, db.Job{ID: "p/delegation/legA", Agent: "builder", Type: "implement", ParentJobID: "p", DelegationID: "legA"},
+		JobPayload{Repo: "owner/repo", Branch: "branchA", DelegationID: "legA"})
+
+	parentJob := db.Job{ID: "p", Agent: "coord", Type: "ask"}
+	parentPayload := JobPayload{
+		Repo:   "owner/repo",
+		Branch: "task-x",
+		Result: &AgentResult{Delegations: []Delegation{
+			{ID: "legA", Action: "implement"},
+			{ID: "legB", Action: "implement"},
+			{ID: "verify", Action: "review", Deps: []string{"legA", "legB"}},
+		}},
+	}
+	verify := Delegation{ID: "verify", Agent: "checker", Action: "review", Prompt: "verify the combined work", Deps: []string{"legA", "legB"}}
+	request := engine.delegationRequest(parentJob, parentPayload, verify)
+
+	err := engine.allocateAndEnqueueDelegation(ctx, parentJob, parentPayload, verify, request, taskRefFromPayload(parentPayload))
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("err = %v, want BlockedError (must not partially integrate while a dep is unresolved)", err)
+	}
+	if len(manager.mergeCalls) != 0 {
+		t.Fatalf("mergeCalls = %d, want 0 when any implement dep is unresolved", len(manager.mergeCalls))
+	}
+	if jobExists(t, store, "p/delegation/verify") {
+		t.Fatal("verify job was enqueued despite unresolved implement dep")
+	}
+	if got := countJobEvents(t, store, "p", "delegation_integration_unresolved"); got != 1 {
+		t.Fatalf("delegation_integration_unresolved events = %d, want 1", got)
+	}
+}
