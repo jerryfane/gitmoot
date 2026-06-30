@@ -1595,7 +1595,8 @@ func defaultJobWorker(store *db.Store, stdout io.Writer, home ...string) jobWork
 }
 
 func recoverRunningJobs(ctx context.Context, store *db.Store, stdout io.Writer) error {
-	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, time.Now().UTC().Add(-daemonRunningJobStaleAfter), "", "")
+	now := time.Now().UTC()
+	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, now, now.Add(-daemonRunningJobStaleAfter), "", "")
 }
 
 func recoverExpiredRuntimeSessionLocks(ctx context.Context, store *db.Store, stdout io.Writer, now time.Time) error {
@@ -1610,11 +1611,12 @@ func recoverExpiredRuntimeSessionLocks(ctx context.Context, store *db.Store, std
 }
 
 func recoverRunningJobsBefore(ctx context.Context, store *db.Store, stdout io.Writer, before time.Time) error {
-	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, before, "", "")
+	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, time.Now().UTC(), before, "", "")
 }
 
 func recoverRunningJobsForRepo(ctx context.Context, store *db.Store, stdout io.Writer, repoFilter string, rootFilter string) error {
-	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, time.Now().UTC().Add(-daemonRunningJobStaleAfter), repoFilter, rootFilter)
+	now := time.Now().UTC()
+	return recoverRunningJobsBeforeForRepo(ctx, store, stdout, now, now.Add(-daemonRunningJobStaleAfter), repoFilter, rootFilter)
 }
 
 func recoverCancelledRunningJobsForEnabledRepos(ctx context.Context, store *db.Store, rootFilter string, stdout io.Writer) error {
@@ -1653,7 +1655,7 @@ func recoverCancelledRunningJobsForRepo(ctx context.Context, store *db.Store, st
 	return nil
 }
 
-func recoverRunningJobsBeforeForRepo(ctx context.Context, store *db.Store, stdout io.Writer, before time.Time, repoFilter string, rootFilter string) error {
+func recoverRunningJobsBeforeForRepo(ctx context.Context, store *db.Store, stdout io.Writer, now time.Time, before time.Time, repoFilter string, rootFilter string) error {
 	jobs, err := store.ListRunningJobsUpdatedBefore(ctx, before)
 	if err != nil {
 		return err
@@ -1678,7 +1680,7 @@ func recoverRunningJobsBeforeForRepo(ctx context.Context, store *db.Store, stdou
 		// lease expires (recoverExpiredRuntimeSessionLocks reclaims it, then a later
 		// tick requeues it) rather than at the 30m threshold — promptness traded for
 		// never failing live work, the unattended-reliability goal of #536.
-		leaseHeld, err := runtimeOwnerLeaseHeld(ctx, store, job.ID, time.Now().UTC())
+		leaseHeld, err := runtimeOwnerLeaseHeld(ctx, store, job.ID, now)
 		if err != nil {
 			return err
 		}
@@ -1786,7 +1788,7 @@ func runDaemonWorkerTick(ctx context.Context, store *db.Store, worker jobWorker,
 	if dryRun {
 		return nil
 	}
-	if err := recoverRunningJobsBeforeForRepo(ctx, store, stdout, now.Add(-daemonRunningJobStaleAfter), repoFilter, rootFilter); err != nil {
+	if err := recoverRunningJobsBeforeForRepo(ctx, store, stdout, now, now.Add(-daemonRunningJobStaleAfter), repoFilter, rootFilter); err != nil {
 		return err
 	}
 	if err := recoverExpiredRuntimeSessionLocks(ctx, store, stdout, now); err != nil {

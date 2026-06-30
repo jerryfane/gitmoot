@@ -3,6 +3,9 @@ package workflow
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -65,6 +68,64 @@ func (e Engine) ownerPIDLive() func(int64) bool {
 		return e.OwnerPIDLive
 	}
 	return defaultOwnerPIDLive
+}
+
+// worktreeHasLiveProcess reports whether a live process on this host still has its
+// working directory inside the worktree at path. It is the lock-independent,
+// PID-reuse- and hostname-rename-immune never-clobber gate the destructive cleanup
+// consults so a worktree a daemon-crash-reparented worker is STILL writing is not
+// force-removed even after its runtime-session lease has expired and its lock been
+// reaped (#536 finding 1).
+func (e Engine) worktreeHasLiveProcess(path string) bool {
+	if e.WorktreeHasLiveProcess != nil {
+		return e.WorktreeHasLiveProcess(path)
+	}
+	return defaultWorktreeHasLiveProcess(path)
+}
+
+// defaultWorktreeHasLiveProcess is a best-effort Linux /proc scan: it returns true
+// when any process's cwd symlink resolves to path or a descendant of it. The codex
+// resume worker in #536 ran with cwd == the delegation worktree, so its presence is
+// the decisive "still writing" signal independent of any lock or PID. On a platform
+// without a readable /proc (e.g. darwin) it returns false — it cannot detect a live
+// worker there, so it favors not stranding the worktree (the lease/lock gate still
+// applies while the lease is unexpired). A worktree mid-removal can report a cwd of
+// "<path> (deleted)"; that suffix is stripped before comparison.
+func defaultWorktreeHasLiveProcess(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	self := os.Getpid()
+	for _, entry := range entries {
+		name := entry.Name()
+		if len(name) == 0 || name[0] < '0' || name[0] > '9' {
+			continue
+		}
+		// Skip our own process: its cwd is never the worktree (the daemon runs from
+		// the home/checkout), but guard regardless so a test driving cleanup from a
+		// worktree cwd cannot self-trip.
+		if pid, perr := strconv.Atoi(name); perr == nil && pid == self {
+			continue
+		}
+		cwd, err := os.Readlink(filepath.Join("/proc", name, "cwd"))
+		if err != nil {
+			continue
+		}
+		cwd = strings.TrimSuffix(strings.TrimSpace(cwd), " (deleted)")
+		if cwd == abs || strings.HasPrefix(cwd, abs+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultOwnerPIDLive probes same-host process liveness via signal 0, mirroring

@@ -69,14 +69,18 @@ func TestJobRuntimeLockLiveness(t *testing.T) {
 			wantLease:  true,
 		},
 		{
-			name:       "expired lease live pid is active but neither strict-live nor lease-held",
+			// PID reuse guard (#536 finding 5): a live same-host PID with an EXPIRED
+			// lease is far more likely a recycled PID than the original worker (the
+			// lock records the daemon PID), so it must NOT keep the lock active and
+			// block reclamation. Not active, not strict-live, not lease-held.
+			name:       "expired lease live pid is neither active nor strict-live nor lease-held",
 			acquire:    true,
 			key:        "runtime:codex:s1",
 			pid:        4242,
 			hostname:   host,
 			expiresIn:  -time.Minute,
 			pidAlive:   livePID,
-			wantActive: true,
+			wantActive: false,
 			wantStrict: false,
 			wantLease:  false,
 		},
@@ -103,6 +107,24 @@ func TestJobRuntimeLockLiveness(t *testing.T) {
 			wantActive: true,
 			wantStrict: true,
 			wantLease:  true,
+		},
+		{
+			// Cross-host strand guard (#536 finding 2): after a daemon restart under a
+			// DIFFERENT hostname (k8s/docker pod recreate), the pre-restart lock is
+			// cross-host. Once its LEASE expires it is almost always our own dead self,
+			// so it must become reclaimable — NOT active and NOT lease-held — or the job
+			// is never requeued and its worktree never cleaned (permanent strand). An
+			// UNEXPIRED cross-host lock (the case above) is still protected.
+			name:       "cross-host expired lease is reclaimable (not active, not lease-held)",
+			acquire:    true,
+			key:        "runtime:codex:s1",
+			pid:        4242,
+			hostname:   "other-host",
+			expiresIn:  -time.Minute,
+			pidAlive:   deadPID,
+			wantActive: false,
+			wantStrict: false,
+			wantLease:  false,
 		},
 		{
 			name:       "empty hostname treated as this host",

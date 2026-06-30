@@ -489,20 +489,29 @@ func (e Engine) cleanupImplementDelegationWorktree(ctx context.Context, jobID st
 		return
 	}
 	// Liveness gate (#536): NEVER force-remove a worktree (and delete its branch)
-	// while a FOREIGN live runtime worker still owns it. On a healthy terminal the
-	// run's OWN runtime-session lock is still held here (the daemon releases it only
-	// after RunJob -> AdvanceJob returns), but it is excluded by owner token via the
-	// run context (runtimeOwnerActive), so cleanup proceeds unchanged. The gate fires
-	// only when the terminal state was synthesized by stale recovery / dirty-checkout
-	// validation while a DIFFERENT worker's lock lingers with an unexpired lease (and
-	// possibly a live owner PID). Refuse the destructive removal in that window and
-	// preserve the dirty worktree for salvage rather than orphaning the live process
-	// onto a deleted cwd. The daemon's reclaimSkippedDelegationWorktrees pass re-fires
-	// this cleanup on a later tick once the foreign lock releases/expires
-	// (recoverExpiredRuntimeSessionLocks reclaims an expired lease), so the preserved
-	// worktree is reclaimed rather than leaked forever.
-	if active, reason := e.runtimeOwnerActive(ctx, jobID); active {
-		_ = e.Store.AddJobEvent(context.WithoutCancel(ctx), db.JobEvent{JobID: jobID, Kind: "delegation_worktree_cleanup_skipped", Message: fmt.Sprintf("implement worktree %s cleanup skipped: runtime owner still active (%s)", strings.TrimSpace(payload.WorktreePath), reason)})
+	// while a live runtime worker could still be writing to it — even past lease
+	// expiry. Two independent signals each block the destructive removal:
+	//
+	//  1. runtimeOwnerActive: a FOREIGN runtime-session lock whose LEASE is unexpired
+	//     (the job's timeout has not elapsed). On a healthy terminal the run's OWN
+	//     lock is still held here (the daemon releases it only after RunJob ->
+	//     AdvanceJob returns) but is excluded by owner token via the run context, so
+	//     cleanup proceeds unchanged. A DIFFERENT worker's unexpired lease — the
+	//     stale-recovery / dirty-checkout-validation window — blocks it.
+	//  2. worktreeHasLiveProcess: a live process whose cwd is inside the worktree.
+	//     This is the post-lease-expiry backstop (#536 finding 1): once a crashed
+	//     daemon's worker outlives its lease, the lock is reaped and gate (1) no
+	//     longer fires, but the reparented worker can still be writing. Removing the
+	//     worktree then would orphan it onto a deleted cwd — the original #536
+	//     corruption shifted to the lease boundary. This probe is lock-independent
+	//     and PID-reuse-/hostname-rename-immune, so it holds where gate (1) cannot.
+	//
+	// In either case the dirty worktree is PRESERVED for salvage rather than clobbered.
+	// The daemon's reclaimSkippedDelegationWorktrees pass re-fires this cleanup on a
+	// later tick; once the foreign lease expires AND no live process holds the
+	// worktree (the worker has actually exited), it is reclaimed rather than leaked.
+	if skip, reason := e.cleanupBlockedByLiveOwner(ctx, jobID, payload); skip {
+		e.recordCleanupSkippedOnce(ctx, jobID, payload, reason)
 		return
 	}
 	manager, ok := e.DelegationWorktrees.(ReadOnlyWorktreeManager) // RemoveWorktreeForce
@@ -570,6 +579,59 @@ func (e Engine) cleanupImplementDelegationWorktree(ctx context.Context, jobID st
 		message = fmt.Sprintf("implement worktree %s and branch %s removed", path, branch)
 	}
 	_ = e.Store.AddJobEvent(opCtx, db.JobEvent{JobID: jobID, Kind: "delegation_worktree_removed", Message: message})
+}
+
+// cleanupBlockedByLiveOwner reports whether the destructive implement-delegation
+// cleanup for jobID must be REFUSED because a live runtime worker could still be
+// writing to the worktree, and a short reason. It composes the two never-clobber
+// signals (#536): an active FOREIGN runtime-session lock (unexpired lease), and a
+// live process whose cwd is inside the worktree (the post-lease-expiry backstop).
+func (e Engine) cleanupBlockedByLiveOwner(ctx context.Context, jobID string, payload JobPayload) (bool, string) {
+	if active, reason := e.runtimeOwnerActive(ctx, jobID); active {
+		return true, fmt.Sprintf("runtime owner still active (%s)", reason)
+	}
+	if path := strings.TrimSpace(payload.WorktreePath); path != "" && e.worktreeHasLiveProcess(path) {
+		return true, fmt.Sprintf("a live process still has its cwd in worktree %s", path)
+	}
+	return false, ""
+}
+
+// recordCleanupSkippedOnce emits a delegation_worktree_cleanup_skipped event, but
+// at most once per preserve window (#536 finding 3): reclaimSkippedDelegationWorktrees
+// re-fires the cleanup every 1s tick for the whole lease duration while the owner
+// stays active, so emitting a fresh event each time would grow the job event log
+// without bound (and make every ListJobEvents scan O(n^2)). If the LAST cleanup
+// outcome event is already a skip, this is a no-op; a later delegation_worktree_removed
+// closes the window so a subsequent (genuinely new) skip would emit again.
+func (e Engine) recordCleanupSkippedOnce(ctx context.Context, jobID string, payload JobPayload, reason string) {
+	if e.lastCleanupOutcomeIsSkip(ctx, jobID) {
+		return
+	}
+	_ = e.Store.AddJobEvent(context.WithoutCancel(ctx), db.JobEvent{
+		JobID:   jobID,
+		Kind:    "delegation_worktree_cleanup_skipped",
+		Message: fmt.Sprintf("implement worktree %s cleanup skipped: %s", strings.TrimSpace(payload.WorktreePath), reason),
+	})
+}
+
+// lastCleanupOutcomeIsSkip reports whether the most recent terminal-cleanup outcome
+// event for jobID is a skip (preserve) not yet followed by a removal — i.e. another
+// skip would be redundant. Order matters (a worktree can be preserved, then later
+// removed), so the LAST of the two kinds wins.
+func (e Engine) lastCleanupOutcomeIsSkip(ctx context.Context, jobID string) bool {
+	events, err := e.Store.ListJobEvents(context.WithoutCancel(ctx), jobID)
+	if err != nil {
+		return false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Kind {
+		case "delegation_worktree_cleanup_skipped":
+			return true
+		case "delegation_worktree_removed":
+			return false
+		}
+	}
+	return false
 }
 
 // ReclaimTerminalDelegationWorktree re-attempts the terminal implement-delegation

@@ -40,12 +40,26 @@ type ResourceLockLiveness struct {
 
 // Active reports whether the owner should be treated as STILL owning its
 // resources for the purpose of DESTRUCTIVE actions (force worktree removal,
-// branch deletion). It is conservative: an unexpired lease, a live same-host PID,
-// or an unverifiable cross-host owner each independently means "do not destroy".
-// On a healthy terminal transition the lock is already released (no row), so this
-// reports false and cleanup proceeds unchanged.
+// branch deletion). On a healthy terminal transition the lock is already released
+// (no row), so this reports false and cleanup proceeds unchanged.
+//
+// It is keyed on the LEASE alone — the live-PID and cross-host signals are
+// deliberately NOT consulted once the lease has expired (#536 findings 2/5):
+//   - A cross-host owner past its lease is almost always our OWN pre-restart self
+//     under a new hostname (k8s/docker pod recreate). Treating it as active forever
+//     would strand the job's worktree+branch permanently — the inverse #536 failure.
+//   - A live same-host PID past its lease is far more likely PID reuse than the
+//     real worker: the lock records the gitmoot DAEMON's PID, not the spawned
+//     runtime worker's, so a recycled PID must NOT block reclamation.
+//
+// The never-clobber protection for a worker that is genuinely STILL RUNNING past
+// lease expiry is provided separately and correctly by the physical
+// worktree-process probe the cleanup gate consults
+// (workflow.Engine.worktreeHasLiveProcess), which is PID-reuse- and
+// hostname-rename-immune. So past lease expiry this lock-based gate steps aside and
+// the physical probe decides.
 func (l ResourceLockLiveness) Active() bool {
-	return l.LeaseUnexpired || l.OwnerPIDLive || l.CrossHost
+	return l.LeaseUnexpired
 }
 
 // LiveAndUnexpired reports a STRICT live owner: an unexpired lease whose owner is
@@ -61,25 +75,36 @@ func (l ResourceLockLiveness) LiveAndUnexpired() bool {
 }
 
 // LeaseHeld reports whether the lock's timeout contract is still in force: its
-// lease has not elapsed, or the owner is on an unverifiable remote host. This is
-// the gate stale-running-job recovery consults (#536).
+// lease has not elapsed. This is the gate stale-running-job recovery consults
+// (#536).
 //
-// Crucially it does NOT consult OwnerPIDLive. The lock records the PID of the
-// gitmoot DAEMON process that acquired it, NOT the spawned codex/claude/kimi
-// runtime worker. On a daemon restart (crash/redeploy/OOM) the runtime worker is
-// reparented to init and keeps running, but the lock still carries the OLD, now
-// dead daemon PID. A PID-based "is it alive?" check therefore reports the wrong
-// answer exactly on the restart path this recovery is named for, and would requeue
-// a job whose worker is still progressing — the original #536 failure. The lease,
-// by contrast, encodes the effective job timeout and survives the restart in the
-// DB, so it is the correct (PID-reuse-immune) contract: do not requeue while the
-// lease is unexpired; once it expires (recoverExpiredRuntimeSessionLocks reclaims
-// it) the job is requeued. The trade-off is that a genuinely-crashed worker whose
-// daemon also died is not requeued until its lease expires rather than at the
-// coarse 30m threshold — promptness traded for never failing live work, which is
-// the unattended-reliability goal.
+// It consults ONLY the lease — neither OwnerPIDLive nor CrossHost.
+//
+// It does NOT consult OwnerPIDLive because the lock records the PID of the gitmoot
+// DAEMON process that acquired it, NOT the spawned codex/claude/kimi runtime
+// worker. On a daemon restart (crash/redeploy/OOM) the runtime worker is reparented
+// to init and keeps running, but the lock still carries the OLD, now dead daemon
+// PID. A PID-based "is it alive?" check therefore reports the wrong answer exactly
+// on the restart path this recovery is named for, and would requeue a job whose
+// worker is still progressing — the original #536 failure.
+//
+// It does NOT consult CrossHost (the previous behavior, fixed in #536 finding 2)
+// because a cross-host lock whose lease has EXPIRED is almost always our own
+// pre-restart self under a new hostname (k8s/docker pod recreate); keeping it
+// "held" forever would mean the job is never requeued and its worktree never
+// cleaned — a permanent strand (the inverse failure). A cross-host lock whose lease
+// is UNEXPIRED is still protected, because LeaseUnexpired is true in that case.
+//
+// The lease encodes the effective job timeout and survives a restart in the DB, so
+// it is the correct (PID-reuse- and hostname-rename-immune) contract: do not
+// requeue while the lease is unexpired; once it expires
+// (recoverExpiredRuntimeSessionLocks reaps the expired runtime-session lock) the
+// job is requeued. The trade-off is that a genuinely-crashed worker whose daemon
+// also died is not requeued until its lease expires rather than at the coarse 30m
+// threshold — promptness traded for never failing live work, which is the
+// unattended-reliability goal.
 func (l ResourceLockLiveness) LeaseHeld() bool {
-	return l.LeaseUnexpired || l.CrossHost
+	return l.LeaseUnexpired
 }
 
 // classifyResourceLockLiveness applies the host/PID/lease classification used by

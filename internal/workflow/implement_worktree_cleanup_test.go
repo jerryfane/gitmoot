@@ -20,7 +20,9 @@ type roOnlyWorktreeManager struct{ removed []string }
 func (m *roOnlyWorktreeManager) AddWorktree(context.Context, string, string, string) error {
 	return nil
 }
-func (m *roOnlyWorktreeManager) AddDetachedWorktree(context.Context, string, string) error { return nil }
+func (m *roOnlyWorktreeManager) AddDetachedWorktree(context.Context, string, string) error {
+	return nil
+}
 func (m *roOnlyWorktreeManager) RemoveWorktreeForce(_ context.Context, path string) error {
 	m.removed = append(m.removed, path)
 	return nil
@@ -537,6 +539,106 @@ func TestCleanupImplementDelegationWorktreeRefusesWhileRuntimeOwnerActive(t *tes
 // cannot delete branches (no BranchDeleter), the worktree is removed, the branch
 // is intentionally kept, and the emitted event does NOT falsely claim the branch
 // was removed. Re-advances are silent no-ops (no repeated removed event).
+// TestCleanupImplementDelegationWorktreeLeaseExpiryBoundary is the #536 finding 1
+// regression: the lock-based gate alone is lease-bound, so PAST lease expiry (when
+// recoverExpiredRuntimeSessionLocks has reaped the runtime-session lock) it no
+// longer fires. But a daemon-crash-reparented worker can still be writing to the
+// worktree past its lease. Force-removing it then is the original #536 corruption
+// shifted to the lease boundary. The physical worktree-process probe must hold the
+// line: a live process with its cwd in the worktree preserves it even with NO lock;
+// once that worker has actually exited, the worktree is reclaimed (never stranded).
+func TestCleanupImplementDelegationWorktreeLeaseExpiryBoundary(t *testing.T) {
+	cases := []struct {
+		name        string
+		liveProcess bool
+		wantRemoved bool
+	}{
+		{name: "live worker past lease preserves worktree", liveProcess: true, wantRemoved: false},
+		{name: "dead worker past lease reclaims worktree", liveProcess: false, wantRemoved: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEngineStore(t)
+			engine := testEngine(store)
+			// No runtime-session lock is held (the lease has expired and the lock was
+			// reaped). The ONLY remaining never-clobber signal is the physical probe.
+			engine.WorktreeHasLiveProcess = func(string) bool { return tc.liveProcess }
+			branch := "gitmoot-delegation-x-boundary"
+			manager := &fakeWorktreeManager{existingBranches: map[string]bool{branch: true}}
+			engine.DelegationCheckout = t.TempDir()
+			engine.DelegationWorktrees = manager
+
+			wt := t.TempDir()
+			jobID := "parent-job/delegation/task-7302"
+			payload := JobPayload{DelegationID: "d1", WorktreePath: wt, Branch: branch, Result: &AgentResult{Decision: "failed"}}
+			engine.cleanupImplementDelegationWorktree(ctx, jobID, "implement", payload)
+
+			if tc.wantRemoved {
+				if len(manager.removedForce) != 1 || manager.removedForce[0] != wt {
+					t.Fatalf("dead worker must reclaim the worktree: removedForce=%+v", manager.removedForce)
+				}
+				if got := countJobEvents(t, store, jobID, "delegation_worktree_cleanup_skipped"); got != 0 {
+					t.Fatalf("reclaim must not skip, got %d skip events", got)
+				}
+			} else {
+				if len(manager.removedForce) != 0 || len(manager.deletedBranches) != 0 {
+					t.Fatalf("live worker past lease must NOT be force-removed: removedForce=%+v deletedBranches=%+v", manager.removedForce, manager.deletedBranches)
+				}
+				if got := countJobEvents(t, store, jobID, "delegation_worktree_cleanup_skipped"); got != 1 {
+					t.Fatalf("live worker must skip cleanup once, got %d skip events", got)
+				}
+				if _, err := os.Stat(wt); err != nil {
+					t.Fatalf("worktree must be preserved on disk: stat err = %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestCleanupImplementDelegationWorktreeSkipIsIdempotent is the #536 finding 3
+// regression: reclaimSkippedDelegationWorktrees re-fires the cleanup every 1s tick
+// while the owner stays active. Emitting a fresh delegation_worktree_cleanup_skipped
+// event each call would grow the job event log without bound and make every
+// ListJobEvents scan O(n^2). Repeated cleanups against a still-active owner must emit
+// AT MOST ONE skip event, and once the owner clears, the worktree is reclaimed.
+func TestCleanupImplementDelegationWorktreeSkipIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	engine := testEngine(store)
+	branch := "gitmoot-delegation-x-idem"
+	manager := &fakeWorktreeManager{existingBranches: map[string]bool{branch: true}}
+	engine.DelegationCheckout = t.TempDir()
+	engine.DelegationWorktrees = manager
+
+	wt := t.TempDir()
+	jobID := "parent-job/delegation/task-idem"
+	payload := JobPayload{DelegationID: "d1", WorktreePath: wt, Branch: branch, Result: &AgentResult{Decision: "failed"}}
+
+	// Owner active: a live process holds the worktree.
+	live := true
+	engine.WorktreeHasLiveProcess = func(string) bool { return live }
+	for i := 0; i < 5; i++ {
+		engine.cleanupImplementDelegationWorktree(ctx, jobID, "implement", payload)
+	}
+	if got := countJobEvents(t, store, jobID, "delegation_worktree_cleanup_skipped"); got != 1 {
+		t.Fatalf("repeated cleanup against an active owner must emit at most one skip event, got %d", got)
+	}
+	if len(manager.removedForce) != 0 {
+		t.Fatalf("worktree must be preserved while owner active: removedForce=%+v", manager.removedForce)
+	}
+
+	// Owner clears: the next cleanup reclaims and emits a single removed event.
+	live = false
+	engine.cleanupImplementDelegationWorktree(ctx, jobID, "implement", payload)
+	if len(manager.removedForce) != 1 || manager.removedForce[0] != wt {
+		t.Fatalf("worktree must be reclaimed once the owner clears: removedForce=%+v", manager.removedForce)
+	}
+	if got := countJobEvents(t, store, jobID, "delegation_worktree_removed"); got != 1 {
+		t.Fatalf("removed event count = %d, want 1", got)
+	}
+}
+
 func TestCleanupImplementDelegationWorktreeNoBranchDeleter(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)

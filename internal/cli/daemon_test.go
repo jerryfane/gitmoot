@@ -5183,7 +5183,7 @@ func TestRecoverRunningJobsForRepoSkipsOtherRepos(t *testing.T) {
 		}
 	}
 
-	if err := recoverRunningJobsBeforeForRepo(ctx, store, io.Discard, time.Now().UTC().Add(time.Second), "owner/repo-a", ""); err != nil {
+	if err := recoverRunningJobsBeforeForRepo(ctx, store, io.Discard, time.Now().UTC(), time.Now().UTC().Add(time.Second), "owner/repo-a", ""); err != nil {
 		t.Fatalf("recoverRunningJobsBeforeForRepo returned error: %v", err)
 	}
 
