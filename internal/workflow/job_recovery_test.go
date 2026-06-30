@@ -47,6 +47,62 @@ func TestRetryJobRequeuesTerminalJobAndPreservesPayload(t *testing.T) {
 	}
 }
 
+func TestRetryJobClearsReadOnlyNoTaskWorktreePath(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	payload := `{"repo":"owner/repo","branch":"main","delegation_id":"plan-glm","worktree_path":"/tmp/gitmoot/worktrees/owner--repo/delegations/root/plan-glm/pool-isolation","head_sha":"abc123","result":{"decision":"failed","summary":"stale"}}`
+	if err := store.CreateJobWithEvent(ctx, db.Job{ID: "root/delegation/plan-glm", Agent: "council-glm", Type: "ask", State: string(JobFailed), Payload: payload}, db.JobEvent{
+		Kind:    string(JobFailed),
+		Message: "failed",
+	}); err != nil {
+		t.Fatalf("CreateJobWithEvent returned error: %v", err)
+	}
+
+	job, err := RetryJob(ctx, store, "root/delegation/plan-glm")
+	if err != nil {
+		t.Fatalf("RetryJob returned error: %v", err)
+	}
+
+	storedPayload, err := unmarshalPayload(job.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if storedPayload.WorktreePath != "" {
+		t.Fatalf("manual read-only retry kept stale WorktreePath = %q", storedPayload.WorktreePath)
+	}
+	if storedPayload.HeadSHA != "" {
+		t.Fatalf("manual read-only retry kept stale HeadSHA = %q", storedPayload.HeadSHA)
+	}
+}
+
+func TestRetryJobPreservesTaskWorktreePath(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	payload := `{"repo":"owner/repo","branch":"feature","task_id":"task-1","delegation_id":"implement","worktree_path":"/tmp/gitmoot/worktrees/owner--repo/task-1","head_sha":"abc123","result":{"decision":"failed","summary":"stale"}}`
+	if err := store.CreateJobWithEvent(ctx, db.Job{ID: "root/delegation/implement", Agent: "builder", Type: "implement", State: string(JobFailed), Payload: payload}, db.JobEvent{
+		Kind:    string(JobFailed),
+		Message: "failed",
+	}); err != nil {
+		t.Fatalf("CreateJobWithEvent returned error: %v", err)
+	}
+
+	job, err := RetryJob(ctx, store, "root/delegation/implement")
+	if err != nil {
+		t.Fatalf("RetryJob returned error: %v", err)
+	}
+
+	storedPayload, err := unmarshalPayload(job.Payload)
+	if err != nil {
+		t.Fatalf("unmarshalPayload returned error: %v", err)
+	}
+	if storedPayload.WorktreePath != "/tmp/gitmoot/worktrees/owner--repo/task-1" {
+		t.Fatalf("task retry WorktreePath = %q, want preserved task worktree", storedPayload.WorktreePath)
+	}
+	if storedPayload.HeadSHA != "abc123" {
+		t.Fatalf("task retry HeadSHA = %q, want preserved", storedPayload.HeadSHA)
+	}
+}
+
 func TestRetryJobRejectsNonTerminalJob(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
