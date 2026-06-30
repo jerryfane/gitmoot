@@ -142,6 +142,9 @@ func (d Daemon) PollOnce(ctx context.Context) error {
 	if err := d.retryClosedReadyToMerge(ctx, openBranches); err != nil && firstErr == nil {
 		firstErr = err
 	}
+	if err := d.reconcileClosedReviewingTasks(ctx, openBranches); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	if d.WatchIssues {
 		if err := d.PollIssuesOnce(ctx); err != nil && firstErr == nil {
 			firstErr = err
@@ -558,6 +561,103 @@ func (d Daemon) retryClosedReadyToMerge(ctx context.Context, openBranches map[st
 			return err
 		}
 		delete(readyBranches, pull.HeadRef)
+	}
+	return nil
+}
+
+// reconcileClosedReviewingTasks self-heals tasks wedged in `reviewing` whose PR
+// is no longer open on GitHub (#543). The main poll loop only iterates OPEN PRs,
+// and the closed-PR retry path (retryClosedReadyToMerge) only covers
+// `ready_to_merge` tasks, so a `reviewing` task whose duplicate/superseded PR was
+// closed (e.g. by a cleanup job) is never reconciled and stays stuck forever with
+// a stale local `open` PR row.
+//
+// It mirrors retryClosedReadyToMerge's shape and cheap short-circuit: it only
+// consults GitHub's closed-PR list when a reviewing task has a branch with NO
+// currently-open PR (the wedge), so the healthy path — where a reviewing task's
+// PR is open and thus present in openBranches — makes zero extra GitHub reads.
+// A genuinely-open PR is in openBranches and skipped, so the normal review path
+// is never disturbed. Matching is by branch + PR number (+ head SHA when known);
+// the engine transition is no-op unless the task is still `reviewing`.
+func (d Daemon) reconcileClosedReviewingTasks(ctx context.Context, openBranches map[string]struct{}) error {
+	if d.Workflow == nil {
+		return nil
+	}
+	tasks, err := d.Store.ListTasksByRepoState(ctx, d.Repo.FullName(), string(workflow.TaskReviewing))
+	if err != nil {
+		return err
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	type reviewingPullRequest struct {
+		task    db.Task
+		number  int64
+		headSHA string
+	}
+	candidates := map[string]reviewingPullRequest{}
+	for _, task := range tasks {
+		if task.Branch == "" {
+			continue
+		}
+		if _, open := openBranches[task.Branch]; open {
+			continue
+		}
+		stored, err := d.Store.GetPullRequestByRepoBranch(ctx, d.Repo.FullName(), task.Branch)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return err
+		}
+		candidates[task.Branch] = reviewingPullRequest{task: task, number: stored.Number, headSHA: stored.HeadSHA}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	closed, err := d.GitHub.ListPullRequests(ctx, d.Repo, "closed")
+	if err != nil {
+		return err
+	}
+	for _, pull := range closed {
+		candidate, ok := candidates[pull.HeadRef]
+		if !ok {
+			continue
+		}
+		if pull.Number != candidate.number {
+			continue
+		}
+		if candidate.headSHA != "" && pull.HeadSHA != "" && pull.HeadSHA != candidate.headSHA {
+			continue
+		}
+		// The GitHub list endpoint reports merged PRs as state="closed" and omits
+		// the top-level `merged` boolean, carrying `merged_at` as the only merge
+		// signal — so treat any of those as merged and the rest as closed-unmerged.
+		merged := strings.TrimSpace(pull.MergedAt) != "" || pull.Merged ||
+			strings.EqualFold(strings.TrimSpace(pull.State), "merged")
+		task := candidate.task
+		leadAgent := "github"
+		if lock, err := d.Store.GetBranchLock(ctx, d.Repo.FullName(), task.Branch); err == nil {
+			if owner := strings.TrimSpace(lock.Owner); owner != "" {
+				leadAgent = owner
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err := d.Workflow.HandleReviewPullRequestClosed(ctx, workflow.PullRequestEvent{
+			Repo:        d.Repo.FullName(),
+			Branch:      task.Branch,
+			PullRequest: int(pull.Number),
+			HeadSHA:     pull.HeadSHA,
+			GoalID:      task.GoalID,
+			TaskID:      task.ID,
+			TaskTitle:   task.Title,
+			LeadAgent:   leadAgent,
+			Sender:      "github",
+		}, merged); err != nil {
+			return err
+		}
+		delete(candidates, pull.HeadRef)
 	}
 	return nil
 }

@@ -794,6 +794,69 @@ func (e Engine) HandlePullRequestReadyToMerge(ctx context.Context, event PullReq
 	return err
 }
 
+// HandleReviewPullRequestClosed reconciles a task wedged in `reviewing` whose
+// pull request is no longer open on GitHub (#543). The daemon poll loop only
+// lists OPEN pull requests, so once a reviewing task's PR is closed — most often
+// a duplicate/superseded PR that a cleanup job closed on GitHub — nothing
+// re-routes the task and it stays in `reviewing` pointing at a stale `open`
+// local PR row forever.
+//
+// It is idempotent and narrowly scoped: it acts ONLY when the task is still in
+// `reviewing`, so any already-advanced task (a genuinely-open PR still under
+// review, or one already merged/blocked) is left untouched and the healthy
+// merge/open paths are never regressed. It transitions the task out of
+// `reviewing` and rewrites the stale local PR row to its true state: a merged PR
+// resolves the task to `merged`; a closed-unmerged PR resolves it to the
+// terminal `blocked` state (there is no open PR left to review or merge, so it
+// surfaces to a human). Existing PR row fields (url/base/merge SHA) are
+// preserved — only the state (and, when merged, head SHA) is reconciled.
+func (e Engine) HandleReviewPullRequestClosed(ctx context.Context, event PullRequestEvent, merged bool) error {
+	if err := e.validate(); err != nil {
+		return err
+	}
+	if err := validatePullRequestEvent(event); err != nil {
+		return err
+	}
+	ref := taskRefFromPullRequest(event)
+	task, err := e.Store.GetTask(ctx, ref.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if task.State != string(TaskReviewing) {
+		return nil
+	}
+	prState := "closed"
+	taskState := TaskBlocked
+	if merged {
+		prState = "merged"
+		taskState = TaskMerged
+	}
+	if err := e.setTaskState(ctx, ref, taskState); err != nil {
+		return err
+	}
+	pr := db.PullRequest{
+		RepoFullName: event.Repo,
+		Number:       int64(event.PullRequest),
+		HeadBranch:   event.Branch,
+		HeadSHA:      event.HeadSHA,
+		State:        prState,
+	}
+	if existing, err := e.Store.GetPullRequest(ctx, event.Repo, int64(event.PullRequest)); err == nil {
+		pr.URL = existing.URL
+		pr.BaseBranch = existing.BaseBranch
+		pr.MergeCommitSHA = existing.MergeCommitSHA
+		if strings.TrimSpace(pr.HeadSHA) == "" {
+			pr.HeadSHA = existing.HeadSHA
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return e.Store.UpsertPullRequest(ctx, pr)
+}
+
 func (e Engine) RunJob(ctx context.Context, jobID string, agent runtime.Agent, adapter DeliveryAdapter) (AgentResult, error) {
 	if err := e.validate(); err != nil {
 		return AgentResult{}, err
