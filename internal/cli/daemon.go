@@ -4170,6 +4170,14 @@ func (w jobWorker) applyOrchestratePolicy(engine *workflow.Engine) {
 	engine.MaxDelegationCostUSD = policy.MaxDelegationCostUSD
 	engine.MaxDelegationNonProgressStreak = policy.MaxDelegationNonProgressStreak
 	engine.MaxVerifyReplanAttempts = policy.MaxVerifyReplanAttempts
+	engine.DelegationTimeoutDefaults = workflow.DelegationTimeoutDefaults{
+		Default:   policy.DefaultDelegationTimeout,
+		Plan:      policy.DefaultPlanTimeout,
+		Implement: policy.DefaultImplementTimeout,
+		Review:    policy.DefaultReviewTimeout,
+		Gate:      policy.DefaultGateTimeout,
+		Repair:    policy.DefaultRepairTimeout,
+	}
 	if notifier, ok := engine.EscalationNotifier.(*daemonEscalationNotifier); ok && notifier != nil {
 		notifier.Handle = policy.EscalationHandle
 	}

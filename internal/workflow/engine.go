@@ -126,6 +126,11 @@ type Engine struct {
 	// left behind by a since-disabled run is never sampled, so it can never serve
 	// traffic without the comparator that would graduate or roll it back.
 	CanaryEnabled bool
+	// DelegationTimeoutDefaults carries optional [orchestrate] default child-job
+	// timeouts. Empty fields mean unbounded. Explicit per-delegation timeout values
+	// still win, so an engine with the zero value is byte-identical to historical
+	// behavior.
+	DelegationTimeoutDefaults DelegationTimeoutDefaults
 	// ArtifactRoot is the filesystem root under which delegation artifacts
 	// (delegations/<parent-job-id>/brief.md and context-manifest.json) are
 	// written when a coordinator returns delegations that request artifacts.
@@ -247,6 +252,54 @@ type Engine struct {
 	// spawns a goroutine; tests inject a synchronous runner so the checker leg is
 	// deterministic. It mirrors ReviewSpawner.
 	CheckerSpawner func(func())
+}
+
+// DelegationTimeoutDefaults are optional fallback timeouts for child delegation
+// jobs. They are intentionally generic orchestration policy, not tied to any
+// particular external coordinator or agent naming convention.
+type DelegationTimeoutDefaults struct {
+	Default   string
+	Plan      string
+	Implement string
+	Review    string
+	Gate      string
+	Repair    string
+}
+
+func (d DelegationTimeoutDefaults) timeoutFor(del Delegation) string {
+	switch strings.ToLower(strings.TrimSpace(del.Phase)) {
+	case "plan":
+		if d.Plan != "" {
+			return d.Plan
+		}
+	case "implement":
+		if d.Implement != "" {
+			return d.Implement
+		}
+	case "review", "review-prep", "review-dispatch":
+		if d.Review != "" {
+			return d.Review
+		}
+	case "gate":
+		if d.Gate != "" {
+			return d.Gate
+		}
+	case "repair", "continue":
+		if d.Repair != "" {
+			return d.Repair
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(del.Action)) {
+	case "implement":
+		if d.Implement != "" {
+			return d.Implement
+		}
+	case "review":
+		if d.Review != "" {
+			return d.Review
+		}
+	}
+	return d.Default
 }
 
 // defaultMaxDelegationNonProgressStreak is the streak threshold used when the
@@ -1495,6 +1548,13 @@ func parseJobTimestamp(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unrecognized job timestamp %q", s)
 }
 
+func effectiveDelegationTimeout(d Delegation, defaults DelegationTimeoutDefaults) string {
+	if timeout := strings.TrimSpace(d.Timeout); timeout != "" {
+		return timeout
+	}
+	return defaults.timeoutFor(d)
+}
+
 // delegationRequest builds the canonical child JobRequest for a delegation,
 // inheriting the parent's repo/branch/PR context and stamping the DAG fields
 // (ParentJobID/DelegationID/DelegationDepth/DelegatedBy/RootJobID/Deps). It is
@@ -1513,6 +1573,7 @@ func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) 
 		agent = ephemeralAgentName(d.ID, job.ID)
 		ephemeral = d.Ephemeral
 	}
+	rootID := e.rootJobID(job, payload)
 	return JobRequest{
 		ID:              job.ID + "/delegation/" + d.ID,
 		Agent:           agent,
@@ -1535,9 +1596,9 @@ func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) 
 		DelegationID:    d.ID,
 		DelegationDepth: payload.DelegationDepth + 1,
 		DelegatedBy:     job.Agent,
-		RootJobID:       e.rootJobID(job, payload),
+		RootJobID:       rootID,
 		Deps:            compactStrings(d.Deps),
-		JobTimeout:      strings.TrimSpace(d.Timeout),
+		JobTimeout:      effectiveDelegationTimeout(d, e.DelegationTimeoutDefaults),
 		Fingerprint:     strings.TrimSpace(d.Fingerprint),
 		FailurePolicy:   strings.TrimSpace(d.FailurePolicy),
 		SynthesisRule:   strings.TrimSpace(d.SynthesisRule),
