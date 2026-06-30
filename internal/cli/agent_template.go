@@ -28,6 +28,8 @@ func runAgentTemplate(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "add":
 		return runAgentTemplateAdd(args[1:], stdout, stderr)
+	case "export":
+		return runAgentTemplateExport(args[1:], stdout, stderr)
 	case "draft":
 		return runAgentTemplateDraft(args[1:], stdout, stderr)
 	case "list":
@@ -52,6 +54,8 @@ func runAgentTemplate(args []string, stdout, stderr io.Writer) int {
 func printAgentTemplateUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot agent template add <template-id> --file ./agents/<template-id>.md [--name <name>] [--description <text>]")
+	fmt.Fprintln(w, "  gitmoot agent template add <template-id> --from-repo <owner/repo> [--ref <ref>] [--path <file>]")
+	fmt.Fprintln(w, "  gitmoot agent template export [<template-id>...] [--all] [--to <dir>] [--dry-run]")
 	fmt.Fprintln(w, "  gitmoot agent template draft <template-id> [--output .gitmoot/templates/<template-id>.md] [--force]")
 	fmt.Fprintln(w, "  gitmoot agent template validate <file>")
 	fmt.Fprintln(w, "  gitmoot agent template list")
@@ -100,6 +104,9 @@ func runAgentTemplateAdd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	file := fs.String("file", "", "local template file to install")
+	fromRepo := fs.String("from-repo", "", "GitHub owner/repo to fetch the template from")
+	ref := fs.String("ref", "", "git ref to fetch from --from-repo (default main)")
+	path := fs.String("path", "", "template file path within --from-repo (default templates/<id>.md)")
 	name := fs.String("name", "", "agent template display name")
 	description := fs.String("description", "", "agent template description")
 	id, flagArgs := leadingID(args)
@@ -120,8 +127,25 @@ func runAgentTemplateAdd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent template add requires exactly one template id")
 		return 2
 	}
-	if strings.TrimSpace(*file) == "" {
-		fmt.Fprintln(stderr, "agent template add requires --file")
+	hasFile := strings.TrimSpace(*file) != ""
+	hasRepo := strings.TrimSpace(*fromRepo) != ""
+	if hasFile && hasRepo {
+		fmt.Fprintln(stderr, "agent template add accepts either --file or --from-repo, not both")
+		return 2
+	}
+	if hasRepo {
+		fmt.Fprintln(stderr, "note: pulled templates are stored verbatim; only pull from repos you trust, and keep private prompts in a private repo")
+		return withStoreExit(*home, stderr, "add agent template", func(store *db.Store) error {
+			added, err := agenttemplate.AddRemote(context.Background(), store, newAgentTemplateFetcher(), id, *fromRepo, *ref, *path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "added %s at %s\n", added.ID, added.ResolvedCommit)
+			return nil
+		})
+	}
+	if !hasFile {
+		fmt.Fprintln(stderr, "agent template add requires --file or --from-repo")
 		return 2
 	}
 	return withStoreExit(*home, stderr, "add agent template", func(store *db.Store) error {
@@ -132,6 +156,126 @@ func runAgentTemplateAdd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "added %s at %s\n", added.ID, added.ResolvedCommit)
 		return nil
 	})
+}
+
+// runAgentTemplateExport reconstructs stored templates back into .md files on
+// disk. It is network-free (DB only). By default it scopes to custom templates
+// and skips built-ins, which already live upstream.
+func runAgentTemplateExport(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("agent template export", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	all := fs.Bool("all", false, "export all custom templates (skips built-ins)")
+	to := fs.String("to", ".", "directory to write exported .md files into")
+	dryRun := fs.Bool("dry-run", false, "list what would be exported without writing files")
+	ids, flagArgs := leadingIDs(args)
+	if err := fs.Parse(flagArgs); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	ids = append(ids, fs.Args()...)
+	ids = compactValues(ids)
+	if len(ids) == 0 && !*all {
+		fmt.Fprintln(stderr, "agent template export requires one or more template ids or --all")
+		return 2
+	}
+	if len(ids) > 0 && *all {
+		fmt.Fprintln(stderr, "agent template export accepts either template ids or --all, not both")
+		return 2
+	}
+	dir := strings.TrimSpace(*to)
+	if dir == "" {
+		dir = "."
+	}
+	return withStoreExit(*home, stderr, "export agent template", func(store *db.Store) error {
+		targets, err := exportTargets(context.Background(), store, ids, *all, stderr)
+		if err != nil {
+			return err
+		}
+		if len(targets) == 0 {
+			fmt.Fprintln(stderr, "no custom templates to export")
+			return nil
+		}
+		if !*dryRun {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("create export directory: %w", err)
+			}
+		}
+		for _, target := range targets {
+			content, err := agenttemplate.Export(target)
+			if err != nil {
+				return err
+			}
+			path := filepath.Join(dir, target.ID+".md")
+			if *dryRun {
+				writeLine(stdout, "would export %s -> %s", target.ID, path)
+				continue
+			}
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				return fmt.Errorf("write exported template %s: %w", path, err)
+			}
+			writeLine(stdout, "exported %s -> %s", target.ID, path)
+		}
+		fmt.Fprintln(stderr, "note: exported .md files contain the full prompt; review for secrets before committing to a shared or public repo")
+		return nil
+	})
+}
+
+// exportTargets resolves the rows to export: explicit ids look up each custom
+// row (built-in ids are skipped with a note), while --all collects every custom
+// row and skips built-ins and retired ids.
+func exportTargets(ctx context.Context, store *db.Store, ids []string, all bool, stderr io.Writer) ([]db.AgentTemplate, error) {
+	if len(ids) > 0 {
+		targets := make([]db.AgentTemplate, 0, len(ids))
+		for _, id := range ids {
+			if _, ok := agenttemplate.Lookup(id); ok {
+				fmt.Fprintf(stderr, "skipping built-in template %s; built-ins already live upstream\n", id)
+				continue
+			}
+			if agenttemplate.IsRetired(id) {
+				return nil, retiredAgentTemplateError(id)
+			}
+			cached, err := store.GetAgentTemplate(ctx, id)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("unknown agent template %q", id)
+			}
+			if err != nil {
+				return nil, err
+			}
+			targets = append(targets, cached)
+		}
+		return targets, nil
+	}
+	cachedTemplates, err := store.ListAgentTemplates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]db.AgentTemplate, 0, len(cachedTemplates))
+	for _, cached := range cachedTemplates {
+		if _, ok := agenttemplate.Lookup(cached.ID); ok {
+			continue
+		}
+		if agenttemplate.IsRetired(cached.ID) {
+			continue
+		}
+		targets = append(targets, cached)
+	}
+	return targets, nil
+}
+
+func leadingIDs(args []string) ([]string, []string) {
+	ids := make([]string, 0, len(args))
+	index := 0
+	for index < len(args) {
+		if strings.HasPrefix(args[index], "-") {
+			break
+		}
+		ids = append(ids, args[index])
+		index++
+	}
+	return ids, args[index:]
 }
 
 func leadingID(args []string) (string, []string) {
@@ -437,10 +581,17 @@ func updateTemplateByID(ctx context.Context, store *db.Store, id string) (db.Age
 	if err != nil {
 		return db.AgentTemplate{}, err
 	}
-	if !agenttemplate.IsLocal(cached) {
-		return db.AgentTemplate{}, fmt.Errorf("agent template %s is not a local custom template and has no built-in source", id)
+	if agenttemplate.IsLocal(cached) {
+		return agenttemplate.UpdateLocal(ctx, store, cached)
 	}
-	return agenttemplate.UpdateLocal(ctx, store, cached)
+	// Pulled templates carry a real owner/repo SourceRepo and are re-fetchable
+	// via the GHFetcher. This branch is strictly gated on IsRemote so local rows
+	// (SourceRepo "local") keep using UpdateLocal and the path stays byte-for-byte
+	// unchanged for them.
+	if agenttemplate.IsRemote(cached) {
+		return agenttemplate.UpdateRemote(ctx, store, newAgentTemplateFetcher(), cached)
+	}
+	return db.AgentTemplate{}, fmt.Errorf("agent template %s is not a local custom template and has no built-in source", id)
 }
 
 func retiredAgentTemplateError(id string) error {

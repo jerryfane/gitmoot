@@ -205,6 +205,196 @@ func TestAgentTemplateAddRejectsInvalidLocalFiles(t *testing.T) {
 	}
 }
 
+func TestAgentTemplateAddFromRepoInstallsAndUpdatesRemoteTemplate(t *testing.T) {
+	content := testLocalTemplateContent("frontend-reviewer", "Review frontend changes.\n")
+	restore := replaceAgentTemplateFetcher(fakeAgentTemplateFetcher{commit: "remote-sha", content: content})
+	defer restore()
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+
+	code := Run([]string{"agent", "template", "add", "frontend-reviewer",
+		"--home", home,
+		"--from-repo", "jerry/templates",
+		"--path", "templates/frontend-reviewer.md",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("template add --from-repo exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "added frontend-reviewer at remote-sha") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"agent", "template", "show", "--home", home, "frontend-reviewer"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("template show exit code = %d, stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{"source: jerry/templates@main:templates/frontend-reviewer.md", "installed: yes", "Review frontend changes."} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("show output missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	// The generalized update path re-fetches a pulled row from its stored source.
+	restore()
+	restore = replaceAgentTemplateFetcher(fakeAgentTemplateFetcher{
+		commit:  "remote-sha-2",
+		content: testLocalTemplateContent("frontend-reviewer", "Review frontend changes deeply.\n"),
+	})
+	defer restore()
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"agent", "template", "update", "--home", home, "frontend-reviewer"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("template update exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated frontend-reviewer at remote-sha-2") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"agent", "template", "show", "--home", home, "frontend-reviewer"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template show after update exit code = %d, stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{"version: v2", "Review frontend changes deeply."} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("show after update missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestAgentTemplateAddRejectsConflictingSources(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	code := Run([]string{"agent", "template", "add", "frontend-reviewer",
+		"--home", home,
+		"--file", "ignored.md",
+		"--from-repo", "jerry/templates",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("conflicting sources exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "either --file or --from-repo") {
+		t.Fatalf("stderr missing conflict guidance:\n%s", stderr.String())
+	}
+}
+
+func TestAgentTemplateExportWritesCustomTemplatesAndSkipsBuiltins(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "frontend.md")
+	if err := os.WriteFile(promptPath, []byte(testLocalTemplateContent("frontend-reviewer", "Review frontend changes.\n")), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if code := Run([]string{"agent", "template", "add", "--home", home, "--file", promptPath, "frontend-reviewer"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template add exit code = %d, stderr=%s", code, stderr.String())
+	}
+	// Install a built-in too, to prove --all skips it.
+	restore := replaceAgentTemplateFetcher(fakeAgentTemplateFetcher{commit: "abc123", content: "Review deeply."})
+	defer restore()
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"agent", "template", "update", "--home", home, "thermo-nuclear-code-quality-review"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template update builtin exit code = %d, stderr=%s", code, stderr.String())
+	}
+
+	outDir := t.TempDir()
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "template", "export", "--home", home, "--all", "--to", outDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("template export exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "exported frontend-reviewer ->") {
+		t.Fatalf("export stdout = %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "thermo-nuclear-code-quality-review") {
+		t.Fatalf("export --all should skip built-ins:\n%s", stdout.String())
+	}
+	exported, err := os.ReadFile(filepath.Join(outDir, "frontend-reviewer.md"))
+	if err != nil {
+		t.Fatalf("ReadFile exported template returned error: %v", err)
+	}
+	parsed, err := agenttemplate.ParseTemplateContent(string(exported))
+	if err != nil {
+		t.Fatalf("exported file did not parse: %v\n%s", err, string(exported))
+	}
+	if parsed.Metadata.ID != "frontend-reviewer" || !strings.Contains(parsed.Body, "Review frontend changes.") {
+		t.Fatalf("exported file = %+v body=%q", parsed.Metadata, parsed.Body)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "thermo-nuclear-code-quality-review.md")); !os.IsNotExist(err) {
+		t.Fatalf("built-in should not be exported, stat err=%v", err)
+	}
+}
+
+func TestAgentTemplateExportDryRunWritesNothing(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "frontend.md")
+	if err := os.WriteFile(promptPath, []byte(testLocalTemplateContent("frontend-reviewer", "Review frontend changes.\n")), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if code := Run([]string{"agent", "template", "add", "--home", home, "--file", promptPath, "frontend-reviewer"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template add exit code = %d, stderr=%s", code, stderr.String())
+	}
+	outDir := t.TempDir()
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "template", "export", "frontend-reviewer", "--home", home, "--to", outDir, "--dry-run"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("template export --dry-run exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "would export frontend-reviewer ->") {
+		t.Fatalf("dry-run stdout = %s", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "frontend-reviewer.md")); !os.IsNotExist(err) {
+		t.Fatalf("--dry-run should not write files, stat err=%v", err)
+	}
+}
+
+func TestAgentTemplateExportRequiresScope(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	code := Run([]string{"agent", "template", "export", "--home", home}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("export without scope exit code = 0, stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires one or more template ids or --all") {
+		t.Fatalf("stderr missing scope guidance:\n%s", stderr.String())
+	}
+}
+
+func TestAgentTemplateLocalUpdatePathUnchangedByGeneralization(t *testing.T) {
+	// Additive invariant: a local custom row (SourceRepo "local") must still flow
+	// through UpdateLocal — never the remote fetch path — so installing the
+	// remote machinery does not change behavior for existing local templates.
+	// Set a fetcher that fails loudly if it is ever called for a local row.
+	restore := replaceAgentTemplateFetcher(explodingFetcher{t: t})
+	defer restore()
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "frontend.md")
+	if err := os.WriteFile(promptPath, []byte(testLocalTemplateContent("frontend-reviewer", "Old prompt.\n")), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if code := Run([]string{"agent", "template", "add", "--home", home, "--file", promptPath, "frontend-reviewer"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("template add exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if err := os.WriteFile(promptPath, []byte(testLocalTemplateContent("frontend-reviewer", "New prompt.\n")), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"agent", "template", "update", "--home", home, "frontend-reviewer"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("local template update exit code = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated frontend-reviewer at sha256:") {
+		t.Fatalf("local update did not use UpdateLocal:\n%s", stdout.String())
+	}
+}
+
 func TestAgentTemplateDraftWritesDefaultTemplatePath(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cwd := chdirTemp(t)
@@ -785,6 +975,20 @@ func replaceSkillOptTrainInitStdin(input string) func() {
 	return func() {
 		skillOptTrainInitStdin = previous
 	}
+}
+
+type explodingFetcher struct {
+	t *testing.T
+}
+
+func (f explodingFetcher) ResolveRef(context.Context, string, string) (string, error) {
+	f.t.Fatal("fetcher ResolveRef called for a local custom template")
+	return "", nil
+}
+
+func (f explodingFetcher) FetchFile(context.Context, string, string, string) (agenttemplate.File, error) {
+	f.t.Fatal("fetcher FetchFile called for a local custom template")
+	return agenttemplate.File{}, nil
 }
 
 type fakeAgentTemplateFetcher struct {

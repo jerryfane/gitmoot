@@ -371,6 +371,28 @@ func IsLocal(template db.AgentTemplate) bool {
 	return template.SourceRepo == LocalSourceRepo && template.SourceRef == LocalSourceRef
 }
 
+// IsRemote reports whether a stored template was pulled from a real GitHub
+// owner/repo (and is therefore re-fetchable via the GHFetcher). It is the strict
+// gate that distinguishes pulled templates from local custom rows (SourceRepo
+// "local") and keeps the generalized update path off by default for those.
+func IsRemote(template db.AgentTemplate) bool {
+	return IsRemoteRepo(template.SourceRepo)
+}
+
+// IsRemoteRepo reports whether repo looks like a real GitHub "owner/repo"
+// reference (not the "local" sentinel and not an empty/malformed value).
+func IsRemoteRepo(repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" || repo == LocalSourceRepo {
+		return false
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	return strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != ""
+}
+
 func HashContent(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -418,6 +440,125 @@ func Update(ctx context.Context, store *db.Store, fetcher Fetcher, id string) (d
 		return db.AgentTemplate{}, err
 	}
 	return store.GetAgentTemplate(ctx, template.ID)
+}
+
+// AddRemote installs a custom template fetched from a real GitHub owner/repo,
+// mirroring AddLocal but routing through the existing GHFetcher so the stored row
+// carries SourceRepo/SourceRef/SourcePath/ResolvedCommit and gains update/revert
+// for free. It keeps AddLocal's guards: built-in ids and retired ids are
+// rejected, and the fetched file's frontmatter id must match the requested id.
+//
+// Caution: templates are stored and exported verbatim (prompt body + metadata).
+// Avoid pulling from, or publishing to, repos whose visibility you do not
+// control if the prompt could contain sensitive instructions.
+func AddRemote(ctx context.Context, store *db.Store, fetcher Fetcher, id string, repo string, ref string, path string) (db.AgentTemplate, error) {
+	if store == nil {
+		return db.AgentTemplate{}, errors.New("agent template store is required")
+	}
+	if fetcher == nil {
+		return db.AgentTemplate{}, errors.New("agent template fetcher is required")
+	}
+	id = strings.TrimSpace(id)
+	if err := ValidateID(id); err != nil {
+		return db.AgentTemplate{}, err
+	}
+	if _, ok := Lookup(id); ok {
+		return db.AgentTemplate{}, fmt.Errorf("agent template %s is built in and cannot be replaced with a remote template", id)
+	}
+	if IsRetired(id) {
+		return db.AgentTemplate{}, fmt.Errorf("agent template %s is retired; use %s", id, PlannerTemplateID)
+	}
+	repo = strings.TrimSpace(repo)
+	if !IsRemoteRepo(repo) {
+		return db.AgentTemplate{}, fmt.Errorf("template source repo %q must be a GitHub owner/repo", repo)
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = "main"
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = "templates/" + id + ".md"
+	}
+	template, err := fetchRemoteTemplate(ctx, fetcher, id, repo, ref, path)
+	if err != nil {
+		return db.AgentTemplate{}, err
+	}
+	if err := store.UpsertAgentTemplate(ctx, template); err != nil {
+		return db.AgentTemplate{}, err
+	}
+	return store.GetAgentTemplate(ctx, template.ID)
+}
+
+// UpdateRemote re-fetches a stored remote template from its recorded
+// SourceRepo/SourceRef/SourcePath. It is the remote sibling of UpdateLocal and is
+// strictly gated on IsRemote so local and built-in rows never reach it.
+func UpdateRemote(ctx context.Context, store *db.Store, fetcher Fetcher, cached db.AgentTemplate) (db.AgentTemplate, error) {
+	if store == nil {
+		return db.AgentTemplate{}, errors.New("agent template store is required")
+	}
+	if fetcher == nil {
+		return db.AgentTemplate{}, errors.New("agent template fetcher is required")
+	}
+	if !IsRemote(cached) {
+		return db.AgentTemplate{}, fmt.Errorf("agent template %s is not a remote custom template", cached.ID)
+	}
+	template, err := fetchRemoteTemplate(ctx, fetcher, cached.ID, cached.SourceRepo, cached.SourceRef, cached.SourcePath)
+	if err != nil {
+		return db.AgentTemplate{}, err
+	}
+	if err := store.UpsertAgentTemplate(ctx, template); err != nil {
+		return db.AgentTemplate{}, err
+	}
+	return store.GetAgentTemplate(ctx, template.ID)
+}
+
+// fetchRemoteTemplate resolves repo@ref, fetches path, and builds an
+// AgentTemplate row from the file's frontmatter, requiring the frontmatter id to
+// match the requested id (the same contract AddLocal enforces for local files).
+func fetchRemoteTemplate(ctx context.Context, fetcher Fetcher, id string, repo string, ref string, path string) (db.AgentTemplate, error) {
+	resolvedCommit, err := fetcher.ResolveRef(ctx, repo, ref)
+	if err != nil {
+		return db.AgentTemplate{}, err
+	}
+	file, err := fetcher.FetchFile(ctx, repo, resolvedCommit, path)
+	if err != nil {
+		return db.AgentTemplate{}, err
+	}
+	parsed, err := ParseTemplateContent(file.Content)
+	if err != nil {
+		return db.AgentTemplate{}, err
+	}
+	if parsed.Metadata.ID != id {
+		return db.AgentTemplate{}, fmt.Errorf("template id %q does not match frontmatter id %q", id, parsed.Metadata.ID)
+	}
+	metadataJSON, err := MarshalMetadata(parsed.Metadata)
+	if err != nil {
+		return db.AgentTemplate{}, err
+	}
+	return db.AgentTemplate{
+		ID:             id,
+		Name:           parsed.Metadata.Name,
+		Description:    parsed.Metadata.Description,
+		SourceRepo:     repo,
+		SourceRef:      ref,
+		SourcePath:     path,
+		ResolvedCommit: resolvedCommit,
+		Content:        file.Content,
+		MetadataJSON:   metadataJSON,
+	}, nil
+}
+
+// Export reconstructs the canonical .md text (YAML frontmatter + body) for a
+// stored template row from its MetadataJSON and Content. It is network-free: it
+// reads only what is already in the local DB, so it is the always-available
+// primitive for backing templates up to disk or a git checkout.
+func Export(template db.AgentTemplate) (string, error) {
+	metadata, err := UnmarshalMetadata(template.MetadataJSON)
+	if err != nil {
+		return "", fmt.Errorf("export agent template %s: %w", template.ID, err)
+	}
+	return FormatTemplateContent(metadata, InstructionsForContent(template.Content)), nil
 }
 
 func ContentForDefinition(definition Definition, content string) (string, error) {

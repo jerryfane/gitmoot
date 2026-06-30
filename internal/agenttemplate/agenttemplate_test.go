@@ -420,6 +420,136 @@ func TestUpdateLocalRefreshesFromStoredPath(t *testing.T) {
 	}
 }
 
+func TestIsRemoteGatesOnRealOwnerRepo(t *testing.T) {
+	remote := []string{"jerry/templates", "owner/repo"}
+	for _, repo := range remote {
+		if !IsRemoteRepo(repo) {
+			t.Fatalf("IsRemoteRepo(%q) = false, want true", repo)
+		}
+	}
+	// The "local" sentinel and malformed values must NOT be treated as remote,
+	// so local custom rows keep using UpdateLocal.
+	for _, repo := range []string{"", LocalSourceRepo, "noslash", "owner/", "/repo", "owner/repo/extra"} {
+		if IsRemoteRepo(repo) {
+			t.Fatalf("IsRemoteRepo(%q) = true, want false", repo)
+		}
+	}
+	if IsRemote(db.AgentTemplate{SourceRepo: LocalSourceRepo, SourceRef: LocalSourceRef}) {
+		t.Fatal("local row reported as remote")
+	}
+	if !IsRemote(db.AgentTemplate{SourceRepo: "jerry/templates", SourceRef: "main"}) {
+		t.Fatal("owner/repo row not reported as remote")
+	}
+}
+
+func TestAddRemoteInstallsAndUpdatesFetchedTemplate(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	content := testTemplateContent("frontend-reviewer", "# Frontend Reviewer\n\nReview UI changes.\n")
+	added, err := AddRemote(ctx, store, fakeFetcher{commit: "sha-add", content: content}, "frontend-reviewer", "jerry/templates", "main", "templates/frontend-reviewer.md")
+	if err != nil {
+		t.Fatalf("AddRemote returned error: %v", err)
+	}
+	if added.SourceRepo != "jerry/templates" || added.SourceRef != "main" || added.SourcePath != "templates/frontend-reviewer.md" {
+		t.Fatalf("added remote source = %+v", added)
+	}
+	if added.ResolvedCommit != "sha-add" || added.Content != content || !strings.Contains(added.MetadataJSON, `"id":"frontend-reviewer"`) {
+		t.Fatalf("added remote content = %+v", added)
+	}
+	if IsLocal(added) || !IsRemote(added) {
+		t.Fatalf("added remote row should be remote, not local: %+v", added)
+	}
+
+	// A pulled row re-fetches from its stored source via UpdateRemote.
+	newContent := testTemplateContent("frontend-reviewer", "# Frontend Reviewer\n\nReview UI changes carefully.\n")
+	updated, err := UpdateRemote(ctx, store, fakeFetcher{commit: "sha-upd", content: newContent}, added)
+	if err != nil {
+		t.Fatalf("UpdateRemote returned error: %v", err)
+	}
+	if updated.ResolvedCommit != "sha-upd" || updated.Content != newContent {
+		t.Fatalf("updated remote row = %+v", updated)
+	}
+	if updated.SourceRepo != "jerry/templates" || updated.SourcePath != "templates/frontend-reviewer.md" {
+		t.Fatalf("updated remote source drifted = %+v", updated)
+	}
+}
+
+func TestAddRemoteRejectsInvalidInputs(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	valid := testTemplateContent("frontend-reviewer", "# Frontend Reviewer\n\nReview UI.\n")
+	mismatch := testTemplateContent("other-id", "# Other\n\nReview UI.\n")
+
+	cases := []struct {
+		name    string
+		id      string
+		repo    string
+		content string
+	}{
+		{name: "builtin id", id: ThermoNuclearCodeQualityReviewID, repo: "jerry/templates", content: valid},
+		{name: "retired id", id: "planner-" + "here", repo: "jerry/templates", content: valid},
+		{name: "bad id", id: "Bad", repo: "jerry/templates", content: valid},
+		{name: "not owner/repo", id: "frontend-reviewer", repo: "local", content: valid},
+		{name: "frontmatter mismatch", id: "frontend-reviewer", repo: "jerry/templates", content: mismatch},
+	}
+	for _, tc := range cases {
+		if _, err := AddRemote(ctx, store, fakeFetcher{commit: "sha", content: tc.content}, tc.id, tc.repo, "main", "templates/x.md"); err == nil {
+			t.Fatalf("%s: AddRemote returned nil", tc.name)
+		}
+	}
+}
+
+func TestUpdateRemoteRejectsLocalRow(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	local := db.AgentTemplate{ID: "frontend-reviewer", SourceRepo: LocalSourceRepo, SourceRef: LocalSourceRef}
+	if _, err := UpdateRemote(ctx, store, fakeFetcher{commit: "sha", content: ""}, local); err == nil {
+		t.Fatal("UpdateRemote on a local row returned nil")
+	}
+}
+
+func TestExportReconstructsStoredTemplate(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	content := testTemplateContent("frontend-reviewer", "# Frontend Reviewer\n\nReview UI changes.\n")
+	added, err := AddRemote(ctx, store, fakeFetcher{commit: "sha-add", content: content}, "frontend-reviewer", "jerry/templates", "main", "templates/frontend-reviewer.md")
+	if err != nil {
+		t.Fatalf("AddRemote returned error: %v", err)
+	}
+	exported, err := Export(added)
+	if err != nil {
+		t.Fatalf("Export returned error: %v", err)
+	}
+	// The export must round-trip back through the parser to the same id/body.
+	parsed, err := ParseTemplateContent(exported)
+	if err != nil {
+		t.Fatalf("exported content did not parse: %v\n%s", err, exported)
+	}
+	if parsed.Metadata.ID != "frontend-reviewer" || !strings.Contains(parsed.Body, "Review UI changes.") {
+		t.Fatalf("exported template = %+v body=%q", parsed.Metadata, parsed.Body)
+	}
+	if exported != content {
+		t.Fatalf("export did not round-trip:\n got: %q\nwant: %q", exported, content)
+	}
+}
+
 func testTemplateContent(id string, body string) string {
 	return FormatTemplateContent(testMetadata(id), body)
 }
