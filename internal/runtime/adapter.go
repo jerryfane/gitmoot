@@ -452,25 +452,38 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 			break
 		}
 	}
-	// Escalate to a fresh dedicated session as a last resort when a pinned
-	// --resume delivery is still failing after the in-call retries, for the two
-	// pre-execution failure classes that a byte-identical --resume retry cannot
-	// clear:
+	// Make ONE last-resort delivery on a fresh dedicated --session-id when a
+	// pinned --resume delivery is still failing after the in-call retries, for
+	// the two pre-execution failure classes a byte-identical --resume retry
+	// cannot clear:
 	//   - the pinned conversation no longer exists (#443), or
 	//   - it keeps hitting the transient socket-closed 401 on EVERY attempt
 	//     (#509). The in-call retries above already spread byte-identical
 	//     --resume attempts across different transient windows; when they all
 	//     fail together yet a fresh, later delivery succeeds, the wedged thing is
-	//     the resumed session, not the prompt. So rather than re-marrying the
-	//     retry to whatever state failed, we abandon the session and mint a new
-	//     one — mirroring why a separate later job clears it.
-	// Both classes mint a fresh dedicated --session-id, retry the job exactly
-	// ONCE, and thread the new ref out via Result.RefreshedRuntimeRef so
-	// mailbox.Run re-pins the agent. Bounded to a single pre-execution retry:
-	// never loops, never touches the shared --continue ("last") path, is skipped
-	// once the context is cancelled (so a killed job stops promptly instead of
-	// launching one more CLI), and never masks an auth failure (a fresh start
-	// that fails for auth reasons still surfaces as auth below).
+	//     the *current* resume attempt, not the prompt — so a one-off fresh
+	//     session gets this delivery past the flake, mirroring why a separate
+	//     later job clears it.
+	//
+	// The two classes differ in what they do AFTER that one delivery:
+	//   - #443 (sessionMissing): the old session is genuinely GONE, so we thread
+	//     the fresh ref out via Result.RefreshedRuntimeRef and mailbox.Run
+	//     PERMANENTLY re-pins the agent to it. Nothing is lost — there was no
+	//     conversation left to resume.
+	//   - #509 (transient): the old session is still ALIVE (the issue's own
+	//     repro shows the same `--resume <ref>` recovering on a later delivery),
+	//     so we must NOT re-pin. Permanently switching a stateful pinned agent
+	//     (e.g. the researcher/coordinator) to a brand-new empty session would
+	//     silently discard all accumulated conversation context on a transport
+	//     blip. We therefore leave refreshedRef empty: the fresh --session-id is
+	//     used only to unstick THIS delivery, and the agent stays pinned to its
+	//     original, context-bearing session so the next delivery resumes it.
+	//
+	// Bounded to a single pre-execution retry: never loops, never touches the
+	// shared --continue ("last") path, is skipped once the context is cancelled
+	// (so a killed job stops promptly instead of launching one more CLI), and
+	// never masks an auth failure (a fresh start that fails for auth reasons
+	// still surfaces as auth below).
 	var refreshedRef string
 	if err != nil && agent.RuntimeRef != LastRef && ctx.Err() == nil {
 		sessionMissing := isClaudeSessionMissing(result)
@@ -478,7 +491,11 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 		if sessionMissing || transient {
 			newRef, refErr := a.newRuntimeRef()
 			if refErr == nil {
-				refreshedRef = newRef
+				// Only re-pin permanently for the dead-session class (#443); the
+				// transient class (#509) keeps its still-alive original session.
+				if sessionMissing {
+					refreshedRef = newRef
+				}
 				result, err = a.runner().Run(ctx, a.Dir, "claude", claudeFreshSessionArgs(agent, job.Prompt, model, newRef)...)
 				if err != nil {
 					if sessionMissing {

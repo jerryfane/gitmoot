@@ -786,9 +786,14 @@ func TestClaudeDeliverEscalatesToFreshSessionOnPersistentTransient(t *testing.T)
 	// Regression for #509: a byte-identical --resume retry empirically does NOT
 	// clear the intermittent socket-closed 401 (every in-call attempt fails
 	// together), but a fresh, later delivery does. So after the in-call retries
-	// exhaust on the transient, Deliver must abandon the wedged pinned session and
-	// make ONE final attempt on a brand-new --session-id, threading the fresh ref
-	// out via RefreshedRuntimeRef so mailbox.Run re-pins the agent.
+	// exhaust on the transient, Deliver must make ONE final attempt on a
+	// brand-new --session-id to get this delivery past the flake.
+	//
+	// CRUCIALLY, the transient (#509) session is still ALIVE (a later --resume of
+	// the same ref recovers), so the agent must NOT be permanently re-pinned:
+	// RefreshedRuntimeRef must stay EMPTY so the agent keeps its original,
+	// context-bearing session and the next delivery resumes it. (Re-pinning is
+	// reserved for the dead-session class (#443) — see TestClaudeDeliverSelfHealsDeadSession.)
 	results := make([]subprocess.Result, claudeDeliveryMaxAttempts+1)
 	errs := make([]error, claudeDeliveryMaxAttempts+1)
 	for i := 0; i < claudeDeliveryMaxAttempts; i++ {
@@ -811,8 +816,10 @@ func TestClaudeDeliverEscalatesToFreshSessionOnPersistentTransient(t *testing.T)
 	if result.Summary != "recovered" {
 		t.Fatalf("summary = %q, want %q", result.Summary, "recovered")
 	}
-	if result.RefreshedRuntimeRef != "550e8400-e29b-41d4-a716-446655440099" {
-		t.Fatalf("RefreshedRuntimeRef = %q, want the fresh UUID (agent must be re-pinned off the wedged session)", result.RefreshedRuntimeRef)
+	// The transient session is still alive, so the agent stays pinned to it: a
+	// transport blip must never silently discard accumulated conversation context.
+	if result.RefreshedRuntimeRef != "" {
+		t.Fatalf("RefreshedRuntimeRef = %q, want empty (a still-alive transient session must NOT be re-pinned away, or the agent loses its context)", result.RefreshedRuntimeRef)
 	}
 	if len(runner.calls) != claudeDeliveryMaxAttempts+1 {
 		t.Fatalf("runner called %d times, want %d (retries + one fresh-session escalation): %v", len(runner.calls), claudeDeliveryMaxAttempts+1, runner.calls)
