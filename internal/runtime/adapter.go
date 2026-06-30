@@ -452,21 +452,40 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 			break
 		}
 	}
-	// Self-heal a dead pinned session (#443): when a pinned --resume delivery
-	// fails before any model turn because the conversation no longer exists, mint
-	// a fresh dedicated --session-id, retry the job exactly ONCE, and thread the
-	// new ref out via Result.RefreshedRuntimeRef so mailbox.Run re-pins the agent.
-	// Bounded to a single pre-execution retry: never loops, never touches the
-	// shared --continue ("last") path, and never masks an auth failure (a fresh
-	// start that fails for auth reasons still surfaces as auth below).
+	// Escalate to a fresh dedicated session as a last resort when a pinned
+	// --resume delivery is still failing after the in-call retries, for the two
+	// pre-execution failure classes that a byte-identical --resume retry cannot
+	// clear:
+	//   - the pinned conversation no longer exists (#443), or
+	//   - it keeps hitting the transient socket-closed 401 on EVERY attempt
+	//     (#509). The in-call retries above already spread byte-identical
+	//     --resume attempts across different transient windows; when they all
+	//     fail together yet a fresh, later delivery succeeds, the wedged thing is
+	//     the resumed session, not the prompt. So rather than re-marrying the
+	//     retry to whatever state failed, we abandon the session and mint a new
+	//     one — mirroring why a separate later job clears it.
+	// Both classes mint a fresh dedicated --session-id, retry the job exactly
+	// ONCE, and thread the new ref out via Result.RefreshedRuntimeRef so
+	// mailbox.Run re-pins the agent. Bounded to a single pre-execution retry:
+	// never loops, never touches the shared --continue ("last") path, is skipped
+	// once the context is cancelled (so a killed job stops promptly instead of
+	// launching one more CLI), and never masks an auth failure (a fresh start
+	// that fails for auth reasons still surfaces as auth below).
 	var refreshedRef string
-	if err != nil && agent.RuntimeRef != LastRef && isClaudeSessionMissing(result) {
-		newRef, refErr := a.newRuntimeRef()
-		if refErr == nil {
-			refreshedRef = newRef
-			result, err = a.runner().Run(ctx, a.Dir, "claude", claudeFreshSessionArgs(agent, job.Prompt, model, newRef)...)
-			if err != nil {
-				return Result{Raw: result.Stdout + result.Stderr}, a.claudeSessionMissingError(agent, result, err)
+	if err != nil && agent.RuntimeRef != LastRef && ctx.Err() == nil {
+		sessionMissing := isClaudeSessionMissing(result)
+		transient := isTransientClaudeDeliveryError(result, err)
+		if sessionMissing || transient {
+			newRef, refErr := a.newRuntimeRef()
+			if refErr == nil {
+				refreshedRef = newRef
+				result, err = a.runner().Run(ctx, a.Dir, "claude", claudeFreshSessionArgs(agent, job.Prompt, model, newRef)...)
+				if err != nil {
+					if sessionMissing {
+						return Result{Raw: result.Stdout + result.Stderr}, a.claudeSessionMissingError(agent, result, err)
+					}
+					return Result{Raw: result.Stdout + result.Stderr}, claudeCommandError(result, err)
+				}
 			}
 		}
 	}
@@ -555,6 +574,16 @@ func (a ClaudeAdapter) retryBackoff(attempt int) time.Duration {
 // "401" requirement correctly excludes them.
 func isTransientClaudeDeliveryError(result subprocess.Result, err error) bool {
 	if err == nil {
+		return false
+	}
+	// Never treat a genuine auth failure (an invalid/expired token, #486) as a
+	// retryable transient, even if its message also happens to carry a
+	// socket-closed phrase: retrying it claudeDeliveryMaxAttempts times and then
+	// minting a fresh session would burn minutes and could mask the real "fix
+	// your token" signal. The socket-closed transient (#509) carries a "Failed to
+	// authenticate" wording but none of the auth-failure markers, so this guard
+	// excludes only genuinely invalid credentials, not the transient.
+	if isClaudeAuthFailure(result) {
 		return false
 	}
 	text := strings.ToLower(result.Stdout + "\n" + result.Stderr)
