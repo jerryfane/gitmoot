@@ -261,7 +261,13 @@ func removeAgentTypeBlocks(content string) string {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			section := strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")
-			skip = strings.HasPrefix(section, "agents.")
+			// Only strip TOP-LEVEL agent-type blocks. Mirror the LoadAgentTypes
+			// guard (#533): a remainder containing a '.' is a SUBSECTION (e.g.
+			// agents.x.heartbeats.y) owned by another loader. Stripping those here
+			// would silently delete every heartbeat on an unrelated `agent type set`
+			// rewrite, since SaveAgentType re-appends only the agent-TYPE blocks.
+			rest := strings.TrimPrefix(section, "agents.")
+			skip = strings.HasPrefix(section, "agents.") && !strings.Contains(rest, ".")
 		}
 		if !skip {
 			kept = append(kept, line)

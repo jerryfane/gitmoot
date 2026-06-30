@@ -27,6 +27,14 @@ func heartbeatScanFixture(t *testing.T, body string) (config.Paths, *db.Store) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
+	// Register the heartbeat target repo as a managed (enabled + checked-out) repo
+	// so the heartbeat repo guard treats it as runnable. Tests that exercise the
+	// unmanaged-repo path register their own repo state instead.
+	if err := store.UpsertRepo(context.Background(), db.Repo{
+		Owner: "jerryfane", Name: "gitmoot", CheckoutPath: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("UpsertRepo: %v", err)
+	}
 	return paths, store
 }
 
@@ -208,6 +216,37 @@ func TestHeartbeatScanSkipsAtMaxBackground(t *testing.T) {
 	}
 	if _, found, _ := store.GetHeartbeatState(ctx, "repo-maintainer", "daily"); found {
 		t.Fatalf("capacity skip must not advance/write state")
+	}
+}
+
+// TestHeartbeatScanSkipsUnmanagedRepo proves a heartbeat targeting a repo the
+// daemon does not manage (not registered / disabled / no checkout) does NOT
+// enqueue a job (which no worker would ever claim, wedging the heartbeat), but
+// DOES advance next_due with last_status=repo_unmanaged so it self-recovers.
+func TestHeartbeatScanSkipsUnmanagedRepo(t *testing.T) {
+	paths, store := heartbeatScanFixture(t, enabledHeartbeatBody)
+	ctx := context.Background()
+	// Disable the registered repo so it is no longer a runnable target.
+	if err := store.SetRepoEnabled(ctx, "jerryfane/gitmoot", false); err != nil {
+		t.Fatalf("SetRepoEnabled: %v", err)
+	}
+	enq, seen := recordingEnqueuer()
+	now := time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC)
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, now); err != nil {
+		t.Fatalf("runHeartbeatScanOnce: %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("unmanaged-repo heartbeat enqueued %d jobs (zombie risk)", len(*seen))
+	}
+	state, found, err := store.GetHeartbeatState(ctx, "repo-maintainer", "daily")
+	if err != nil || !found {
+		t.Fatalf("expected state row after unmanaged skip, found=%v err=%v", found, err)
+	}
+	if state.LastStatus != "repo_unmanaged" {
+		t.Fatalf("last_status = %q, want repo_unmanaged", state.LastStatus)
+	}
+	if !state.NextDueAt.Equal(now.Add(24 * time.Hour)) {
+		t.Fatalf("unmanaged skip must advance next_due (no wedge): %+v", state)
 	}
 }
 

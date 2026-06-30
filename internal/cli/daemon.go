@@ -1319,6 +1319,25 @@ func heartbeatFingerprint(agent, name string) string {
 	return fmt.Sprintf("heartbeat:%s/%s", agent, name)
 }
 
+// heartbeatRepoManaged reports whether repo is one the daemon worker tick can
+// actually run a job for: registered (a repos row exists), enabled, and with a
+// non-empty checkout_path. A heartbeat for any other repo must be skipped (with
+// next_due advanced) rather than enqueued into a job no worker will ever claim.
+func heartbeatRepoManaged(ctx context.Context, store *db.Store, repo string) (bool, error) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return false, nil
+	}
+	record, err := store.GetRepo(ctx, repo)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return record.Enabled && strings.TrimSpace(record.CheckoutPath) != "", nil
+}
+
 func heartbeatJobID(agent, name string, now time.Time) string {
 	return fmt.Sprintf("heartbeat-%s-%s-%x", agent, name, now.UTC().UnixNano())
 }
@@ -1385,6 +1404,25 @@ func runOneHeartbeat(ctx context.Context, store *db.Store, enqueue heartbeatEnqu
 	// heartbeat runs immediately; a future next_due is skipped without advancing.
 	if !state.NextDueAt.IsZero() && now.Before(state.NextDueAt) {
 		return nil
+	}
+	// Repo guard: the worker tick only claims jobs for a registered+enabled repo
+	// with a checkout. A heartbeat targeting an unmanaged/disabled/uncheckout repo
+	// would enqueue a job no worker ever claims, which would then permanently wedge
+	// the heartbeat (the zombie 'queued' job trips the overlap guard every tick).
+	// So skip the enqueue but ADVANCE next_due (record last_status) so no zombie is
+	// created and the heartbeat self-recovers once the repo becomes managed.
+	// dispatchLocalAgentJob does an equivalent resolve/upsert; this path bypasses it.
+	managed, err := heartbeatRepoManaged(ctx, store, heartbeat.Repo)
+	if err != nil {
+		return err
+	}
+	if !managed {
+		state.Agent = heartbeat.Agent
+		state.Name = heartbeat.Name
+		state.LastRunAt = now
+		state.NextDueAt = now.Add(interval + heartbeatJitter(jitter))
+		state.LastStatus = "repo_unmanaged"
+		return store.UpsertHeartbeatState(ctx, state)
 	}
 	// Overlap protection: a still-active heartbeat job (>= max_concurrent) means the
 	// previous run has not finished. Skip WITHOUT advancing so it is retried next

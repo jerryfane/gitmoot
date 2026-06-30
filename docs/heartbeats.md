@@ -27,7 +27,7 @@ max_concurrent = 1
 | Field            | Required | Default | Notes                                                        |
 | ---------------- | -------- | ------- | ------------------------------------------------------------ |
 | `enabled`        | no       | `false` | A disabled heartbeat never runs.                             |
-| `repo`           | yes      | —       | `owner/name` the job runs against.                           |
+| `repo`           | yes      | —       | `owner/name` the job runs against. Must be a registered, enabled daemon repo with a checkout (see note below). |
 | `interval`       | yes      | —       | Go duration (e.g. `24h`, `1h30m`). Validated at load.        |
 | `jitter`         | no       | `0s`    | Random `[0, jitter]` added to each `next_due` to de-thunder. |
 | `action`         | no       | `ask`   | **MVP: only `ask` (read-only) is supported.**                |
@@ -53,6 +53,11 @@ error at config load.
   already at its `max_background`; it retries once capacity frees up.
 - **Missed ticks coalesce:** after a long outage the schedule replays only once
   (`next_due` is re-anchored to now), not a backlog of every missed interval.
+- **Repo must be managed:** `repo` has to be a repo the daemon actually manages —
+  registered (added to the daemon), enabled, and with a local checkout. A
+  heartbeat pointing at an unmanaged/disabled repo is skipped each tick with
+  `last_status = repo_unmanaged` (it does not enqueue a job no worker would claim),
+  and starts running on its own once the repo becomes managed.
 
 ## Safety notes
 

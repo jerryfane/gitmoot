@@ -135,6 +135,69 @@ runtime = "codex"
 	}
 }
 
+// TestSaveAgentTypePreservesHeartbeatSection is the regression guard for #533:
+// an unrelated `agent type set` rewrite (SaveAgentType) must NOT delete a
+// pre-existing [agents.<agent>.heartbeats.<name>] subsection. Before the fix
+// removeAgentTypeBlocks stripped every "agents." section (including heartbeats),
+// silently dropping the heartbeat with no error.
+func TestSaveAgentTypePreservesHeartbeatSection(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[agents.repo-maintainer]
+runtime = "codex"
+role = "repo-maintainer"
+max_background = 1
+
+[agents.repo-maintainer.heartbeats.daily]
+enabled = true
+repo = "jerryfane/gitmoot"
+interval = "24h"
+prompt = "Review open issues and PRs."
+max_concurrent = 1
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	before, err := LoadHeartbeats(paths)
+	if err != nil {
+		t.Fatalf("LoadHeartbeats before save: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("expected 1 heartbeat before save, got %d", len(before))
+	}
+
+	types, err := LoadAgentTypes(paths)
+	if err != nil {
+		t.Fatalf("LoadAgentTypes: %v", err)
+	}
+	maintainer := types["repo-maintainer"]
+	maintainer.MaxBackground = 2
+	if err := SaveAgentType(paths, maintainer); err != nil {
+		t.Fatalf("SaveAgentType: %v", err)
+	}
+
+	after, err := LoadHeartbeats(paths)
+	if err != nil {
+		t.Fatalf("LoadHeartbeats after save: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("heartbeat dropped by SaveAgentType: got %d heartbeats", len(after))
+	}
+	if after[0].Agent != "repo-maintainer" || after[0].Name != "daily" || after[0].Prompt != "Review open issues and PRs." {
+		t.Fatalf("heartbeat mangled by SaveAgentType: %+v", after[0])
+	}
+	content, err := os.ReadFile(paths.ConfigFile)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(content), "[agents.repo-maintainer.heartbeats.daily]") {
+		t.Fatalf("heartbeat section missing from rewritten config:\n%s", string(content))
+	}
+}
+
 func TestLoadAgentTypesRejectsInvalidAutonomyPolicy(t *testing.T) {
 	paths := PathsForHome(t.TempDir())
 	if err := Initialize(paths); err != nil {
