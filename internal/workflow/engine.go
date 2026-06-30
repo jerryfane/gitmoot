@@ -854,7 +854,53 @@ func (e Engine) HandleReviewPullRequestClosed(ctx context.Context, event PullReq
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	return e.Store.UpsertPullRequest(ctx, pr)
+	if err := e.Store.UpsertPullRequest(ctx, pr); err != nil {
+		return err
+	}
+	if merged {
+		// An externally-merged PR detected by the reconciler must release the branch
+		// lock and remove the task worktree, exactly as the canonical merge path
+		// (PolicyMergeGate.finishMerged) does. Without this the reconcile method
+		// would set TaskMerged but strand the branch lock (held forever) and leak
+		// the task worktree on disk — the "strands a lock / leaves a worktree" class
+		// that accumulates under unattended automation. The blocked branch
+		// deliberately keeps the worktree/lock for human resumption, so only the
+		// merged branch cleans up.
+		e.reconcileMergedCleanup(ctx, event.Repo, task)
+	}
+	return nil
+}
+
+// reconcileMergedCleanup releases the branch lock and removes the task worktree
+// after HandleReviewPullRequestClosed resolves an externally-merged reviewing
+// task to `merged` (#543). It mirrors PolicyMergeGate.finishMerged's post-merge
+// cleanup so the self-heal reconcile path does not leak a held branch lock or an
+// on-disk worktree. Every step is best-effort and nil-safe: failures are
+// swallowed so the already-durable terminal `merged` transition is never undone,
+// matching finishMerged's treatment of these as non-fatal post-merge warnings.
+func (e Engine) reconcileMergedCleanup(ctx context.Context, repo string, task db.Task) {
+	if branch := strings.TrimSpace(task.Branch); branch != "" {
+		if lock, err := e.Store.GetBranchLock(ctx, repo, branch); err == nil {
+			_, _ = e.Store.ReleaseLockWithEvent(ctx, lock, db.BranchLockEvent{
+				Kind:    "released",
+				Message: "released after pull request merged (reconciled #543)",
+			})
+		}
+	}
+	path := strings.TrimSpace(task.WorktreePath)
+	if path == "" {
+		return
+	}
+	// Force-remove: the work is already merged, so a leftover dirty/locked worktree
+	// (the common reason a non-force removal fails) must not block reclaiming it.
+	manager, ok := e.DelegationWorktrees.(ReadOnlyWorktreeManager)
+	if !ok {
+		return
+	}
+	if err := manager.RemoveWorktreeForce(ctx, path); err != nil {
+		return
+	}
+	_ = e.Store.ClearTaskWorktreePath(ctx, task.ID)
 }
 
 func (e Engine) RunJob(ctx context.Context, jobID string, agent runtime.Agent, adapter DeliveryAdapter) (AgentResult, error) {

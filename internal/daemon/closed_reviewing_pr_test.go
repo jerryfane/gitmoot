@@ -130,3 +130,100 @@ func TestPollOnceReconcilesClosedReviewingPullRequest(t *testing.T) {
 		})
 	}
 }
+
+// TestPollOnceReconcilesMergedSiblingPullRequest covers the literal #543 scenario
+// (finding 1): the real PR (#5) is MERGED while a duplicate (#6) on the SAME
+// branch was closed unmerged. Only #6 was ever recorded locally
+// (GetPullRequestByRepoBranch returns the highest number), so keying the
+// reconcile on the pinned #6 alone drives the task to a spurious `blocked` and
+// re-surfaces already-merged work to a human. The merge signal for #5 is already
+// in the same closed list the reconciler fetches, so the task must resolve to
+// `merged`.
+func TestPollOnceReconcilesMergedSiblingPullRequest(t *testing.T) {
+	repo := github.Repository{Owner: "jerryfane", Name: "expensy"}
+	const branch = "task-7304-csv-export"
+	const headSHA = "d0b6891d074f7b5af39c2555c6fe4b6fd3284003"
+
+	cases := []struct {
+		name        string
+		closedPulls []github.PullRequest
+	}{
+		{
+			// Duplicate #6 shares the head SHA with the merged real PR #5 (same
+			// branch tip), which is the normal duplicate-PR shape.
+			name: "merged sibling with matching head sha",
+			closedPulls: []github.PullRequest{
+				{Number: 5, State: "closed", HeadRef: branch, BaseRef: "main", HeadSHA: headSHA, MergedAt: "2026-06-30T09:48:20Z"},
+				{Number: 6, State: "closed", HeadRef: branch, BaseRef: "main", HeadSHA: headSHA},
+			},
+		},
+		{
+			// The merged sibling's head SHA is unknown: a merged PR on the branch is
+			// still preferred over the closed-unmerged pin.
+			name: "merged sibling with unknown head sha",
+			closedPulls: []github.PullRequest{
+				{Number: 5, State: "closed", HeadRef: branch, BaseRef: "main", MergedAt: "2026-06-30T09:48:20Z"},
+				{Number: 6, State: "closed", HeadRef: branch, BaseRef: "main", HeadSHA: headSHA},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := testStore(t)
+			if err := store.UpsertTask(ctx, db.Task{
+				ID:           "task-7304",
+				RepoFullName: repo.FullName(),
+				GoalID:       "goal-1",
+				Title:        "CSV Export",
+				State:        string(workflow.TaskReviewing),
+				Branch:       branch,
+			}); err != nil {
+				t.Fatalf("UpsertTask returned error: %v", err)
+			}
+			// Only the duplicate #6 was ever recorded locally, as in the bug.
+			if err := store.UpsertPullRequest(ctx, db.PullRequest{
+				RepoFullName: repo.FullName(),
+				Number:       6,
+				URL:          "https://github.com/jerryfane/expensy/pull/6",
+				HeadBranch:   branch,
+				BaseBranch:   "main",
+				HeadSHA:      headSHA,
+				State:        "open",
+			}); err != nil {
+				t.Fatalf("UpsertPullRequest returned error: %v", err)
+			}
+
+			client := &fakeGitHub{
+				pullsByState: map[string][]github.PullRequest{
+					"open":   nil,
+					"closed": tc.closedPulls,
+				},
+				comments: map[int64][]github.IssueComment{},
+			}
+			engine := workflow.Engine{Store: store}
+			daemon := Daemon{Repo: repo, Store: store, GitHub: client, Workflow: &engine}
+
+			if err := daemon.PollOnce(ctx); err != nil {
+				t.Fatalf("PollOnce returned error: %v", err)
+			}
+
+			task, err := store.GetTask(ctx, "task-7304")
+			if err != nil {
+				t.Fatalf("GetTask returned error: %v", err)
+			}
+			if task.State != string(workflow.TaskMerged) {
+				t.Fatalf("task state = %q, want %q (merged sibling must not surface as blocked)", task.State, workflow.TaskMerged)
+			}
+			// The merged sibling #5 must be recorded as merged.
+			merged, err := store.GetPullRequest(ctx, repo.FullName(), 5)
+			if err != nil {
+				t.Fatalf("GetPullRequest(#5) returned error: %v", err)
+			}
+			if merged.State != "merged" {
+				t.Fatalf("PR #5 state = %q, want merged", merged.State)
+			}
+		})
+	}
+}
