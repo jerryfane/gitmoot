@@ -39,6 +39,16 @@ func LoadAgentTypes(paths Paths) (map[string]AgentType, error) {
 			current = ""
 			if strings.HasPrefix(section, "agents.") {
 				current = strings.TrimSpace(strings.TrimPrefix(section, "agents."))
+				// GUARD (#533): a remainder containing a '.' is a SUBSECTION (e.g.
+				// agents.x.heartbeats.y), not an agent. Without this it would register a
+				// phantom agent named "x.heartbeats.y" and absorb the subsection's fields.
+				// Clearing current both skips the registration and skips the subsection's
+				// fields below; that subsection's own loader (e.g. LoadHeartbeats) owns it.
+				// No existing (non-subsection) agent name contains a '.', so this never
+				// changes behavior for any current config.
+				if strings.Contains(current, ".") {
+					current = ""
+				}
 				if current != "" {
 					entry := types[current]
 					entry.Name = current
@@ -251,7 +261,13 @@ func removeAgentTypeBlocks(content string) string {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			section := strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")
-			skip = strings.HasPrefix(section, "agents.")
+			// Only strip TOP-LEVEL agent-type blocks. Mirror the LoadAgentTypes
+			// guard (#533): a remainder containing a '.' is a SUBSECTION (e.g.
+			// agents.x.heartbeats.y) owned by another loader. Stripping those here
+			// would silently delete every heartbeat on an unrelated `agent type set`
+			// rewrite, since SaveAgentType re-appends only the agent-TYPE blocks.
+			rest := strings.TrimPrefix(section, "agents.")
+			skip = strings.HasPrefix(section, "agents.") && !strings.Contains(rest, ".")
 		}
 		if !skip {
 			kept = append(kept, line)

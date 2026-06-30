@@ -4648,6 +4648,123 @@ func (s *Store) UpsertBanditArm(ctx context.Context, arm BanditArm) error {
 	return err
 }
 
+// HeartbeatState is the persisted state of one named agent heartbeat schedule
+// (#533): when it last ran, when it is next due, and the id/status of its most
+// recent job. The next_due + last_status are what make a heartbeat restart-safe
+// (a restart re-reads next_due rather than firing immediately).
+type HeartbeatState struct {
+	Agent      string
+	Name       string
+	LastRunAt  time.Time
+	NextDueAt  time.Time
+	LastJobID  string
+	LastStatus string
+}
+
+// GetHeartbeatState returns the persisted state for one (agent, name) heartbeat.
+// A missing row is NOT an error: it returns ok=false with a zero state, which the
+// daemon treats as "due now" (a zero next_due is in the past). This keeps the
+// table off-by-default — no row exists until a heartbeat first fires.
+func (s *Store) GetHeartbeatState(ctx context.Context, agent, name string) (HeartbeatState, bool, error) {
+	agent = strings.TrimSpace(agent)
+	name = strings.TrimSpace(name)
+	if agent == "" || name == "" {
+		return HeartbeatState{}, false, errors.New("heartbeat agent and name are required")
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT agent, name, last_run_at, next_due_at, last_job_id, last_status
+		FROM heartbeat_state WHERE agent = ? AND name = ?`, agent, name)
+	var (
+		state            HeartbeatState
+		lastRun, nextDue string
+	)
+	if err := row.Scan(&state.Agent, &state.Name, &lastRun, &nextDue, &state.LastJobID, &state.LastStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return HeartbeatState{}, false, nil
+		}
+		return HeartbeatState{}, false, err
+	}
+	state.LastRunAt = parseHeartbeatTime(lastRun)
+	state.NextDueAt = parseHeartbeatTime(nextDue)
+	return state, true, nil
+}
+
+// UpsertHeartbeatState writes (or replaces) a heartbeat's full state. Times are
+// stored as RFC3339Nano UTC text (a zero time becomes empty text, mirroring the
+// table's DEFAULT '').
+func (s *Store) UpsertHeartbeatState(ctx context.Context, state HeartbeatState) error {
+	state.Agent = strings.TrimSpace(state.Agent)
+	state.Name = strings.TrimSpace(state.Name)
+	if state.Agent == "" || state.Name == "" {
+		return errors.New("heartbeat agent and name are required")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO heartbeat_state(agent, name, last_run_at, next_due_at, last_job_id, last_status)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(agent, name) DO UPDATE SET
+			last_run_at = excluded.last_run_at,
+			next_due_at = excluded.next_due_at,
+			last_job_id = excluded.last_job_id,
+			last_status = excluded.last_status`,
+		state.Agent, state.Name,
+		formatHeartbeatTime(state.LastRunAt), formatHeartbeatTime(state.NextDueAt),
+		strings.TrimSpace(state.LastJobID), strings.TrimSpace(state.LastStatus))
+	return err
+}
+
+// CountActiveJobsByFingerprint counts queued/running jobs whose stored payload
+// carries the given fingerprint — the heartbeat overlap guard (#533), a cousin of
+// countActiveJobsTx that filters on the payload fingerprint instead of the agent
+// column. The fingerprint lives in the JSON payload, and modernc's json_extract
+// raises a SQL error on a malformed payload (see backfillJobRootID), so this
+// counts Go-side: it scans the small set of active rows and tolerates a malformed
+// payload (skipped) rather than aborting. An empty fingerprint matches nothing.
+func (s *Store) CountActiveJobsByFingerprint(ctx context.Context, fingerprint string) (int, error) {
+	fingerprint = strings.TrimSpace(fingerprint)
+	if fingerprint == "" {
+		return 0, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM jobs WHERE state IN ('queued', 'running')`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return 0, err
+		}
+		var probe struct {
+			Fingerprint string `json:"fingerprint"`
+		}
+		if err := json.Unmarshal([]byte(payload), &probe); err != nil {
+			continue
+		}
+		if strings.TrimSpace(probe.Fingerprint) == fingerprint {
+			count++
+		}
+	}
+	return count, rows.Err()
+}
+
+func formatHeartbeatTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func parseHeartbeatTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
+}
+
 // IncrementBanditArm atomically applies ONE pairwise outcome to a (templateID,
 // versionID) arm in a single transaction: a win bumps alpha, a loss bumps beta,
 // and either way pulls increments. A first-ever pull seeds the row from the
@@ -6454,5 +6571,22 @@ CREATE INDEX idx_atv_canary ON agent_template_versions(template_id) WHERE state 
 	`
 CREATE INDEX idx_job_events_job_id ON job_events(job_id);
 CREATE INDEX idx_job_events_kind ON job_events(kind);
+	`,
+	// #533 agent heartbeat schedules: one row per (agent, named heartbeat) tracking
+	// the schedule's persisted state so a daemon restart never duplicates an active
+	// run (the next_due_at + the active-job check are the restart-safe dedup). This
+	// is a pure additive append — CREATE TABLE only, no ALTER/renumber of any prior
+	// migration — and the table stays empty unless a heartbeat is configured AND
+	// fires, so every existing DB reads identically.
+	`
+CREATE TABLE heartbeat_state (
+	agent TEXT NOT NULL,
+	name TEXT NOT NULL,
+	last_run_at TEXT NOT NULL DEFAULT '',
+	next_due_at TEXT NOT NULL DEFAULT '',
+	last_job_id TEXT NOT NULL DEFAULT '',
+	last_status TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (agent, name)
+);
 	`,
 }
