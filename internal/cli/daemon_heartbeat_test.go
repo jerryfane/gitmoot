@@ -1,0 +1,241 @@
+package cli
+
+import (
+	"context"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/workflow"
+)
+
+// heartbeatScanFixture writes a config (DefaultConfig + body), initializes it, and
+// opens a store, returning both for a runHeartbeatScanOnce test.
+func heartbeatScanFixture(t *testing.T, body string) (config.Paths, *db.Store) {
+	t.Helper()
+	paths := config.PathsForHome(t.TempDir())
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return paths, store
+}
+
+// recordingEnqueuer captures every request and returns a synthetic job.
+func recordingEnqueuer() (heartbeatEnqueuer, *[]workflow.JobRequest) {
+	var seen []workflow.JobRequest
+	enq := func(_ context.Context, request workflow.JobRequest) (db.Job, error) {
+		seen = append(seen, request)
+		return db.Job{ID: request.ID, Agent: request.Agent, Type: request.Action, State: string(workflow.JobQueued)}, nil
+	}
+	return enq, &seen
+}
+
+const enabledHeartbeatBody = `
+[agents.repo-maintainer]
+runtime = "codex"
+role = "repo-maintainer"
+max_background = 1
+
+[agents.repo-maintainer.heartbeats.daily]
+enabled = true
+repo = "jerryfane/gitmoot"
+interval = "24h"
+prompt = "Review open issues and PRs."
+max_concurrent = 1
+`
+
+// TestHeartbeatScanOffByDefault is the off-by-default invariant: a config with no
+// heartbeat sections must enqueue nothing and write no heartbeat_state row.
+func TestHeartbeatScanOffByDefault(t *testing.T) {
+	paths, store := heartbeatScanFixture(t, `
+[agents.repo-maintainer]
+runtime = "codex"
+role = "repo-maintainer"
+`)
+	ctx := context.Background()
+	enq := func(context.Context, workflow.JobRequest) (db.Job, error) {
+		t.Fatal("enqueuer must not be called when no heartbeats are configured")
+		return db.Job{}, nil
+	}
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, time.Now().UTC()); err != nil {
+		t.Fatalf("runHeartbeatScanOnce: %v", err)
+	}
+	if _, found, err := store.GetHeartbeatState(ctx, "repo-maintainer", "daily"); err != nil || found {
+		t.Fatalf("expected no heartbeat_state row, found=%v err=%v", found, err)
+	}
+}
+
+// TestHeartbeatScanEnqueuesDueJob proves a due heartbeat enqueues exactly one job
+// shaped like dispatchLocalAgentJob (sender=heartbeat, action=ask, fingerprint),
+// and advances next_due so a same-now rescan does NOT duplicate (restart dedup).
+func TestHeartbeatScanEnqueuesDueJob(t *testing.T) {
+	paths, store := heartbeatScanFixture(t, enabledHeartbeatBody)
+	ctx := context.Background()
+	enq, seen := recordingEnqueuer()
+	now := time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC)
+
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, now); err != nil {
+		t.Fatalf("runHeartbeatScanOnce: %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("expected 1 enqueued job, got %d", len(*seen))
+	}
+	req := (*seen)[0]
+	if req.Agent != "repo-maintainer" || req.Action != "ask" || req.Sender != "heartbeat" ||
+		req.Repo != "jerryfane/gitmoot" || req.Instructions != "Review open issues and PRs." ||
+		req.Fingerprint != "heartbeat:repo-maintainer/daily" {
+		t.Fatalf("unexpected request shape: %+v", req)
+	}
+	state, found, err := store.GetHeartbeatState(ctx, "repo-maintainer", "daily")
+	if err != nil || !found {
+		t.Fatalf("expected state row after enqueue, found=%v err=%v", found, err)
+	}
+	wantDue := now.Add(24 * time.Hour)
+	if !state.NextDueAt.Equal(wantDue) || state.LastStatus != "enqueued" || state.LastJobID != req.ID {
+		t.Fatalf("state not advanced: %+v (want due %s)", state, wantDue)
+	}
+
+	// Restart dedup: a second scan at the SAME now is not yet due → no new job.
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, now); err != nil {
+		t.Fatalf("runHeartbeatScanOnce rescan: %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("rescan duplicated the job: %d enqueues", len(*seen))
+	}
+}
+
+// TestHeartbeatScanSkipsDisabled proves a disabled heartbeat never runs and never
+// writes state.
+func TestHeartbeatScanSkipsDisabled(t *testing.T) {
+	paths, store := heartbeatScanFixture(t, `
+[agents.repo-maintainer]
+runtime = "codex"
+role = "repo-maintainer"
+
+[agents.repo-maintainer.heartbeats.daily]
+enabled = false
+repo = "jerryfane/gitmoot"
+interval = "24h"
+prompt = "p"
+`)
+	ctx := context.Background()
+	enq, seen := recordingEnqueuer()
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, time.Now().UTC()); err != nil {
+		t.Fatalf("runHeartbeatScanOnce: %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("disabled heartbeat enqueued %d jobs", len(*seen))
+	}
+	if _, found, _ := store.GetHeartbeatState(ctx, "repo-maintainer", "daily"); found {
+		t.Fatalf("disabled heartbeat wrote state")
+	}
+}
+
+// TestHeartbeatScanSkipsNotDue proves a future next_due is honored (no enqueue).
+func TestHeartbeatScanSkipsNotDue(t *testing.T) {
+	paths, store := heartbeatScanFixture(t, enabledHeartbeatBody)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC)
+	if err := store.UpsertHeartbeatState(ctx, db.HeartbeatState{
+		Agent: "repo-maintainer", Name: "daily", NextDueAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	enq, seen := recordingEnqueuer()
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, now); err != nil {
+		t.Fatalf("runHeartbeatScanOnce: %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("not-due heartbeat enqueued %d jobs", len(*seen))
+	}
+}
+
+// TestHeartbeatScanSkipsOnActiveJob proves overlap protection: an active job
+// carrying the heartbeat fingerprint (>= max_concurrent) blocks a new enqueue and
+// does NOT advance next_due (so it retries next tick).
+func TestHeartbeatScanSkipsOnActiveJob(t *testing.T) {
+	paths, store := heartbeatScanFixture(t, enabledHeartbeatBody)
+	ctx := context.Background()
+	if err := store.CreateJob(ctx, db.Job{
+		ID: "active-1", Agent: "repo-maintainer", Type: "ask", State: "running",
+		Payload: `{"fingerprint":"heartbeat:repo-maintainer/daily"}`,
+	}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	enq, seen := recordingEnqueuer()
+	now := time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC)
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, now); err != nil {
+		t.Fatalf("runHeartbeatScanOnce: %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("overlap not respected: enqueued %d jobs", len(*seen))
+	}
+	if _, found, _ := store.GetHeartbeatState(ctx, "repo-maintainer", "daily"); found {
+		t.Fatalf("overlap skip must not advance/write state")
+	}
+}
+
+// TestHeartbeatScanSkipsAtMaxBackground proves agent capacity is respected: when
+// the agent is already at max_background, the heartbeat skips this tick without
+// advancing. The blocking jobs carry a DIFFERENT fingerprint so the overlap guard
+// passes and the max_background guard is the one under test.
+func TestHeartbeatScanSkipsAtMaxBackground(t *testing.T) {
+	paths, store := heartbeatScanFixture(t, enabledHeartbeatBody) // max_background = 1
+	ctx := context.Background()
+	if err := store.CreateJob(ctx, db.Job{
+		ID: "busy-1", Agent: "repo-maintainer", Type: "ask", State: "running",
+		Payload: `{"fingerprint":"some-other-work"}`,
+	}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	enq, seen := recordingEnqueuer()
+	now := time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC)
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, now); err != nil {
+		t.Fatalf("runHeartbeatScanOnce: %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("max_background not respected: enqueued %d jobs", len(*seen))
+	}
+	if _, found, _ := store.GetHeartbeatState(ctx, "repo-maintainer", "daily"); found {
+		t.Fatalf("capacity skip must not advance/write state")
+	}
+}
+
+// TestHeartbeatScanCoalescesMissedTicks proves a long outage replays only ONCE:
+// next_due is anchored to now (not the stale due time), so one scan after many
+// missed intervals enqueues a single job and schedules the next from now.
+func TestHeartbeatScanCoalescesMissedTicks(t *testing.T) {
+	paths, store := heartbeatScanFixture(t, enabledHeartbeatBody)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC)
+	// Seed a next_due 10 days in the past (10 missed daily ticks).
+	if err := store.UpsertHeartbeatState(ctx, db.HeartbeatState{
+		Agent: "repo-maintainer", Name: "daily", NextDueAt: now.Add(-10 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	enq, seen := recordingEnqueuer()
+	if err := runHeartbeatScanOnce(ctx, paths, store, enq, now); err != nil {
+		t.Fatalf("runHeartbeatScanOnce: %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("expected a single coalesced run, got %d", len(*seen))
+	}
+	state, _, err := store.GetHeartbeatState(ctx, "repo-maintainer", "daily")
+	if err != nil {
+		t.Fatalf("GetHeartbeatState: %v", err)
+	}
+	if !state.NextDueAt.Equal(now.Add(24 * time.Hour)) {
+		t.Fatalf("next_due not re-anchored to now: %+v", state)
+	}
+}

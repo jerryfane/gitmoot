@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1193,6 +1194,10 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 			})
 			startCockpitReconcileLoop(ctx, store, paths.Home, stdout)
 		}
+		// Heartbeat schedules (#533) reuse the normal job queue. Off-by-default: with
+		// no heartbeat sections the scan returns before any store touch. Skip it under
+		// --dry-run (no worker loop runs there, so an enqueued job would just sit).
+		heartbeatEnqueue := newHeartbeatEnqueuer(store, home)
 		for {
 			if err := receiveSupervisorWorkerError(workerErr); err != nil {
 				return err
@@ -1200,6 +1205,11 @@ func runRegisteredRepoSupervisor(ctx context.Context, home string, poll time.Dur
 			wait, err := pollRegisteredReposWithPoller(ctx, poller, schedule, time.Now().UTC(), poll)
 			if err != nil {
 				return err
+			}
+			if !dryRun {
+				if err := runHeartbeatScanOnce(ctx, paths, store, heartbeatEnqueue, time.Now().UTC()); err != nil {
+					writeLine(stdout, "heartbeat scan error: %s", err)
+				}
 			}
 			if watchSkillOptReviews {
 				if _, err := pollSkillOptReviewWatches(ctx, paths, store, blobStore, reviewGitHub, stdout, dryRun, home); err != nil {
@@ -1247,6 +1257,15 @@ func runSingleRepoSupervisor(ctx context.Context, home string, d daemon.Daemon, 
 		return runDaemonWorkerTick(ctx, store, worker, workers, false, d.Repo.FullName(), rootFilter, stdout, now)
 	})
 	startCockpitReconcileLoop(ctx, store, home, stdout)
+	// Heartbeat schedules (#533) must also fire in the single-repo daemon, or a
+	// single-repo daemon would silently never run them. Off-by-default: with no
+	// heartbeat sections the scan returns before any store touch. A failure to
+	// resolve paths only disables heartbeats (logged once); it never aborts the loop.
+	heartbeatPaths, heartbeatPathsErr := pathsFromFlag(home)
+	if heartbeatPathsErr != nil {
+		writeLine(stdout, "heartbeat scan disabled: %s", heartbeatPathsErr)
+	}
+	heartbeatEnqueue := newHeartbeatEnqueuer(store, home)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1259,6 +1278,11 @@ func runSingleRepoSupervisor(ctx context.Context, home string, d daemon.Daemon, 
 			checkoutLock.Unlock()
 		} else {
 			_ = d.PollRecoveryCommandsOnce(ctx)
+		}
+		if heartbeatPathsErr == nil {
+			if err := runHeartbeatScanOnce(ctx, heartbeatPaths, store, heartbeatEnqueue, time.Now().UTC()); err != nil {
+				writeLine(stdout, "heartbeat scan error: %s", err)
+			}
 		}
 		timer := time.NewTimer(interval)
 		select {
@@ -1273,6 +1297,145 @@ func runSingleRepoSupervisor(ctx context.Context, home string, d daemon.Daemon, 
 		case <-timer.C:
 		}
 	}
+}
+
+// heartbeatEnqueuer enqueues one heartbeat job. In production it wraps
+// workflow.Mailbox.Enqueue; tests inject a fake to assert the request shape (and
+// to fail loudly if an off-by-default scan ever enqueues).
+type heartbeatEnqueuer func(ctx context.Context, request workflow.JobRequest) (db.Job, error)
+
+// newHeartbeatEnqueuer builds the production enqueuer: a Mailbox bound to the
+// store and the daemon's canary-routing policy, matching dispatchLocalAgentJob's
+// construction so a heartbeat job is indistinguishable from a normal background
+// job once enqueued.
+func newHeartbeatEnqueuer(store *db.Store, home string) heartbeatEnqueuer {
+	mailbox := workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(home)}
+	return func(ctx context.Context, request workflow.JobRequest) (db.Job, error) {
+		return mailbox.Enqueue(ctx, request)
+	}
+}
+
+func heartbeatFingerprint(agent, name string) string {
+	return fmt.Sprintf("heartbeat:%s/%s", agent, name)
+}
+
+func heartbeatJobID(agent, name string, now time.Time) string {
+	return fmt.Sprintf("heartbeat-%s-%s-%x", agent, name, now.UTC().UnixNano())
+}
+
+// heartbeatJitter returns a uniformly random delay in [0, jitter] so concurrent
+// heartbeats with the same interval do not thunder. jitter<=0 returns 0, which
+// keeps a no-jitter (the default) schedule deterministic.
+func heartbeatJitter(jitter time.Duration) time.Duration {
+	if jitter <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(jitter) + 1))
+}
+
+// runHeartbeatScanOnce checks every configured heartbeat schedule once and
+// enqueues a normal background job for each enabled+due entry (#533), reusing the
+// standard job queue: the existing worker tick then runs the job (no new
+// execution code).
+//
+// OFF BY DEFAULT: a config with no [agents.<agent>.heartbeats.<name>] sections
+// makes LoadHeartbeats return an empty slice, so this returns nil BEFORE touching
+// the store or the enqueuer. It is wired into BOTH supervisor loops; the caller
+// logs a scan error and never aborts the loop. A per-heartbeat error is collected
+// (first wins) but does not stop the remaining heartbeats.
+func runHeartbeatScanOnce(ctx context.Context, paths config.Paths, store *db.Store, enqueue heartbeatEnqueuer, now time.Time) error {
+	heartbeats, err := config.LoadHeartbeats(paths)
+	if err != nil {
+		return err
+	}
+	if len(heartbeats) == 0 {
+		return nil
+	}
+	agentTypes, err := config.LoadAgentTypes(paths)
+	if err != nil {
+		return err
+	}
+	now = now.UTC()
+	var firstErr error
+	for _, heartbeat := range heartbeats {
+		if err := runOneHeartbeat(ctx, store, enqueue, agentTypes, heartbeat, now); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func runOneHeartbeat(ctx context.Context, store *db.Store, enqueue heartbeatEnqueuer, agentTypes map[string]config.AgentType, heartbeat config.Heartbeat, now time.Time) error {
+	if !heartbeat.Enabled {
+		return nil
+	}
+	interval, err := time.ParseDuration(heartbeat.Interval)
+	if err != nil {
+		return fmt.Errorf("heartbeat %s/%s interval: %w", heartbeat.Agent, heartbeat.Name, err)
+	}
+	jitter, err := time.ParseDuration(heartbeat.Jitter)
+	if err != nil {
+		return fmt.Errorf("heartbeat %s/%s jitter: %w", heartbeat.Agent, heartbeat.Name, err)
+	}
+	state, _, err := store.GetHeartbeatState(ctx, heartbeat.Agent, heartbeat.Name)
+	if err != nil {
+		return err
+	}
+	// Not yet due: a zero next_due (the first-ever scan) is in the past, so a fresh
+	// heartbeat runs immediately; a future next_due is skipped without advancing.
+	if !state.NextDueAt.IsZero() && now.Before(state.NextDueAt) {
+		return nil
+	}
+	// Overlap protection: a still-active heartbeat job (>= max_concurrent) means the
+	// previous run has not finished. Skip WITHOUT advancing so it is retried next
+	// tick (this is also the restart-safe dedup: a restart sees the active job).
+	fingerprint := heartbeatFingerprint(heartbeat.Agent, heartbeat.Name)
+	active, err := store.CountActiveJobsByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return err
+	}
+	if active >= heartbeat.MaxConcurrent {
+		return nil
+	}
+	// Respect agent capacity: when the agent is already at its max_background, skip
+	// this tick WITHOUT advancing so the heartbeat is retried once capacity frees up
+	// rather than being silently dropped for a full interval.
+	if agentType, ok := agentTypes[heartbeat.Agent]; ok && agentType.MaxBackground > 0 {
+		busy, err := store.AgentActiveJobCount(ctx, heartbeat.Agent)
+		if err != nil {
+			return err
+		}
+		if busy >= agentType.MaxBackground {
+			return nil
+		}
+	}
+	job, enqueueErr := enqueue(ctx, workflow.JobRequest{
+		ID:           heartbeatJobID(heartbeat.Agent, heartbeat.Name, now),
+		Agent:        heartbeat.Agent,
+		Action:       heartbeat.Action,
+		Repo:         heartbeat.Repo,
+		Sender:       "heartbeat",
+		Instructions: heartbeat.Prompt,
+		Fingerprint:  fingerprint,
+	})
+	// Advance exactly one interval whether or not the enqueue succeeded. Anchoring
+	// next_due to `now` (not the old due time) coalesces missed ticks into a single
+	// run (no backlog replay), and advancing on failure (recording last_status)
+	// stops a broken heartbeat from hot-looping every tick.
+	state.Agent = heartbeat.Agent
+	state.Name = heartbeat.Name
+	state.LastRunAt = now
+	state.NextDueAt = now.Add(interval + heartbeatJitter(jitter))
+	if enqueueErr != nil {
+		state.LastStatus = "enqueue_failed"
+	} else {
+		state.LastJobID = job.ID
+		state.LastStatus = "enqueued"
+	}
+	if err := store.UpsertHeartbeatState(ctx, state); err != nil {
+		return err
+	}
+	return enqueueErr
 }
 
 func startSupervisorWorkerLoop(ctx context.Context, interval time.Duration, run func(time.Time) error) <-chan error {
