@@ -3064,7 +3064,7 @@ func perJobAdmissionEstimate(ctx context.Context, store *db.Store, job db.Job, p
 		return admissionEstimate{session: true, memGB: policy.CodexMemoryGB}
 	case runtime.ClaudeRuntime:
 		return admissionEstimate{session: true, memGB: policy.ClaudeMemoryGB}
-	case runtime.KimiRuntime:
+	case runtime.KimiRuntime, runtime.KimiCLIRuntime:
 		return admissionEstimate{session: true, memGB: policy.KimiMemoryGB}
 	default:
 		return admissionEstimate{session: true, memGB: policy.DefaultMemoryGB}
@@ -3413,7 +3413,7 @@ func tempWorkerEligible(ctx context.Context, store *db.Store, job db.Job, payloa
 		return tempWorkerEligibility{Reason: "parallel_sessions.same_session is queue"}
 	}
 	switch agent.Runtime {
-	case runtime.CodexRuntime, runtime.ClaudeRuntime, runtime.KimiRuntime:
+	case runtime.CodexRuntime, runtime.ClaudeRuntime, runtime.KimiRuntime, runtime.KimiCLIRuntime:
 	default:
 		return tempWorkerEligibility{Reason: fmt.Sprintf("runtime %s does not support temp workers", agent.Runtime)}
 	}
@@ -4133,6 +4133,8 @@ func buildRuntimeAdapter(agent runtime.Agent, checkout string, runner subprocess
 		return runtime.ClaudeAdapter{Dir: checkout, Runner: runner}, nil
 	case runtime.KimiRuntime:
 		return runtime.KimiAdapter{Dir: checkout, Runner: runner}, nil
+	case runtime.KimiCLIRuntime:
+		return runtime.KimiCLIAdapter{Dir: checkout, Runner: runner}, nil
 	case runtime.ShellRuntime:
 		return runtime.ShellAdapter{Dir: checkout, Runner: runner}, nil
 	default:
