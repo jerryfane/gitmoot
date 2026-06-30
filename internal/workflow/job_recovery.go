@@ -37,6 +37,10 @@ func RetryJob(ctx context.Context, store *db.Store, jobID string) (db.Job, error
 		return db.Job{}, err
 	}
 	payload.Result = nil
+	if manualRetryShouldClearReadOnlyWorktree(job, payload) {
+		payload.WorktreePath = ""
+		payload.HeadSHA = ""
+	}
 	encoded, err := marshalPayload(payload)
 	if err != nil {
 		return db.Job{}, err
@@ -57,6 +61,21 @@ func RetryJob(ctx context.Context, store *db.Store, jobID string) (db.Job, error
 		return db.Job{}, fmt.Errorf("job %s is %s; retry requires failed, blocked, or cancelled", latest.ID, latest.State)
 	}
 	return store.GetJob(ctx, job.ID)
+}
+
+func manualRetryShouldClearReadOnlyWorktree(job db.Job, payload JobPayload) bool {
+	if strings.TrimSpace(payload.WorktreePath) == "" {
+		return false
+	}
+	if strings.TrimSpace(payload.TaskID) != "" {
+		return false
+	}
+	switch strings.TrimSpace(job.Type) {
+	case "ask", "review":
+		return true
+	default:
+		return false
+	}
 }
 
 func latestCancellationWasFromRunning(ctx context.Context, store *db.Store, jobID string) (bool, error) {
