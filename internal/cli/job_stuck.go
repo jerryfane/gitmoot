@@ -2,11 +2,17 @@ package cli
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
+
+// authWordRe matches "auth" only as a whole word, so an authoritative auth
+// signal ("auth token invalid") is caught while an unrelated substring such as
+// "author" in "invalid author email" is not.
+var authWordRe = regexp.MustCompile(`\bauth\b`)
 
 // stuckReasonEventKinds are the job_event kinds that carry an authoritative
 // reason a queued or blocked job is not progressing (issue #552). Surfacing why a
@@ -112,14 +118,17 @@ func deriveStuckReason(job db.Job, reasonEvent db.JobEvent, hasReasonEvent bool,
 // the caller keeps its generic label.
 func classifyAuthQuota(msg string) string {
 	l := strings.ToLower(msg)
+	// A bare 401/429 digit run is ambiguous (a PR number, a token count), so only
+	// treat it as an HTTP status when the message actually frames it as one.
+	httpCtx := strings.Contains(l, "status") || strings.Contains(l, "http")
 	switch {
 	case strings.Contains(l, "usage limit"), strings.Contains(l, "rate limit"),
-		strings.Contains(l, "quota"), strings.Contains(l, "429"),
-		strings.Contains(l, "resets"):
+		strings.Contains(l, "quota"), strings.Contains(l, "limit resets"),
+		httpCtx && strings.Contains(l, "429"):
 		return "throttled"
 	case strings.Contains(l, "authentication"), strings.Contains(l, "unauthorized"),
-		strings.Contains(l, "401"),
-		strings.Contains(l, "auth") && strings.Contains(l, "invalid"):
+		httpCtx && strings.Contains(l, "401"),
+		authWordRe.MatchString(l) && strings.Contains(l, "invalid"):
 		return "auth failing"
 	}
 	return ""

@@ -64,6 +64,37 @@ func TestDeriveStuckReason(t *testing.T) {
 			wantReason: "throttled:",
 		},
 		{
+			name:        "failed-check test name containing 'resets' is not mislabeled throttled",
+			job:         blocked,
+			event:       db.JobEvent{Kind: "deterministic_checkers_failed", Message: "--- FAIL: TestConfigResets (0.01s)"},
+			hasEvent:    true,
+			wantReason:  "blocked:",
+			wantNoMatch: "throttled",
+		},
+		{
+			name:        "git 'invalid author email' is not mislabeled auth failing",
+			job:         blocked,
+			event:       db.JobEvent{Kind: "advance_blocked", Message: "commit failed: invalid author email"},
+			hasEvent:    true,
+			wantReason:  "blocked:",
+			wantNoMatch: "auth failing",
+		},
+		{
+			name:        "bare 401 digit run without http context is not mislabeled auth failing",
+			job:         queued,
+			event:       db.JobEvent{Kind: "advance_blocked", Message: "delegation to PR 401 exceeded budget"},
+			hasEvent:    true,
+			wantReason:  "waiting:",
+			wantNoMatch: "auth failing",
+		},
+		{
+			name:       "http 401 status is labeled auth failing",
+			job:        blocked,
+			event:      db.JobEvent{Kind: "advance_blocked", Message: "gh api returned http 401"},
+			hasEvent:   true,
+			wantReason: "auth failing:",
+		},
+		{
 			name:       "retry event surfaces retrying",
 			job:        queued,
 			event:      db.JobEvent{Kind: "advance_retry", Message: "attempt 2 of 3"},
@@ -100,6 +131,9 @@ func TestDeriveStuckReason(t *testing.T) {
 			}
 			if !strings.Contains(got.Reason, tt.wantReason) {
 				t.Fatalf("reason = %q, want substring %q", got.Reason, tt.wantReason)
+			}
+			if tt.wantNoMatch != "" && strings.Contains(got.Reason, tt.wantNoMatch) {
+				t.Fatalf("reason = %q, must not contain %q", got.Reason, tt.wantNoMatch)
 			}
 			if tt.wantNext != "" && got.NextRetryAt != tt.wantNext {
 				t.Fatalf("next retry = %q, want %q", got.NextRetryAt, tt.wantNext)
