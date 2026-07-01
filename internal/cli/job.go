@@ -47,8 +47,8 @@ func runJob(args []string, stdout, stderr io.Writer) int {
 
 func printJobUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  gitmoot job list [--repo owner/repo] [--state state]")
-	fmt.Fprintln(w, "  gitmoot job show <id>")
+	fmt.Fprintln(w, "  gitmoot job list [--repo owner/repo] [--state state] [--json]")
+	fmt.Fprintln(w, "  gitmoot job show <id> [--json]")
 	fmt.Fprintln(w, "  gitmoot job events <id>")
 	fmt.Fprintln(w, "  gitmoot job watch <id> [--poll 1s] [--json]")
 	fmt.Fprintln(w, "  gitmoot job run <id>")
@@ -63,6 +63,7 @@ func runJobList(args []string, stdout, stderr io.Writer) int {
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	repo := fs.String("repo", "", "repo scope as owner/repo")
 	state := fs.String("state", "", "job state filter")
+	jsonOutput := fs.Bool("json", false, "print jobs (with why-stuck detail) as JSON")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -80,6 +81,12 @@ func runJobList(args []string, stdout, stderr io.Writer) int {
 	// not reveal it; this surfaces the reason as a trailing column so a zero-child
 	// fan-out is not invisible. Best-effort: a lookup error leaves the column off.
 	var preflightFailed map[string]string
+	// reasonEvents / locks feed the why-stuck surface (#552): the latest
+	// reason-bearing event per job and the live resource locks, both fetched in a
+	// single query so the derived reason costs no per-job lookup. Best-effort: a
+	// lookup error leaves the reason off rather than failing the listing.
+	var reasonEvents map[string]db.JobEvent
+	var locks []db.ResourceLock
 	if err := withStore(*home, func(store *db.Store) error {
 		var err error
 		jobs, err = store.ListJobs(context.Background())
@@ -87,37 +94,156 @@ func runJobList(args []string, stdout, stderr io.Writer) int {
 			return err
 		}
 		preflightFailed, _ = store.JobIDsWithEventKind(context.Background(), "delegation_preflight_failed")
+		reasonEvents, _ = store.LatestJobEventsOfKinds(context.Background(), stuckReasonEventKinds)
+		locks, _ = store.ListResourceLocks(context.Background())
 		return nil
 	}); err != nil {
 		fmt.Fprintf(stderr, "job list: %v\n", err)
 		return 1
 	}
-	for _, job := range filterJobs(jobs, *repo, *state) {
+	filtered := filterJobs(jobs, *repo, *state)
+	if *jsonOutput {
+		entries := make([]jobListEntry, 0, len(filtered))
+		for _, job := range filtered {
+			payload, _ := daemonJobPayload(job)
+			ev, ok := reasonEvents[job.ID]
+			reason := deriveStuckReason(job, ev, ok, locks)
+			entries = append(entries, jobListEntry{
+				ID:              job.ID,
+				State:           job.State,
+				Type:            job.Type,
+				Agent:           job.Agent,
+				Repo:            payload.Repo,
+				PullRequest:     payload.PullRequest,
+				PreflightFailed: strings.TrimSpace(preflightFailed[job.ID]),
+				WhyStuck:        reason.Reason,
+				NextRetryAt:     reason.NextRetryAt,
+			})
+		}
+		if err := writeJSON(stdout, entries); err != nil {
+			fmt.Fprintf(stderr, "job list: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	for _, job := range filtered {
 		payload, _ := daemonJobPayload(job)
 		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t#%d", job.ID, job.State, job.Type, job.Agent, payload.Repo, payload.PullRequest)
 		if reason, ok := preflightFailed[job.ID]; ok && strings.TrimSpace(reason) != "" {
 			fmt.Fprintf(stdout, "\tPREFLIGHT_FAILED: %s", reason)
+		}
+		ev, ok := reasonEvents[job.ID]
+		if reason := deriveStuckReason(job, ev, ok, locks); !reason.empty() {
+			fmt.Fprintf(stdout, "\tWHY: %s", reason.Reason)
+			if reason.NextRetryAt != "" {
+				fmt.Fprintf(stdout, " (next retry %s)", reason.NextRetryAt)
+			}
 		}
 		fmt.Fprintln(stdout)
 	}
 	return 0
 }
 
+// jobListEntry is the JSON shape for `job list --json`: the existing table
+// columns plus the additive why-stuck fields (#552). The stuck fields are omitted
+// when empty so a healthy job's JSON is not bloated.
+type jobListEntry struct {
+	ID              string `json:"id"`
+	State           string `json:"state"`
+	Type            string `json:"type"`
+	Agent           string `json:"agent"`
+	Repo            string `json:"repo"`
+	PullRequest     int    `json:"pull_request"`
+	PreflightFailed string `json:"preflight_failed,omitempty"`
+	WhyStuck        string `json:"why_stuck,omitempty"`
+	NextRetryAt     string `json:"next_retry_at,omitempty"`
+}
+
 func runJobShow(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("job show", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	jsonOutput := fs.Bool("json", false, "print the job (with why-stuck detail) as JSON")
 	jobID, ok := parseSingleJobID(fs, args, stderr, "job show")
 	if !ok {
 		return parseSingleJobIDExitCode(args)
 	}
-	job, payload, err := loadJobWithPayload(*home, jobID)
-	if err != nil {
+	var job db.Job
+	var payload workflow.JobPayload
+	var reason stuckReason
+	if err := withStore(*home, func(store *db.Store) error {
+		var err error
+		job, err = store.GetJob(context.Background(), jobID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("job %q not found", jobID)
+			}
+			return err
+		}
+		payload, err = daemonJobPayload(job)
+		if err != nil {
+			return err
+		}
+		reason = loadStuckReason(store, job)
+		return nil
+	}); err != nil {
 		fmt.Fprintf(stderr, "job show: %v\n", err)
 		return 1
 	}
-	printJob(stdout, job, payload)
+	if *jsonOutput {
+		out := jobShowOutput{Job: job, Payload: payload, WhyStuck: reason.Reason, NextRetryAt: reason.NextRetryAt}
+		if err := writeJSON(stdout, out); err != nil {
+			fmt.Fprintf(stderr, "job show: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	printJob(stdout, job, payload, reason)
 	return 0
+}
+
+// jobShowOutput is the JSON shape for `job show --json`: the job, its decoded
+// payload, and the additive why-stuck detail (#552). The stuck fields are omitted
+// when empty so a healthy job's JSON is unchanged in spirit.
+type jobShowOutput struct {
+	Job         db.Job              `json:"job"`
+	Payload     workflow.JobPayload `json:"payload"`
+	WhyStuck    string              `json:"why_stuck,omitempty"`
+	NextRetryAt string              `json:"next_retry_at,omitempty"`
+}
+
+// loadStuckReason derives a queued/blocked job's why-stuck reason from its full
+// event history (scanning for the LATEST reason-bearing event, which is more
+// authoritative than the overall-latest event) and the live resource locks. It is
+// best-effort: a lookup error yields the zero reason rather than failing `job
+// show`. Non-queued/blocked jobs short-circuit without any query.
+func loadStuckReason(store *db.Store, job db.Job) stuckReason {
+	state := strings.TrimSpace(job.State)
+	if state != string(workflow.JobQueued) && state != string(workflow.JobBlocked) {
+		return stuckReason{}
+	}
+	events, err := store.ListJobEvents(context.Background(), job.ID)
+	if err != nil {
+		return stuckReason{}
+	}
+	ev, ok := latestReasonEvent(events)
+	locks, _ := store.ListResourceLocks(context.Background())
+	return deriveStuckReason(job, ev, ok, locks)
+}
+
+// latestReasonEvent returns the last event whose kind is a stuck-reason kind.
+func latestReasonEvent(events []db.JobEvent) (db.JobEvent, bool) {
+	var found db.JobEvent
+	var ok bool
+	for _, event := range events {
+		for _, kind := range stuckReasonEventKinds {
+			if event.Kind == kind {
+				found, ok = event, true
+				break
+			}
+		}
+	}
+	return found, ok
 }
 
 func runJobEvents(args []string, stdout, stderr io.Writer) int {
@@ -365,27 +491,15 @@ func filterJobs(jobs []db.Job, repoFilter string, stateFilter string) []db.Job {
 	return filtered
 }
 
-func loadJobWithPayload(home string, jobID string) (db.Job, workflow.JobPayload, error) {
-	var job db.Job
-	var payload workflow.JobPayload
-	err := withStore(home, func(store *db.Store) error {
-		var err error
-		job, err = store.GetJob(context.Background(), jobID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("job %q not found", jobID)
-			}
-			return err
-		}
-		payload, err = daemonJobPayload(job)
-		return err
-	})
-	return job, payload, err
-}
-
-func printJob(stdout io.Writer, job db.Job, payload workflow.JobPayload) {
+func printJob(stdout io.Writer, job db.Job, payload workflow.JobPayload, reason stuckReason) {
 	fmt.Fprintf(stdout, "id: %s\n", job.ID)
 	fmt.Fprintf(stdout, "state: %s\n", job.State)
+	if !reason.empty() {
+		fmt.Fprintf(stdout, "why_stuck: %s\n", reason.Reason)
+		if reason.NextRetryAt != "" {
+			fmt.Fprintf(stdout, "next_retry_at: %s\n", reason.NextRetryAt)
+		}
+	}
 	fmt.Fprintf(stdout, "type: %s\n", job.Type)
 	fmt.Fprintf(stdout, "agent: %s\n", job.Agent)
 	fmt.Fprintf(stdout, "repo: %s\n", payload.Repo)

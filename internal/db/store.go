@@ -2763,6 +2763,46 @@ func (s *Store) JobIDsWithEventKind(ctx context.Context, kind string) (map[strin
 	return out, rows.Err()
 }
 
+// LatestJobEventsOfKinds returns, per job, the LATEST job_event whose kind is one
+// of the given kinds, keyed by job id, in a single indexed query. It mirrors
+// LatestJobEvents but restricts the candidate set to the caller's "reason" kinds
+// so a stuck-job surface (issue #552) can find the most recent event that
+// actually explains why a queued/blocked job is waiting — ignoring benign
+// lifecycle events (queued, route_selected, delegation_continuation_enqueued)
+// that would otherwise be the overall latest event and mask the real reason. An
+// empty kinds slice returns an empty map without querying.
+func (s *Store) LatestJobEventsOfKinds(ctx context.Context, kinds []string) (map[string]JobEvent, error) {
+	if len(kinds) == 0 {
+		return map[string]JobEvent{}, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
+	args := make([]any, 0, len(kinds)*2)
+	for _, kind := range kinds {
+		args = append(args, kind)
+	}
+	// The IN list appears twice (outer filter + inner MAX(id) subquery), so the
+	// bound args are the kinds repeated.
+	args = append(args, args...)
+	query := `SELECT job_id, kind, message FROM job_events
+		WHERE kind IN (` + placeholders + `) AND id IN (
+			SELECT MAX(id) FROM job_events WHERE kind IN (` + placeholders + `) GROUP BY job_id)`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]JobEvent{}
+	for rows.Next() {
+		var event JobEvent
+		if err := rows.Scan(&event.JobID, &event.Kind, &event.Message); err != nil {
+			return nil, err
+		}
+		out[event.JobID] = event
+	}
+	return out, rows.Err()
+}
+
 // JobIDsWithPendingDelegationWorktreeReclaim returns the IDs of jobs whose most
 // recent terminal delegation-worktree cleanup outcome was a PRESERVE
 // (delegation_worktree_cleanup_skipped) NOT yet followed by a removal
