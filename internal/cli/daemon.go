@@ -77,14 +77,16 @@ func runDaemonStart(args []string, stdout, stderr io.Writer) int {
 }
 
 func runDaemonStartWithWorkDir(args []string, workDir string, stdout, stderr io.Writer) int {
-	return runDaemonStartWithWorkDirRestart(args, workDir, false, stdout, stderr)
+	return runDaemonStartWithWorkDirRestart(args, workDir, false, false, stdout, stderr)
 }
 
 // runDaemonStartWithWorkDirRestart is the shared (re)start body. restart selects
 // the auth-drop warning flavor (#559): a plain start warns that the new daemon
 // will come up without Claude auth; a restart warns that a previously-authed
-// daemon's auth will be LOST.
-func runDaemonStartWithWorkDirRestart(args []string, workDir string, restart bool, stdout, stderr io.Writer) int {
+// daemon's auth will be LOST — but only when priorDaemonHadClaudeAuth confirms
+// the prior daemon actually had Claude auth (the caller inspects it before the
+// stop). When the prior state is unknown, the neutral plain-start wording is used.
+func runDaemonStartWithWorkDirRestart(args []string, workDir string, restart bool, priorDaemonHadClaudeAuth bool, stdout, stderr io.Writer) int {
 	cfg, code := parseDaemonStartConfig("daemon start", args, stderr)
 	if code == daemonHelp {
 		return 0
@@ -123,7 +125,7 @@ func runDaemonStartWithWorkDirRestart(args []string, workDir string, restart boo
 		}
 	}
 
-	warnIfDaemonStartLosesClaudeAuth(stderr, restart)
+	warnIfDaemonStartLosesClaudeAuth(stderr, restart, priorDaemonHadClaudeAuth)
 
 	started, err := startDaemonChild(cfg.Home, cfg.Poll.String(), cfg.Workers, cfg.WatchSkillOptReviews, cfg.WatchIssues, cfg.Scheduler, cfg.RepoFlag, cfg.Session, state, resolvedWorkDir)
 	if err != nil {
@@ -418,6 +420,14 @@ func runDaemonRestart(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+	// Inspect the still-running daemon's ACTUAL Claude auth BEFORE stopping it, so
+	// the restart warning only claims a DROP when there is genuinely auth to lose
+	// (#559). This is the same mechanism `daemon status` uses; it degrades to
+	// Detected=false on a non-Linux/unreadable-/proc host, which correctly falls
+	// back to the neutral plain-start wording. Must run before runDaemonStop below,
+	// which tears the prior daemon down and makes its env unreadable.
+	priorAuth := presence.InspectDaemonClaudeAuth(paths)
+	priorDaemonHadClaudeAuth := priorAuth.Detected && priorAuth.Auth.Ready()
 	stopArgs := []string{}
 	if restartCfg.Home != "" {
 		stopArgs = append(stopArgs, "--home", restartCfg.Home)
@@ -426,7 +436,7 @@ func runDaemonRestart(args []string, stdout, stderr io.Writer) int {
 	if stopCode != 0 {
 		return stopCode
 	}
-	return runDaemonStartWithWorkDirRestart(targetArgs, targetWorkDir, true, stdout, stderr)
+	return runDaemonStartWithWorkDirRestart(targetArgs, targetWorkDir, true, priorDaemonHadClaudeAuth, stdout, stderr)
 }
 
 // claudeAuthEnvLookup predicts the environment the (re)started daemon child will
@@ -443,11 +453,19 @@ var claudeAuthEnvLookup = os.LookupEnv
 // disables Claude-runtime auth for ALL subscribed repos, discoverable only later
 // via `daemon status`. It only covers the Claude runtime (the one
 // InspectClaudeAuthEnv describes) and never refuses the start.
-func warnIfDaemonStartLosesClaudeAuth(w io.Writer, restart bool) {
+//
+// The definite "this restart will DROP the auth the previous daemon had" wording
+// is only used when priorDaemonHadClaudeAuth is true — i.e. the caller confirmed,
+// by inspecting the still-running daemon's own environment BEFORE stopping it,
+// that there is genuinely auth to lose. On a Codex/Kimi-only box, or when the
+// prior daemon's env was unreadable (non-Linux/unreadable /proc), the prior state
+// is UNKNOWN and we fall back to the neutral plain-start wording rather than
+// asserting a loss that never happened.
+func warnIfDaemonStartLosesClaudeAuth(w io.Writer, restart bool, priorDaemonHadClaudeAuth bool) {
 	if runtime.InspectClaudeAuthEnv(claudeAuthEnvLookup).Ready() {
 		return
 	}
-	if restart {
+	if restart && priorDaemonHadClaudeAuth {
 		fmt.Fprintln(w, "⚠️  WARNING: this restart will DROP Claude auth — the new daemon is being launched WITHOUT")
 		fmt.Fprintln(w, "    CLAUDE_CODE_OAUTH_TOKEN in this environment, so it will LOSE the auth the previous daemon had.")
 	} else {

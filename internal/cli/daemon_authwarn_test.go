@@ -25,7 +25,7 @@ func TestWarnIfDaemonStartLosesClaudeAuth_WarnsWhenNotReady(t *testing.T) {
 
 	for _, restart := range []bool{false, true} {
 		var buf bytes.Buffer
-		warnIfDaemonStartLosesClaudeAuth(&buf, restart)
+		warnIfDaemonStartLosesClaudeAuth(&buf, restart, restart)
 		out := buf.String()
 		if !strings.Contains(out, "WARNING") {
 			t.Fatalf("restart=%v: expected a WARNING, got %q", restart, out)
@@ -43,14 +43,37 @@ func TestWarnIfDaemonStartLosesClaudeAuth_RestartWordingReflectsDrop(t *testing.
 	withClaudeAuthLookup(t, map[string]string{})
 
 	var start, restart bytes.Buffer
-	warnIfDaemonStartLosesClaudeAuth(&start, false)
-	warnIfDaemonStartLosesClaudeAuth(&restart, true)
+	warnIfDaemonStartLosesClaudeAuth(&start, false, false)
+	warnIfDaemonStartLosesClaudeAuth(&restart, true, true) // prior daemon confirmed authed
 
 	if strings.Contains(start.String(), "DROP") {
 		t.Fatalf("plain-start wording should not claim a DROP, got %q", start.String())
 	}
 	if !strings.Contains(restart.String(), "DROP") || !strings.Contains(restart.String(), "LOSE") {
 		t.Fatalf("restart wording should reflect the auth being dropped/lost, got %q", restart.String())
+	}
+}
+
+// TestWarnIfDaemonStartLosesClaudeAuth_RestartWithoutPriorAuthUsesNeutralWording
+// guards the #559 review fix: a restart must NOT assert a DROP/LOSE when the prior
+// daemon's Claude auth is unknown or was absent (e.g. a Codex/Kimi-only box, or an
+// unreadable prior env). It still warns that the new daemon comes up without auth,
+// but with the neutral plain-start wording.
+func TestWarnIfDaemonStartLosesClaudeAuth_RestartWithoutPriorAuthUsesNeutralWording(t *testing.T) {
+	withClaudeAuthLookup(t, map[string]string{}) // no Claude auth in the inherited env
+
+	var buf bytes.Buffer
+	warnIfDaemonStartLosesClaudeAuth(&buf, true, false) // restart, but prior auth unknown/absent
+	out := buf.String()
+	if !strings.Contains(out, "WARNING") {
+		t.Fatalf("expected a WARNING even without prior auth, got %q", out)
+	}
+	if strings.Contains(out, "DROP") || strings.Contains(out, "LOSE") ||
+		strings.Contains(out, "the previous daemon had") {
+		t.Fatalf("restart without confirmed prior auth must not claim a DROP/LOSE, got %q", out)
+	}
+	if !strings.Contains(out, "starting WITHOUT Claude auth") {
+		t.Fatalf("expected neutral plain-start wording, got %q", out)
 	}
 }
 
@@ -64,7 +87,7 @@ func TestWarnIfDaemonStartLosesClaudeAuth_SilentWhenReady(t *testing.T) {
 		withClaudeAuthLookup(t, map[string]string{key: "x"})
 		for _, restart := range []bool{false, true} {
 			var buf bytes.Buffer
-			warnIfDaemonStartLosesClaudeAuth(&buf, restart)
+			warnIfDaemonStartLosesClaudeAuth(&buf, restart, restart)
 			if buf.Len() != 0 {
 				t.Fatalf("key=%s restart=%v: expected silence when auth ready, got %q", key, restart, buf.String())
 			}
