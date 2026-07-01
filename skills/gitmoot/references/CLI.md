@@ -540,8 +540,8 @@ Use GitHub PR comments as the public audit trail:
 ## Jobs And Locks
 
 ```sh
-gitmoot job list --repo owner/repo
-gitmoot job show <job-id>
+gitmoot job list --repo owner/repo   # add --json for machine-readable rows
+gitmoot job show <job-id>            # add --json for the full job + why-stuck detail
 gitmoot job watch <job-id>
 gitmoot job events <job-id>
 gitmoot job retry <job-id>
@@ -557,6 +557,17 @@ gracefully. In-flight jobs finish normally; the coordinator's next continuation
 is routed through the graceful finalize path (synthesize what completed → stop)
 and the daemon stops starting queued children of that root. See
 `references/SAFETY.md` for how it relates to the other termination bounds.
+
+For a `queued` or `blocked` job, `gitmoot job list` appends a `WHY:` column and
+`gitmoot job show` prints a `why_stuck:` (and, when a lease applies, a
+`next_retry_at:`) line explaining what the job is waiting on — e.g. `waiting on
+runtime session lock runtime:codex:<ref> (held by job <id>)`, `blocked: awaiting
+human`, `auth failing: …`, `throttled: …`, or `retrying: …`. The reason is
+derived from the most authoritative existing signal (the latest reason-bearing
+`job events` entry plus the owning resource lock's lease); a healthy job's output
+is unchanged. `gitmoot doctor` proactively validates `gh auth` (with an
+actionable remediation hint) and the Claude runtime token so a bad credential is
+caught before a job stalls on it.
 
 `gitmoot job cancel <job-id>` also releases any resource locks the cancelled job
 still owned — including a stranded `runtime:<rt>:<session>` lock left behind when

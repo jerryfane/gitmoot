@@ -103,10 +103,26 @@ func (c Checker) command(ctx context.Context, runner subprocess.Runner, name str
 	return Check{Name: name, OK: true, Required: required, Detail: firstLine(result.Stdout, result.Stderr)}
 }
 
+// GHAuthRemediation is the actionable hint appended when `gh auth status` fails.
+// A job that pushes branches or opens PRs needs valid gh credentials in the
+// environment that RUNS it — which for background jobs is the daemon's, not the
+// invoking shell's (issue #552 point 4: an integrate leg failed on invalid gh
+// auth even though interactive `gh auth status` was valid, because the daemon did
+// not inherit the shell's credentials).
+const GHAuthRemediation = "run `gh auth login` and ensure the daemon inherits valid gh credentials before dispatching jobs that push or open PRs"
+
 func (c Checker) ghAuth(ctx context.Context, runner subprocess.Runner) Check {
 	result, err := runner.Run(ctx, "", "gh", "auth", "status")
 	if err != nil {
-		return Check{Name: "gh auth", Required: true, Detail: strings.TrimSpace(result.Stderr)}
+		detail := strings.TrimSpace(result.Stderr)
+		if detail == "" {
+			detail = strings.TrimSpace(err.Error())
+		}
+		if detail != "" {
+			detail += "; "
+		}
+		detail += GHAuthRemediation
+		return Check{Name: "gh auth", Required: true, Detail: detail}
 	}
 	return Check{Name: "gh auth", OK: true, Required: true, Detail: firstLine(result.Stdout, result.Stderr)}
 }
