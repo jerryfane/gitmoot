@@ -63,13 +63,16 @@ func printDaemonUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot daemon start [--repo owner/repo] [--poll 30s] [--workers 1 | --parallel N] [--scheduler barrier|pool] [--watch-skillopt-reviews] [--watch-issues]")
 	fmt.Fprintln(w, "  gitmoot daemon run [--repo owner/repo] [--poll 30s] [--workers 1 | --parallel N] [--scheduler barrier|pool] [--watch-skillopt-reviews] [--watch-issues]")
-	fmt.Fprintln(w, "  gitmoot daemon stop")
+	fmt.Fprintln(w, "  gitmoot daemon stop [--forget-runtime-auth]")
 	fmt.Fprintln(w, "  gitmoot daemon restart")
 	fmt.Fprintln(w, "  gitmoot daemon status")
 	fmt.Fprintln(w, "  gitmoot daemon logs")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "  --repo sets the daemon's LAUNCH CONTEXT (working dir / preflight checkout) only; it does NOT")
 	fmt.Fprintln(w, "  scope supervision — the daemon supervises ALL subscribed repos regardless.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  --forget-runtime-auth (stop) deletes the persisted owner-only daemon-runtime.env so a later")
+	fmt.Fprintln(w, "  restart cannot recover the token; a plain restart still recovers it.")
 }
 
 func runDaemonStart(args []string, stdout, stderr io.Writer) int {
@@ -134,9 +137,22 @@ func runDaemonStartWithWorkDirRestart(args []string, workDir string, restart boo
 	if err := persistDaemonRuntimeAuth(paths.Home, claudeAuthEnvLookup); err != nil {
 		fmt.Fprintf(stderr, "daemon start: warning: could not persist runtime auth: %v\n", err)
 	}
-	recoveredEnv := recoverDaemonChildAuthEnv(paths.Home, claudeAuthEnvLookup)
+	// Recovery is RESTART-ONLY (#588): only an internal `daemon restart` — which
+	// tears the prior daemon down and re-inherits the launching shell's env — may
+	// recover the persisted token so a restart never silently drops Claude auth
+	// (the #559 root cause). A plain `daemon start` from a shell that deliberately
+	// unset the token must NOT resurrect the old persisted token; it warns instead
+	// (#581). Persistence above still runs on BOTH paths so the file stays fresh.
+	var recoveredEnv []string
+	if restart {
+		recoveredEnv = recoverDaemonChildAuthEnv(paths.Home, claudeAuthEnvLookup)
+	}
 	if len(recoveredEnv) > 0 {
 		writeLine(stdout, "recovered persisted runtime auth from %s (launching env lacked it)", daemonRuntimeAuthFileName)
+		// Do NOT fully suppress the #581 "no auth" signal (#588): the recovered
+		// token carries no expiry/validation metadata, so emit an INFORMATIONAL
+		// note that it may be STALE or REVOKED. The token VALUE is never printed.
+		noteRecoveredRuntimeAuthMayBeStale(stderr)
 	} else {
 		warnIfDaemonStartLosesClaudeAuth(stderr, restart, priorDaemonHadClaudeAuth)
 	}
@@ -389,6 +405,11 @@ func runDaemonStop(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("daemon stop", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	// #588: opt-in teardown of the persisted 0600 daemon-runtime.env so a stopped
+	// daemon does not leave a recoverable token on disk. The INTERNAL restart's stop
+	// call must NOT pass this (it relies on recovery); only an explicit operator
+	// `daemon stop --forget-runtime-auth` forgets the token.
+	forgetRuntimeAuth := fs.Bool("forget-runtime-auth", false, "delete the persisted daemon runtime-auth file (daemon-runtime.env) after stopping")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -410,12 +431,25 @@ func runDaemonStop(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "daemon stop: %v\n", err)
 		return 1
 	}
+	forgetPersistedRuntimeAuth := func() {
+		if !*forgetRuntimeAuth {
+			return
+		}
+		path := daemonRuntimeAuthFilePath(paths.Home)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "daemon stop: warning: could not forget runtime auth: %v\n", err)
+			return
+		}
+		writeLine(stdout, "forgot persisted runtime auth (%s)", daemonRuntimeAuthFileName)
+	}
 	if stale {
 		writeLine(stdout, "removed stale daemon pid file")
+		forgetPersistedRuntimeAuth()
 		return 0
 	}
 	if pid == 0 {
 		writeLine(stdout, "daemon not running")
+		forgetPersistedRuntimeAuth()
 		return 0
 	}
 	if err := stopDaemonPID(pid); err != nil {
@@ -424,6 +458,7 @@ func runDaemonStop(args []string, stdout, stderr io.Writer) int {
 	}
 	_ = os.Remove(state.PIDFile)
 	writeLine(stdout, "daemon stopped pid %d", pid)
+	forgetPersistedRuntimeAuth()
 	return 0
 }
 
@@ -535,6 +570,24 @@ func warnIfDaemonStartLosesClaudeAuth(w io.Writer, restart bool, priorDaemonHadC
 	fmt.Fprintln(w, "    Every Claude-runtime job across ALL subscribed repos will fail auth.")
 	fmt.Fprintln(w, "    Set the token in this shell before (re)starting, or run the daemon via its systemd service")
 	fmt.Fprintln(w, "    (which loads the token from its EnvironmentFile). See `gitmoot daemon status`.")
+}
+
+// noteRecoveredRuntimeAuthMayBeStale prints a NON-fatal INFORMATIONAL stderr note
+// (#588) after a restart recovers a persisted runtime-auth token from the 0600
+// daemon-runtime.env. Recovery keeps a token-less restart from silently dropping
+// Claude auth, but the persisted value carries NO expiry or validation metadata,
+// so it may be STALE or REVOKED. This deliberately does not fully suppress the
+// #581 "no auth" signal — it substitutes a softer note. The token VALUE is never
+// printed; only the fact of recovery and how to verify it. It points at
+// `gitmoot doctor` (a LIVE token probe) rather than `gitmoot daemon status`,
+// which only confirms a token is SET, not valid, and would still report a revoked
+// recovered token as "ok" — the exact silent-auth-failure class #559/#581/#588
+// set out to eliminate.
+func noteRecoveredRuntimeAuthMayBeStale(w io.Writer) {
+	fmt.Fprintln(w, "ℹ️  NOTE: the recovered Claude auth token was restored from persisted state and has NO")
+	fmt.Fprintln(w, "    expiry/validation metadata — it may be STALE or REVOKED. `gitmoot daemon status` only")
+	fmt.Fprintln(w, "    confirms a token is PRESENT, not that it is valid; run `gitmoot doctor` for a live")
+	fmt.Fprintln(w, "    validity probe that surfaces a revoked token.")
 }
 
 func runDaemonStatus(args []string, stdout, stderr io.Writer) int {
