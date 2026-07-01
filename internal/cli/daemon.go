@@ -67,6 +67,9 @@ func printDaemonUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot daemon restart")
 	fmt.Fprintln(w, "  gitmoot daemon status")
 	fmt.Fprintln(w, "  gitmoot daemon logs")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  --repo sets the daemon's LAUNCH CONTEXT (working dir / preflight checkout) only; it does NOT")
+	fmt.Fprintln(w, "  scope supervision — the daemon supervises ALL subscribed repos regardless.")
 }
 
 func runDaemonStart(args []string, stdout, stderr io.Writer) int {
@@ -74,6 +77,14 @@ func runDaemonStart(args []string, stdout, stderr io.Writer) int {
 }
 
 func runDaemonStartWithWorkDir(args []string, workDir string, stdout, stderr io.Writer) int {
+	return runDaemonStartWithWorkDirRestart(args, workDir, false, stdout, stderr)
+}
+
+// runDaemonStartWithWorkDirRestart is the shared (re)start body. restart selects
+// the auth-drop warning flavor (#559): a plain start warns that the new daemon
+// will come up without Claude auth; a restart warns that a previously-authed
+// daemon's auth will be LOST.
+func runDaemonStartWithWorkDirRestart(args []string, workDir string, restart bool, stdout, stderr io.Writer) int {
 	cfg, code := parseDaemonStartConfig("daemon start", args, stderr)
 	if code == daemonHelp {
 		return 0
@@ -111,6 +122,8 @@ func runDaemonStartWithWorkDir(args []string, workDir string, stdout, stderr io.
 			return 1
 		}
 	}
+
+	warnIfDaemonStartLosesClaudeAuth(stderr, restart)
 
 	started, err := startDaemonChild(cfg.Home, cfg.Poll.String(), cfg.Workers, cfg.WatchSkillOptReviews, cfg.WatchIssues, cfg.Scheduler, cfg.RepoFlag, cfg.Session, state, resolvedWorkDir)
 	if err != nil {
@@ -163,7 +176,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("daemon run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
-	repoFlag := fs.String("repo", "", "GitHub repository as owner/repo")
+	repoFlag := fs.String("repo", "", "GitHub repository as owner/repo (sets the daemon launch context: working dir / preflight checkout; does NOT scope supervision — the daemon supervises ALL subscribed repos)")
 	var session string
 	fs.StringVar(&session, "session", "", "scope the daemon worker to a delegation root job id")
 	fs.StringVar(&session, "root", "", "alias for --session")
@@ -413,7 +426,37 @@ func runDaemonRestart(args []string, stdout, stderr io.Writer) int {
 	if stopCode != 0 {
 		return stopCode
 	}
-	return runDaemonStartWithWorkDir(targetArgs, targetWorkDir, stdout, stderr)
+	return runDaemonStartWithWorkDirRestart(targetArgs, targetWorkDir, true, stdout, stderr)
+}
+
+// claudeAuthEnvLookup predicts the environment the (re)started daemon child will
+// inherit. startDaemonChild launches the child with cmd.Env unset, so it inherits
+// THIS process's environment; the anti-footgun warning (#559) therefore inspects
+// that same environment BEFORE launch. It is a package var so tests can seed the
+// auth-readiness seam deterministically instead of depending on real host creds.
+var claudeAuthEnvLookup = os.LookupEnv
+
+// warnIfDaemonStartLosesClaudeAuth prints a prominent, non-fatal stderr warning
+// when the daemon about to (re)start will inherit an environment WITHOUT Claude
+// auth (#559). Because startDaemonChild does not set cmd.Env, the child inherits
+// this process's environment; a shell missing CLAUDE_CODE_OAUTH_TOKEN silently
+// disables Claude-runtime auth for ALL subscribed repos, discoverable only later
+// via `daemon status`. It only covers the Claude runtime (the one
+// InspectClaudeAuthEnv describes) and never refuses the start.
+func warnIfDaemonStartLosesClaudeAuth(w io.Writer, restart bool) {
+	if runtime.InspectClaudeAuthEnv(claudeAuthEnvLookup).Ready() {
+		return
+	}
+	if restart {
+		fmt.Fprintln(w, "⚠️  WARNING: this restart will DROP Claude auth — the new daemon is being launched WITHOUT")
+		fmt.Fprintln(w, "    CLAUDE_CODE_OAUTH_TOKEN in this environment, so it will LOSE the auth the previous daemon had.")
+	} else {
+		fmt.Fprintln(w, "⚠️  WARNING: the daemon is starting WITHOUT Claude auth (CLAUDE_CODE_OAUTH_TOKEN is unset in")
+		fmt.Fprintln(w, "    this environment).")
+	}
+	fmt.Fprintln(w, "    Every Claude-runtime job across ALL subscribed repos will fail auth.")
+	fmt.Fprintln(w, "    Set the token in this shell before (re)starting, or run the daemon via its systemd service")
+	fmt.Fprintln(w, "    (which loads the token from its EnvironmentFile). See `gitmoot daemon status`.")
 }
 
 func runDaemonStatus(args []string, stdout, stderr io.Writer) int {
@@ -697,7 +740,7 @@ func parseDaemonStartConfig(command string, args []string, stderr io.Writer) (da
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
-	repoFlag := fs.String("repo", "", "GitHub repository as owner/repo")
+	repoFlag := fs.String("repo", "", "GitHub repository as owner/repo (sets the daemon launch context: working dir / preflight checkout; does NOT scope supervision — the daemon supervises ALL subscribed repos)")
 	var session string
 	fs.StringVar(&session, "session", "", "scope the daemon worker to a delegation root job id")
 	fs.StringVar(&session, "root", "", "alias for --session")
@@ -2750,7 +2793,14 @@ func warnSerializedParallelJobs(ctx context.Context, worker jobWorker, limit int
 		workers = count
 	}
 	writeLine(worker.Stdout, "warning: %d parallelizable jobs queued for %s will run serially under the current scheduler config; relaunch with: gitmoot daemon restart --parallel %d", count, target, workers)
+	writeLine(worker.Stdout, "         %s", daemonRestartEnvCaveat)
 }
+
+// daemonRestartEnvCaveat is the anti-footgun caveat (#559) appended to the
+// serialized-jobs relaunch hint: a `daemon restart` re-inherits the launching
+// shell's environment, so runtime tokens must be present in that shell or the
+// daemon loses auth, and it resets in-flight scheduler state.
+const daemonRestartEnvCaveat = "note: a restart RE-INHERITS the launching shell's environment (ensure runtime tokens like CLAUDE_CODE_OAUTH_TOKEN are set in that shell, or the daemon loses auth) and resets in-flight scheduler state."
 
 // listPendingQueuedJobs returns the queued jobs eligible to run for this
 // repo/session filter, dropping children of a killed root.
