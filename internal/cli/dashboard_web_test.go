@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	dashboard "github.com/jerryfane/gitmoot-dashboard"
@@ -196,5 +198,153 @@ func TestWebDataSourceBuildsGraphFromStore(t *testing.T) {
 	}
 	if node.Title != "implement: export" {
 		t.Fatalf("Job child-export title = %q", node.Title)
+	}
+}
+
+// setJobTimes overwrites a seeded job's created_at/updated_at (which CreateJob
+// stamps with CURRENT_TIMESTAMP) so timing assertions have deterministic values.
+// It opens a throwaway connection because the seeding store is already closed.
+func setJobTimes(t *testing.T, home, jobID, createdAt, updatedAt string) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Exec(`UPDATE jobs SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, updatedAt, jobID); err != nil {
+		t.Fatalf("UPDATE jobs times: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE job_events SET created_at = ? WHERE job_id = ?`, createdAt, jobID); err != nil {
+		t.Fatalf("UPDATE job_events times: %v", err)
+	}
+}
+
+// TestWebDataSourceNodeTiming asserts the DataSource reads created_at/updated_at
+// off the row (via ListJobs/GetJob) and stamps StartedAt always, EndedAt only on
+// terminal jobs, and Event.T from the event's created_at.
+func TestWebDataSourceNodeTiming(t *testing.T) {
+	home := dashboardTestHome(t)
+	seedWebDashboardTree(t, home)
+
+	const created = "2026-05-23 06:45:00"
+	const updated = "2026-05-23 07:00:00"
+	setJobTimes(t, home, "child-search", created, updated) // succeeded => terminal
+	setJobTimes(t, home, "child-export", created, updated) // running => not terminal
+
+	wantStart := parseJobTimeMillis(created)
+	wantEnd := parseJobTimeMillis(updated)
+	if wantStart == 0 || wantEnd == 0 {
+		t.Fatalf("test timestamps did not parse: start=%d end=%d", wantStart, wantEnd)
+	}
+
+	ds := &webDataSource{home: home}
+	ctx := context.Background()
+
+	state, err := ds.State(ctx, "coord")
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	search, ok := nodeByID(state.Nodes, "child-search")
+	if !ok {
+		t.Fatalf("child-search node missing")
+	}
+	if search.StartedAt != wantStart {
+		t.Fatalf("child-search StartedAt = %d, want %d", search.StartedAt, wantStart)
+	}
+	if search.EndedAt != wantEnd {
+		t.Fatalf("child-search EndedAt = %d, want %d (terminal job should stamp EndedAt)", search.EndedAt, wantEnd)
+	}
+	if len(search.Events) == 0 {
+		t.Fatalf("child-search should carry events")
+	}
+	if search.Events[0].T != wantStart {
+		t.Fatalf("child-search Events[0].T = %d, want %d (from event created_at)", search.Events[0].T, wantStart)
+	}
+
+	// A non-terminal (running) job stamps StartedAt but leaves EndedAt unset.
+	export, ok := nodeByID(state.Nodes, "child-export")
+	if !ok {
+		t.Fatalf("child-export node missing")
+	}
+	if export.StartedAt != wantStart {
+		t.Fatalf("child-export StartedAt = %d, want %d", export.StartedAt, wantStart)
+	}
+	if export.EndedAt != 0 {
+		t.Fatalf("child-export EndedAt = %d, want 0 (running job is not terminal)", export.EndedAt)
+	}
+
+	// /api/job (GetJob) timing must match /api/state (GetJob now selects created_at/updated_at).
+	node, err := ds.Job(ctx, "child-search")
+	if err != nil {
+		t.Fatalf("Job: %v", err)
+	}
+	if node.StartedAt != wantStart || node.EndedAt != wantEnd {
+		t.Fatalf("Job timing = (%d,%d), want (%d,%d)", node.StartedAt, node.EndedAt, wantStart, wantEnd)
+	}
+}
+
+// TestNodeTitleDescriptive covers the descriptive-title preference order beyond
+// the plain task-title case: a humanized delegation id and an instructions line.
+func TestNodeTitleDescriptive(t *testing.T) {
+	// Humanized "task-N-..." delegation id (no task title).
+	got := nodeTitle(workflow.JobPayload{}, db.Job{DelegationID: "task-3-pairing-agent-auth", Type: "implement"}, "implement")
+	if got != "Task 3: pairing agent auth" {
+		t.Fatalf("delegation title = %q, want %q", got, "Task 3: pairing agent auth")
+	}
+
+	// First non-empty instructions line wins over the bare action, and is capped.
+	long := "   \n" + "Wire the pairing agent into the auth handshake so sessions resume cleanly across restarts and reconnects"
+	got = nodeTitle(workflow.JobPayload{Instructions: long}, db.Job{Type: "ask"}, "ask")
+	if got == "ask" || got == "" {
+		t.Fatalf("instructions title fell through to action: %q", got)
+	}
+	if r := []rune(got); len(r) > 61 { // 60 + ellipsis
+		t.Fatalf("instructions title not capped: %d runes (%q)", len(r), got)
+	}
+
+	// An explicit task title still wins over everything.
+	got = nodeTitle(workflow.JobPayload{TaskTitle: "Add search", Instructions: "ignored"}, db.Job{DelegationID: "task-1-x"}, "implement")
+	if got != "Add search" {
+		t.Fatalf("task title = %q, want %q", got, "Add search")
+	}
+
+	// Empty inputs fall back to the job id, never panic.
+	got = nodeTitle(workflow.JobPayload{}, db.Job{ID: "job-xyz"}, "")
+	if got != "job-xyz" {
+		t.Fatalf("fallback title = %q, want job-xyz", got)
+	}
+}
+
+// TestSummarizeRunsSortedAndCapped asserts the run list puts active runs first,
+// then most-recent, and caps at maxRunSummaries.
+func TestSummarizeRunsSortedAndCapped(t *testing.T) {
+	var jobs []db.Job
+	// 70 terminal (succeeded) roots with increasing updated_at, plus one older
+	// active (running) root. The active root must lead despite its older time,
+	// and the list must cap at maxRunSummaries.
+	for i := 0; i < 70; i++ {
+		jobs = append(jobs, db.Job{
+			ID:        fmt.Sprintf("done-%02d", i),
+			State:     "succeeded",
+			UpdatedAt: fmt.Sprintf("2026-05-%02d 10:00:00", (i%27)+1),
+		})
+	}
+	jobs = append(jobs, db.Job{ID: "active-root", State: "running", UpdatedAt: "2026-01-01 00:00:00"})
+
+	runs := summarizeRuns(jobs)
+	if len(runs) != maxRunSummaries {
+		t.Fatalf("run count = %d, want %d (capped)", len(runs), maxRunSummaries)
+	}
+	if runs[0].RunID != "active-root" {
+		t.Fatalf("first run = %q, want active-root (active leads even when older)", runs[0].RunID)
+	}
+	if runs[0].State != "running" {
+		t.Fatalf("first run state = %q, want running", runs[0].State)
+	}
+	// Terminal runs after the active one are newest-activity first.
+	for i := 2; i < len(runs); i++ {
+		if runs[i-1].Updated < runs[i].Updated {
+			t.Fatalf("runs not newest-first at %d: %d < %d", i, runs[i-1].Updated, runs[i].Updated)
+		}
 	}
 }
