@@ -251,12 +251,20 @@ type Job struct {
 	// UpdatedAt is populated by ListJobs (for age display in the dashboard);
 	// other readers may leave it zero.
 	UpdatedAt string
+	// CreatedAt is the job's creation timestamp (SQLite UTC form,
+	// "2006-01-02 15:04:05"). Populated by ListJobs/GetJob so the web dashboard
+	// can stamp a node's StartedAt; other readers may leave it zero.
+	CreatedAt string
 }
 
 type JobEvent struct {
 	JobID   string
 	Kind    string
 	Message string
+	// CreatedAt is the event's timestamp (SQLite UTC form). Populated by
+	// ListJobEvents so the web dashboard can order a node's timeline by real
+	// wall-clock time; other readers may leave it zero.
+	CreatedAt string
 }
 
 type EvalArtifact struct {
@@ -2411,16 +2419,16 @@ func (s *Store) IsRootJobKilled(ctx context.Context, rootID string) (bool, error
 }
 
 func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens FROM jobs WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens, updated_at, created_at FROM jobs WHERE id = ?`, id)
 	var job Job
-	if err := row.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled, &job.InputTokens, &job.OutputTokens); err != nil {
+	if err := row.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled, &job.InputTokens, &job.OutputTokens, &job.UpdatedAt, &job.CreatedAt); err != nil {
 		return Job{}, err
 	}
 	return job, nil
 }
 
 func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens, updated_at FROM jobs ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens, updated_at, created_at FROM jobs ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -2429,7 +2437,7 @@ func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 	var jobs []Job
 	for rows.Next() {
 		var job Job
-		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled, &job.InputTokens, &job.OutputTokens, &job.UpdatedAt); err != nil {
+		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload, &job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.DelegatedBy, &job.RootKilled, &job.InputTokens, &job.OutputTokens, &job.UpdatedAt, &job.CreatedAt); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, job)
@@ -2698,7 +2706,7 @@ func (s *Store) AddJobEvent(ctx context.Context, event JobEvent) error {
 }
 
 func (s *Store) ListJobEvents(ctx context.Context, jobID string) ([]JobEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT job_id, kind, message FROM job_events WHERE job_id = ? ORDER BY id`, jobID)
+	rows, err := s.db.QueryContext(ctx, `SELECT job_id, kind, message, created_at FROM job_events WHERE job_id = ? ORDER BY id`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -2707,7 +2715,7 @@ func (s *Store) ListJobEvents(ctx context.Context, jobID string) ([]JobEvent, er
 	var events []JobEvent
 	for rows.Next() {
 		var event JobEvent
-		if err := rows.Scan(&event.JobID, &event.Kind, &event.Message); err != nil {
+		if err := rows.Scan(&event.JobID, &event.Kind, &event.Message, &event.CreatedAt); err != nil {
 			return nil, err
 		}
 		events = append(events, event)

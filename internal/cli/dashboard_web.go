@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	dashboard "github.com/jerryfane/gitmoot-dashboard"
 
@@ -282,14 +283,22 @@ func buildDashboardNode(job db.Job, payload workflow.JobPayload, events []db.Job
 	} else if len(payload.RawOutputs) > 0 {
 		node.Output = strings.TrimSpace(payload.RawOutputs[len(payload.RawOutputs)-1])
 	}
+	if t := parseJobTimeMillis(job.CreatedAt); t > 0 {
+		node.StartedAt = t
+	}
 	if t := parseJobTimeMillis(job.UpdatedAt); t > 0 && isTerminalJobState(job.State) {
 		node.EndedAt = t
 	}
-	// The event id ordering (ListJobEvents ORDER BY id) is the only monotonic
-	// signal available (job_events carries no timestamp column here), so T is a
-	// 1-based sequence the UI can order a node's timeline by.
+	// Event.T is epoch millis from the event's created_at when the row carries
+	// one, so the UI can order a node's timeline by real wall-clock time. When a
+	// timestamp is absent/unparseable we fall back to the event id ordering
+	// (ListJobEvents ORDER BY id) as a 1-based monotonic sequence.
 	for i, e := range events {
-		node.Events = append(node.Events, dashboard.Event{T: int64(i + 1), Label: eventLabel(e)})
+		t := parseJobTimeMillis(e.CreatedAt)
+		if t <= 0 {
+			t = int64(i + 1)
+		}
+		node.Events = append(node.Events, dashboard.Event{T: t, Label: eventLabel(e)})
 	}
 	return node
 }
@@ -386,13 +395,40 @@ func summarizeRuns(jobs []db.Job) []dashboard.RunSummary {
 			Updated: parseJobTimeMillis(a.updated),
 		})
 	}
+	// Active (non-terminal) runs sort first, then most-recent activity, then id
+	// for a deterministic tiebreak. The list is capped so a long history never
+	// swamps the run picker; the cap keeps the freshest/active runs.
 	sort.SliceStable(out, func(i, j int) bool {
+		ai, aj := runStateActive(out[i].State), runStateActive(out[j].State)
+		if ai != aj {
+			return ai
+		}
 		if out[i].Updated != out[j].Updated {
 			return out[i].Updated > out[j].Updated
 		}
 		return out[i].RunID < out[j].RunID
 	})
+	if len(out) > maxRunSummaries {
+		out = out[:maxRunSummaries]
+	}
 	return out
+}
+
+// maxRunSummaries caps the run list returned by Runs()/summarizeRuns so the web
+// dashboard's run picker stays bounded on a home with a long orchestration
+// history.
+const maxRunSummaries = 60
+
+// runStateActive reports whether an aggregated run state is still live (not a
+// settled terminal state), so active runs can be surfaced ahead of finished
+// ones in the run list.
+func runStateActive(state dashboard.NodeState) bool {
+	switch string(state) {
+	case "succeeded", "failed", "cancelled":
+		return false
+	default:
+		return true
+	}
 }
 
 // mostRecentRunRoot returns the run root to show when no run is requested: the
@@ -526,10 +562,20 @@ func isTerminalJobState(state string) bool {
 	}
 }
 
-// nodeTitle picks the most descriptive title available: the task title, else the
-// delegation action, else the job type, else the id.
+// nodeTitle picks the most descriptive title available so a card reads as a
+// task rather than a bare action. Preference order: an explicit task title; a
+// humanized delegation id ("task-3-pairing-agent-auth" -> "Task 3: pairing
+// agent auth"); the first non-empty line of the job's instructions (capped);
+// then the existing action / job-type / id fallback. Deterministic and safe on
+// empty inputs.
 func nodeTitle(payload workflow.JobPayload, job db.Job, action string) string {
 	if t := strings.TrimSpace(payload.TaskTitle); t != "" {
+		return t
+	}
+	if t := humanizeDelegationID(job.DelegationID); t != "" {
+		return t
+	}
+	if t := firstInstructionLine(payload.Instructions); t != "" {
 		return t
 	}
 	if a := strings.TrimSpace(action); a != "" {
@@ -539,6 +585,72 @@ func nodeTitle(payload workflow.JobPayload, job db.Job, action string) string {
 		return t
 	}
 	return job.ID
+}
+
+// humanizeDelegationID turns a slug-style delegation id into a readable title.
+// A leading "task-<n>" segment becomes "Task <n>: <rest>"; otherwise the words
+// (split on '-'/'_') are joined with spaces and the first letter is upcased.
+// Returns "" for an empty id so nodeTitle can fall through.
+func humanizeDelegationID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(id, func(r rune) bool { return r == '-' || r == '_' })
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) >= 2 && strings.EqualFold(parts[0], "task") && isAllDigits(parts[1]) {
+		head := "Task " + parts[1]
+		rest := strings.Join(parts[2:], " ")
+		if rest == "" {
+			return head
+		}
+		return head + ": " + rest
+	}
+	return capitalizeFirst(strings.Join(parts, " "))
+}
+
+// firstInstructionLine returns the first non-empty, trimmed line of an
+// instructions blob, capped to ~60 runes (appending an ellipsis when cut), so a
+// title stays a single readable clause. Returns "" when there is no content.
+func firstInstructionLine(instructions string) string {
+	for _, line := range strings.Split(instructions, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		const maxRunes = 60
+		runes := []rune(line)
+		if len(runes) > maxRunes {
+			return strings.TrimSpace(string(runes[:maxRunes])) + "…"
+		}
+		return line
+	}
+	return ""
+}
+
+// isAllDigits reports whether s is non-empty and every rune is an ASCII digit.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// capitalizeFirst upcases the first rune of s, leaving the rest untouched.
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
 
 // runTitle titles a whole run from its root job.
