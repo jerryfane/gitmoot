@@ -265,7 +265,7 @@ func buildDashboardNode(job db.Job, payload workflow.JobPayload, events []db.Job
 	if payload.PullRequest > 0 && strings.TrimSpace(payload.Repo) != "" {
 		node.PRURL = fmt.Sprintf("https://github.com/%s/pull/%d", payload.Repo, payload.PullRequest)
 	}
-	if t := parseJobTimeUnix(job.UpdatedAt); t > 0 && isTerminalJobState(job.State) {
+	if t := parseJobTimeMillis(job.UpdatedAt); t > 0 && isTerminalJobState(job.State) {
 		node.EndedAt = t
 	}
 	// The event id ordering (ListJobEvents ORDER BY id) is the only monotonic
@@ -366,7 +366,7 @@ func summarizeRuns(jobs []db.Job) []dashboard.RunSummary {
 			RunID:   root,
 			Title:   runTitle(payload, a.root),
 			State:   aggregateRunState(a.states),
-			Updated: parseJobTimeUnix(a.updated),
+			Updated: parseJobTimeMillis(a.updated),
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -555,10 +555,11 @@ func eventLabel(e db.JobEvent) string {
 	return kind + ": " + msg
 }
 
-// parseJobTimeUnix parses a stored job timestamp into unix seconds, tolerating
-// the SQLite CURRENT_TIMESTAMP form and the ISO forms other update paths write.
-// Returns 0 when absent or unparseable.
-func parseJobTimeUnix(value string) int64 {
+// parseJobTimeMillis parses a stored job timestamp into epoch milliseconds
+// (the dashboard contract's timestamp unit), tolerating the SQLite
+// CURRENT_TIMESTAMP form and the ISO forms other update paths write. Returns 0
+// when absent or unparseable.
+func parseJobTimeMillis(value string) int64 {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0
@@ -570,7 +571,7 @@ func parseJobTimeUnix(value string) int64 {
 		time.RFC3339,
 	} {
 		if t, err := time.Parse(layout, value); err == nil {
-			return t.UTC().Unix()
+			return t.UTC().UnixMilli()
 		}
 	}
 	return 0
