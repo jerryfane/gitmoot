@@ -42,10 +42,14 @@ type daemonRunProc struct {
 // with the #556 widening seam enabled so BOTH simultaneous children are
 // guaranteed past the friendly liveness guard before either self-registers —
 // making the TOCTOU window deterministic instead of microseconds wide.
-func startDaemonRunProc(t *testing.T, exe, home string) *daemonRunProc {
+//
+// argv is cosmetic: TestMain re-execs on the env var alone and ignores the
+// arguments, but tests of the untracked-holder kill-guard (#597 review) pass
+// "daemon run ..." so the child's /proc cmdline looks like a real daemon run.
+func startDaemonRunProc(t *testing.T, exe, home string, argv ...string) *daemonRunProc {
 	t.Helper()
 	p := &daemonRunProc{done: make(chan error, 1)}
-	p.cmd = exec.Command(exe)
+	p.cmd = exec.Command(exe, argv...)
 	env := os.Environ()
 	scrubbed := env[:0]
 	for _, kv := range env {
