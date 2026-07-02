@@ -477,10 +477,10 @@ gitmoot orchestrate project-planner "Review PR #123 in this repo." --repo owner/
 `gitmoot agent run <agent> --background "..."`. It starts a conductor
 (coordinator) that returns a `delegations[]` score; the players (child agents)
 then run in parallel or in dependency order, and a finale (continuation)
-reconvenes and synthesizes the results. `--recipe
-<review-panel|decompose-and-verify|verifier>` (#477, also accepted on `agent
-run`) routes the coordinator through a named built-in recipe prompt without
-changing the agent's identity — see
+reconvenes and synthesizes the results.
+`--recipe review-panel|decompose-and-verify|verifier` (#477, also accepted on
+`agent run`) routes the coordinator through a named built-in recipe prompt
+without changing the agent's identity — see
 [Coordinator Recipes](../workflows/coordinator-recipes-workflow.md).
 
 This uses the same agent registry, repo access grants, cached template snapshot,
