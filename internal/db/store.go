@@ -2560,9 +2560,16 @@ func (s *Store) SumJobTokensByRoot(ctx context.Context, rootID string) (int, err
 	return total, err
 }
 
+// ListQueuedJobs returns the queued jobs in created_at (then rowid) order. The
+// state predicate is the SQL literal 'queued' — not a bound parameter — so SQLite
+// can prove it matches the partial index idx_jobs_queued_created (WHERE
+// state='queued') and read the queued rows in order directly; a bound `state = ?`
+// leaves the planner unable to prove the partial predicate, so it full-scans jobs
+// and builds a temp b-tree for the ORDER BY every worker tick (#619, verified by
+// EXPLAIN QUERY PLAN). 'queued' is a fixed constant, so inlining it is safe.
 func (s *Store) ListQueuedJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens
-		FROM jobs WHERE state = ? ORDER BY created_at, rowid`, "queued")
+		FROM jobs WHERE state = 'queued' ORDER BY created_at, rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -2579,9 +2586,21 @@ func (s *Store) ListQueuedJobs(ctx context.Context) ([]Job, error) {
 	return jobs, rows.Err()
 }
 
+// ListRunningJobsUpdatedBefore returns the running jobs whose updated_at predates
+// the crash-backstop threshold. It orders by updated_at (not id) so the partial
+// index idx_jobs_running_updated_at (WHERE state='running') satisfies both the
+// filter and the ordering — an `ORDER BY id` defeated that index and forced a full
+// primary-key scan of the whole jobs table each worker tick (#619). The state
+// predicate is the SQL literal 'running' (not a bound parameter) for the same
+// reason ListQueuedJobs inlines 'queued': SQLite only applies a partial index when
+// it can prove the query's WHERE implies the index's predicate, which a bound
+// `state = ?` prevents (EXPLAIN QUERY PLAN falls back to a scan + temp b-tree).
+// The sole caller (recoverRunningJobsBeforeForRepoSkipping) processes each row
+// independently and does not depend on the ordering; updated_at is fixed-width
+// 'YYYY-MM-DD HH:MM:SS' so lexical order equals chronological order.
 func (s *Store) ListRunningJobsUpdatedBefore(ctx context.Context, before time.Time) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens
-		FROM jobs WHERE state = ? AND updated_at < ? ORDER BY id`, "running", before.UTC().Format("2006-01-02 15:04:05"))
+		FROM jobs WHERE state = 'running' AND updated_at < ? ORDER BY updated_at`, before.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
 	}
@@ -6992,5 +7011,18 @@ CREATE TABLE merge_gate_ci_observations (
 	// prior migration.
 	`
 CREATE INDEX idx_job_events_kind_job_id ON job_events(kind, job_id, id);
+	`,
+	// #619 partial index for the per-tick ListQueuedJobs poll. That query
+	// (`WHERE state='queued' ORDER BY created_at, rowid`) had no supporting index,
+	// so it full-scanned jobs and built a temp b-tree for the ORDER BY every worker
+	// tick. A partial index on created_at over only the queued rows lets the planner
+	// read them in created_at order directly (the partial index carries rowid as the
+	// implicit tiebreaker, satisfying `created_at, rowid`) and indexes only the small
+	// queued set, not the terminal-job backlog. ListQueuedJobs' text is unchanged.
+	// EQP flips from `SCAN jobs` + `USE TEMP B-TREE FOR ORDER BY` to `SCAN jobs USING
+	// INDEX idx_jobs_queued_created`. Pure additive index, no renumber/alter of any
+	// prior migration.
+	`
+CREATE INDEX idx_jobs_queued_created ON jobs(created_at) WHERE state='queued';
 	`,
 }

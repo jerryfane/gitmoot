@@ -4759,3 +4759,116 @@ func TestListJobsByType(t *testing.T) {
 		t.Fatalf("ListJobsByType(nonexistent) = %+v, want nil", unknown)
 	}
 }
+
+// TestListQueuedJobsUsesQueuedIndex pins FIX-4b (#619): ListQueuedJobs is served by
+// the partial index idx_jobs_queued_created with no temp b-tree, and returns only
+// queued rows in created_at then rowid order.
+func TestListQueuedJobsUsesQueuedIndex(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	seed := []struct {
+		id, state, createdAt string
+	}{
+		{"q3", "queued", "2026-01-03 00:00:00"},
+		{"q1", "queued", "2026-01-01 00:00:00"},
+		{"q2", "queued", "2026-01-02 00:00:00"},
+		{"r1", "running", "2026-01-01 00:00:00"},
+		{"done", "succeeded", "2026-01-01 00:00:00"},
+	}
+	for _, s := range seed {
+		if err := store.CreateJob(ctx, Job{ID: s.id, Agent: "a", Type: "implement", State: s.state}); err != nil {
+			t.Fatalf("CreateJob(%s) returned error: %v", s.id, err)
+		}
+		if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET created_at = ? WHERE id = ?`, s.createdAt, s.id); err != nil {
+			t.Fatalf("set created_at(%s) returned error: %v", s.id, err)
+		}
+	}
+
+	plan := explainQueryPlan(t, store, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens
+		FROM jobs WHERE state = 'queued' ORDER BY created_at, rowid`)
+	if !strings.Contains(plan, "USING INDEX idx_jobs_queued_created") {
+		t.Fatalf("ListQueuedJobs plan does not use idx_jobs_queued_created:\n%s", plan)
+	}
+	if strings.Contains(plan, "TEMP B-TREE") {
+		t.Fatalf("ListQueuedJobs plan still builds a temp b-tree:\n%s", plan)
+	}
+
+	got, err := store.ListQueuedJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListQueuedJobs returned error: %v", err)
+	}
+	wantIDs := []string{"q1", "q2", "q3"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("ListQueuedJobs returned %d jobs, want %d: %+v", len(got), len(wantIDs), got)
+	}
+	for i, job := range got {
+		if job.ID != wantIDs[i] {
+			t.Fatalf("job[%d].ID = %q, want %q (created_at, rowid order)", i, job.ID, wantIDs[i])
+		}
+		if job.State != "queued" {
+			t.Fatalf("job[%d].State = %q, want queued only", i, job.State)
+		}
+	}
+}
+
+// TestListRunningJobsUpdatedBeforeOrder pins FIX-4a (#619): ListRunningJobsUpdatedBefore
+// orders by updated_at (not id), applies the running/threshold filter, and is served
+// by idx_jobs_running_updated_at.
+func TestListRunningJobsUpdatedBeforeOrder(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	// updated_at order (job-2, job-3, job-1) deliberately differs from id order
+	// (job-1, job-2, job-3) so the result proves ordering by updated_at, not id.
+	seed := []struct {
+		id, state, updatedAt string
+		wantBefore           bool
+	}{
+		{"job-1", "running", "2026-01-30 00:00:00", true},
+		{"job-2", "running", "2026-01-10 00:00:00", true},
+		{"job-3", "running", "2026-01-20 00:00:00", true},
+		{"job-4", "running", "2026-06-01 00:00:00", false}, // after threshold
+		{"job-5", "queued", "2026-01-05 00:00:00", false},  // not running
+	}
+	for _, s := range seed {
+		if err := store.CreateJob(ctx, Job{ID: s.id, Agent: "a", Type: "implement", State: s.state}); err != nil {
+			t.Fatalf("CreateJob(%s) returned error: %v", s.id, err)
+		}
+		if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET updated_at = ? WHERE id = ?`, s.updatedAt, s.id); err != nil {
+			t.Fatalf("set updated_at(%s) returned error: %v", s.id, err)
+		}
+	}
+
+	before := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	got, err := store.ListRunningJobsUpdatedBefore(ctx, before)
+	if err != nil {
+		t.Fatalf("ListRunningJobsUpdatedBefore returned error: %v", err)
+	}
+	wantIDs := []string{"job-2", "job-3", "job-1"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("returned %d jobs, want %d: %+v", len(got), len(wantIDs), got)
+	}
+	for i, job := range got {
+		if job.ID != wantIDs[i] {
+			t.Fatalf("job[%d].ID = %q, want %q (updated_at order)", i, job.ID, wantIDs[i])
+		}
+		if job.State != "running" {
+			t.Fatalf("job[%d].State = %q, want running only", i, job.State)
+		}
+	}
+
+	plan := explainQueryPlan(t, store, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens
+		FROM jobs WHERE state = 'running' AND updated_at < '2026-02-01 00:00:00' ORDER BY updated_at`)
+	if !strings.Contains(plan, "idx_jobs_running_updated_at") {
+		t.Fatalf("ListRunningJobsUpdatedBefore plan does not use idx_jobs_running_updated_at:\n%s", plan)
+	}
+}
