@@ -4360,11 +4360,13 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 		// classified OPERATIONAL blocker (runtime auth rejected, rate limit/quota)
 		// is re-queued with an earliest-retry-at hold instead of staying failed
 		// indistinguishably from a product failure. Strictly additive and off the
-		// hot path: deferOperationalBlocker only diverts when the error matches a
-		// classified blocker AND the job failed without a stored result AND it is
-		// not a delegation child; every other failure takes the path below
-		// byte-identically. A deferral error is logged and falls through so the
-		// job is never left in limbo.
+		// hot path: deferOperationalBlocker only diverts when the error is a typed
+		// delivery-seam failure matching a classified blocker AND the job failed
+		// without a stored result AND no delivery ever completed (no persisted raw
+		// outputs — the duplicate-side-effect gate) AND it is not a delegation
+		// child; every other failure takes the path below byte-identically. A
+		// deferral error is logged and falls through so the job is never left in
+		// limbo.
 		if deferred, deferErr := w.deferOperationalBlocker(ctx, job.ID, err); deferErr != nil {
 			writeLine(w.Stdout, "job %s blocker deferral failed: %v", job.ID, deferErr)
 		} else if deferred {

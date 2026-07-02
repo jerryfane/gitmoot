@@ -13,6 +13,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/events"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
@@ -111,21 +112,26 @@ func TestE2E532QuotaBlockerDeferredAndAutoRedispatched(t *testing.T) {
 	state := t.TempDir()
 	marker := filepath.Join(state, "delivered")
 	countFile := filepath.Join(state, "count")
+	promptFile := filepath.Join(state, "retry-prompt")
 	// Fail the first delivery with a fabricated 429 carrying a relative reset;
-	// succeed on the second. $0/$1 (the "gitmoot" argv + prompt) are unused.
+	// succeed on the second, capturing the retried prompt ($1) so the
+	// at-least-once reconciliation notice is provable end to end.
 	script := fmt.Sprintf(`printf x >> %q
 if [ ! -f %q ]; then
   : > %q
   echo "HTTP 429 Too Many Requests: rate limit reached; try again in 3 seconds" 1>&2
   exit 1
 fi
-printf '%%s' '%s'`, countFile, marker, marker, blockerE2EApprovedResult)
+printf '%%s' "$1" > %q
+printf '%%s' '%s'`, countFile, marker, marker, promptFile, blockerE2EApprovedResult)
 	seedDaemonWorkerAgent(t, store, "opsbot", runtime.ShellRuntime, script, []string{"ask"}, "owner/repo")
 	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{
 		ID: "job-quota", Agent: "opsbot", Action: "ask", Repo: "owner/repo",
 		Branch: "main", PullRequest: 1,
 	})
 	worker := blockerE2EWorker(store, home, checkout)
+	sink := &recordingSink{}
+	worker.EventSinkOverride = sink
 
 	// First dispatch: the delivery fails 429 → the job must be DEFERRED
 	// (blocked-operational), not terminally failed.
@@ -149,11 +155,26 @@ printf '%%s' '%s'`, countFile, marker, marker, blockerE2EApprovedResult)
 	if err != nil {
 		t.Fatalf("parse blocker_retry_at %q: %v", payload.BlockerRetryAt, err)
 	}
-	if until := time.Until(retryAt); until <= 0 || until > 4*time.Second {
-		t.Fatalf("blocker_retry_at %s not within the fabricated 3s reset window (until=%s)", payload.BlockerRetryAt, until)
+	// The fabricated 3s reset is floored to quotaBlockerMinParsedDelay (5s), plus
+	// up to 10% jitter.
+	if until := time.Until(retryAt); until <= 0 || until > quotaBlockerMinParsedDelay+time.Second {
+		t.Fatalf("blocker_retry_at %s not within the floored reset window (until=%s)", payload.BlockerRetryAt, until)
 	}
 	if !blockerE2EHasEventKind(t, store, "job-quota", blockerDeferredEventKind) {
 		t.Fatalf("missing %s job event", blockerDeferredEventKind)
+	}
+	// The [events] stream must carry the additive job.deferred so external
+	// consumers acting on the already-emitted job.failed can suppress terminal
+	// handling for a job the daemon is about to retry.
+	deferredEvents := sink.byType(events.EventJobDeferred)
+	if len(deferredEvents) != 1 {
+		t.Fatalf("job.deferred emissions = %d, want 1", len(deferredEvents))
+	}
+	if ev := deferredEvents[0]; ev.JobID != "job-quota" || ev.Repo != "owner/repo" ||
+		!strings.Contains(ev.Detail, string(blockerClassRuntimeQuota)) ||
+		!strings.Contains(ev.Detail, "attempt 1/") ||
+		!strings.Contains(ev.Detail, "retry at ") {
+		t.Fatalf("job.deferred event = %+v, want class/attempt/retry_at in detail", ev)
 	}
 
 	// The #552 stuck-reason surface (job list/show) must explain the hold.
@@ -219,6 +240,16 @@ printf '%%s' '%s'`, countFile, marker, marker, blockerE2EApprovedResult)
 	}
 	if payload.BlockerAttempts != 1 {
 		t.Fatalf("blocker_attempts after success = %d, want 1 (single deferral)", payload.BlockerAttempts)
+	}
+	// The retried delivery is at-least-once for side effects, so its prompt must
+	// carry the reconciliation notice telling the agent to verify prior work.
+	retryPrompt, err := os.ReadFile(promptFile)
+	if err != nil {
+		t.Fatalf("read captured retry prompt: %v", err)
+	}
+	if !strings.Contains(string(retryPrompt), "operational blocker (runtime_quota)") ||
+		!strings.Contains(string(retryPrompt), "reconcile") {
+		t.Fatalf("retried prompt is missing the at-least-once reconciliation notice:\n%s", retryPrompt)
 	}
 }
 
@@ -315,6 +346,99 @@ func TestE2E532ProductFailureIsNeverRetried(t *testing.T) {
 	job, _ = blockerE2EJobPayload(t, store, "job-product")
 	if job.State != string(workflow.JobFailed) {
 		t.Fatalf("product failure left terminal state: %q", job.State)
+	}
+}
+
+// A repair-exhausted gitmoot_result CONTRACT failure — the agent delivered
+// output every time but never a valid envelope, and the final error text is
+// agent-authored (here an unsupported decision that mentions "rate limit") —
+// is a product failure: it must never classify as an operational blocker, no
+// matter what quota/auth words the agent's text contains.
+func TestE2E532ContractValidationFailureIsNeverRetried(t *testing.T) {
+	ctx := context.Background()
+	store, home := blockerE2EHome(t)
+	checkout := t.TempDir()
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+
+	countFile := filepath.Join(t.TempDir(), "count")
+	malformed := `{"gitmoot_result":{"decision":"blocked: rate limit","summary":"quota","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`
+	script := fmt.Sprintf("printf x >> %q\nprintf '%%s' '%s'", countFile, malformed)
+	seedDaemonWorkerAgent(t, store, "contractbot", runtime.ShellRuntime, script, []string{"ask"}, "owner/repo")
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{
+		ID: "job-contract", Agent: "contractbot", Action: "ask", Repo: "owner/repo",
+		Branch: "main", PullRequest: 6,
+	})
+	worker := blockerE2EWorker(store, home, checkout)
+
+	if err := runQueuedJobsForRepo(ctx, worker, 1, "", ""); err != nil {
+		t.Fatalf("dispatch returned error: %v", err)
+	}
+	job, payload := blockerE2EJobPayload(t, store, "job-contract")
+	if job.State != string(workflow.JobFailed) {
+		t.Fatalf("contract failure state = %q, want %q (a deferral means agent-authored text classified)", job.State, workflow.JobFailed)
+	}
+	if payload.BlockerClass != "" || payload.BlockerRetryAt != "" {
+		t.Fatalf("contract failure acquired blocker fields: %+v", payload)
+	}
+	if blockerE2EHasEventKind(t, store, "job-contract", blockerDeferredEventKind) {
+		t.Fatal("contract failure recorded a blocker_deferred event")
+	}
+	// First delivery + the repair re-asks — but never a #532 auto-retry.
+	deliveries := blockerE2EDeliveryCount(t, countFile)
+	if err := runQueuedJobsForRepo(ctx, worker, 1, "", ""); err != nil {
+		t.Fatalf("second dispatch returned error: %v", err)
+	}
+	if got := blockerE2EDeliveryCount(t, countFile); got != deliveries {
+		t.Fatalf("contract failure was re-delivered (count %d -> %d)", deliveries, got)
+	}
+}
+
+// A 429 that hits the REPAIR delivery — i.e. after a first delivery that
+// completed a full, potentially side-effectful agent turn — must not defer:
+// the persisted raw output proves execution, and an auto-retry would re-run
+// the entire prompt (duplicate pushes/PRs). The job keeps today's terminal
+// path.
+func TestE2E532RepairDeliveryQuotaFailureIsNotRetried(t *testing.T) {
+	ctx := context.Background()
+	store, home := blockerE2EHome(t)
+	checkout := t.TempDir()
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+
+	state := t.TempDir()
+	marker := filepath.Join(state, "delivered")
+	countFile := filepath.Join(state, "count")
+	// First delivery SUCCEEDS but with no gitmoot_result envelope (a completed
+	// turn); every repair delivery then fails with a classified 429.
+	script := fmt.Sprintf(`printf x >> %q
+if [ ! -f %q ]; then
+  : > %q
+  printf '%%s' "did the work, pushed the branch, forgot the envelope"
+  exit 0
+fi
+echo "HTTP 429 Too Many Requests: rate limit reached; try again in 3 seconds" 1>&2
+exit 1`, countFile, marker, marker)
+	seedDaemonWorkerAgent(t, store, "repairbot", runtime.ShellRuntime, script, []string{"ask"}, "owner/repo")
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{
+		ID: "job-repair", Agent: "repairbot", Action: "ask", Repo: "owner/repo",
+		Branch: "main", PullRequest: 7,
+	})
+	worker := blockerE2EWorker(store, home, checkout)
+
+	if err := runQueuedJobsForRepo(ctx, worker, 1, "", ""); err != nil {
+		t.Fatalf("dispatch returned error: %v", err)
+	}
+	job, payload := blockerE2EJobPayload(t, store, "job-repair")
+	if job.State != string(workflow.JobFailed) {
+		t.Fatalf("repair-delivery 429 state = %q, want %q (deferring would re-run an already-executed job)", job.State, workflow.JobFailed)
+	}
+	if len(payload.RawOutputs) == 0 {
+		t.Fatal("first delivery's raw output was not persisted; the side-effect guard has nothing to key on")
+	}
+	if payload.BlockerClass != "" || payload.BlockerRetryAt != "" {
+		t.Fatalf("already-executed job acquired blocker fields: %+v", payload)
+	}
+	if blockerE2EHasEventKind(t, store, "job-repair", blockerDeferredEventKind) {
+		t.Fatal("already-executed job recorded a blocker_deferred event")
 	}
 }
 

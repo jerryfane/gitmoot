@@ -356,6 +356,33 @@ func (m Mailbox) canaryDraw() float64 {
 	return rand.Float64()
 }
 
+// DeliveryError marks an error that provably originated from the runtime
+// DELIVERY seam — adapter.Deliver itself failed (runtime CLI exited nonzero,
+// provider rejected the request) — as opposed to an error ABOUT the agent's
+// delivered output (gitmoot_result contract/validation failures, which are
+// product failures the agent authored). The daemon's operational-blocker
+// classifier (#532) requires this marker before doing ANY string matching, so
+// agent-authored text that merely mentions "quota"/"rate limit" (a summary, a
+// delegation id such as "audit-quota-enforcement") can never be misclassified
+// as a retryable operational blocker. Error() is transparent so every existing
+// string-based consumer of a delivery failure stays byte-identical.
+type DeliveryError struct{ Err error }
+
+func (e DeliveryError) Error() string { return e.Err.Error() }
+func (e DeliveryError) Unwrap() error { return e.Err }
+
+// blockerRetryReconciliationNotice is prepended to the prompt of a job the
+// daemon re-dispatches after an operational-blocker deferral (#532). The
+// auto-retry is AT-LEAST-ONCE for side effects: a blocker that hit mid-turn may
+// have interrupted an attempt that already pushed branches, opened PRs, or
+// posted comments, and (for ephemeral/fresh-session workers) the retried run
+// has no memory of it — so tell the agent to reconcile instead of duplicating.
+func blockerRetryReconciliationNotice(class string) string {
+	return fmt.Sprintf("IMPORTANT: a previous attempt of this exact job was interrupted by an operational blocker (%s) "+
+		"and may have already performed side effects — pushed branches, opened pull requests, posted comments, or made commits. "+
+		"Before doing any work, check for artifacts from that interrupted attempt and reuse/reconcile them instead of redoing or duplicating the work.", class)
+}
+
 func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, adapter DeliveryAdapter) (AgentResult, error) {
 	if m.Store == nil {
 		return AgentResult{}, errors.New("mailbox store is required")
@@ -384,10 +411,18 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 	}
 
 	prompt := prompts.RenderJob(payload.prompt(job.Type))
+	if payload.BlockerAttempts > 0 && strings.TrimSpace(payload.BlockerClass) != "" {
+		// This run is an automatic operational-blocker retry (#532): the previous
+		// attempt may have executed side effects before the blocker hit, so ask the
+		// agent to reconcile prior artifacts rather than duplicate them.
+		prompt = blockerRetryReconciliationNotice(payload.BlockerClass) + "\n\n" + prompt
+	}
 	firstRaw, firstRefreshedRef, firstErr := m.deliver(ctx, adapter, agent, job, payload, prompt)
 	if firstErr != nil {
 		_ = m.fail(ctx, job.ID, fmt.Sprintf("delivery failed: %v", firstErr))
-		return AgentResult{}, firstErr
+		// Typed DeliveryError: this error is FROM the delivery seam (not about the
+		// agent's output), the precondition for #532 operational classification.
+		return AgentResult{}, DeliveryError{Err: firstErr}
 	}
 	m.persistRefreshedRuntimeRef(ctx, job.ID, agent, firstRefreshedRef)
 	// If the first delivery self-healed a dead session (#443), adopt the freshly
@@ -430,7 +465,10 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 			repairRaw, repairRefreshedRef, repairErr := m.deliver(ctx, adapter, agent, job, payload, repairPrompt)
 			if repairErr != nil {
 				_ = m.fail(ctx, job.ID, fmt.Sprintf("repair delivery failed: %v", repairErr))
-				return AgentResult{}, repairErr
+				// Typed like the first-delivery failure. Note the #532 deferral still
+				// refuses this job: the persisted RawOutputs from the completed first
+				// delivery prove side-effectful execution (see deferOperationalBlocker).
+				return AgentResult{}, DeliveryError{Err: repairErr}
 			}
 			m.persistRefreshedRuntimeRef(ctx, job.ID, agent, repairRefreshedRef)
 			// Adopt a freshly minted session ref so the next repair re-ask resumes the

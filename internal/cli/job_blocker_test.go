@@ -23,17 +23,18 @@ func TestClassifyOperationalBlocker(t *testing.T) {
 	}{
 		{
 			name:      "codex usage limit without parseable reset",
-			err:       errors.New("delivery failed: You've hit your usage limit. try again at Jun 14th: exit status 1"),
+			err:       workflow.DeliveryError{Err: errors.New("You've hit your usage limit. try again at Jun 14th: exit status 1")},
 			wantOK:    true,
 			wantClass: blockerClassRuntimeQuota,
 		},
 		{
 			name:      "http 429 with relative reset",
-			err:       errors.New("delivery failed: HTTP 429 Too Many Requests: rate limit reached; try again in 30 seconds: exit status 1"),
+			err:       workflow.DeliveryError{Err: errors.New("HTTP 429 Too Many Requests: rate limit reached; try again in 30 seconds: exit status 1")},
 			wantOK:    true,
 			wantClass: blockerClassRuntimeQuota,
 		},
 		{
+			// The typed sentinel is trustworthy without the DeliveryError marker.
 			name:      "typed claude auth sentinel",
 			err:       fmt.Errorf("delivery failed: %w", runtime.ErrClaudeAuthFailed),
 			wantOK:    true,
@@ -41,13 +42,13 @@ func TestClassifyOperationalBlocker(t *testing.T) {
 		},
 		{
 			name:      "textual 401 authentication_error",
-			err:       errors.New("delivery failed: Failed to authenticate. API Error: 401 authentication_error: invalid x-api-key: exit status 1"),
+			err:       workflow.DeliveryError{Err: errors.New("Failed to authenticate. API Error: 401 authentication_error: invalid x-api-key: exit status 1")},
 			wantOK:    true,
 			wantClass: blockerClassRuntimeAuth,
 		},
 		{
 			name:   "unclassified runtime error stays terminal",
-			err:    errors.New("delivery failed: boom: exit status 2"),
+			err:    workflow.DeliveryError{Err: errors.New("boom: exit status 2")},
 			wantOK: false,
 		},
 		{
@@ -57,12 +58,40 @@ func TestClassifyOperationalBlocker(t *testing.T) {
 		},
 		{
 			name:   "context cancellation is never a blocker",
-			err:    fmt.Errorf("delivery failed: %w", context.Canceled),
+			err:    workflow.DeliveryError{Err: fmt.Errorf("delivery failed: %w", context.Canceled)},
 			wantOK: false,
 		},
 		{
 			name:   "run deadline is never a blocker",
-			err:    fmt.Errorf("delivery failed: %w", context.DeadlineExceeded),
+			err:    workflow.DeliveryError{Err: fmt.Errorf("delivery failed: %w", context.DeadlineExceeded)},
+			wantOK: false,
+		},
+		{
+			// A repair-exhausted gitmoot_result VALIDATION error is agent-authored
+			// text (no DeliveryError marker): a delegation id mentioning "quota" must
+			// never classify as an operational blocker (product/contract failure).
+			name:   "contract validation error mentioning quota is never a blocker",
+			err:    errors.New(`delegation "audit-quota-enforcement" references unknown dep "quota-schema"`),
+			wantOK: false,
+		},
+		{
+			// Same for a malformed decision whose text contains rate-limit words.
+			name:   "contract decision error mentioning rate limit is never a blocker",
+			err:    errors.New(`unsupported gitmoot_result decision "blocked: rate limit"`),
+			wantOK: false,
+		},
+		{
+			// The "exit status N" exec suffix must not provide HTTP context for a
+			// bare digit run on ANOTHER line (hex job ids are full of 429s).
+			name:   "exec exit-status plus hex job id never classifies",
+			err:    workflow.DeliveryError{Err: errors.New("adapter exited with status 1\njob local-ask-18be4290fad9 failed\nexit status 1")},
+			wantOK: false,
+		},
+		{
+			// A URL plus an unrelated PR number carrying a 429 digit run must not
+			// combine across lines into a throttle classification.
+			name:   "url and PR number digits never classify",
+			err:    workflow.DeliveryError{Err: errors.New("failed to open pull request: see https://github.com/o/r\nhint: PR #4291 already exists")},
 			wantOK: false,
 		},
 		{
@@ -102,7 +131,7 @@ func TestClassifyOperationalBlocker(t *testing.T) {
 
 func TestClassifyOperationalBlockerQuotaUsesParsedReset(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	got, ok := classifyOperationalBlocker(errors.New("delivery failed: rate limit reached; try again in 30 seconds"), now)
+	got, ok := classifyOperationalBlocker(workflow.DeliveryError{Err: errors.New("rate limit reached; try again in 30 seconds")}, now)
 	if !ok {
 		t.Fatal("expected quota classification")
 	}
@@ -132,7 +161,13 @@ func TestParseQuotaResetDelay(t *testing.T) {
 	}{
 		{"codex relative seconds", "Rate limit reached. Please try again in 32 seconds.", 32 * time.Second},
 		{"relative minutes", "usage limit; retry in 5 minutes", 5 * time.Minute},
+		{"abbreviated min", "Rate limit reached. Please try again in 5 min", 5 * time.Minute},
+		{"abbreviated hrs", "usage limit; retry in 2 hrs", 2 * time.Hour},
+		{"openai decimal seconds floored", "Rate limit reached. Please try again in 1.898s.", quotaBlockerMinParsedDelay},
+		{"decimal minutes", "rate limit; try again in 1.5 minutes", 90 * time.Second},
+		{"short reset floored", "rate limit reached; try again in 3 seconds", quotaBlockerMinParsedDelay},
 		{"retry-after header style", "429 Too Many Requests. Retry-After: 120", 120 * time.Second},
+		{"unknown unit word falls back", "rate limit; try again in 5 fortnights", quotaBlockerFallbackDelay},
 		{"unparseable absolute date falls back", "You've hit your usage limit. try again at Jun 14th", quotaBlockerFallbackDelay},
 		{"no hint falls back", "quota exceeded", quotaBlockerFallbackDelay},
 	}
