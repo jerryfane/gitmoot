@@ -2928,6 +2928,45 @@ func (s *Store) JobIDsWithPendingCommentRetry(ctx context.Context) ([]string, er
 	return jobIDs, rows.Err()
 }
 
+// JobIDsWithOpenEscalation returns the IDs of coordinator jobs with an OPEN
+// escalation round — strictly more delegation_escalation_requested than
+// delegation_escalation_resolved events — the same requested>resolved rule
+// Engine.escalationOpen applies per job (engine.go), evaluated set-at-once over
+// idx_job_events_kind. It lets AutoFinalizeExpiredEscalations iterate only the
+// (small) set of trees currently paused awaiting a human instead of listing EVERY
+// job and re-reading each one's full event history TWICE on every repo poll — which
+// sustained ~37MB/s and ~1108 queries per poll x18 repos (#598/#340). Zero rows =>
+// the caller returns with no further per-job queries.
+//
+// Both ask-gate (#445) and failure escalations ride these same two kinds, and the
+// per-job candidate gate is purely count-based on them (never branching on the
+// record's Kind), so this count reproduces the exact candidate set the original
+// loadEscalation(exists) + !escalationResolved(open) gates passed. The literal
+// strings MUST equal the escalationRequestedEvent/escalationResolvedEvent constants;
+// a store test pins this.
+func (s *Store) JobIDsWithOpenEscalation(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT job_id FROM job_events
+		WHERE kind IN ('delegation_escalation_requested', 'delegation_escalation_resolved')
+		GROUP BY job_id
+		HAVING SUM(CASE WHEN kind = 'delegation_escalation_requested' THEN 1 ELSE 0 END)
+		     > SUM(CASE WHEN kind = 'delegation_escalation_resolved' THEN 1 ELSE 0 END)
+		ORDER BY job_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobIDs []string
+	for rows.Next() {
+		var jobID string
+		if err := rows.Scan(&jobID); err != nil {
+			return nil, err
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	return jobIDs, rows.Err()
+}
+
 func (s *Store) UpsertEvalArtifact(ctx context.Context, artifact EvalArtifact) error {
 	artifact, err := normalizeEvalArtifact(artifact)
 	if err != nil {
