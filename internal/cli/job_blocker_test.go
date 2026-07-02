@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -181,4 +182,103 @@ func TestQueuedJobBlockerHeld(t *testing.T) {
 	if queuedJobBlockerHeld(db.Job{ID: "job-1", State: string(workflow.JobQueued), Payload: "{"}, now) {
 		t.Fatal("malformed payload must never strand a job")
 	}
+}
+
+func TestRestorePreIsolationPayloadForDeferredJob(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerAgent(t, store, "iso", runtime.ShellRuntime, "true", []string{"ask"}, "owner/repo")
+
+	seed := func(t *testing.T, id string, mutate func(*workflow.JobPayload)) (string, workflow.JobPayload) {
+		t.Helper()
+		enqueueDaemonWorkerJob(t, store, workflow.JobRequest{
+			ID: id, Agent: "iso", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1,
+		})
+		job, err := store.GetJob(ctx, id)
+		if err != nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		before := job.Payload
+		payload, err := daemonJobPayload(job)
+		if err != nil {
+			t.Fatalf("parse payload: %v", err)
+		}
+		mutate(&payload)
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := store.UpdateJobPayload(ctx, id, string(encoded)); err != nil {
+			t.Fatalf("UpdateJobPayload: %v", err)
+		}
+		return before, payload
+	}
+
+	t.Run("deferred isolation job restores worktree and keeps hold", func(t *testing.T) {
+		hold := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+		before, _ := seed(t, "job-iso-deferred", func(p *workflow.JobPayload) {
+			p.WorktreePath = "/reaped/isolation/path"
+			p.BlockerClass = string(blockerClassRuntimeQuota)
+			p.BlockerAttempts = 1
+			p.BlockerRetryAt = hold
+		})
+		restorePreIsolationPayloadForDeferredJob(ctx, store, "job-iso-deferred", before)
+		_, got := func() (db.Job, workflow.JobPayload) {
+			job, err := store.GetJob(ctx, "job-iso-deferred")
+			if err != nil {
+				t.Fatalf("GetJob: %v", err)
+			}
+			payload, err := daemonJobPayload(job)
+			if err != nil {
+				t.Fatalf("parse payload: %v", err)
+			}
+			return job, payload
+		}()
+		if got.WorktreePath != "" {
+			t.Fatalf("worktree path = %q, want restored empty pre-isolation value", got.WorktreePath)
+		}
+		if got.BlockerClass != string(blockerClassRuntimeQuota) || got.BlockerAttempts != 1 || got.BlockerRetryAt != hold {
+			t.Fatalf("blocker hold fields were not carried over: %+v", got)
+		}
+	})
+
+	t.Run("terminal job is untouched", func(t *testing.T) {
+		before, mutated := seed(t, "job-iso-failed", func(p *workflow.JobPayload) {
+			p.WorktreePath = "/reaped/isolation/path"
+			p.BlockerRetryAt = time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+		})
+		if _, err := store.TransitionJobStateWithEvent(ctx, "job-iso-failed", string(workflow.JobQueued), string(workflow.JobFailed), db.JobEvent{JobID: "job-iso-failed", Kind: "failed", Message: "boom"}); err != nil {
+			t.Fatalf("transition: %v", err)
+		}
+		restorePreIsolationPayloadForDeferredJob(ctx, store, "job-iso-failed", before)
+		job, err := store.GetJob(ctx, "job-iso-failed")
+		if err != nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		payload, err := daemonJobPayload(job)
+		if err != nil {
+			t.Fatalf("parse payload: %v", err)
+		}
+		if payload.WorktreePath != mutated.WorktreePath {
+			t.Fatalf("terminal job payload was rewritten: %+v", payload)
+		}
+	})
+
+	t.Run("queued job without hold is untouched", func(t *testing.T) {
+		before, mutated := seed(t, "job-iso-nohold", func(p *workflow.JobPayload) {
+			p.WorktreePath = "/reaped/isolation/path"
+		})
+		restorePreIsolationPayloadForDeferredJob(ctx, store, "job-iso-nohold", before)
+		job, err := store.GetJob(ctx, "job-iso-nohold")
+		if err != nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		payload, err := daemonJobPayload(job)
+		if err != nil {
+			t.Fatalf("parse payload: %v", err)
+		}
+		if payload.WorktreePath != mutated.WorktreePath {
+			t.Fatalf("hold-less queued job payload was rewritten: %+v", payload)
+		}
+	})
 }

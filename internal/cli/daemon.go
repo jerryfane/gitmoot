@@ -3605,6 +3605,15 @@ func runQueuedJobsForRepoPoolTracked(ctx context.Context, worker jobWorker, limi
 		// so no other selector can re-dispatch it mid-restore.
 		if f.payloadBeforeIsolation != "" && errors.Is(f.err, errRuntimeSessionBusy) {
 			_ = worker.Store.UpdateJobPayload(context.WithoutCancel(ctx), f.jobID, f.payloadBeforeIsolation)
+		} else if f.payloadBeforeIsolation != "" {
+			// Operational-blocker deferral (#532) × pool isolation: a deferred job
+			// is queued again but its payload still points at the isolation
+			// worktree this reap is about to delete. Restore the pre-isolation
+			// payload (carrying the blocker hold fields over) so its re-dispatch
+			// after the hold re-evaluates cleanly instead of preflight-failing on
+			// a reaped path. No-op for any job that is not queued with a blocker
+			// hold, so terminal outcomes are byte-identical.
+			restorePreIsolationPayloadForDeferredJob(context.WithoutCancel(ctx), worker.Store, f.jobID, f.payloadBeforeIsolation)
 		}
 		tracker.end(f.jobID)
 		// Release the host-global admission reservation (#365) keyed by job ID,

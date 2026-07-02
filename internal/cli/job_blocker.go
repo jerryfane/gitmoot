@@ -249,6 +249,37 @@ func (w jobWorker) deferOperationalBlocker(ctx context.Context, jobID string, ca
 	return transitioned, nil
 }
 
+// restorePreIsolationPayloadForDeferredJob handles the pool-isolation ×
+// blocker-deferral interaction: an isolation-dispatched job (#394) that
+// DEFERRED on an operational blocker is queued again, but
+// allocatePoolIsolationWorktree rewrote its payload to point at the isolation
+// worktree the pool reap removes on completion. Restore the pre-isolation
+// payload while carrying the blocker fields over, so the held job re-evaluates
+// (and can be re-isolated) cleanly on re-dispatch. Best-effort and strictly
+// scoped: any job that is not queued with a live blocker hold is left untouched.
+func restorePreIsolationPayloadForDeferredJob(ctx context.Context, store *db.Store, jobID string, payloadBeforeIsolation string) {
+	job, err := store.GetJob(ctx, jobID)
+	if err != nil || job.State != string(workflow.JobQueued) {
+		return
+	}
+	current, err := daemonJobPayload(job)
+	if err != nil || strings.TrimSpace(current.BlockerRetryAt) == "" {
+		return
+	}
+	var restored workflow.JobPayload
+	if err := json.Unmarshal([]byte(payloadBeforeIsolation), &restored); err != nil {
+		return
+	}
+	restored.BlockerClass = current.BlockerClass
+	restored.BlockerAttempts = current.BlockerAttempts
+	restored.BlockerRetryAt = current.BlockerRetryAt
+	encoded, err := json.Marshal(restored)
+	if err != nil {
+		return
+	}
+	_ = store.UpdateJobPayload(ctx, jobID, string(encoded))
+}
+
 // queuedJobBlockerHeld reports whether a queued job is still inside its
 // operational-blocker hold window (payload.blocker_retry_at in the future).
 // Jobs without the field — every job that never hit a classified blocker —
