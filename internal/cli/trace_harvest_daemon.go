@@ -148,8 +148,12 @@ func daemonHardVerifierDispatcher(store *db.Store, checkout string, home string)
 		return nil
 	}
 	return &hardVerifierDispatcher{
-		store:  store,
-		runner: subprocess.ExecRunner{},
+		store: store,
+		// GroupRunner (process-group SIGTERM→SIGKILL) reaps a wedged verifier AND its
+		// grandchildren (a `go test` spawns test binaries, `npm test` spawns node), so
+		// the leg's bounded context can never leave an orphaned suite running. The
+		// short-lived git worktree calls keep the plain ExecRunner (no grandchildren).
+		runner: subprocess.GroupRunner{},
 		sandbox: worktreeSandboxProvisioner{
 			base:   checkout,
 			home:   home,

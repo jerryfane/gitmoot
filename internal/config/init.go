@@ -206,12 +206,28 @@ path = ""
 #     default (diff_size only) so a tool-less host runs the always-available metric
 #     and never a heavy tool. Narrow it to run only the cheap dims, or widen it to
 #     opt heavy tools (jscpd/golangci-lint) in. An unknown name is ignored.
+#   hard_verifiers_enabled (#474): OFF by default; requires auto_trace AND at least one
+#     hard_verifier_commands line. When true, a MERGED implement job runs the configured
+#     build/test/lint COMMANDS in a FRESH clean sandbox checkout at the merged head (a
+#     detached git worktree — no external sandbox dep), exit 0 == pass. The binary
+#     verdict is the authoritative EvaluatorScore.Hard (pass ⇒ hard=1.0/choice a, fail
+#     ⇒ hard=0.0/choice b) — an un-gameable FOURTH coexisting row (reviewer
+#     gitmoot-verifier, item hard#repo#pr) that catches a merge whose code fails a clean
+#     build/test even through an empty (no-CI) gate. DETACHED + best-effort: an
+#     unprovisionable sandbox or empty command list writes no row and never blocks the
+#     merge. Off ⇒ byte-identical. Promotion stays MANUAL.
+#   hard_verifier_commands (#474): REPEATABLE — one verifier command per line (so a
+#     command may contain commas / shell operators). The run PASSES only when EVERY
+#     command exits 0. UNSET/empty ⇒ the tier is a no-op (no safe universal default).
 # [skillopt]
 # auto_trace_enabled = false
 # cross_family_review_enabled = false
 # revert_detection_enabled = true
 # deterministic_checkers_enabled = false
 # deterministic_checkers = diff_size
+# hard_verifiers_enabled = false
+# hard_verifier_commands = go build ./...
+# hard_verifier_commands = go test ./...
 # auto_promote = false
 # auto_promote_min_samples = 0
 # auto_promote_min_score = 0.0

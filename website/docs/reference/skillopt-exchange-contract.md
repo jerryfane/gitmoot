@@ -195,15 +195,20 @@ mirrors the off-by-default `[events]` stream.
 - **Merged with real CI** (a passing non-`gitmoot/` external status/check at the
   merged head) → strong positive (`soft = 1.0`, `choice = a`).
 - **Merged through an empty gate** (the synthetic `gitmoot/ci` context, or no
-  external CI at head) → **near-neutral** (`soft ≈ 0.5`, `choice = a`), never a
-  strong positive. Rewarding an empty gate would optimize toward "merges that
-  pass no real CI"; the no-CI guard reads the combined status at the merged head
-  SHA and demotes it. (On the merge side, an empty gate is itself deferred by a
-  grace window — a second zero-external observation at the same head at least
-  `[merge_gate] min_ci_wait` later — plus `.github/workflows/` awareness before it
-  ever stamps `gitmoot/ci` (#596), so this near-neutral band applies only to
-  genuinely CI-less heads. Set `[merge_gate] require_external_ci = true` to
-  hard-block an empty gate instead.)
+  external CI at head) → the merge **event** is recorded (`choice = a`) but the
+  quality **score is genuinely absent** (`has_score = false`), **never a
+  fabricated `0.5`** (#474). Rewarding an empty gate would optimize toward "merges
+  that pass no real CI", and inventing a `0.5` midpoint violates the rest of the
+  projection's rule (it returns `has_score = false` when a signal is truly
+  missing). The no-CI guard reads the combined status at the merged head SHA; when
+  the #614/#596 `gitmoot/ci` "no external CI" stamp is present, the reasoning marks
+  it a **confirmed** empty gate (the grace/workflow window elapsed → genuinely no
+  CI, vs. a still-racing zero). To turn a no-CI merge back into a real `0`/`1`
+  quality signal, enable the **hard-verifier tier** below. (On the merge side, an
+  empty gate is itself deferred by a grace window — a second zero-external
+  observation at the same head at least `[merge_gate] min_ci_wait` later — plus
+  `.github/workflows/` awareness before it ever stamps `gitmoot/ci` (#596). Set
+  `[merge_gate] require_external_ci = true` to hard-block an empty gate instead.)
 - **Blocked at the merge gate** → authoritative gate-fail (`hard = 0`,
   `choice = b`).
 - **Review changes_requested** → graded negative (`choice = b`) whose score
@@ -339,6 +344,56 @@ swallowed. Promotion stays manual (the leg writes only `eval_runs` /
 > the PR head, so the tool-backed dimensions are effectively produced only when such
 > a checkout happens to be available; `diff_size` always runs. Plumbing a PR-head
 > worktree through to the tool runners is a documented follow-on.
+
+### Deterministic hard-verifier tier (off by default)
+
+Where the `diff_size`/`lint`/`complexity` checkers above produce **soft** quality
+priors, the **hard-verifier tier** (#474, RFC-informed by THUDM/slime's coding-agent
+grading loop) produces a single **un-gameable `0`/`1`** — the authoritative
+`EvaluatorScore.Hard`. Setting **all three** of `[skillopt].auto_trace_enabled = true`,
+`[skillopt].hard_verifiers_enabled = true`, **and at least one**
+`hard_verifier_commands` line (all default off/empty) runs the operator's configured
+verifier commands in a **fresh, clean sandbox checkout at the merged head** — a
+detached `git worktree` off the daemon checkout, reusing gitmoot's own worktree
+isolation (no E2B / containers / second clone). Each command runs via `sh -c` with its
+**working directory set to the throwaway sandbox**, so it can never touch the real
+checkout; `exit 0 == pass`:
+
+```toml
+[skillopt]
+auto_trace_enabled = true
+hard_verifiers_enabled = true
+hard_verifier_commands = go build ./...
+hard_verifier_commands = go test ./...
+```
+
+`hard_verifier_commands` is **repeatable** — one command per line — so a command may
+itself contain commas / shell operators. The verdict is **fail-closed**: it PASSES
+only when **every** command exits `0` (slime's `fail_to_pass ∪ pass_to_pass ⊆
+passed`). The binary verdict maps onto `EvaluatorScore.Hard`: **pass → `hard = 1.0`**
+(a strong, evidence-backed positive, `choice = a`), **fail → `hard = 0.0`** (an
+authoritative gate-fail, `choice = b`) — a merge whose code actually fails a clean
+build/test is caught **even when it merged through an empty gate**, and no LLM judge's
+prose can move it.
+
+The verdict is written as a **fourth** `FeedbackEvent` in the SAME
+`auto-trace:<version>` run under a distinct item id (`hard#<repo>#<pr>`) and the fixed
+`gitmoot-verifier` reviewer sentinel — so it **coexists with** (never overwrites) the
+verifiable floor (`gitmoot-auto`), the cross-family review (`gitmoot-review`), and the
+objective checker (`gitmoot-checker`); a re-verification re-upserts the SAME hard row
+in place. The hard eval item carries `hard_verifier = true`, `hard_passed`, the
+projected `hard_score`, and the per-command `command_results`, while the run keeps
+`feedback_source = automatic_trace` — additive, **no new contract field,
+`contract_version` stays `1`**.
+
+The leg runs **off the blocking merge path** (detached, `HardVerifierLegTimeout`-bounded,
+process-group killed so a wedged suite and its grandchildren are reaped) and is
+**fail-safe throughout**: an unprovisionable sandbox or an empty command list yields
+**no hard row** and never errors the harvest, blocks the merge, or stalls
+`AdvanceJob`; a dispatch failure records a `hard_verifiers_failed` job event and is
+swallowed. Because it re-runs the tests, it only maps onto **testable** implement
+legs — subjective review-quality kinds keep the soft cross-family signal. Promotion
+stays manual.
 
 ### Promotion policy + notifications (off by default)
 
