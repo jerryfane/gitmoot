@@ -4598,3 +4598,95 @@ func TestJobIDsWithOpenEscalationRaceSafe(t *testing.T) {
 		}
 	}
 }
+
+// explainQueryPlan runs EXPLAIN QUERY PLAN for query and returns the plan's detail
+// lines joined by newline so index-choice assertions read cleanly. store_test is
+// package db (white-box), so it can reach store.db directly.
+func explainQueryPlan(t *testing.T, store *Store, query string) string {
+	t.Helper()
+	rows, err := store.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+query)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN returned error: %v", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan EQP row returned error: %v", err)
+		}
+		lines = append(lines, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("EQP rows error: %v", err)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// TestJobEventsKindJobIDCoveringIndexPlan pins the #619 covering index: each of the
+// three per-tick candidate GROUP BY queries must be served index-only by
+// idx_job_events_kind_job_id, with no fall-through to the non-covering
+// idx_job_events_kind (which forced a table row fetch per candidate row).
+func TestJobEventsKindJobIDCoveringIndexPlan(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{
+			name: "advance",
+			query: `SELECT job_id FROM job_events
+				WHERE kind IN ('advance_started', 'advance_retry')
+				  AND id IN (
+					SELECT MAX(id) FROM job_events
+					WHERE kind IN ('advance_started', 'advance_retry', 'advance_completed',
+					               'advance_retried', 'advance_blocked', 'advance_retry_skipped', 'retry_queued')
+					GROUP BY job_id
+				)
+				ORDER BY job_id`,
+		},
+		{
+			name: "comment",
+			query: `SELECT job_id FROM job_events
+				WHERE kind = 'comment_post_failed'
+				  AND id IN (
+					SELECT MAX(id) FROM job_events
+					WHERE kind IN ('comment_post_failed', 'comment_posted', 'retry_queued')
+					GROUP BY job_id
+				)
+				ORDER BY job_id`,
+		},
+		{
+			name: "reclaim",
+			query: `SELECT job_id FROM job_events
+				WHERE kind = 'delegation_worktree_cleanup_skipped'
+				  AND id IN (
+					SELECT MAX(id) FROM job_events
+					WHERE kind IN ('delegation_worktree_cleanup_skipped', 'delegation_worktree_removed')
+					GROUP BY job_id
+				)
+				ORDER BY job_id`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := explainQueryPlan(t, store, tc.query)
+			if !strings.Contains(plan, "COVERING INDEX idx_job_events_kind_job_id") {
+				t.Fatalf("plan does not use the covering index:\n%s", plan)
+			}
+			// The non-covering idx_job_events_kind renders "USING INDEX
+			// idx_job_events_kind (kind=? AND rowid=?)" — its trailing "(" plus a
+			// table row fetch is exactly what the covering index removes.
+			if strings.Contains(plan, "USING INDEX idx_job_events_kind (") {
+				t.Fatalf("plan still row-fetches via the non-covering idx_job_events_kind:\n%s", plan)
+			}
+		})
+	}
+}

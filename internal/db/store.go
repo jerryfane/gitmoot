@@ -6946,4 +6946,21 @@ CREATE TABLE merge_gate_ci_observations (
 	UNIQUE(repo_full_name, pull_request)
 );
 	`,
+	// #619 covering index for the per-tick job-event candidate GROUP BY queries
+	// (JobIDsWithPendingAdvanceRetry / CommentRetry / DelegationWorktreeReclaim).
+	// Those queries filter `kind IN (...)` and project only job_id + MAX(id), but
+	// idx_job_events_kind covers only `kind`, so each candidate row still required a
+	// table row fetch to read job_id/id (~23.67 MiB/call for the advance query on the
+	// affected DB). Indexing (kind, job_id, id) lets the planner satisfy both the
+	// outer filter and the MAX(id) GROUP BY index-only. EQP flips all three from
+	// `SEARCH ... USING INDEX idx_job_events_kind (kind=? AND rowid=?)` (with row
+	// fetches) to `SEARCH ... USING COVERING INDEX idx_job_events_kind_job_id
+	// (kind=?)`; the GROUP BY temp b-tree remains (groups span kinds) but now runs
+	// over index-only (job_id,id). job_events.id is INTEGER PRIMARY KEY (a rowid
+	// alias) so id is covered. Result sets are byte-identical — pure additive index
+	// (idx_job_events_kind is kept for pure kind= lookups), no renumber/alter of any
+	// prior migration.
+	`
+CREATE INDEX idx_job_events_kind_job_id ON job_events(kind, job_id, id);
+	`,
 }
