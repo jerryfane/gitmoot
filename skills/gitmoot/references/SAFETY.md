@@ -24,6 +24,29 @@ conflict. When an **external** system owns the merge decision instead, set
 then **abstains** from its native merge gate — fail-closed, meaning it never
 merges gatelessly; the external gate makes the call.
 
+### No external CI: grace window, not instant pass (#596)
+
+When a PR head reports **zero** external commit-statuses **and** zero check-runs,
+Gitmoot does **not** immediately treat the repo as CI-less and stamp the
+synthetic `gitmoot/ci` success. GitHub Actions creates a check-run a few seconds
+*after* a head is pushed, so a single zero observation cannot distinguish "no CI
+configured" from "CI not created yet" — and a fast approve path could otherwise
+merge inside that window before CI exists. Instead the gate returns **pending**
+and only concludes "no CI" after a **second consecutive zero-external observation
+at the same head**, at least `min_ci_wait` (default `60s`) later. The gate is
+re-evaluated every daemon poll, so a genuinely CI-less repo merges exactly one
+grace window later. Two extra guards layer on top:
+
+- **Workflow-aware:** if `.github/workflows/` exists at the head tree, the gate
+  never concludes no-CI from a zero observation — it stays pending until a real
+  check appears (a demonstrably CI-configured repo whose Actions run is merely
+  queued must never merge gatelessly).
+- **`[merge_gate] require_external_ci`** (global, or per-repo under
+  `[repos."owner/repo".merge_gate]`; default `false`): when `true`, an empty gate
+  **hard-blocks** with an actionable reason instead of ever stamping `gitmoot/ci`
+  — use it for repos you know always have CI. Optionally tune `min_ci_wait` in the
+  same section.
+
 Useful commands:
 
 ```sh
