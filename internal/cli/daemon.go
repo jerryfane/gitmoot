@@ -4720,6 +4720,12 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 	}
 	writeLine(w.Stdout, "running job %s for %s in %s", job.ID, agent.Name, payload.Repo)
 	engine := w.WorkflowFactory(checkout)
+	// Wire the PRE-TERMINAL operational-blocker deferrer (#532 slice E) on the LIVE
+	// worker (not the WorkflowFactory-captured copy) so it observes this worker's
+	// EventSink for the first-class job.deferred emit. When a delivery-seam failure
+	// classifies as a retryable operational blocker the mailbox re-queues the job
+	// BEFORE the terminal transition, so no job.failed reaches the [events] sink.
+	engine.BlockerDeferrer = w.deferOperationalBlockerPreTerminal
 	runCtx, stopRun := w.runningJobContext(ctx, job.ID)
 	defer stopRun()
 	if jobTimeout > 0 {
@@ -4729,25 +4735,20 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 	}
 	_, err = engine.RunJob(runCtx, job.ID, agent, adapter)
 	if err != nil {
+		// Operational-blocker deferral (#532 slice E): a run whose delivery failed on
+		// a classified OPERATIONAL blocker (runtime auth rejected, rate limit/quota,
+		// network/GitHub outage) is re-queued PRE-terminally by the mailbox's injected
+		// BlockerDeferrer — running→queued with a hold + a first-class job.deferred,
+		// and NO job.failed. RunJob reports ErrJobDeferred; short-circuit the entire
+		// terminal path (no handleRunJobError, no failure comment) since the run
+		// already resolved to a deferral. Every other failure takes the path below
+		// byte-identically.
+		if errors.Is(err, workflow.ErrJobDeferred) {
+			writeLine(w.Stdout, "job %s deferred on operational blocker (pre-terminal): %v", job.ID, err)
+			return nil
+		}
 		if markErr := w.handleRunJobError(ctx, job.ID, err); markErr != nil {
 			return markErr
-		}
-		// Operational-blocker deferral (#532): a run that terminally failed on a
-		// classified OPERATIONAL blocker (runtime auth rejected, rate limit/quota)
-		// is re-queued with an earliest-retry-at hold instead of staying failed
-		// indistinguishably from a product failure. Strictly additive and off the
-		// hot path: deferOperationalBlocker only diverts when the error is a typed
-		// delivery-seam failure matching a classified blocker AND the job failed
-		// without a stored result AND no delivery ever completed (no persisted raw
-		// outputs — the duplicate-side-effect gate) AND it is not a delegation
-		// child; every other failure takes the path below byte-identically. A
-		// deferral error is logged and falls through so the job is never left in
-		// limbo.
-		if deferred, deferErr := w.deferOperationalBlocker(ctx, job.ID, err); deferErr != nil {
-			writeLine(w.Stdout, "job %s blocker deferral failed: %v", job.ID, deferErr)
-		} else if deferred {
-			writeLine(w.Stdout, "job %s deferred on operational blocker: %v", job.ID, err)
-			return nil
 		}
 		commentErr := err
 		if job.Type == "implement" && runtimePermissionFailure(err) {

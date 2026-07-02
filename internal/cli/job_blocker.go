@@ -47,8 +47,10 @@ import (
 //     budget is exhausted the job stays terminally failed exactly like today.
 //
 // Every job that does not hit a classified blocker takes the existing path
-// byte-identically: the hook in jobWorker.run only diverts when
-// deferOperationalBlocker returns true.
+// byte-identically: the mailbox's injected BlockerDeferrer
+// (deferOperationalBlockerPreTerminal, #532 slice E) only diverts a run when it
+// classifies AND every scope guard passes; otherwise Mailbox.Run fails the job
+// exactly as before.
 
 // blockerClass names a class of operational blocker. Persisted in the job
 // payload (blocker_class) and rendered by the #552 stuck-reason surface, so the
@@ -320,14 +322,17 @@ func blockerRetryJitter(delay time.Duration) time.Duration {
 	return time.Duration(rand.Int64N(int64(max)))
 }
 
-// deferOperationalBlocker re-queues a job that just terminally failed on a
-// classifiable operational blocker, preserving its resumable context. Called by
-// jobWorker.run strictly AFTER RunJob returned an error, i.e. off the hot path:
-// it reads the (already failed) job back, and only when every scope guard passes
-// does it write the blocker fields into the payload and flip failed→queued with
-// a blocker_deferred event. It returns (true, nil) exactly when the job was
-// deferred, so the caller skips the terminal failure comment/log; every other
-// outcome leaves the job exactly as the existing path put it.
+// deferOperationalBlockerPreTerminal re-queues a RUNNING job whose delivery just
+// failed on a classifiable operational blocker, preserving its resumable context.
+// It is the injected workflow.Engine.BlockerDeferrer, called by Mailbox.Run at the
+// delivery-seam failure point BEFORE the terminal transition (#532 slice E): it
+// reads the (still running) job back, and only when every scope guard passes does
+// it write the blocker fields into the payload and flip running→queued with a
+// blocker_deferred event + additive job.deferred emit. It returns (true, nil)
+// exactly when the job was deferred, so Mailbox.Run skips m.fail and NO job.failed
+// is emitted first (slice A deferred failed→queued AFTER the terminal transition —
+// the flap this slice removes). Every other outcome returns false so Run takes its
+// existing terminal path unchanged.
 //
 // SIDE-EFFECT SEMANTICS: the auto-retry is AT-LEAST-ONCE. A run whose FIRST
 // delivery completed (persisted RawOutputs) is never deferred — completed
@@ -338,23 +343,23 @@ func blockerRetryJitter(delay time.Duration) time.Duration {
 // from here, so Mailbox.Run prepends a reconciliation notice to every
 // blocker-retried prompt (payload.BlockerAttempts > 0) telling the agent to
 // verify and reuse prior artifacts instead of duplicating them.
-func (w jobWorker) deferOperationalBlocker(ctx context.Context, jobID string, cause error) (bool, error) {
-	classification, ok := classifyOperationalBlocker(cause, time.Now().UTC())
-	if !ok {
-		return false, nil
-	}
+func (w jobWorker) deferOperationalBlockerPreTerminal(ctx context.Context, jobID string, cause error) (bool, error) {
 	latest, err := w.Store.GetJob(ctx, jobID)
 	if err != nil {
 		return false, err
 	}
-	// Only a run that Mailbox.fail closed as JobFailed is eligible; a blocked/
-	// cancelled/queued job belongs to other machinery (permission block, kill,
-	// pre-flight) that already owns its semantics.
-	if latest.State != string(workflow.JobFailed) {
+	// The pre-terminal seam runs while the job is still RUNNING (Mailbox.Run claimed
+	// it queued→running before delivering); anything else means the run already
+	// resolved and this seam does not apply.
+	if latest.State != string(workflow.JobRunning) {
 		return false, nil
 	}
 	payload, err := daemonJobPayload(latest)
 	if err != nil {
+		return false, nil
+	}
+	classification, ok := classifyOperationalBlocker(cause, time.Now().UTC())
+	if !ok {
 		return false, nil
 	}
 	// A stored result means the agent answered: decision=failed is a PRODUCT
@@ -389,31 +394,29 @@ func (w jobWorker) deferOperationalBlocker(ctx context.Context, jobID string, ca
 	if err != nil {
 		return false, err
 	}
-	// Payload first, transition second: a crash in between leaves the job
-	// terminally failed (today's behavior) with extra context in the payload —
+	// Payload first, transition second: a crash in between leaves the job RUNNING
+	// with extra context in the payload — the stale-running recovery requeues it —
 	// never a queued job missing its hold timestamp.
 	if err := w.Store.UpdateJobPayload(ctx, jobID, string(encoded)); err != nil {
 		return false, err
 	}
-	transitioned, err := w.Store.TransitionJobStateWithEvent(ctx, jobID, string(workflow.JobFailed), string(workflow.JobQueued), db.JobEvent{
-		JobID: jobID,
-		Kind:  blockerDeferredEventKind,
-		Message: fmt.Sprintf("%s: attempt %d/%d, retry at %s: %s",
-			classification.Class, attempt, maxOperationalBlockerRetries, retryAt, classification.Detail),
+	message := fmt.Sprintf("%s: attempt %d/%d, retry at %s: %s",
+		classification.Class, attempt, maxOperationalBlockerRetries, retryAt, classification.Detail)
+	transitioned, err := w.Store.TransitionJobStateWithEvent(ctx, jobID, string(workflow.JobRunning), string(workflow.JobQueued), db.JobEvent{
+		JobID:   jobID,
+		Kind:    blockerDeferredEventKind,
+		Message: message,
 	})
 	if err != nil {
 		return false, err
 	}
 	if transitioned {
-		// The engine already emitted a terminal job.failed for this run
-		// (Mailbox.fail), so [events] consumers acting on job.failed would race the
-		// hidden retry. Emit an additive job.deferred so stream consumers can
-		// suppress terminal handling: job.failed followed by job.deferred is NOT
-		// terminal (see events.EventJobDeferred). Best-effort and nil-safe when
-		// [events] is OFF, mirroring the daemon's other emits.
-		emitDaemonTerminalEvent(ctx, w.eventSink(), w.Store, jobID, events.EventJobDeferred, string(workflow.JobQueued),
-			fmt.Sprintf("%s: attempt %d/%d, retry at %s: %s",
-				classification.Class, attempt, maxOperationalBlockerRetries, retryAt, classification.Detail))
+		// PRE-TERMINAL (#532 slice E): m.fail was never called, so NO job.failed was
+		// emitted for this run. Emit the additive job.deferred as the FIRST-CLASS
+		// terminal-set transition for this run — the [events] stream sees the deferral
+		// directly, with no preceding failed→deferred flap. Best-effort and nil-safe
+		// when [events] is OFF, mirroring the daemon's other emits.
+		emitDaemonTerminalEvent(ctx, w.eventSink(), w.Store, jobID, events.EventJobDeferred, string(workflow.JobQueued), message)
 	}
 	return transitioned, nil
 }

@@ -23,7 +23,7 @@ import (
 // script fails the FIRST delivery with a fabricated 429-with-reset and succeeds
 // on the second, driven through the REAL daemon dispatch entry
 // (runQueuedJobsForRepo → listPendingQueuedJobs → jobWorker.run → engine.RunJob
-// → ShellAdapter → real subprocess → Mailbox.fail → deferOperationalBlocker).
+// → ShellAdapter → real subprocess → Mailbox.Run's pre-terminal BlockerDeferrer).
 //
 // MUTATION PROOF: disable the classification match (make
 // classifyOperationalBlocker return false, or drop the "throttled" case) and
