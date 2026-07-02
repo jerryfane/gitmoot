@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1628,6 +1629,7 @@ func TestRunQueuedJobsAllowsDifferentRuntimeSessionsAcrossRepos(t *testing.T) {
 }
 
 func TestRunQueuedJobsLeavesBusyRuntimeSessionQueued(t *testing.T) {
+	resetRuntimeLockWaitEpisodes() // #598: the runtime_lock_wait dedup is package-global; a neighbor reusing job-a could otherwise suppress our write.
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
 	home := t.TempDir()
@@ -1685,6 +1687,7 @@ func TestRunQueuedJobsLeavesBusyRuntimeSessionQueued(t *testing.T) {
 }
 
 func TestRunQueuedJobsDelegatesBusyRuntimeToTempWorker(t *testing.T) {
+	resetRuntimeLockWaitEpisodes() // #598: package-global runtime_lock_wait dedup; reset so a neighbor reusing job-a-merge-back can't suppress our write.
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
 	checkout := t.TempDir()
@@ -6982,5 +6985,155 @@ func TestRetryPendingJobCommentsBoundedToCandidates(t *testing.T) {
 
 	if len(comments.posted) != 1 || comments.posted[0].issueNumber != 9 {
 		t.Fatalf("posted comments = %+v, want exactly one on PR 9 (the pending candidate)", comments.posted)
+	}
+}
+
+// queuePolicyBusyRuntimeStore builds a worker whose parallel-session policy is
+// "queue" (so a runtime-busy job bounces errRuntimeSessionBusy instead of forking a
+// temp worker) with the codex "audit" agent's runtime session runtime:codex:session-1
+// already externally locked. Each returned dispatch attempt bounces busy. Used by
+// the #598 spin/dedup tests.
+func queuePolicyBusyRuntimeStore(t *testing.T) (*db.Store, jobWorker, *int64) {
+	t.Helper()
+	store := daemonWorkerStore(t)
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	content := strings.Replace(config.DefaultConfig(paths), `same_session = "fork_temp_session"`, `same_session = "queue"`, 1)
+	if err := os.WriteFile(paths.ConfigFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile config returned error: %v", err)
+	}
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "audit", runtime.CodexRuntime, "session-1", []string{"ask"}, "owner/repo")
+	if acquired, err := store.AcquireResourceLock(context.Background(), db.ResourceLock{
+		ResourceKey: "runtime:codex:session-1",
+		OwnerJobID:  "other-job",
+		OwnerToken:  "other-token",
+		ExpiresAt:   time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano),
+	}, time.Now().UTC()); err != nil || !acquired {
+		t.Fatalf("AcquireResourceLock returned acquired=%v err=%v", acquired, err)
+	}
+	var attempts int64
+	worker := defaultJobWorker(store, io.Discard, home)
+	worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
+		atomic.AddInt64(&attempts, 1)
+		return t.TempDir(), nil
+	}
+	return store, worker, &attempts
+}
+
+func countDaemonWorkerEvents(t *testing.T, store *db.Store, jobID, kind string) int {
+	t.Helper()
+	events, err := store.ListJobEvents(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("ListJobEvents(%s) returned error: %v", jobID, err)
+	}
+	n := 0
+	for _, e := range events {
+		if e.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRuntimeLockWaitEventDedupedPerEpisode proves the #598 dedup: repeated busy
+// dispatch attempts of the same job write exactly ONE runtime_lock_wait row per wait
+// episode, and closing the episode (a successful acquire) lets the next wait record
+// a fresh row.
+func TestRuntimeLockWaitEventDedupedPerEpisode(t *testing.T) {
+	resetRuntimeLockWaitEpisodes()
+	ctx := context.Background()
+	store, worker, _ := queuePolicyBusyRuntimeStore(t)
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "audit", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1})
+
+	// Five dispatch attempts, all bounce busy → exactly ONE runtime_lock_wait row.
+	for i := 0; i < 5; i++ {
+		if err := runQueuedJobs(ctx, worker, 1); err != nil {
+			t.Fatalf("runQueuedJobs attempt %d returned error: %v", i, err)
+		}
+	}
+	if n := countDaemonWorkerEvents(t, store, "job-a", "runtime_lock_wait"); n != 1 {
+		t.Fatalf("runtime_lock_wait rows after 5 busy attempts = %d, want 1 (deduped per episode)", n)
+	}
+
+	// A successful acquire closes the episode; the next busy wait is a fresh episode.
+	endRuntimeLockWaitEpisode("job-a")
+	if err := runQueuedJobs(ctx, worker, 1); err != nil {
+		t.Fatalf("runQueuedJobs after episode end returned error: %v", err)
+	}
+	if n := countDaemonWorkerEvents(t, store, "job-a", "runtime_lock_wait"); n != 2 {
+		t.Fatalf("runtime_lock_wait rows after new episode = %d, want 2", n)
+	}
+}
+
+// TestPoolDoesNotRespinRuntimeBusyJob proves the #598 spin-stop: a queued job whose
+// runtime session is externally locked bounces busy, and the pool dispatcher must
+// dispatch it at most once per invocation and then RETURN, instead of re-selecting
+// it every pass in a tight spin. Mutation proof: dropping the excludeBouncedBusy
+// call makes the attempt count unbounded (the goroutine below never returns and the
+// wall-clock guard trips).
+func TestPoolDoesNotRespinRuntimeBusyJob(t *testing.T) {
+	resetRuntimeLockWaitEpisodes()
+	ctx := context.Background()
+	store, worker, attempts := queuePolicyBusyRuntimeStore(t)
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "audit", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runQueuedJobsForRepoPoolTracked(ctx, worker, 1, 1, "owner/repo", "", nil)
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("runQueuedJobsForRepoPoolTracked returned error: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("pool did not return within 15s (busy job re-spinning); attempts so far = %d", atomic.LoadInt64(attempts))
+	}
+	if got := atomic.LoadInt64(attempts); got != 1 {
+		t.Fatalf("dispatch attempts = %d, want exactly 1 (busy job re-selected)", got)
+	}
+	if n := countDaemonWorkerEvents(t, store, "job-a", "runtime_lock_wait"); n != 1 {
+		t.Fatalf("runtime_lock_wait rows = %d, want 1", n)
+	}
+	job, err := store.GetJob(ctx, "job-a")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	if job.State != string(workflow.JobQueued) {
+		t.Fatalf("job state = %q, want queued (held for a later tick)", job.State)
+	}
+}
+
+// TestSameSessionSiblingsHeldBackOnBusy proves the #598 runtime-key holdback: two
+// queued jobs share a runtime session; once the first bounces busy, its sibling
+// (same session key) must NOT be dispatched in the same invocation. With only the
+// job-id set (no bouncedBusyRuntimes) the sibling would be dispatched after the
+// first is reaped, giving 2 attempts; the runtime-key holdback keeps it at 1.
+func TestSameSessionSiblingsHeldBackOnBusy(t *testing.T) {
+	resetRuntimeLockWaitEpisodes()
+	ctx := context.Background()
+	store, worker, attempts := queuePolicyBusyRuntimeStore(t)
+	// Both jobs use the same audit agent ⇒ the same runtime:codex:session-1 key.
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-a", Agent: "audit", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 1})
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "job-b", Agent: "audit", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: 2})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runQueuedJobsForRepoPoolTracked(ctx, worker, 2, 2, "owner/repo", "", nil)
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("runQueuedJobsForRepoPoolTracked returned error: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("pool did not return within 15s; attempts so far = %d", atomic.LoadInt64(attempts))
+	}
+	if got := atomic.LoadInt64(attempts); got != 1 {
+		t.Fatalf("dispatch attempts = %d, want exactly 1 (same-session sibling must be held back)", got)
 	}
 }
