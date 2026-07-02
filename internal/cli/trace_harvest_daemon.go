@@ -129,6 +129,45 @@ func daemonDeterministicCheckerDispatcher(store *db.Store, gh github.Client, che
 	}
 }
 
+// daemonHardVerifierDispatcher returns the best-effort deterministic HARD-verifier
+// dispatcher for this home (#474), or nil when the tier is OFF — the default, or any
+// config-load failure (fail-safe to disabled). HardVerifiersEnabled() requires BOTH
+// hard_verifiers_enabled AND auto_trace_enabled AND at least one configured command,
+// so the hard row is only ever written inside an enabled auto-trace run with real
+// verifiers to run. When nil, the engine constructs no verifier leg and writes no
+// hard row, so daemon behavior is byte-identical. It mirrors
+// daemonDeterministicCheckerDispatcher's off-by-default gate. The sandbox is a fresh
+// INDEPENDENT local clone of the daemon's checkout, detached at the merged head — its
+// own git dir (config/refs/gc/worktree registry), so a verifier that shells out to git
+// cannot escape into the live checkout (reusing gitmoot's single-binary git tooling, no
+// external sandbox dep).
+func daemonHardVerifierDispatcher(store *db.Store, checkout string, home string) workflow.HardVerifierDispatcher {
+	if store == nil {
+		return nil
+	}
+	policy, err := loadSkillOptPolicy(home)
+	if err != nil || !policy.HardVerifiersEnabled() {
+		return nil
+	}
+	return &hardVerifierDispatcher{
+		store: store,
+		// GroupRunner (process-group SIGTERM→SIGKILL) reaps a wedged verifier AND its
+		// grandchildren (a `go test` spawns test binaries, `npm test` spawns node), so
+		// the leg's bounded context can never leave an orphaned suite running. The
+		// short-lived git clone/checkout calls keep the plain ExecRunner (no grandchildren).
+		runner: subprocess.GroupRunner{},
+		sandbox: cloneSandboxProvisioner{
+			base:   checkout,
+			home:   home,
+			runner: subprocess.ExecRunner{},
+			// store backs the checkout-mutation lock that serializes the sandbox clone's
+			// base read against concurrent real jobs on the same daemon checkout (#617).
+			store: store,
+		},
+		commands: policy.ResolvedHardVerifierCommands(),
+	}
+}
+
 // daemonAuthedRuntimes probes which of the cross-family runtimes (codex/claude/
 // kimi) are authed/available, best-effort, via each adapter's Health check with a
 // synthetic read-only agent. A runtime that errors (not installed / not authed) is
