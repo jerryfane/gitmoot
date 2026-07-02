@@ -242,6 +242,11 @@ func TestRuntimeOverrideValidationBeforeEnqueue(t *testing.T) {
 		"unknown runtime":         {"agent", "ask", "maintainer", "hi", "--home", home, "--repo", "owner/repo", "--runtime", "bogus"},
 		"shell without session":   {"agent", "ask", "maintainer", "hi", "--home", home, "--repo", "owner/repo", "--runtime", "shell"},
 		"session without runtime": {"agent", "ask", "maintainer", "hi", "--home", home, "--repo", "owner/repo", "--session", "printf ok"},
+		// "last" names no concrete session: the delivery would resume whichever
+		// session is most recent (possibly another agent's default-runtime
+		// session, mid-flight) under a "runtime:<rt>:last" lock that can never
+		// serialize with the concrete session's lock.
+		"last session": {"agent", "ask", "maintainer", "hi", "--home", home, "--repo", "owner/repo", "--runtime", "claude", "--session", "last"},
 	} {
 		var out, errBuf bytes.Buffer
 		if code := Run(args, &out, &errBuf); code == 0 {
@@ -265,5 +270,66 @@ func TestRuntimeOverrideValidationBeforeEnqueue(t *testing.T) {
 		if !strings.Contains(errBuf.String(), supported) {
 			t.Fatalf("error %q must enumerate supported runtime %q", errBuf.String(), supported)
 		}
+	}
+}
+
+// TestRuntimeOverridePermissionBlockedJobKeepsOverride: an implement dispatch
+// on a non-write-policy agent routes to the permission-blocked enqueue path,
+// whose persisted payload must keep the resolved --runtime/--session override
+// AND the per-job --model. `gitmoot job retry` re-runs the stored payload
+// as-is, so dropping them here would silently retry the job on the agent's
+// DEFAULT runtime — taking the default runtime-session lock and resuming the
+// exact session the user's --runtime asked it to stay off.
+func TestRuntimeOverridePermissionBlockedJobKeepsOverride(t *testing.T) {
+	ctx := context.Background()
+	home, store, _ := runtimeOverrideE2EHome(t)
+	// Implement capability + read-only policy: dispatch reaches
+	// readOnlyImplementationBlocked and enqueues the blocked job.
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:           "ro-implementer",
+		Role:           "worker",
+		Runtime:        runtime.CodexRuntime,
+		RuntimeRef:     runtimeOverrideCodexRef,
+		RepoScope:      "owner/repo",
+		Capabilities:   []string{"implement"},
+		AutonomyPolicy: runtime.AutonomyPolicyReadOnly,
+		HealthStatus:   "ok",
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{
+		"agent", "implement", "ro-implementer", "add a feature",
+		"--home", home,
+		"--repo", "owner/repo",
+		"--runtime", "shell",
+		"--session", "printf ok",
+		"--model", "override-model",
+		"--json",
+	}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("agent implement exit = %d, stderr=%s", code, errBuf.String())
+	}
+	var output localAgentJobOutput
+	if err := json.Unmarshal(out.Bytes(), &output); err != nil {
+		t.Fatalf("parse implement output %q: %v", out.String(), err)
+	}
+	if output.State != string(workflow.JobBlocked) {
+		t.Fatalf("implement state = %q, want blocked", output.State)
+	}
+	job, err := store.GetJob(ctx, output.JobID)
+	if err != nil {
+		t.Fatalf("GetJob(%s): %v", output.JobID, err)
+	}
+	payload, err := workflow.ParseJobPayload(job.Payload)
+	if err != nil {
+		t.Fatalf("ParseJobPayload: %v", err)
+	}
+	if payload.RuntimeOverride != runtime.ShellRuntime || payload.RuntimeOverrideRef != "printf ok" {
+		t.Fatalf("blocked payload override = %q/%q, want shell/\"printf ok\" (a retry must honor the user's --runtime)", payload.RuntimeOverride, payload.RuntimeOverrideRef)
+	}
+	if payload.Model != "override-model" {
+		t.Fatalf("blocked payload Model = %q, want %q (a retry must honor the per-job --model)", payload.Model, "override-model")
 	}
 }

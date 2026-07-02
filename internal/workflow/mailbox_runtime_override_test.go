@@ -118,6 +118,9 @@ func TestMailboxEnqueueRejectsInvalidRuntimeOverride(t *testing.T) {
 		"missing ref":          {ID: "job-bad", Agent: "a", Action: "ask", Repo: "o/r", RuntimeOverride: runtime.ClaudeRuntime},
 		"ref without override": {ID: "job-bad", Agent: "a", Action: "ask", Repo: "o/r", RuntimeOverrideRef: "x"},
 		"shell fresh ref":      {ID: "job-bad", Agent: "a", Action: "ask", Repo: "o/r", RuntimeOverride: runtime.ShellRuntime, RuntimeOverrideRef: freshRef},
+		// "last" names no concrete session, so its lock key could never serialize
+		// with the concrete session it would actually resume.
+		"last ref on a resumable runtime": {ID: "job-bad", Agent: "a", Action: "ask", Repo: "o/r", RuntimeOverride: runtime.ClaudeRuntime, RuntimeOverrideRef: runtime.LastRef},
 	} {
 		if _, err := mailbox.Enqueue(ctx, request); err == nil {
 			t.Fatalf("%s: Enqueue accepted an invalid runtime override", name)

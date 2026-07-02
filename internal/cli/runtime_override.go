@@ -47,6 +47,15 @@ func resolveJobRuntimeOverride(overrideRuntime string, session string) (string, 
 		return "", "", err
 	}
 	if session != "" {
+		// SESSION SAFETY: "last" names no concrete session — the delivery would
+		// resume whichever session in the checkout is most recent (possibly an
+		// agent's default-runtime session, mid-flight), while the lock key would
+		// be the literal "runtime:<rt>:last" and so could never serialize with
+		// that concrete session's lock. Require an explicit id; shell refs are
+		// commands, not resumable sessions, so they are exempt.
+		if session == runtime.LastRef && rt != runtime.ShellRuntime {
+			return "", "", errors.New("--session last is not allowed with --runtime; pass an explicit session id")
+		}
 		return rt, session, nil
 	}
 	if rt == runtime.ShellRuntime {

@@ -292,7 +292,8 @@ func printAgentAskUsage(w io.Writer) {
 func printAgentRuntimeOverrideHelp(w io.Writer) {
 	fmt.Fprintf(w, "  --runtime %s runs THIS job on the named runtime; the agent's registered default runtime is unchanged.\n", strings.Join(runtime.SupportedRuntimes(), "|"))
 	fmt.Fprintln(w, "    The overridden job never resumes the agent's default-runtime session: it runs on a fresh session of the")
-	fmt.Fprintln(w, "    override runtime, or on --session <ref> (a session id, last, or — required for shell — a command).")
+	fmt.Fprintln(w, "    override runtime, or on --session <ref> (an explicit session id, or — required for shell — a command;")
+	fmt.Fprintln(w, "    \"last\" is rejected because it resumes whichever session is most recent).")
 	fmt.Fprintln(w, "    Model rule: --model with --runtime is interpreted for the OVERRIDE runtime; without --model the job uses the")
 	fmt.Fprintln(w, "    override runtime's default model (the agent's configured default model is never applied to another runtime).")
 }

@@ -42,6 +42,22 @@ func TestResolveJobRuntimeOverride(t *testing.T) {
 			t.Fatalf("got (%q, %q, %v)", rt, ref, err)
 		}
 	})
+	t.Run("last is rejected on a resumable runtime", func(t *testing.T) {
+		// SESSION SAFETY: "last" resumes whichever session in the checkout is most
+		// recent — possibly an agent's default-runtime session, mid-flight — while
+		// the lock key would be the literal "runtime:<rt>:last" and so could never
+		// serialize with the concrete session's lock.
+		for _, rt := range []string{runtime.ClaudeRuntime, runtime.CodexRuntime, runtime.KimiRuntime} {
+			if _, _, err := resolveJobRuntimeOverride(rt, runtime.LastRef); err == nil {
+				t.Fatalf("accepted --session last with --runtime %s", rt)
+			}
+		}
+		// Shell refs are commands, not resumable sessions: a literal "last"
+		// command stays a valid (if odd) shell session.
+		if _, _, err := resolveJobRuntimeOverride(runtime.ShellRuntime, runtime.LastRef); err != nil {
+			t.Fatalf("shell session command %q rejected: %v", runtime.LastRef, err)
+		}
+	})
 	t.Run("resumable runtime without session mints a fresh per-job ref", func(t *testing.T) {
 		rt, ref, err := resolveJobRuntimeOverride(runtime.ClaudeRuntime, "")
 		if err != nil || rt != runtime.ClaudeRuntime {

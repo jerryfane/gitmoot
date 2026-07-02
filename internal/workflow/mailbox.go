@@ -710,6 +710,15 @@ func validateJobRuntimeOverrideRequest(request JobRequest) error {
 	if override == runtime.ShellRuntime && runtime.IsFreshRef(ref) {
 		return errors.New("shell runtime override requires an explicit session command (shell sessions are commands, not resumable sessions)")
 	}
+	// SESSION SAFETY (#531): "last" names no concrete session — the delivery
+	// would resume whichever session in the checkout is most recent (possibly an
+	// agent's default-runtime session, mid-flight), while the lock key would be
+	// the literal "runtime:<rt>:last" and so could never serialize with that
+	// concrete session's lock. Shell refs are commands, not resumable sessions,
+	// so they are exempt.
+	if override != runtime.ShellRuntime && ref == runtime.LastRef {
+		return errors.New("job runtime override session \"last\" is not allowed; use an explicit session id")
+	}
 	return nil
 }
 

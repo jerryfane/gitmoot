@@ -317,14 +317,19 @@ runtime while the agent's registered default runtime stays untouched (`agent
 show` is unchanged afterwards). An overridden job never resumes — and never
 writes back to — the agent's default-runtime session: it runs on a fresh
 session of the override runtime, or on an explicit `--session <ref>` (a
-Codex/Claude session id or `last`, a Kimi session id, or — required for
-`shell` — a command), and its runtime-session lock names the override runtime
-so it cannot collide with the default session's lock. Model rule: `--model`
-combined with `--runtime` is interpreted for the OVERRIDE runtime; an override
-without `--model` uses the override runtime's default model — the agent's
-configured default model is never applied to a different runtime. An unknown
-`--runtime` fails before any job is enqueued, and background (daemon) jobs
-honor the override identically to foreground:
+Codex/Claude session id, a Kimi session id, or — required for `shell` — a
+command; `last` is rejected because it resumes whichever session is most
+recent rather than a concrete one), and its runtime-session lock names the
+override runtime so it cannot collide with the default session's lock. Model
+rule: `--model` combined with `--runtime` is interpreted for the OVERRIDE
+runtime; an override without `--model` uses the override runtime's default
+model — the agent's configured default model is never applied to a different
+runtime. An unknown
+`--runtime` fails before any job is enqueued, background (daemon) jobs honor
+the override identically to foreground, and a coordinator's delegation-tree
+continuations (synthesis, corrective, replan, finalize) inherit the override,
+so an `orchestrate --runtime` tree stays on the override runtime across
+generations:
 
 ```sh
 # Retry a hard review through Claude without re-registering the reviewer:

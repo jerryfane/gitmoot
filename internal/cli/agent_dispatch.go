@@ -103,7 +103,7 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	if agent, blocked, err := readOnlyManagedImplementationBlock(ctx, store, request, repo.FullName()); err != nil {
 		return localAgentJobOutput{}, err
 	} else if blocked {
-		return enqueuePermissionBlockedLocalAgentJob(ctx, store, request, repo.FullName(), record.DefaultBranch, agent.Name)
+		return enqueuePermissionBlockedLocalAgentJob(ctx, store, request, repo.FullName(), record.DefaultBranch, agent.Name, overrideRuntime, overrideRef)
 	}
 	agent, releaseAgentReservation, err := resolveLocalDispatchAgent(ctx, store, request, repo.FullName(), record)
 	if err != nil {
@@ -138,7 +138,7 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		}
 	}
 	if readOnlyImplementationBlocked(request.Action, effectiveAgent) {
-		return enqueuePermissionBlockedLocalAgentJob(ctx, store, request, repo.FullName(), record.DefaultBranch, agent.Name)
+		return enqueuePermissionBlockedLocalAgentJob(ctx, store, request, repo.FullName(), record.DefaultBranch, agent.Name, overrideRuntime, overrideRef)
 	}
 	switch request.Action {
 	case "review":
@@ -396,7 +396,7 @@ func buildLocalAgentJobOutput(latest db.Job, request localAgentDispatchRequest) 
 	}, nil
 }
 
-func enqueuePermissionBlockedLocalAgentJob(ctx context.Context, store *db.Store, request localAgentDispatchRequest, repo string, defaultBranch string, agentName string) (localAgentJobOutput, error) {
+func enqueuePermissionBlockedLocalAgentJob(ctx context.Context, store *db.Store, request localAgentDispatchRequest, repo string, defaultBranch string, agentName string, overrideRuntime string, overrideRef string) (localAgentJobOutput, error) {
 	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home)}).Enqueue(ctx, workflow.JobRequest{
 		ID:           localAgentJobID(request.Action, agentName),
 		Agent:        agentName,
@@ -412,6 +412,14 @@ func enqueuePermissionBlockedLocalAgentJob(ctx context.Context, store *db.Store,
 		Reviewers:    request.Reviewers,
 		Sender:       "local",
 		Instructions: request.Instructions,
+		// Persist the per-job --model and the resolved --runtime/--session override
+		// (#531) on the BLOCKED job too: `gitmoot job retry` re-runs the stored
+		// payload as-is, so dropping them here would silently retry the job on the
+		// agent's default runtime — resuming the default-runtime session the user's
+		// --runtime explicitly asked it to stay off.
+		Model:              request.Model,
+		RuntimeOverride:    overrideRuntime,
+		RuntimeOverrideRef: overrideRef,
 	})
 	if err != nil {
 		return localAgentJobOutput{}, err
