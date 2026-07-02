@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math/rand"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -4596,5 +4597,263 @@ func TestJobIDsWithOpenEscalationRaceSafe(t *testing.T) {
 		if gotSet[jobID] != wantOpen {
 			t.Fatalf("job %s open=%v, want %v (set=%v)", jobID, gotSet[jobID], wantOpen, got)
 		}
+	}
+}
+
+// explainQueryPlan runs EXPLAIN QUERY PLAN for query and returns the plan's detail
+// lines joined by newline so index-choice assertions read cleanly. store_test is
+// package db (white-box), so it can reach store.db directly. args binds any `?`
+// placeholders in query so production SQL consts carrying parameters (e.g.
+// listRunningJobsUpdatedBeforeSQL) can be EXPLAINed verbatim.
+func explainQueryPlan(t *testing.T, store *Store, query string, args ...any) string {
+	t.Helper()
+	rows, err := store.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN returned error: %v", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan EQP row returned error: %v", err)
+		}
+		lines = append(lines, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("EQP rows error: %v", err)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// TestJobEventsKindJobIDCoveringIndexPlan pins the #619 covering index: each of the
+// three per-tick candidate GROUP BY queries must be served index-only by
+// idx_job_events_kind_job_id. It also pins FIX-E: the redundant single-column
+// idx_job_events_kind is dropped by the migrations, so the composite (whose leading
+// column is `kind`) is now the SOLE kind index — every kind-filtered query still
+// plans through it after the drop.
+func TestJobEventsKindJobIDCoveringIndexPlan(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	// FIX-E: the migrations dropped idx_job_events_kind; confirm it is gone so the
+	// covering-index assertions below prove the composite carries these queries alone.
+	var kindIndexes int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_job_events_kind'`).Scan(&kindIndexes); err != nil {
+		t.Fatalf("query sqlite_master returned error: %v", err)
+	}
+	if kindIndexes != 0 {
+		t.Fatalf("idx_job_events_kind still exists; FIX-E migration should have dropped it")
+	}
+
+	// EXPLAIN the PRODUCTION query text (the exported consts), not hand-copied SQL, so
+	// a change to any candidate query is what this covering-index plan is asserted for.
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{name: "advance", query: jobIDsWithPendingAdvanceRetrySQL},
+		{name: "comment", query: jobIDsWithPendingCommentRetrySQL},
+		{name: "reclaim", query: jobIDsWithPendingDelegationWorktreeReclaimSQL},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := explainQueryPlan(t, store, tc.query)
+			if !strings.Contains(plan, "COVERING INDEX idx_job_events_kind_job_id") {
+				t.Fatalf("plan does not use the covering index:\n%s", plan)
+			}
+			// Guard against any fall-through to a non-covering kind index (the dropped
+			// idx_job_events_kind rendered "USING INDEX idx_job_events_kind (kind=? AND
+			// rowid=?)" — its trailing "(" plus a table row fetch is what the covering
+			// index removes).
+			if strings.Contains(plan, "USING INDEX idx_job_events_kind (") {
+				t.Fatalf("plan still row-fetches via a non-covering idx_job_events_kind:\n%s", plan)
+			}
+		})
+	}
+}
+
+// TestListJobsByType pins the #619 poll-path projection: ListJobsByType returns
+// exactly the rows of the requested type — with the full ListJobs projection
+// (payload included) — in id order, and nil for a type with no rows.
+func TestListJobsByType(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	seed := []Job{
+		{ID: "job-a-review", Agent: "reviewer", Type: "review", State: "queued", Payload: `{"repo":"owner/repo","kind":"review-a"}`},
+		{ID: "job-b-implement", Agent: "coder", Type: "implement", State: "running", Payload: `{"repo":"owner/repo","kind":"implement-b"}`},
+		{ID: "job-c-review", Agent: "reviewer", Type: "review", State: "succeeded", Payload: `{"repo":"owner/repo","kind":"review-c"}`},
+		{ID: "job-d-ask", Agent: "asker", Type: "ask", State: "queued", Payload: `{"repo":"owner/repo","kind":"ask-d"}`},
+	}
+	for _, job := range seed {
+		if err := store.CreateJob(ctx, job); err != nil {
+			t.Fatalf("CreateJob(%s) returned error: %v", job.ID, err)
+		}
+	}
+
+	got, err := store.ListJobsByType(ctx, "review")
+	if err != nil {
+		t.Fatalf("ListJobsByType returned error: %v", err)
+	}
+	wantIDs := []string{"job-a-review", "job-c-review"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("ListJobsByType(review) returned %d jobs, want %d: %+v", len(got), len(wantIDs), got)
+	}
+	for i, job := range got {
+		if job.ID != wantIDs[i] {
+			t.Fatalf("job[%d].ID = %q, want %q (order must be by id)", i, job.ID, wantIDs[i])
+		}
+		if job.Type != "review" {
+			t.Fatalf("job[%d].Type = %q, want review", i, job.Type)
+		}
+		if job.Payload == "" {
+			t.Fatalf("job[%d].Payload is empty; the projection must materialize payload", i)
+		}
+		if job.State == "" || job.Agent == "" {
+			t.Fatalf("job[%d] missing fields: %+v", i, job)
+		}
+	}
+
+	// ListJobsByType must equal ListJobs filtered by type in Go (byte-identical rows).
+	all, err := store.ListJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListJobs returned error: %v", err)
+	}
+	var wantReview []Job
+	for _, job := range all {
+		if job.Type == "review" {
+			wantReview = append(wantReview, job)
+		}
+	}
+	if !reflect.DeepEqual(got, wantReview) {
+		t.Fatalf("ListJobsByType(review) = %+v, want ListJobs-filtered %+v", got, wantReview)
+	}
+
+	if unknown, err := store.ListJobsByType(ctx, "nonexistent"); err != nil {
+		t.Fatalf("ListJobsByType(nonexistent) returned error: %v", err)
+	} else if unknown != nil {
+		t.Fatalf("ListJobsByType(nonexistent) = %+v, want nil", unknown)
+	}
+}
+
+// TestListQueuedJobsUsesQueuedIndex pins FIX-4b (#619): ListQueuedJobs is served by
+// the partial index idx_jobs_queued_created with no temp b-tree, and returns only
+// queued rows in created_at then rowid order.
+func TestListQueuedJobsUsesQueuedIndex(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	seed := []struct {
+		id, state, createdAt string
+	}{
+		{"q3", "queued", "2026-01-03 00:00:00"},
+		{"q1", "queued", "2026-01-01 00:00:00"},
+		{"q2", "queued", "2026-01-02 00:00:00"},
+		{"r1", "running", "2026-01-01 00:00:00"},
+		{"done", "succeeded", "2026-01-01 00:00:00"},
+	}
+	for _, s := range seed {
+		if err := store.CreateJob(ctx, Job{ID: s.id, Agent: "a", Type: "implement", State: s.state}); err != nil {
+			t.Fatalf("CreateJob(%s) returned error: %v", s.id, err)
+		}
+		if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET created_at = ? WHERE id = ?`, s.createdAt, s.id); err != nil {
+			t.Fatalf("set created_at(%s) returned error: %v", s.id, err)
+		}
+	}
+
+	plan := explainQueryPlan(t, store, listQueuedJobsSQL)
+	if !strings.Contains(plan, "USING INDEX idx_jobs_queued_created") {
+		t.Fatalf("ListQueuedJobs plan does not use idx_jobs_queued_created:\n%s", plan)
+	}
+	if strings.Contains(plan, "TEMP B-TREE") {
+		t.Fatalf("ListQueuedJobs plan still builds a temp b-tree:\n%s", plan)
+	}
+
+	got, err := store.ListQueuedJobs(ctx)
+	if err != nil {
+		t.Fatalf("ListQueuedJobs returned error: %v", err)
+	}
+	wantIDs := []string{"q1", "q2", "q3"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("ListQueuedJobs returned %d jobs, want %d: %+v", len(got), len(wantIDs), got)
+	}
+	for i, job := range got {
+		if job.ID != wantIDs[i] {
+			t.Fatalf("job[%d].ID = %q, want %q (created_at, rowid order)", i, job.ID, wantIDs[i])
+		}
+		if job.State != "queued" {
+			t.Fatalf("job[%d].State = %q, want queued only", i, job.State)
+		}
+	}
+}
+
+// TestListRunningJobsUpdatedBeforeOrder pins FIX-4a (#619): ListRunningJobsUpdatedBefore
+// orders by updated_at (not id), applies the running/threshold filter, and is served
+// by idx_jobs_running_updated_at.
+func TestListRunningJobsUpdatedBeforeOrder(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	// updated_at order (job-2, job-3, job-1) deliberately differs from id order
+	// (job-1, job-2, job-3) so the result proves ordering by updated_at, not id.
+	seed := []struct {
+		id, state, updatedAt string
+		wantBefore           bool
+	}{
+		{"job-1", "running", "2026-01-30 00:00:00", true},
+		{"job-2", "running", "2026-01-10 00:00:00", true},
+		{"job-3", "running", "2026-01-20 00:00:00", true},
+		{"job-4", "running", "2026-06-01 00:00:00", false}, // after threshold
+		{"job-5", "queued", "2026-01-05 00:00:00", false},  // not running
+	}
+	for _, s := range seed {
+		if err := store.CreateJob(ctx, Job{ID: s.id, Agent: "a", Type: "implement", State: s.state}); err != nil {
+			t.Fatalf("CreateJob(%s) returned error: %v", s.id, err)
+		}
+		if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET updated_at = ? WHERE id = ?`, s.updatedAt, s.id); err != nil {
+			t.Fatalf("set updated_at(%s) returned error: %v", s.id, err)
+		}
+	}
+
+	before := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	got, err := store.ListRunningJobsUpdatedBefore(ctx, before)
+	if err != nil {
+		t.Fatalf("ListRunningJobsUpdatedBefore returned error: %v", err)
+	}
+	wantIDs := []string{"job-2", "job-3", "job-1"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("returned %d jobs, want %d: %+v", len(got), len(wantIDs), got)
+	}
+	for i, job := range got {
+		if job.ID != wantIDs[i] {
+			t.Fatalf("job[%d].ID = %q, want %q (updated_at order)", i, job.ID, wantIDs[i])
+		}
+		if job.State != "running" {
+			t.Fatalf("job[%d].State = %q, want running only", i, job.State)
+		}
+	}
+
+	plan := explainQueryPlan(t, store, listRunningJobsUpdatedBeforeSQL, "2026-02-01 00:00:00")
+	if !strings.Contains(plan, "idx_jobs_running_updated_at") {
+		t.Fatalf("ListRunningJobsUpdatedBefore plan does not use idx_jobs_running_updated_at:\n%s", plan)
 	}
 }

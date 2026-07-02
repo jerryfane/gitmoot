@@ -2442,13 +2442,16 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 	return job, nil
 }
 
-func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens, updated_at, created_at FROM jobs ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// jobColumns is the 14-column projection ListJobs and ListJobsByType both read (the
+// full jobs row except root_id), kept as one const so their SELECT lists — and the
+// scanJobs scan order below — can never drift apart.
+const jobColumns = `id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens, updated_at, created_at`
 
+// scanJobs reads every row of a *sql.Rows produced by a `SELECT `+jobColumns+`
+// FROM jobs …` query into Jobs, in jobColumns order, and closes rows. Shared by
+// ListJobs and ListJobsByType so their identical scan lives in exactly one place.
+func scanJobs(rows *sql.Rows) ([]Job, error) {
+	defer rows.Close()
 	var jobs []Job
 	for rows.Next() {
 		var job Job
@@ -2458,6 +2461,34 @@ func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumns+` FROM jobs ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	return scanJobs(rows)
+}
+
+// ListJobsByType returns every job of the given type, with the SAME 14-column
+// projection and ORDER BY id as ListJobs, filtered in SQL by `type = ?`. The PR
+// poll path (#619) only ever needs review jobs, but was calling ListJobs and
+// discarding non-review rows in Go — materializing the whole 37.8MB payload column
+// (including one 11MB implement payload) on every open PR every sweep. Because the
+// `type` column precedes `payload` in the row record, SQLite's `type = ?` filter
+// decides to keep a row before it ever touches the payload's overflow pages, so
+// this decodes payload only for matching rows (~237KB of review payloads vs 37.8MB
+// total on the affected DB). Behavior is byte-identical to ListJobs + a Go type
+// filter; only the avoided payload reads differ. EQP: `SCAN jobs USING INDEX
+// sqlite_autoindex_jobs_1` over the same rows — a dedicated jobs(type) index was
+// not worth its per-insert write cost and is deferred.
+func (s *Store) ListJobsByType(ctx context.Context, jobType string) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumns+` FROM jobs WHERE type = ? ORDER BY id`, jobType)
+	if err != nil {
+		return nil, err
+	}
+	return scanJobs(rows)
 }
 
 // ListJobsByParent returns the direct children of parentJobID (delegation
@@ -2530,9 +2561,22 @@ func (s *Store) SumJobTokensByRoot(ctx context.Context, rootID string) (int, err
 	return total, err
 }
 
+// listQueuedJobsSQL is ListQueuedJobs' exact query, exported as a package-level const
+// so the plan test (TestListQueuedJobsUsesQueuedIndex) can EXPLAIN QUERY PLAN the
+// PRODUCTION text rather than a hand-copied duplicate — a change to this query is then
+// what the test actually asserts a plan for.
+const listQueuedJobsSQL = `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens
+		FROM jobs WHERE state = 'queued' ORDER BY created_at, rowid`
+
+// ListQueuedJobs returns the queued jobs in created_at (then rowid) order. The
+// state predicate is the SQL literal 'queued' — not a bound parameter — so SQLite
+// can prove it matches the partial index idx_jobs_queued_created (WHERE
+// state='queued') and read the queued rows in order directly; a bound `state = ?`
+// leaves the planner unable to prove the partial predicate, so it full-scans jobs
+// and builds a temp b-tree for the ORDER BY every worker tick (#619, verified by
+// EXPLAIN QUERY PLAN). 'queued' is a fixed constant, so inlining it is safe.
 func (s *Store) ListQueuedJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens
-		FROM jobs WHERE state = ? ORDER BY created_at, rowid`, "queued")
+	rows, err := s.db.QueryContext(ctx, listQueuedJobsSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -2549,9 +2593,27 @@ func (s *Store) ListQueuedJobs(ctx context.Context) ([]Job, error) {
 	return jobs, rows.Err()
 }
 
+// listRunningJobsUpdatedBeforeSQL is ListRunningJobsUpdatedBefore's exact query,
+// exported as a package-level const so the plan test (TestListRunningJobsUpdatedBeforeOrder)
+// EXPLAINs the PRODUCTION text (binding the threshold as its `?` parameter) instead of
+// a hand-copied duplicate.
+const listRunningJobsUpdatedBeforeSQL = `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens
+		FROM jobs WHERE state = 'running' AND updated_at < ? ORDER BY updated_at`
+
+// ListRunningJobsUpdatedBefore returns the running jobs whose updated_at predates
+// the crash-backstop threshold. It orders by updated_at (not id) so the partial
+// index idx_jobs_running_updated_at (WHERE state='running') satisfies both the
+// filter and the ordering — an `ORDER BY id` defeated that index and forced a full
+// primary-key scan of the whole jobs table each worker tick (#619). The state
+// predicate is the SQL literal 'running' (not a bound parameter) for the same
+// reason ListQueuedJobs inlines 'queued': SQLite only applies a partial index when
+// it can prove the query's WHERE implies the index's predicate, which a bound
+// `state = ?` prevents (EXPLAIN QUERY PLAN falls back to a scan + temp b-tree).
+// The sole caller (recoverRunningJobsBeforeForRepoSkipping) processes each row
+// independently and does not depend on the ordering; updated_at is fixed-width
+// 'YYYY-MM-DD HH:MM:SS' so lexical order equals chronological order.
 func (s *Store) ListRunningJobsUpdatedBefore(ctx context.Context, before time.Time) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, agent, type, state, payload, parent_job_id, delegation_id, delegation_depth, delegated_by, root_killed, input_tokens, output_tokens
-		FROM jobs WHERE state = ? AND updated_at < ? ORDER BY id`, "running", before.UTC().Format("2006-01-02 15:04:05"))
+	rows, err := s.db.QueryContext(ctx, listRunningJobsUpdatedBeforeSQL, before.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
 	}
@@ -2848,6 +2910,40 @@ func (s *Store) jobIDsByQuery(ctx context.Context, query string) ([]string, erro
 	return jobIDs, rows.Err()
 }
 
+// The three per-tick candidate GROUP BY queries are exported as package-level consts
+// so the covering-index plan test (TestJobEventsKindJobIDCoveringIndexPlan) EXPLAINs
+// the PRODUCTION query text — not a hand-copied duplicate — for each. A change to any
+// of these queries is then exactly what the covering-index test asserts a plan for.
+const (
+	jobIDsWithPendingDelegationWorktreeReclaimSQL = `SELECT job_id FROM job_events
+		WHERE kind = 'delegation_worktree_cleanup_skipped'
+		  AND id IN (
+			SELECT MAX(id) FROM job_events
+			WHERE kind IN ('delegation_worktree_cleanup_skipped', 'delegation_worktree_removed')
+			GROUP BY job_id
+		)
+		ORDER BY job_id`
+
+	jobIDsWithPendingAdvanceRetrySQL = `SELECT job_id FROM job_events
+		WHERE kind IN ('advance_started', 'advance_retry')
+		  AND id IN (
+			SELECT MAX(id) FROM job_events
+			WHERE kind IN ('advance_started', 'advance_retry', 'advance_completed',
+			               'advance_retried', 'advance_blocked', 'advance_retry_skipped', 'retry_queued')
+			GROUP BY job_id
+		)
+		ORDER BY job_id`
+
+	jobIDsWithPendingCommentRetrySQL = `SELECT job_id FROM job_events
+		WHERE kind = 'comment_post_failed'
+		  AND id IN (
+			SELECT MAX(id) FROM job_events
+			WHERE kind IN ('comment_post_failed', 'comment_posted', 'retry_queued')
+			GROUP BY job_id
+		)
+		ORDER BY job_id`
+)
+
 // JobIDsWithPendingDelegationWorktreeReclaim returns the IDs of jobs whose most
 // recent terminal delegation-worktree cleanup outcome was a PRESERVE
 // (delegation_worktree_cleanup_skipped) NOT yet followed by a removal
@@ -2867,14 +2963,7 @@ func (s *Store) jobIDsByQuery(ctx context.Context, query string) ([]string, erro
 // is a skip — exactly mirroring the per-job lastCleanupOutcomeIsSkip walk, but
 // set-at-once.
 func (s *Store) JobIDsWithPendingDelegationWorktreeReclaim(ctx context.Context) ([]string, error) {
-	return s.jobIDsByQuery(ctx, `SELECT job_id FROM job_events
-		WHERE kind = 'delegation_worktree_cleanup_skipped'
-		  AND id IN (
-			SELECT MAX(id) FROM job_events
-			WHERE kind IN ('delegation_worktree_cleanup_skipped', 'delegation_worktree_removed')
-			GROUP BY job_id
-		)
-		ORDER BY job_id`)
+	return s.jobIDsByQuery(ctx, jobIDsWithPendingDelegationWorktreeReclaimSQL)
 }
 
 // JobIDsWithPendingAdvanceRetry returns the IDs of jobs whose LATEST post-delivery
@@ -2894,15 +2983,7 @@ func (s *Store) JobIDsWithPendingDelegationWorktreeReclaim(ctx context.Context) 
 // switch's default: no-op for every other kind) and the outer filter keeps a job
 // iff that latest tracked event is positive. One row per job (its unique MAX id).
 func (s *Store) JobIDsWithPendingAdvanceRetry(ctx context.Context) ([]string, error) {
-	return s.jobIDsByQuery(ctx, `SELECT job_id FROM job_events
-		WHERE kind IN ('advance_started', 'advance_retry')
-		  AND id IN (
-			SELECT MAX(id) FROM job_events
-			WHERE kind IN ('advance_started', 'advance_retry', 'advance_completed',
-			               'advance_retried', 'advance_blocked', 'advance_retry_skipped', 'retry_queued')
-			GROUP BY job_id
-		)
-		ORDER BY job_id`)
+	return s.jobIDsByQuery(ctx, jobIDsWithPendingAdvanceRetrySQL)
 }
 
 // JobIDsWithPendingCommentRetry returns the IDs of jobs whose LATEST comment event
@@ -2913,14 +2994,7 @@ func (s *Store) JobIDsWithPendingAdvanceRetry(ctx context.Context) ([]string, er
 // tick (#598). The pass re-verifies each candidate with the Go predicate, so this
 // only has to be a superset; it is in fact exact.
 func (s *Store) JobIDsWithPendingCommentRetry(ctx context.Context) ([]string, error) {
-	return s.jobIDsByQuery(ctx, `SELECT job_id FROM job_events
-		WHERE kind = 'comment_post_failed'
-		  AND id IN (
-			SELECT MAX(id) FROM job_events
-			WHERE kind IN ('comment_post_failed', 'comment_posted', 'retry_queued')
-			GROUP BY job_id
-		)
-		ORDER BY job_id`)
+	return s.jobIDsByQuery(ctx, jobIDsWithPendingCommentRetrySQL)
 }
 
 // JobIDsWithOpenEscalation returns the IDs of coordinator jobs with an OPEN
@@ -6945,5 +7019,49 @@ CREATE TABLE merge_gate_ci_observations (
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	UNIQUE(repo_full_name, pull_request)
 );
+	`,
+	// #619 covering index for the per-tick job-event candidate GROUP BY queries
+	// (JobIDsWithPendingAdvanceRetry / CommentRetry / DelegationWorktreeReclaim).
+	// Those queries filter `kind IN (...)` and project only job_id + MAX(id), but
+	// idx_job_events_kind covers only `kind`, so each candidate row still required a
+	// table row fetch to read job_id/id (~23.67 MiB/call for the advance query on the
+	// affected DB). Indexing (kind, job_id, id) lets the planner satisfy both the
+	// outer filter and the MAX(id) GROUP BY index-only. EQP flips all three from
+	// `SEARCH ... USING INDEX idx_job_events_kind (kind=? AND rowid=?)` (with row
+	// fetches) to `SEARCH ... USING COVERING INDEX idx_job_events_kind_job_id
+	// (kind=?)`; the GROUP BY temp b-tree remains (groups span kinds) but now runs
+	// over index-only (job_id,id). job_events.id is INTEGER PRIMARY KEY (a rowid
+	// alias) so id is covered. Result sets are byte-identical — pure additive index
+	// (idx_job_events_kind is kept for pure kind= lookups), no renumber/alter of any
+	// prior migration.
+	`
+CREATE INDEX idx_job_events_kind_job_id ON job_events(kind, job_id, id);
+	`,
+	// #619 partial index for the per-tick ListQueuedJobs poll. That query
+	// (`WHERE state='queued' ORDER BY created_at, rowid`) had no supporting index,
+	// so it full-scanned jobs and built a temp b-tree for the ORDER BY every worker
+	// tick. A partial index on created_at over only the queued rows lets the planner
+	// read them in created_at order directly (the partial index carries rowid as the
+	// implicit tiebreaker, satisfying `created_at, rowid`) and indexes only the small
+	// queued set, not the terminal-job backlog. ListQueuedJobs' text is unchanged.
+	// EQP flips from `SCAN jobs` + `USE TEMP B-TREE FOR ORDER BY` to `SCAN jobs USING
+	// INDEX idx_jobs_queued_created`. Pure additive index, no renumber/alter of any
+	// prior migration.
+	`
+CREATE INDEX idx_jobs_queued_created ON jobs(created_at) WHERE state='queued';
+	`,
+	// #619 drop the now-redundant idx_job_events_kind. The prior migration added
+	// idx_job_events_kind_job_id(kind, job_id, id); its leading column is `kind`, so
+	// it is a strict superset of the single-column idx_job_events_kind(kind) for every
+	// query that leads on kind — which is EVERY kind-filtered job_events query in the
+	// codebase (the three per-tick candidate GROUP BYs, JobIDsWithEventKind, and
+	// JobIDsWithOpenEscalation all filter `kind = ?` / `kind IN (...)`). SQLite serves
+	// those from the composite (EQP verified against a copy of the production DB after
+	// this drop), so idx_job_events_kind only cost write amplification on every
+	// job_events insert. DROP INDEX IF EXISTS is idempotent and a pure removal — no
+	// row reads differently — appended at the end so it does not renumber or alter any
+	// prior migration.
+	`
+DROP INDEX IF EXISTS idx_job_events_kind;
 	`,
 }
