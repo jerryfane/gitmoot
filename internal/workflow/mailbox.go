@@ -186,6 +186,12 @@ type JobPayload struct {
 	BlockerClass    string `json:"blocker_class,omitempty"`
 	BlockerAttempts int    `json:"blocker_attempts,omitempty"`
 	BlockerRetryAt  string `json:"blocker_retry_at,omitempty"`
+	// BlockerSuggestedAction is a concrete human-facing remedy for a deferral that
+	// usually needs manual intervention (a dirty/wrong-head checkout, #532 slice C).
+	// It is surfaced through the #552 stuck surface (job list/show) so an operator
+	// sees what condition must change; auth/quota/network deferrals leave it empty
+	// because they clear on their own. Additive/omitempty (byte-identical when unset).
+	BlockerSuggestedAction string `json:"blocker_suggested_action,omitempty"`
 }
 
 type DeliveryAdapter interface {
@@ -383,15 +389,29 @@ func (e DeliveryError) Error() string { return e.Err.Error() }
 func (e DeliveryError) Unwrap() error { return e.Err }
 
 // blockerRetryReconciliationNotice is prepended to the prompt of a job the
-// daemon re-dispatches after an operational-blocker deferral (#532). The
-// auto-retry is AT-LEAST-ONCE for side effects: a blocker that hit mid-turn may
-// have interrupted an attempt that already pushed branches, opened PRs, or
-// posted comments, and (for ephemeral/fresh-session workers) the retried run
-// has no memory of it — so tell the agent to reconcile instead of duplicating.
-func blockerRetryReconciliationNotice(class string) string {
-	return fmt.Sprintf("IMPORTANT: a previous attempt of this exact job was interrupted by an operational blocker (%s) "+
-		"and may have already performed side effects — pushed branches, opened pull requests, posted comments, or made commits. "+
-		"Before doing any work, check for artifacts from that interrupted attempt and reuse/reconcile them instead of redoing or duplicating the work.", class)
+// daemon re-dispatches after an operational-blocker deferral (#532). It composes
+// two concerns onto the retry prompt (the InjectUpstreamDepContext prompt-prefix
+// pattern):
+//
+//   - WARN level (#532 slice F): tell the agent the previous attempt died
+//     OPERATIONALLY — a runtime auth/quota/network/checkout condition in the
+//     environment — and NOT on the merits of its own output, so it does not
+//     second-guess an approach that was actually sound and get pulled off course.
+//   - AT-LEAST-ONCE side effects (#602's side-effect gate): a blocker that hit
+//     mid-turn may have interrupted an attempt that already pushed branches,
+//     opened PRs, or posted comments, and (for ephemeral/fresh-session workers)
+//     the retried run has no memory of it — so tell the agent to reconcile
+//     instead of duplicating.
+//
+// attempt is the deferral count (payload.BlockerAttempts) so the agent sees this
+// is a bounded operational retry, not an open-ended loop.
+func blockerRetryReconciliationNotice(class string, attempt int) string {
+	return fmt.Sprintf("NOTE (operational retry, attempt %d): the PREVIOUS attempt of this exact job did NOT fail on the merits of your work — "+
+		"it was interrupted by an operational blocker (%s) in the environment (a runtime auth/quota/network/checkout condition), "+
+		"not by anything wrong in your own output. The daemon automatically re-dispatched it now that the condition cleared, so treat "+
+		"your prior approach as still valid rather than a product failure. That interrupted attempt may already have performed side "+
+		"effects — pushed branches, opened pull requests, posted comments, or made commits — so before doing any work, check for those "+
+		"artifacts and reuse/reconcile them instead of redoing or duplicating the work.", attempt, class)
 }
 
 func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, adapter DeliveryAdapter) (AgentResult, error) {
@@ -424,9 +444,11 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 	prompt := prompts.RenderJob(payload.prompt(job.Type))
 	if payload.BlockerAttempts > 0 && strings.TrimSpace(payload.BlockerClass) != "" {
 		// This run is an automatic operational-blocker retry (#532): the previous
-		// attempt may have executed side effects before the blocker hit, so ask the
-		// agent to reconcile prior artifacts rather than duplicate them.
-		prompt = blockerRetryReconciliationNotice(payload.BlockerClass) + "\n\n" + prompt
+		// attempt died on an environment condition, not on its own output, and may
+		// have executed side effects before the blocker hit — so warn the agent its
+		// prior approach was sound and ask it to reconcile prior artifacts rather than
+		// duplicate them (slice F).
+		prompt = blockerRetryReconciliationNotice(payload.BlockerClass, payload.BlockerAttempts) + "\n\n" + prompt
 	}
 	firstRaw, firstRefreshedRef, firstErr := m.deliver(ctx, adapter, agent, job, payload, prompt)
 	if firstErr != nil {

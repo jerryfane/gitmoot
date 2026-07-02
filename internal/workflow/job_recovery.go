@@ -45,6 +45,7 @@ func RetryJob(ctx context.Context, store *db.Store, jobID string) (db.Job, error
 	payload.BlockerClass = ""
 	payload.BlockerAttempts = 0
 	payload.BlockerRetryAt = ""
+	payload.BlockerSuggestedAction = ""
 	if manualRetryShouldClearReadOnlyWorktree(job, payload) {
 		payload.WorktreePath = ""
 		payload.HeadSHA = ""

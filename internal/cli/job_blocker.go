@@ -15,6 +15,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/events"
+	"github.com/jerryfane/gitmoot/internal/github"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
@@ -57,6 +58,16 @@ type blockerClass string
 const (
 	blockerClassRuntimeAuth  blockerClass = "runtime_auth"
 	blockerClassRuntimeQuota blockerClass = "runtime_quota"
+	// blockerClassNetworkOutage (#532 slice D) classifies a transient network /
+	// GitHub outage — a gh-CLI transport/DNS/TLS/5xx failure grounded in
+	// internal/github's TransientError / IsTransientMessage signatures — that
+	// reached a terminal job failure. It defers with a short backoff.
+	blockerClassNetworkOutage blockerClass = "network_outage"
+	// blockerClassCheckoutContention (#532 slice C) classifies a daemon-owned
+	// pre-flight checkout failure: a branch-lock conflict (self-heals, short
+	// exponential backoff) or a dirty/wrong-head checkout (usually needs a human;
+	// defers with a suggested_action surfaced through the #552 stuck surface).
+	blockerClassCheckoutContention blockerClass = "checkout_contention"
 )
 
 // blockerDeferredEventKind is the job_event kind recorded when a failed job is
@@ -94,11 +105,22 @@ const quotaBlockerMaxParsedDelay = 24 * time.Hour
 // inside a still-closed window and burn the retry budget in seconds.
 const quotaBlockerMinParsedDelay = 5 * time.Second
 
+// networkBlockerRetryDelay is the short base backoff for a transient network /
+// GitHub outage (#532 slice D). Outages clear on their own quickly, so the hold
+// is short (plus jitter, bounded by the shared 3-attempt budget) rather than the
+// minutes-long auth/quota holds.
+const networkBlockerRetryDelay = 30 * time.Second
+
 // blockerClassification is the classifier verdict for one failed run.
 type blockerClassification struct {
 	Class   blockerClass
 	RetryAt time.Time // earliest safe automatic re-dispatch (UTC)
 	Detail  string    // first line of the causing error, for events/UX
+	// SuggestedAction, when set, is a concrete human-facing remedy surfaced through
+	// the #552 stuck surface (job list/show) and persisted in the payload. Only the
+	// checkout dirty/wrong-head sub-class sets it today (#532 slice C); auth/quota/
+	// network defer on a condition that clears on its own and leave it empty.
+	SuggestedAction string
 }
 
 // classifyOperationalBlocker inspects a RunJob error and reports whether it is a
@@ -134,6 +156,13 @@ func classifyOperationalBlocker(cause error, now time.Time) (blockerClassificati
 		// credential rejection, so it is trustworthy without the delivery gate.
 		return blockerClassification{Class: blockerClassRuntimeAuth, RetryAt: now.Add(authBlockerRetryDelay), Detail: detail}, true
 	}
+	if github.AsTransient(cause) {
+		// A typed github.TransientError can reach a TERMINAL job failure directly
+		// from a daemon-owned github op (not the runtime delivery seam), so it is
+		// trustworthy without the DeliveryError marker — the network signatures live
+		// in internal/github and a 4xx/permission/conflict is never tagged transient.
+		return blockerClassification{Class: blockerClassNetworkOutage, RetryAt: now.Add(networkBlockerRetryDelay + blockerRetryJitter(networkBlockerRetryDelay)), Detail: detail}, true
+	}
 	var delivery workflow.DeliveryError
 	if !errors.As(cause, &delivery) {
 		return blockerClassification{}, false
@@ -144,6 +173,14 @@ func classifyOperationalBlocker(cause error, now time.Time) (blockerClassificati
 		return blockerClassification{Class: blockerClassRuntimeQuota, RetryAt: now.Add(delay + blockerRetryJitter(delay)), Detail: detail}, true
 	case "auth failing":
 		return blockerClassification{Class: blockerClassRuntimeAuth, RetryAt: now.Add(authBlockerRetryDelay), Detail: detail}, true
+	}
+	// Network / GitHub outage that surfaced through the delivery seam: the agent's
+	// own `gh` subprocess printed a transport/DNS/5xx signature to stderr (which
+	// becomes DeliveryError text, never a TransientError value). Reuse the SAME
+	// internal/github signature set so both the typed and the delivery paths agree.
+	// Checked AFTER auth/quota so a 401/429 keeps its more specific class.
+	if github.IsTransientMessage(text) {
+		return blockerClassification{Class: blockerClassNetworkOutage, RetryAt: now.Add(networkBlockerRetryDelay + blockerRetryJitter(networkBlockerRetryDelay)), Detail: detail}, true
 	}
 	return blockerClassification{}, false
 }
@@ -347,6 +384,7 @@ func (w jobWorker) deferOperationalBlocker(ctx context.Context, jobID string, ca
 	payload.BlockerClass = string(classification.Class)
 	payload.BlockerAttempts = attempt
 	payload.BlockerRetryAt = retryAt
+	payload.BlockerSuggestedAction = classification.SuggestedAction
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return false, err
@@ -404,6 +442,7 @@ func restorePreIsolationPayloadForDeferredJob(ctx context.Context, store *db.Sto
 	restored.BlockerClass = current.BlockerClass
 	restored.BlockerAttempts = current.BlockerAttempts
 	restored.BlockerRetryAt = current.BlockerRetryAt
+	restored.BlockerSuggestedAction = current.BlockerSuggestedAction
 	encoded, err := json.Marshal(restored)
 	if err != nil {
 		return
