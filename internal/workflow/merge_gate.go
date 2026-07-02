@@ -610,9 +610,12 @@ func (g PolicyMergeGate) concludeNoExternalCI(ctx context.Context, repo github.R
 	repoFullName := repo.FullName()
 	now := g.now()
 	obs, err := g.Store.GetNoCIObservation(ctx, repoFullName, pullRequest)
-	switch {
-	case errors.Is(err, sql.ErrNoRows) || obs.HeadSHA != headSHA:
-		// First zero observation at this head (or the head changed): record & defer.
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) || obs.HeadSHA != headSHA {
+		// First zero observation at this head (no prior row, or the head changed):
+		// record & defer.
 		if recordErr := g.Store.UpsertNoCIObservation(ctx, db.NoCIObservation{
 			RepoFullName: repoFullName,
 			PullRequest:  pullRequest,
@@ -622,8 +625,6 @@ func (g PolicyMergeGate) concludeNoExternalCI(ctx context.Context, repo github.R
 			return recordErr
 		}
 		return mergePending{reason: fmt.Sprintf("waiting to confirm no external CI at head %s; will re-check after the grace window in case GitHub Actions is still creating the run", shortHead)}
-	case err != nil:
-		return err
 	}
 
 	firstZero, parseErr := time.Parse(time.RFC3339Nano, obs.FirstZeroAt)
