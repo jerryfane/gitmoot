@@ -6819,3 +6819,168 @@ func TestBuildAskGateComment(t *testing.T) {
 		t.Fatalf("ask-gate comment parsed into %d command(s); want 0: %+v\nbody:\n%s", len(cmds), cmds, body)
 	}
 }
+
+// TestRetryPendingJobAdvancementsBoundedToCandidates proves the bounded (#598)
+// advancement retry pass acts on ONLY the jobs whose latest advancement event is a
+// pending marker: a large backlog of terminal jobs whose advancement already
+// completed is never GetJob'd or advanced, a #602-deferred (state=queued) job with
+// an unresolved advance_started is filtered by state, and a candidate id whose job
+// row was pruned is skipped without aborting the tick.
+func TestRetryPendingJobAdvancementsBoundedToCandidates(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "reviewer", runtime.ShellRuntime, "unused", []string{"review"}, "owner/repo")
+
+	validPayload := func(pr int) string {
+		encoded, err := json.Marshal(workflow.JobPayload{
+			Repo: "owner/repo", Branch: "task-1", PullRequest: pr, TaskID: "task-1",
+			Result: &workflow.AgentResult{Decision: "approved", Summary: "ok"},
+		})
+		if err != nil {
+			t.Fatalf("Marshal payload returned error: %v", err)
+		}
+		return string(encoded)
+	}
+
+	// Large backlog of terminal jobs whose advancement already reconciled
+	// (advance_started -> advance_completed): NOT candidates.
+	for i := 0; i < 50; i++ {
+		id := "adv-done-" + strconv.Itoa(i)
+		if err := store.CreateJobWithEvent(ctx, db.Job{
+			ID: id, Agent: "reviewer", Type: "review", State: string(workflow.JobSucceeded), Payload: validPayload(1000 + i),
+		}, db.JobEvent{Kind: string(workflow.JobSucceeded), Message: "seed"}); err != nil {
+			t.Fatalf("CreateJobWithEvent(%s) returned error: %v", id, err)
+		}
+		for _, kind := range []string{"advance_started", "advance_completed", "queued"} {
+			if err := store.AddJobEvent(ctx, db.JobEvent{JobID: id, Kind: kind, Message: "noise"}); err != nil {
+				t.Fatalf("AddJobEvent returned error: %v", err)
+			}
+		}
+	}
+
+	// The one genuinely-pending advancement (latest tracked event = advance_started).
+	pendingID := "adv-pending"
+	if err := store.CreateJobWithEvent(ctx, db.Job{
+		ID: pendingID, Agent: "reviewer", Type: "review", State: string(workflow.JobSucceeded), Payload: validPayload(7),
+	}, db.JobEvent{Kind: string(workflow.JobSucceeded), Message: "seed"}); err != nil {
+		t.Fatalf("CreateJobWithEvent(pending) returned error: %v", err)
+	}
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: pendingID, Kind: "advance_started", Message: "started"}); err != nil {
+		t.Fatalf("AddJobEvent returned error: %v", err)
+	}
+
+	// #602: a job deferred back to queued still carries an unresolved advance_started
+	// so the candidate query returns it, but the state filter rejects it (identical
+	// to the old ListJobs gate).
+	deferredID := "adv-deferred-queued"
+	if err := store.CreateJobWithEvent(ctx, db.Job{
+		ID: deferredID, Agent: "reviewer", Type: "review", State: string(workflow.JobQueued), Payload: validPayload(8),
+	}, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
+		t.Fatalf("CreateJobWithEvent(deferred) returned error: %v", err)
+	}
+	for _, kind := range []string{"advance_started", "blocker_deferred"} {
+		if err := store.AddJobEvent(ctx, db.JobEvent{JobID: deferredID, Kind: kind, Message: "m"}); err != nil {
+			t.Fatalf("AddJobEvent returned error: %v", err)
+		}
+	}
+
+	// Pruned row: a candidate marker with no surviving jobs row.
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: "adv-pruned-orphan", Kind: "advance_started", Message: "orphan"}); err != nil {
+		t.Fatalf("AddJobEvent(orphan) returned error: %v", err)
+	}
+
+	var advanced []string
+	worker := defaultJobWorker(store, io.Discard)
+	worker.CheckoutValidator = func(_ context.Context, job db.Job, _ workflow.JobPayload, _ runtime.Agent) (string, error) {
+		advanced = append(advanced, job.ID)
+		// Short-circuit before any workflow engine call; advanceJob records an
+		// advance_retry event and returns nil. The spy captured the job id, which
+		// is all this bounded-dispatch test asserts.
+		return "", errors.New("stop after capture")
+	}
+
+	if err := retryPendingJobAdvancements(ctx, worker, "owner/repo", "", nil); err != nil {
+		t.Fatalf("retryPendingJobAdvancements returned error: %v", err)
+	}
+
+	if len(advanced) != 1 || advanced[0] != pendingID {
+		t.Fatalf("advanceJob reached %v, want exactly [%s]", advanced, pendingID)
+	}
+}
+
+// TestRetryPendingJobCommentsBoundedToCandidates is the comment-retry analogue: the
+// bounded pass re-posts ONLY the jobs whose latest comment event is
+// comment_post_failed, ignoring a backlog of already-posted jobs, a #602-deferred
+// queued job, and a pruned-row candidate.
+func TestRetryPendingJobCommentsBoundedToCandidates(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "audit", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
+
+	payloadFor := func(pr int) string {
+		encoded, err := json.Marshal(workflow.JobPayload{
+			Repo: "owner/repo", Branch: "main", PullRequest: pr,
+			Result: &workflow.AgentResult{Decision: "approved", Summary: "ok"},
+		})
+		if err != nil {
+			t.Fatalf("Marshal payload returned error: %v", err)
+		}
+		return string(encoded)
+	}
+
+	// Backlog of jobs whose comment already posted (failed -> posted): NOT candidates.
+	for i := 0; i < 40; i++ {
+		id := "cmt-done-" + strconv.Itoa(i)
+		if err := store.CreateJobWithEvent(ctx, db.Job{
+			ID: id, Agent: "audit", Type: "ask", State: string(workflow.JobFailed), Payload: payloadFor(2000 + i),
+		}, db.JobEvent{Kind: string(workflow.JobFailed), Message: "seed"}); err != nil {
+			t.Fatalf("CreateJobWithEvent(%s) returned error: %v", id, err)
+		}
+		for _, kind := range []string{"comment_post_failed", "comment_posted"} {
+			if err := store.AddJobEvent(ctx, db.JobEvent{JobID: id, Kind: kind, Message: "noise"}); err != nil {
+				t.Fatalf("AddJobEvent returned error: %v", err)
+			}
+		}
+	}
+
+	// The one genuinely-pending comment retry.
+	pendingID := "cmt-pending"
+	if err := store.CreateJobWithEvent(ctx, db.Job{
+		ID: pendingID, Agent: "audit", Type: "ask", State: string(workflow.JobFailed), Payload: payloadFor(9),
+	}, db.JobEvent{Kind: string(workflow.JobFailed), Message: "seed"}); err != nil {
+		t.Fatalf("CreateJobWithEvent(pending) returned error: %v", err)
+	}
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: pendingID, Kind: "comment_post_failed", Message: "temporary github error"}); err != nil {
+		t.Fatalf("AddJobEvent returned error: %v", err)
+	}
+
+	// #602: comment_post_failed but state=queued → rejected by state filter.
+	deferredID := "cmt-deferred-queued"
+	if err := store.CreateJobWithEvent(ctx, db.Job{
+		ID: deferredID, Agent: "audit", Type: "ask", State: string(workflow.JobQueued), Payload: payloadFor(10),
+	}, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
+		t.Fatalf("CreateJobWithEvent(deferred) returned error: %v", err)
+	}
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: deferredID, Kind: "comment_post_failed", Message: "m"}); err != nil {
+		t.Fatalf("AddJobEvent returned error: %v", err)
+	}
+
+	// Pruned row: candidate marker with no surviving job row.
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: "cmt-pruned-orphan", Kind: "comment_post_failed", Message: "orphan"}); err != nil {
+		t.Fatalf("AddJobEvent(orphan) returned error: %v", err)
+	}
+
+	comments := &cliPollFakeGitHub{}
+	worker := defaultJobWorker(store, io.Discard)
+	worker.CommenterFactory = func(string) github.Client { return comments }
+
+	if err := retryPendingJobComments(ctx, worker, "owner/repo", ""); err != nil {
+		t.Fatalf("retryPendingJobComments returned error: %v", err)
+	}
+
+	if len(comments.posted) != 1 || comments.posted[0].issueNumber != 9 {
+		t.Fatalf("posted comments = %+v, want exactly one on PR 9 (the pending candidate)", comments.posted)
+	}
+}

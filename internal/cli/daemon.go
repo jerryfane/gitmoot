@@ -2990,12 +2990,31 @@ func runQueuedJobs(ctx context.Context, worker jobWorker, limit int) error {
 // live path only ever runs it under the job's own key — and retried on a later
 // tick once the key frees, instead of gating ALL retries on whole-repo idleness
 // (which a steady backlog can prevent indefinitely, freezing merge retries).
+// retryPendingJobAdvancements re-fires the post-delivery advancement for any
+// terminal job whose latest advancement event is still an unreconciled attempt
+// marker (advance_started/advance_retry). It is BOUNDED, not a full-table scan
+// (#598): rather than list EVERY job and re-read each terminal job's full event
+// history (ListJobEvents) on every 1s worker tick — O(jobs × events), which burned
+// a core once a few hundred terminal jobs had accumulated — it asks the store for
+// ONLY the (small) set of jobs whose latest tracked advancement event is a pending
+// marker, and GetJob's just those. Each candidate is then re-verified with the Go
+// predicate jobNeedsAdvanceRetry, so behavior is identical to the old per-job walk;
+// the state/repo/session filters and the checkoutHeld gate are preserved verbatim.
 func retryPendingJobAdvancements(ctx context.Context, worker jobWorker, repoFilter string, rootFilter string, checkoutHeld func(string) bool) error {
-	jobs, err := worker.Store.ListJobs(ctx)
+	jobIDs, err := worker.Store.JobIDsWithPendingAdvanceRetry(ctx)
 	if err != nil {
 		return err
 	}
-	for _, job := range jobs {
+	for _, jobID := range jobIDs {
+		job, err := worker.Store.GetJob(ctx, jobID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// A marker event with no surviving job row (e.g. a pruned job): nothing
+			// to advance, and erroring here would abort the whole tick.
+			continue
+		}
+		if err != nil {
+			return err
+		}
 		if !jobStateCanRetryAdvancement(job.State) || !queuedJobMatchesRepo(job, repoFilter) || !queuedJobMatchesSession(job, rootFilter) {
 			continue
 		}
@@ -3245,12 +3264,29 @@ func jobStateCanRetryAdvancement(state string) bool {
 	}
 }
 
+// retryPendingJobComments re-posts the result comment for any terminal job whose
+// latest comment event is comment_post_failed. Like retryPendingJobAdvancements it
+// is BOUNDED (#598): it asks the store for ONLY the jobs whose latest comment event
+// is a failure marker instead of listing EVERY job and re-reading each terminal
+// job's full event history on every 1s worker tick. Each candidate is re-verified
+// with the Go predicate jobNeedsCommentRetry, so behavior is identical. Comment
+// retries never touch a checkout, so (unlike advancements) they take no checkoutHeld
+// gate.
 func retryPendingJobComments(ctx context.Context, worker jobWorker, repoFilter string, rootFilter string) error {
-	jobs, err := worker.Store.ListJobs(ctx)
+	jobIDs, err := worker.Store.JobIDsWithPendingCommentRetry(ctx)
 	if err != nil {
 		return err
 	}
-	for _, job := range jobs {
+	for _, jobID := range jobIDs {
+		job, err := worker.Store.GetJob(ctx, jobID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// A marker event with no surviving job row (e.g. a pruned job): skip
+			// rather than abort the tick.
+			continue
+		}
+		if err != nil {
+			return err
+		}
 		if !jobStateCanRetryComment(job.State) || !queuedJobMatchesRepo(job, repoFilter) || !queuedJobMatchesSession(job, rootFilter) {
 			continue
 		}

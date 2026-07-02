@@ -2854,6 +2854,80 @@ func (s *Store) JobIDsWithPendingDelegationWorktreeReclaim(ctx context.Context) 
 	return jobIDs, rows.Err()
 }
 
+// JobIDsWithPendingAdvanceRetry returns the IDs of jobs whose LATEST post-delivery
+// advancement event (by id) is still an unreconciled attempt marker
+// (advance_started/advance_retry) — exactly jobWorker.jobNeedsAdvanceRetry's
+// last-one-wins rule (daemon.go), evaluated set-at-once so the retry pass iterates
+// only genuine candidates instead of a full ListJobs + a per-terminal-job
+// ListJobEvents on every 1s worker tick — which was O(jobs × events) and burned a
+// core once a few hundred terminal jobs had accumulated (#598). The pass
+// re-verifies each candidate with the Go predicate, so this only has to be a
+// superset; it is in fact exact.
+//
+// The order of the tracked kinds matters (a job can be started, then completed,
+// then retried), so the LAST one wins: a job is a candidate iff the highest-id
+// event among exactly the predicate's tracked kinds is a positive attempt marker.
+// The MAX(id) subquery is restricted to those tracked kinds only (mirroring the Go
+// switch's default: no-op for every other kind) and the outer filter keeps a job
+// iff that latest tracked event is positive. One row per job (its unique MAX id).
+func (s *Store) JobIDsWithPendingAdvanceRetry(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT job_id FROM job_events
+		WHERE kind IN ('advance_started', 'advance_retry')
+		  AND id IN (
+			SELECT MAX(id) FROM job_events
+			WHERE kind IN ('advance_started', 'advance_retry', 'advance_completed',
+			               'advance_retried', 'advance_blocked', 'advance_retry_skipped', 'retry_queued')
+			GROUP BY job_id
+		)
+		ORDER BY job_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobIDs []string
+	for rows.Next() {
+		var jobID string
+		if err := rows.Scan(&jobID); err != nil {
+			return nil, err
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	return jobIDs, rows.Err()
+}
+
+// JobIDsWithPendingCommentRetry returns the IDs of jobs whose LATEST comment event
+// (by id) is comment_post_failed with no subsequent comment_posted or retry_queued
+// — exactly jobWorker.jobNeedsCommentRetry's last-one-wins rule (daemon.go),
+// evaluated set-at-once so the comment-retry pass iterates only genuine candidates
+// instead of a full ListJobs + per-terminal-job ListJobEvents on every 1s worker
+// tick (#598). The pass re-verifies each candidate with the Go predicate, so this
+// only has to be a superset; it is in fact exact.
+func (s *Store) JobIDsWithPendingCommentRetry(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT job_id FROM job_events
+		WHERE kind = 'comment_post_failed'
+		  AND id IN (
+			SELECT MAX(id) FROM job_events
+			WHERE kind IN ('comment_post_failed', 'comment_posted', 'retry_queued')
+			GROUP BY job_id
+		)
+		ORDER BY job_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobIDs []string
+	for rows.Next() {
+		var jobID string
+		if err := rows.Scan(&jobID); err != nil {
+			return nil, err
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	return jobIDs, rows.Err()
+}
+
 func (s *Store) UpsertEvalArtifact(ctx context.Context, artifact EvalArtifact) error {
 	artifact, err := normalizeEvalArtifact(artifact)
 	if err != nil {
