@@ -169,4 +169,20 @@ func TestRecallPrecisionAtK(t *testing.T) {
 	if recall2 != 0 {
 		t.Fatalf("with K=1 and 'a' at position 2, recall = %v, want 0", recall2)
 	}
+	// A null retriever must NOT show perfect precision when keys were expected:
+	// otherwise the gating harness would read "precision@K=1.000" for an
+	// empty/null retriever (see PR #626 review).
+	recall3, prec3 := recallPrecisionAtK(nil, []string{"a"}, 5)
+	if recall3 != 0 {
+		t.Fatalf("empty retrieval with expected keys: recall = %v, want 0", recall3)
+	}
+	if prec3 != 0 {
+		t.Fatalf("empty retrieval with expected keys: precision = %v, want 0", prec3)
+	}
+	// A genuinely correct null (nothing expected, nothing retrieved) still
+	// earns full recall and precision credit.
+	recall4, prec4 := recallPrecisionAtK(nil, nil, 5)
+	if recall4 != 1 || prec4 != 1 {
+		t.Fatalf("correct null retrieval: recall = %v prec = %v, want 1, 1", recall4, prec4)
+	}
 }

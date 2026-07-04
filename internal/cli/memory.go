@@ -370,7 +370,10 @@ func loadMemoryEvalFixtures(path string) (memoryEvalFixtures, error) {
 // the labeled expected set. Only the top-K retrieved keys are scored. Recall is
 // (relevant retrieved)/(relevant total); precision is (relevant retrieved)/(K
 // or fewer actually retrieved). A case with no expected keys scores recall 1.0
-// (nothing to miss) and precision 1.0 when nothing is retrieved.
+// (nothing to miss). An empty retrieval earns precision credit only when the
+// expected set is also empty (a genuinely correct null retrieval); when keys
+// were expected but nothing was retrieved, precision is 0 so a null/empty
+// retriever cannot masquerade as perfect precision in the gating harness.
 func recallPrecisionAtK(retrieved, expected []string, k int) (recall, precision float64) {
 	if k > 0 && len(retrieved) > k {
 		retrieved = retrieved[:k]
@@ -391,7 +394,14 @@ func recallPrecisionAtK(retrieved, expected []string, k int) (recall, precision 
 		recall = float64(hits) / float64(len(expected))
 	}
 	if len(retrieved) == 0 {
-		precision = 1.0
+		// A null retrieval only deserves precision credit when there was
+		// nothing relevant to retrieve; otherwise it earns none (0/0 -> 0),
+		// so an empty retriever cannot show "perfect" precision.
+		if len(expected) == 0 {
+			precision = 1.0
+		} else {
+			precision = 0.0
+		}
 	} else {
 		precision = float64(hits) / float64(len(retrieved))
 	}
