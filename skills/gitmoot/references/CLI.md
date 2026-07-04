@@ -1071,15 +1071,19 @@ bounded signal — never one fact per job (#645):
   corrective verify/retry rounds ("recent implement jobs here needed up to N fix
   rounds"), keyed by decision.
 - **Terminal-outcome facts** — when an *ordinary* job (the shape `agent
-  ask`/`agent run`/`review`/`implement` enqueue, no verify/retry loop) ends on a
-  **notable** decision — `changes_requested`, `blocked`, or `failed` ("some
-  review jobs here concluded with changes requested") — keyed by
-  `(action, outcome)`. A routine first-try success (`approved`/`implemented`)
-  writes nothing.
+  ask`/`agent run`/`review`/`implement` enqueue, no verify/retry loop) ends on the
+  **notable**, non-anomalous decision `changes_requested` ("some review jobs here
+  concluded with changes requested") — keyed by `(action, outcome)`. A routine
+  first-try success (`approved`/`implemented`) writes nothing, and the *anomalous*
+  one-off terminals (`failed`, `blocked`) are **not** auto-promoted: without a
+  recurrence threshold, a single flaky failure must not become a durable, injected
+  repo fact.
 
-Facts are keyed by low-cardinality categories (never free-form content), so
-repeated jobs UPSERT the same row rather than growing the pool, and every fact
-passes the same deterministic write filters as agent learnings.
+Facts are keyed by low-cardinality **closed** categories, never free-form
+content: the outcome is a validated decision value and the action is collapsed to
+a small fixed allowlist (a delegation's free-form action buckets to a generic
+token). So repeated jobs UPSERT the same row rather than growing the pool, and
+every fact passes the same deterministic write filters as agent learnings.
 
 Enrollment is per agent, plus optional global knobs:
 

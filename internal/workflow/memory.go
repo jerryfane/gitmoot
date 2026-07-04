@@ -257,16 +257,29 @@ func fixRoundsFact(payload JobPayload, result AgentResult) (memory.Entry, bool) 
 	return memory.Entry{Scope: memory.ScopeRepo, Key: key, Content: content}, true
 }
 
-// notableOutcomes maps the NOTABLE terminal decisions — the ones that carry
-// durable operational knowledge about a repository — to a reference-phrased fact
-// fragment. The SUCCESS decisions (approved, implemented) are deliberately
-// ABSENT: a routine success is not a signal, so an ordinary first-try success
-// produces nothing (the anti-flood restraint, constraint #1). Every key is drawn
-// from the closed ResultDecisions set, keeping outcome-fact cardinality bounded.
+// notableOutcomes maps the terminal decisions the outcome producer AUTO-PROMOTES
+// to a reference-phrased fact fragment. The set is deliberately narrow:
+//
+//   - SUCCESS decisions (approved, implemented) are ABSENT: a routine success is
+//     not a signal, so an ordinary first-try success produces nothing (the
+//     anti-flood restraint, constraint #1).
+//   - The ANOMALOUS terminal states (failed, blocked) are ALSO absent. Those are
+//     the outcomes most likely to be a ONE-OFF — a single flaky failure, a single
+//     task blocked pending external input — and this producer promotes on the
+//     FIRST occurrence with no recurrence threshold and no decay. Auto-promoting
+//     them would let ONE anomalous job become a durable, injected repo "fact" that
+//     biases every future prompt toward expecting failure, long after the next 500
+//     jobs succeed. Until a recurrence gate exists (promote only after the same
+//     (owner,repo,action,decision) has recurred N>=2 times) they stay OUT of the
+//     auto-promoted set. See #645 review (the misleading-durable-fact finding).
+//
+// What remains — changes_requested — is a NORMAL, repeatable review conclusion
+// (not an anomaly): a review asking for changes is an expected outcome, so its
+// hedged "Some ... have" fact is accurate and non-biasing even at a low count.
+// Every key is drawn from the validated closed ResultDecisions set, keeping
+// outcome-fact cardinality bounded.
 var notableOutcomes = map[string]string{
 	"changes_requested": "concluded with changes requested rather than approval",
-	"blocked":           "blocked pending external input instead of completing",
-	"failed":            "ended in a failed outcome",
 }
 
 // terminalOutcomeFact records a repo fact when an ORDINARY job (the shape
@@ -274,9 +287,14 @@ var notableOutcomes = map[string]string{
 // fixRoundsFact above stays silent) terminates on a NOTABLE decision. This is
 // the #645 fix: it fires on terminal states ordinary CLI jobs actually reach, so
 // the confirmed pool populates under normal usage. It is keyed by
-// (action, decision) — two low-cardinality closed categories — so repeated jobs
-// UPSERT and NO free-form content ever enters the key. A non-notable decision
-// (approved/implemented, or an unknown value) yields nothing (ok=false).
+// (action, decision) where BOTH sides are CLOSED categories: the decision is a
+// value from the validated ResultDecisions set, and the action is collapsed by
+// memoryActionToken to a fixed allowlist plus a single generic bucket. That
+// bounding is load-bearing because job.Type for a DELEGATION child is the
+// coordinator's free-form, LLM-authored d.Action (validated only as non-empty),
+// which must NEVER inflate key cardinality, collide at a length boundary, or leak
+// mangled content into a key or the injected prose. A non-notable decision yields
+// nothing (ok=false).
 func terminalOutcomeFact(action string, result AgentResult) (memory.Entry, bool) {
 	decision := strings.TrimSpace(result.Decision)
 	phrase, ok := notableOutcomes[decision]
@@ -289,24 +307,33 @@ func terminalOutcomeFact(action string, result AgentResult) (memory.Entry, bool)
 	return memory.Entry{Scope: memory.ScopeRepo, Key: key, Content: content}, true
 }
 
-// memoryActionToken normalizes a job action into a bounded, key-safe token:
-// lowercased and reduced to [a-z0-9_-] and capped, so even an unexpected action
-// string can never inject free-form content or blow up key cardinality. An
-// empty/anomalous action maps to "recent".
+// canonicalActions is the CLOSED allowlist of job actions the outcome producer
+// keys on. Top-level CLI jobs carry one of these as job.Type; a delegation child
+// instead carries its free-form, LLM-authored d.Action (validated only as
+// non-empty at result.go), which is precisely why memoryActionToken maps anything
+// NOT in this set to a single generic bucket instead of passing it through.
+var canonicalActions = map[string]bool{
+	"ask":       true,
+	"review":    true,
+	"implement": true,
+}
+
+// memoryActionToken maps a job action to a BOUNDED, key-safe token drawn from a
+// CLOSED set. A recognized canonical action passes through (lowercased); ANY other
+// value — an empty action, an unknown internal type, or a delegation's free-form
+// d.Action such as "review the payment webhook retry logic" — collapses to the
+// single generic "recent" bucket. Stripping-and-capping the raw string (the prior
+// behavior) was NOT enough: distinct free-form phrasings still produced distinct
+// keys (pool bloat, upsert defeated) and injected mangled prose, and long strings
+// could collide at the length cap. Collapsing to a closed allowlist keeps the
+// outcome key space a genuine closed category (constraint #2): free-form input can
+// neither inflate cardinality nor leak mangled content into a key or the prose.
 func memoryActionToken(action string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(action)) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			b.WriteRune(r)
-		}
-		if b.Len() >= 32 {
-			break
-		}
+	a := strings.ToLower(strings.TrimSpace(action))
+	if canonicalActions[a] {
+		return a
 	}
-	if b.Len() == 0 {
-		return "recent"
-	}
-	return b.String()
+	return "recent"
 }
 
 // memoryFixRounds is the deterministic corrective-round count for a terminal

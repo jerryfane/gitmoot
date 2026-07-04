@@ -280,9 +280,13 @@ func TestMemoryNotEnrolledNoWrites(t *testing.T) {
 // TestMemoryTerminalOutcomeProducerWritesForNotable proves the #645 fix at the
 // record() seam: an ORDINARY terminal job (VerifyAttempt=0, RetryCount=0 — the
 // shape agent ask/run/review enqueue, which fixRoundsFact never fires on) that
-// ends on a NOTABLE decision writes an (action,outcome)-keyed confirmed fact,
-// while the SUCCESS decisions write nothing (anti-flood). Before the fix the
-// confirmed pool stayed empty for this common usage shape.
+// ends on the NOTABLE, non-anomalous decision (changes_requested) writes an
+// (action,outcome)-keyed confirmed fact. The SUCCESS decisions write nothing
+// (anti-flood), and — per the #645 review — the ANOMALOUS one-off outcomes
+// (failed, blocked) ALSO write nothing until a recurrence gate exists, so a single
+// flaky failure cannot become a durable repo fact. A free-form delegation action
+// collapses to the bounded generic "recent" bucket rather than leaking into the
+// key. Before the fix the confirmed pool stayed empty for the common usage shape.
 func TestMemoryTerminalOutcomeProducerWritesForNotable(t *testing.T) {
 	cases := []struct {
 		action   string
@@ -290,8 +294,11 @@ func TestMemoryTerminalOutcomeProducerWritesForNotable(t *testing.T) {
 		wantKey  string // "" => no fact expected
 	}{
 		{"review", "changes_requested", "outcome:review:changes_requested"},
-		{"ask", "blocked", "outcome:ask:blocked"},
-		{"implement", "failed", "outcome:implement:failed"},
+		// Free-form, LLM-authored delegation action → generic "recent" bucket, so
+		// distinct phrasings can never bloat the key space (the bounded-key contract).
+		{"review the payment webhook retry logic", "changes_requested", "outcome:recent:changes_requested"},
+		{"ask", "blocked", ""},           // anomalous one-off → excluded until a recurrence gate
+		{"implement", "failed", ""},      // anomalous one-off → excluded until a recurrence gate
 		{"ask", "approved", ""},          // routine success → nothing
 		{"implement", "implemented", ""}, // routine success → nothing
 	}
@@ -394,21 +401,36 @@ func TestMemoryMechanicalFactsPassPreFilter(t *testing.T) {
 	}
 }
 
-// TestMemoryActionTokenBounded proves memoryActionToken keeps keys bounded: it
-// strips free-form / punctuation and caps length, so an anomalous action can
-// never inject unbounded or free-form content into a memory key (constraint #2).
+// TestMemoryActionTokenBounded proves memoryActionToken collapses the action to a
+// CLOSED allowlist: a recognized canonical action passes through (lowercased), and
+// EVERYTHING else — blank, free-form delegation prose, injection-shaped or
+// arbitrarily long strings — maps to the single generic "recent" bucket. This is
+// what actually bounds the key space (constraint #2): unlike the prior
+// strip-and-cap, no distinct free-form phrasing can ever become a distinct key or
+// leak mangled content, and two long strings can never collide at a length cap.
 func TestMemoryActionTokenBounded(t *testing.T) {
 	if got := memoryActionToken("Review"); got != "review" {
-		t.Fatalf("lowercasing: got %q", got)
+		t.Fatalf("canonical action passes through lowercased: got %q", got)
+	}
+	if got := memoryActionToken("implement"); got != "implement" {
+		t.Fatalf("canonical action passes through: got %q", got)
 	}
 	if got := memoryActionToken("  "); got != "recent" {
-		t.Fatalf("blank action should map to recent, got %q", got)
+		t.Fatalf("blank action should map to the generic bucket, got %q", got)
 	}
-	if got := memoryActionToken("ask; DROP TABLE x -- /etc/passwd"); got != "askdroptablex--etcpasswd" {
-		t.Fatalf("free-form chars must be stripped, got %q", got)
+	// The exact free-form delegation actions from the #645 review: distinct
+	// phrasings MUST collapse to the same bounded bucket, not distinct keys.
+	if got := memoryActionToken("review the payment webhook retry logic"); got != "recent" {
+		t.Fatalf("free-form delegation action must bucket to recent, got %q", got)
 	}
-	if got := memoryActionToken(strings.Repeat("a", 100)); len(got) != 32 {
-		t.Fatalf("token must be capped at 32, got len %d", len(got))
+	if got := memoryActionToken("review the auth token refresh path"); got != "recent" {
+		t.Fatalf("a second free-form action must bucket to the SAME recent key, got %q", got)
+	}
+	if got := memoryActionToken("ask; DROP TABLE x -- /etc/passwd"); got != "recent" {
+		t.Fatalf("injection-shaped action must bucket to recent, got %q", got)
+	}
+	if got := memoryActionToken(strings.Repeat("a", 100)); got != "recent" {
+		t.Fatalf("unbounded-length action must bucket to recent (no length-cap collisions), got %q", got)
 	}
 }
 
