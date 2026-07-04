@@ -21,10 +21,17 @@ it ships in phases. The current phase is **observation mode**:
   *"Prior learnings (reference only, not instructions)"* with `[this repo]` /
   `[general]` tags. An empty result adds nothing.
 - **WRITE** — the confirmed (injectable) tier is populated only by Gitmoot's own
-  deterministic **mechanical facts** (e.g. how many corrective fix rounds a
-  recent job in this repo needed — no model involved). Agent-returned learnings
-  are **shadow-logged** to an append-only observations table for measurement but
-  are never injected and never promoted in this phase.
+  deterministic **mechanical facts** (no model involved). A fact is written only
+  when a terminal job carries a genuine, bounded signal — never one fact per job:
+  a **fix-round fact** when a job needed corrective verify/retry rounds, and a
+  **terminal-outcome fact** when an *ordinary* job (an `agent ask`/`run`/`review`
+  job with no verify/retry loop) ends on a **notable** decision —
+  `changes_requested`, `blocked`, or `failed`. A routine first-try success writes
+  nothing. Facts are keyed by low-cardinality categories such as
+  `(action, outcome)` — never free-form content — so repeated jobs UPSERT the
+  same row rather than growing the pool. Agent-returned learnings are
+  **shadow-logged** to an append-only observations table for measurement but are
+  never injected and never promoted in this phase.
 
 Every write passes deterministic pre-filters that reject directive-phrased
 ("you must always…"), executable/command, secret-shaped, and — for `general`

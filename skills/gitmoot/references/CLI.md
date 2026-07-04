@@ -1064,6 +1064,23 @@ current phase, runs in **observation mode**: the injectable ("confirmed") tier
 is populated only by Gitmoot's own deterministic mechanical facts, while
 agent-returned learnings are logged for measurement but never injected.
 
+Gitmoot writes a mechanical fact only when a terminal job carries a genuine,
+bounded signal — never one fact per job (#645):
+
+- **Fix-round facts** — when a job reached its decision only after one or more
+  corrective verify/retry rounds ("recent implement jobs here needed up to N fix
+  rounds"), keyed by decision.
+- **Terminal-outcome facts** — when an *ordinary* job (the shape `agent
+  ask`/`agent run`/`review`/`implement` enqueue, no verify/retry loop) ends on a
+  **notable** decision — `changes_requested`, `blocked`, or `failed` ("some
+  review jobs here concluded with changes requested") — keyed by
+  `(action, outcome)`. A routine first-try success (`approved`/`implemented`)
+  writes nothing.
+
+Facts are keyed by low-cardinality categories (never free-form content), so
+repeated jobs UPSERT the same row rather than growing the pool, and every fact
+passes the same deterministic write filters as agent learnings.
+
 Enrollment is per agent, plus optional global knobs:
 
 ```toml
