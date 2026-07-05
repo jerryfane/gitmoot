@@ -1,50 +1,81 @@
-# gitmoot — Agent Guide
+# AGENTS.md — gitmoot
+
+> Agent operating context for this repo (agents.md spec). Complements `README.md`
+> (which is for humans). `CLAUDE.md` imports this file via `@AGENTS.md`.
+>
+> This is the filled-in **Project Map** for the `lead-engineer` work strategy.
+> Accuracy is sacred: every claim here is verified against the repo or describes
+> this host's live deployment. Don't add a claim you haven't checked.
+
+## Project overview
 
 gitmoot is a local-first coordinator for AI coding agents working across GitHub
-repositories, pull requests, goals, reviews, and runtime workflows. It is a Go
-CLI plus a background daemon; workflow state lives in local SQLite.
+repositories, pull requests, goals, reviews, and runtime workflows. It ships as a
+single static Go binary plus a background daemon; workflow state lives in local
+SQLite (the **modernc pure-Go** driver — no cgo). The single static binary with
+**zero runtime dependencies** is a core invariant.
 
-This file is the shared context for AI coding agents. `CLAUDE.md` imports it via
-`@AGENTS.md`.
+It drives four runtimes (`codex`, `claude`, `kimi`, `shell`). `agent start`
+supports codex/claude/kimi; `shell` is a subscribe-only command runtime used
+mainly to drive engine-feature E2Es with no LLM.
 
-## Build, Test, and Verify
+## Build, test, and verify (the gate)
 
 Requires Go 1.26+ (see `go.mod`; CI resolves the version via
-`go-version-file: go.mod`). Run from the repo root and make these pass before
-committing — they mirror the CI gate in `.github/workflows/ci.yml`:
+`go-version-file: go.mod`). On this host, pin the toolchain:
+
+```sh
+export GOTOOLCHAIN=local PATH=/root/.local/toolchains/go1.26.4/bin:$PATH
+```
+
+Run from the repo root and make these pass before committing — they mirror the CI
+gate in `.github/workflows/ci.yml`:
 
 ```sh
 go build ./...
+go generate ./... && git diff --exit-code   # gitmoot_result contract is single-sourced + regenerated; stale artifact fails CI
 go vet ./...
 go test ./...
-go test -race ./internal/workflow/   # the workflow engine is race-tested in CI
+# Race gate is scoped (not ./...) with a 20m timeout — matches CI exactly:
+go test -race -timeout 20m ./internal/workflow/ ./internal/cli/ ./internal/db/ ./internal/daemon/
 ```
 
-The CLI entrypoint lives under `cmd/`.
+The CLI entrypoint lives under `cmd/gitmoot/`. The CI gate is Go-only — it does
+**not** build the website or run the live multi-runtime (codex/claude/kimi) E2E
+(those need a Node build / runtime auth and stay manual).
 
-## Repository Layout
+Prefer driving engine-feature E2Es with **no LLM** via the `shell` runtime on an
+isolated `/tmp` home, and test home-scoped daemon seams at the true runtime
+boundary — component tests miss the home double-resolution bug class (#446/#459).
 
-- `cmd/` — CLI entrypoint(s).
-- `internal/` — all implementation. Key packages: `cli` (command surface),
-  `workflow` (job/delegation engine + result contract), `db` (SQLite store),
-  `runtime` (Codex/Claude/Kimi adapters), `daemon` (PR watcher), `skillopt`
-  (template learning), `agenttemplate`, `report` (bug reports), `presence`,
-  `plugin*`.
+## Repository layout
+
+- `cmd/gitmoot/` — CLI entrypoint.
+- `internal/cli/` — the command surface (agent, template, skillopt, memory,
+  dashboard) **and the `daemon` command wiring / worker loop**.
+- `internal/daemon/` — the PR-watcher daemon package (poll/resume/revert logic).
+- `internal/workflow/` — the job/delegation engine, mailbox, memory controller,
+  and the `gitmoot_result` contract.
+- `internal/runtime/` — the Codex/Claude/Kimi/shell adapters.
+- `internal/skillopt/` — the template auto-optimization loop.
+- `internal/config/` — config loaders (`init.go` holds the `DefaultConfig`
+  template + per-section loaders).
+- `internal/db/` — the SQLite store + the migrations slice.
+- Other notable `internal/` packages: `agenttemplate`, `report` (bug reports),
+  `presence`, `memory`, `doctor`, `cockpit`, `plugin*`.
 - `skills/gitmoot/` — the packaged Agent Skill: `SKILL.md` + `references/`
   (`CLI.md`, `WORKFLOWS.md`, `RESULT_CONTRACT.md`, `SAFETY.md`, …) +
   `agent-templates/`.
-- `docs/` — in-repo reference docs.
-- `website/` — the Docusaurus site published to gitmoot.io (see below).
-- `scripts/` — repo scripts.
+- `docs/` — in-repo reference docs. `website/` — the Docusaurus site (separate
+  tree). `scripts/` — repo scripts.
 
 ## Documentation — two independent trees
 
-Docs live in **two places that do not auto-sync**, so a docs change usually
-needs to be applied to both:
+Docs live in **two places that do not auto-sync**, so a docs change usually needs
+both:
 
-1. **In-repo**: `docs/`, `skills/gitmoot/`, `README.md`, `SKILL.md`,
-   `CONTRIBUTING.md`.
-2. **Website**: `website/docs/` (Docusaurus) — what publishes to
+1. **In-repo**: `docs/`, `skills/gitmoot/`, `README.md`, `CONTRIBUTING.md`.
+2. **Website**: `website/docs/` (Docusaurus) — published to
    <https://gitmoot.io/docs>.
 
 The website is **not auto-deployed**. It is served by nginx from
@@ -57,28 +88,70 @@ rsync -a --delete build/ /var/www/gitmoot-docs/  # destructive; back up the targ
 ```
 
 `website/sidebars.ts` is manual — add new pages there. `website/static/llms.txt`
-is a hand-curated index; `website/static/llms-full.txt` is generated by
+is hand-curated; `website/static/llms-full.txt` is generated by
 `npm run build:llms` (part of `npm run build`).
 
-## Conventions
+**Docs ship with code**: every user-facing change updates the skill / `CLI.md` /
+site / `llms.txt` in the **same PR**, and you never document behavior you haven't
+verified against the code — grep `main`, not a stale feature checkout.
 
-- **Commits**: Conventional Commits — `feat:`, `fix:`, `docs:`, `chore:`,
-  `ci:`, `perf:`, with an optional scope, e.g. `feat(workflow): …`,
-  `docs(website): …`. Reference issues with `(#NNN)`.
-- **Branches / PRs**: do **not** push directly to `main`. Branch, open a PR, let
-  CI (`build / vet / test`) pass, then **squash-merge** into `main`.
-- **Scope**: preserve existing behavior unless the change requires otherwise;
-  keep work scoped to the task.
+## Runtime map / this host's live deployment
 
-## Agent Jobs & the Result Contract
+The facts below describe **this box's** running deployment (operator reality), not
+portable code behavior.
 
-gitmoot runs agents through registered runtimes — **Codex, Claude Code, and
-Kimi Code** (`gitmoot agent start --runtime codex|claude|kimi`). Jobs return a
+- The live daemon runs as `systemd --user gitmoot-daemon`. Its token is supplied
+  via a `chmod 600` EnvironmentFile at `/root/.config/gitmoot/daemon.env` (which
+  also carries `PATH`); `loginctl enable-linger` keeps it alive. Manage it with
+  `systemctl --user`, **not** `gitmoot daemon restart` (which spawns a 2nd
+  daemon). Footgun: `daemon run` does not update `daemon.json`, so
+  `gitmoot daemon status` / the dashboard can falsely read "stopped".
+- Deployed binary: `/root/.local/bin/gitmoot`.
+- `--home /x` resolves to `/x/.gitmoot`. The live daemon home is `/root/.gitmoot`.
+  **Never touch `/root/.gitmoot` in tests** — use throwaway `/tmp` homes only.
+- The daemon rebuilds its per-repo workflow engine each tick and warm-reloads
+  runtime config on `SIGHUP` (#577), so many config edits (e.g. `[memory]`,
+  worker count, poll interval) take effect without a full restart. Warm reload
+  never re-execs (it preserves inherited runtime auth — the #559 lesson).
+- Public read-only dashboard: <https://gitmoot.themartian.app> (a separate
+  `gitmoot-dashboard-web` systemd service behind traefik). Docs site: gitmoot.io.
+
+## Hard rules (footguns)
+
+- **Never touch `/root/.gitmoot`** in tests/E2E — isolated `/tmp` homes only.
+- **Never re-resolve an already-resolved home** (`<home>/.gitmoot/.gitmoot` →
+  silent nil; the #446/#459 bug class). Use the dual-mode resolver.
+- Manage the live daemon via `systemctl --user`, never `gitmoot daemon restart`.
+- In E2E/orchestrate set `HERDR_SOCKET_PATH=/tmp/throwaway` and unset `HERDR_ENV`
+  or panes leak to the prod Telegram group.
+- Global flags like `--home` use Go flag parsing, so they must precede positional
+  args (e.g. `skillopt candidate --home /tmp/h show <id>`, not after the id).
+- `agent template add` needs a file with YAML frontmatter — use
+  `agent template draft` to scaffold one. `template publish --create` makes a
+  **private** repo; prompt bodies + metadata are stored/published **verbatim**,
+  so point the remote at a private repo unless the prompts are meant to be public.
+- An invalid `CLAUDE_CODE_OAUTH_TOKEN` 401s fresh claude sessions but `--resume`
+  masks it; `gitmoot doctor` "auth ok" is set-not-valid (a false green).
+- Killing a foreground `agent ask` / `skillopt train` strands a resource lock
+  (runtime-session / generation); recover via `skillopt train recover` or clear
+  the lock.
+- codex ephemeral workers need `~/.codex/config.toml`
+  `[sandbox_workspace_write] network_access=true` to push / open PRs.
+- Agent permission policies gate Bash: `--policy workspace-write` auto-accepts
+  **file edits only** and does **not** unblock Bash (`go`/`git`/`gh`). A full
+  implement/push agent needs broader access; workspace-write alone is edits-only.
+- The single static binary is sacred: no cgo, no runtime deps (modernc pure-Go
+  SQLite).
+
+## Agent jobs & the result contract
+
+gitmoot runs agents through registered runtimes — **Codex, Claude Code, and Kimi
+Code** (`gitmoot agent start --runtime codex|claude|kimi`). Jobs return a
 `gitmoot_result` JSON object, and agents can fan work out via a validated
-`delegations[]` DAG with a coordinator continuation job (the Orchestra pattern),
-bounded by depth, a per-root job budget, and loop detection. `gitmoot orchestrate
-<agent> "..." [--repo R]` is sugar for `gitmoot agent run <agent> --background
-"..."`. The contracts live in:
+`delegations[]` DAG with a coordinator continuation job (the **Orchestra**
+pattern), bounded by depth, a per-root job budget, and loop detection.
+`gitmoot orchestrate <agent> "..." [--repo R]` is sugar for
+`gitmoot agent run <agent> --background "..."`. Contracts:
 
 - `skills/gitmoot/references/RESULT_CONTRACT.md` — `gitmoot_result` + the
   `delegations` fields and termination bounds.
@@ -86,12 +159,43 @@ bounded by depth, a per-root job budget, and loop detection. `gitmoot orchestrat
   delegation termination bounds.
 - `skills/gitmoot/SKILL.md` — the entry point for the Gitmoot agent skill.
 
-## Gotchas
+## Deploy recipe (this host)
 
-- **Gitignored** (local-only, not in the repo): `/GOALS/` (goal working docs),
-  `/repos/` (vendored helper repos), `/dist/`, `/.gitmoot/evals/`. Editing these
-  never shows in `git status`.
-- The CI gate is Go-only — it does **not** build the website or run the live
-  multi-runtime (codex/claude/kimi) E2E (those need a Node build / runtime auth).
+1. On `main` after merge, build with the pinned toolchain (above).
+2. `mv`-rename the new binary into `/root/.local/bin/gitmoot` (same filesystem;
+   the rename avoids `ETXTBSY`).
+3. Restart the daemon at idle: `systemctl --user restart gitmoot-daemon`
+   (confirm 0 running jobs first).
+4. Config-only changes (e.g. `[memory]`/`[skillopt]`) usually need no restart
+   (re-read per tick / warm-reloaded on SIGHUP).
+5. **Public releases need explicit OWNER sign-off** —
+   `gh release create vX.Y.Z --latest` triggers `release.yml`. "Deploy locally"
+   is not "cut a release".
+
+## Live-probe
+
+Prove a deploy: `gitmoot version` (commit/build), `gitmoot daemon status`,
+`gitmoot doctor`. For engine features, a `shell`-runtime E2E on an isolated
+`/tmp` home is the no-LLM smoke test.
+
+## Work strategy (lead-engineer)
+
+Issue-first → isolated worktrees off `main` → implement → adversarial-review →
+fix → verify on the integrated tree → owner-gated PR → deploy affected-only →
+live-probe before close. The **OWNER holds merge authority**. Under ultracode,
+orchestrate via the Workflow tool with opus sub-agents (protect the scarcer fable
+quota).
+
+## PR & commit conventions
+
+- **Commits**: Conventional Commits — `feat:`, `fix:`, `docs:`, `chore:`, `ci:`,
+  `perf:`, optional scope (e.g. `feat(workflow): …`). Reference issues with
+  `(#NNN)`.
+- **Branches / PRs**: do **not** push directly to `main`. Branch, open a PR, let
+  CI (`build / vet / test`) pass, then the owner **squash-merges**. One PR per
+  issue, with deploy notes in the body.
+- **Scope**: preserve existing behavior unless the change requires otherwise.
 - For machine-local agent notes, use a gitignored `CLAUDE.local.md` rather than
-  editing this shared file.
+  editing this shared file. Gitignored (local-only, not in the repo): `/GOALS/`,
+  `/repos/` (vendored helper repos), `/dist/`, `/.gitmoot/evals/` — editing these
+  never shows in `git status`.
