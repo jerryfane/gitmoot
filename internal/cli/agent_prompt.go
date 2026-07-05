@@ -100,12 +100,16 @@ func sessionCloseHint(jobID string) string {
 	return fmt.Sprintf(`[gitmoot session job %s — when this work is complete, run: gitmoot job close %s --decision <approved|changes_requested|implemented|blocked|failed> --summary "..."]`, jobID, jobID)
 }
 
-// runAgentPromptRecord implements `agent prompt <agent> --record`: it opens a
-// session job (the same OpenExternalJob/Mailbox clock-in `job open` uses) for the
-// agent + repo and returns the prompt with a header that names the job id so the
-// importing session tracks the here-method work by default. Unlike the plain
-// prompt path this needs a writable store, and the id MUST resolve to an agent
-// (a bare template has no repo_scope and cannot own a session job).
+// runAgentPromptRecord implements `agent prompt <id> --record`: it opens a session
+// job (the same OpenExternalJob/Mailbox clock-in `job open` uses) for the resolved
+// identity + repo and returns the prompt with a header that names the job id so the
+// importing session tracks the here-method work by default. Unlike the plain prompt
+// path this needs a writable store. The id may resolve two ways:
+//   - a registered agent: the repo falls back to the agent's repo_scope when --repo
+//     is omitted, and the session job records the agent name as its identity.
+//   - a bare template (no agent registered): --repo owner/repo is REQUIRED (a
+//     template has no repo_scope to fall back on), and the session job records the
+//     template id as its identity (#673).
 func runAgentPromptRecord(home, id, repoFlag, typeName string, jsonOutput bool, stdout, stderr io.Writer) int {
 	action, ok := validateSessionAction(typeName, stderr)
 	if !ok {
@@ -117,34 +121,62 @@ func runAgentPromptRecord(home, id, repoFlag, typeName string, jsonOutput bool, 
 		jobID  string
 	)
 	if err := withStoreAndPaths(home, func(paths config.Paths, store *db.Store) error {
-		agent, err := store.GetAgent(ctx, strings.TrimSpace(id))
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("agent %q not found; --record requires an existing agent (a bare template id has no repo scope to record against)", id)
+		id := strings.TrimSpace(id)
+		agent, err := store.GetAgent(ctx, id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		var (
+			resolved agentPromptOutput
+			identity string
+			repoName string
+		)
+		if err == nil {
+			// Registered-agent path (unchanged): repo falls back to repo_scope.
+			resolved, err = promptForAgent(ctx, store, agent)
+			if err != nil {
+				return err
 			}
-			return err
+			repoScope := strings.TrimSpace(repoFlag)
+			if repoScope == "" {
+				repoScope = strings.TrimSpace(agent.RepoScope)
+			}
+			if repoScope == "" {
+				return fmt.Errorf("no repo to record against: pass --repo owner/repo or set agent %q's repo_scope", agent.Name)
+			}
+			fullName, verr := validateSessionAgentRepo(ctx, store, agent.Name, repoScope)
+			if verr != nil {
+				return verr
+			}
+			identity = agent.Name
+			repoName = fullName
+		} else {
+			// Bare-template path (#673): no agent to fall back on, so --repo is
+			// required and the template id is the recorded identity.
+			template, terr := loadInstalledTemplate(ctx, store, id)
+			if terr != nil {
+				return terr
+			}
+			repoScope := strings.TrimSpace(repoFlag)
+			if repoScope == "" {
+				return fmt.Errorf("--repo owner/repo is required to record %q: it is a template, not a registered agent, so there is no repo scope to record against", id)
+			}
+			fullName, verr := validateSessionRepo(ctx, store, repoScope)
+			if verr != nil {
+				return verr
+			}
+			resolved = promptOutputForTemplate("template", template.ID, template)
+			identity = template.ID
+			repoName = fullName
 		}
-		resolved, err := promptForAgent(ctx, store, agent)
-		if err != nil {
-			return err
-		}
-		repoScope := strings.TrimSpace(repoFlag)
-		if repoScope == "" {
-			repoScope = strings.TrimSpace(agent.RepoScope)
-		}
-		if repoScope == "" {
-			return fmt.Errorf("no repo to record against: pass --repo owner/repo or set agent %q's repo_scope", agent.Name)
-		}
-		fullName, err := validateSessionAgentRepo(ctx, store, agent.Name, repoScope)
-		if err != nil {
-			return err
-		}
+
 		engine := sessionWorkflowEngine(store, paths.Home)
 		job, err := engine.OpenExternalJob(ctx, workflow.JobRequest{
-			ID:     sessionJobID(action, agent.Name),
-			Agent:  agent.Name,
+			ID:     sessionJobID(action, identity),
+			Agent:  identity,
 			Action: action,
-			Repo:   fullName,
+			Repo:   repoName,
 			Sender: "session",
 		})
 		if err != nil {

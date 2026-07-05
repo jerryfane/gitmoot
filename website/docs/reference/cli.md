@@ -596,11 +596,18 @@ gitmoot agent prompt frontend-reviewer --record [--repo owner/repo] [--type ask|
 # followed by the prompt body.
 ```
 
-`--record` requires an **agent** (not a bare template id); the repo comes from
-`--repo`, else the agent's `repo_scope` (error if neither is set). `--type`
-defaults to `implement`. When the imported work is done, close the job with
-`gitmoot job close <id> --decision …`. `--json` includes the opened `job_id`.
-Without `--record`, behavior is unchanged (no job).
+`--record` accepts either a **registered agent** or a bare **template id**:
+
+- Registered agent: the repo comes from `--repo`, else the agent's `repo_scope`
+  (error if neither is set); the session job records the agent name.
+- Bare template (no agent of that name registered, e.g. the packaged `planner`):
+  `--repo owner/repo` is **required** — a template has no `repo_scope` to fall
+  back on — and the session job records the **template id** as its agent identity
+  (#673). The repo must be tracked (`gitmoot repo add owner/repo` first).
+
+`--type` defaults to `implement`. When the imported work is done, close the job
+with `gitmoot job close <id> --decision …`. `--json` includes the opened
+`job_id`. Without `--record`, behavior is unchanged (no job).
 
 Draft and validate a captured template before installing it:
 
@@ -824,9 +831,11 @@ it (retrying would re-queue it for a real runtime with an empty payload) — rec
 one by opening a fresh session job instead. The agent and repo must exist.
 
 **Make in-chat / "here" work show on the dashboard.** The one-step default is
-`gitmoot agent prompt <agent> --record`: it opens the session job *as you import
-the prompt* and prints a header naming the job id (see the `agent prompt`
-section above). Apply the prompt, do the work, then clock out with
+`gitmoot agent prompt <agent-or-template> --record`: it opens the session job *as
+you import the prompt* and prints a header naming the job id (see the `agent
+prompt` section above). It works for a registered agent (repo defaults to its
+scope) and for a bare template id with an explicit `--repo` (the template id is
+recorded as the identity, #673). Apply the prompt, do the work, then clock out with
 `gitmoot job close <id> --decision …`. That is all it takes for otherwise-invisible
 current-chat ("here") work to appear in `job list`, the dashboard, and the event
 stream — no daemon, no runtime, no PR comment. Use plain `agent prompt` (no
