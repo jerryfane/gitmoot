@@ -502,6 +502,7 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 		return AgentResult{}, err
 	}
 
+	registeredFreshRef := runtime.IsFreshRef(agent.RuntimeRef)
 	prompt := prompts.RenderJob(payload.prompt(job.Type))
 	// Append the off-by-default "Prior learnings" memory block (#626 READ path).
 	// When the memory hook is unset (every non-enrolled path) or returns "" (no
@@ -545,7 +546,7 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 	// belongs to the DEFAULT runtime, and persisting an override-runtime ref
 	// there would corrupt the agent's session identity. The refreshed ref is
 	// still adopted in-memory below so repair retries stay coherent.
-	if payload.RuntimeOverride == "" {
+	if payload.RuntimeOverride == "" && !registeredFreshRef {
 		m.persistRefreshedRuntimeRef(ctx, job.ID, agent, firstRefreshedRef)
 	}
 	// If the first delivery self-healed a dead session (#443), adopt the freshly
@@ -601,7 +602,7 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 			}
 			// Same #531 override guard as the first delivery: never persist an
 			// override-runtime ref onto the agent's default-runtime resume state.
-			if payload.RuntimeOverride == "" {
+			if payload.RuntimeOverride == "" && !registeredFreshRef {
 				m.persistRefreshedRuntimeRef(ctx, job.ID, agent, repairRefreshedRef)
 			}
 			// Adopt a freshly minted session ref so the next repair re-ask resumes the

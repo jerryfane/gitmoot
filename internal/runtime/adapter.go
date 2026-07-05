@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -138,12 +139,11 @@ func SupportedRuntimes() []string {
 }
 
 // FreshRefPrefix marks a runtime reference that names no existing session:
-// "fresh:<uuid>". A delivery against a fresh ref must start a brand-new
+// "fresh:<suffix>". A delivery against a fresh ref must start a brand-new
 // session on its runtime and must never resume (or write back to) any stored
-// session. The uuid suffix exists so each fresh ref — and therefore each
-// runtime-session lock key derived from it — is unique per job; adapters do
-// not reuse it as the actual CLI session id. Minted by the per-job --runtime
-// override path (#531) when no explicit session is given.
+// session. The suffix scopes runtime-session lock keys; per-job override refs
+// are unique when minted, and registered fresh refs are rewritten to a job
+// scoped ref before execution.
 const FreshRefPrefix = "fresh:"
 
 // NewFreshRef mints a unique fresh-session runtime reference (see
@@ -161,15 +161,23 @@ func IsFreshRef(ref string) bool {
 	return strings.HasPrefix(ref, FreshRefPrefix)
 }
 
+// FreshRefForJob returns a deterministic fresh-session ref scoped to a job id.
+// This lets a registered "fresh:<seat>" agent get a separate runtime lock and
+// CLI session per job instead of sharing one lock across all jobs.
+func FreshRefForJob(jobID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(jobID)))
+	return FreshRefPrefix + "job:" + hex.EncodeToString(sum[:8])
+}
+
 func ValidateAgent(agent Agent) error {
 	if err := validateAgentFields(agent, true); err != nil {
 		return err
 	}
 	if agent.Runtime == ClaudeRuntime && agent.RuntimeRef != LastRef && !isUUID(agent.RuntimeRef) && !IsFreshRef(agent.RuntimeRef) {
-		return fmt.Errorf("claude runtime reference %q must be a UUID, last, or fresh:<uuid>", agent.RuntimeRef)
+		return fmt.Errorf("claude runtime reference %q must be a UUID, last, or fresh:<suffix>", agent.RuntimeRef)
 	}
 	if isKimiRuntime(agent.Runtime) && agent.RuntimeRef != "" && !isKimiSessionID(agent.RuntimeRef) && !IsFreshRef(agent.RuntimeRef) {
-		return fmt.Errorf("kimi runtime reference %q must be a Kimi session id, fresh:<uuid>, or empty", agent.RuntimeRef)
+		return fmt.Errorf("kimi runtime reference %q must be a Kimi session id, fresh:<suffix>, or empty", agent.RuntimeRef)
 	}
 	return nil
 }
@@ -355,7 +363,12 @@ func (a CodexAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 	// Usage is attributable to this job when the session belongs to it alone:
 	// a fresh ref (brand-new session, no resume) or a single-use session
 	// (ephemeral/temp workers — started for the job, disposed after it).
-	return codexDeliverResult(result.Stdout, IsFreshRef(agent.RuntimeRef) || agent.SingleUseSession), nil
+	freshSession := IsFreshRef(agent.RuntimeRef) || agent.SingleUseSession
+	parsed := codexDeliverResult(result.Stdout, freshSession)
+	if IsFreshRef(agent.RuntimeRef) {
+		parsed.RefreshedRuntimeRef = parseCodexThreadID(result.Stdout)
+	}
+	return parsed, nil
 }
 
 // codexDeliverArgs builds the `codex exec` argument vector for a Deliver call.
@@ -431,6 +444,28 @@ func codexDeliverResult(stdout string, freshSession bool) Result {
 		inputTokens, outputTokens = 0, 0
 	}
 	return Result{Raw: raw, Summary: strings.TrimSpace(raw), InputTokens: inputTokens, OutputTokens: outputTokens}
+}
+
+func parseCodexThreadID(output string) string {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var event struct {
+			Type     string `json:"type"`
+			ThreadID string `json:"thread_id"`
+		}
+		if json.Unmarshal([]byte(line), &event) != nil {
+			continue
+		}
+		if event.Type == "thread.started" && strings.TrimSpace(event.ThreadID) != "" {
+			return strings.TrimSpace(event.ThreadID)
+		}
+	}
+	return ""
 }
 
 func (a CodexAdapter) Health(ctx context.Context, agent Agent) error {
@@ -660,13 +695,14 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 // fresh-ref path, #531). Each attempt mints a NEW session id, mirroring the
 // #443 self-heal shape (claudeFreshSessionArgs — never --resume/--continue),
 // so a transient-401 retry can never trip over an already-created session id.
-// It intentionally returns no RefreshedRuntimeRef: a fresh-ref delivery is
-// one-shot and must never re-pin the agent's stored session.
+// It returns the successful concrete session id as RefreshedRuntimeRef so
+// malformed-output repair prompts in the same job resume that isolated job
+// session. The mailbox guards registered fresh refs from being re-pinned.
 func (a ClaudeAdapter) deliverFresh(ctx context.Context, agent Agent, job Job, model string) (Result, error) {
 	var result subprocess.Result
 	var err error
+	var sessionID string
 	for attempt := 1; ; attempt++ {
-		var sessionID string
 		sessionID, err = a.newRuntimeRef()
 		if err != nil {
 			return Result{}, err
@@ -682,7 +718,7 @@ func (a ClaudeAdapter) deliverFresh(ctx context.Context, agent Agent, job Job, m
 	if err != nil {
 		return Result{Raw: result.Stdout + result.Stderr}, claudeCommandError(result, err)
 	}
-	parsed := Result{Raw: result.Stdout}
+	parsed := Result{Raw: result.Stdout, RefreshedRuntimeRef: sessionID}
 	summary, inTok, outTok := parseClaudeJSONResult(result.Stdout)
 	if summary != "" {
 		parsed.Summary = summary

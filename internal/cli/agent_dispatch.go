@@ -205,6 +205,9 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "route_selected", Message: routeSelectedMessage(request)}); err != nil {
 		return localAgentJobOutput{}, err
 	}
+	if overrideRuntime == "" {
+		effectiveAgent = scopeRegisteredFreshRefForJob(effectiveAgent, job.ID)
+	}
 	if request.Background {
 		return localAgentJobOutput{
 			JobID:                job.ID,

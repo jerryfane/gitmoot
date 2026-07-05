@@ -681,6 +681,55 @@ func TestMailboxRunRepairRetryResumesRefreshedRef(t *testing.T) {
 	}
 }
 
+func TestMailboxRunFreshRefRepairUsesConcreteSessionWithoutPersisting(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+	freshRef := "fresh:council-codex"
+	concreteRef := "codex-thread-123"
+	if err := store.UpsertAgent(ctx, db.Agent{
+		Name:       "shipper",
+		Role:       "implementer",
+		Runtime:    runtime.CodexRuntime,
+		RuntimeRef: freshRef,
+		RepoScope:  "jerryfane/gitmoot",
+	}); err != nil {
+		t.Fatalf("UpsertAgent returned error: %v", err)
+	}
+	agent := runtime.Agent{Name: "shipper", Runtime: runtime.CodexRuntime, RuntimeRef: freshRef, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	adapter := &fakeDelivery{
+		outputs: []string{
+			"fresh job session but no json",
+			`{"gitmoot_result":{"decision":"implemented","summary":"done","findings":[],"changes_made":["x"],"tests_run":[],"needs":[],"delegations":[]}}`,
+		},
+		refreshedRefs: []string{concreteRef},
+	}
+
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if len(adapter.agentRefs) != 2 {
+		t.Fatalf("deliveries = %d, want 2", len(adapter.agentRefs))
+	}
+	if adapter.agentRefs[0] != freshRef {
+		t.Fatalf("first delivery ref = %q, want registered fresh ref", adapter.agentRefs[0])
+	}
+	if adapter.agentRefs[1] != concreteRef {
+		t.Fatalf("repair delivery ref = %q, want concrete job session", adapter.agentRefs[1])
+	}
+	stored, err := store.GetAgent(ctx, "shipper")
+	if err != nil {
+		t.Fatalf("GetAgent returned error: %v", err)
+	}
+	if stored.RuntimeRef != freshRef {
+		t.Fatalf("stored runtime_ref = %q, want registered fresh ref %q", stored.RuntimeRef, freshRef)
+	}
+}
+
 func TestMailboxRunNoRefreshLeavesRefUnchanged(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
