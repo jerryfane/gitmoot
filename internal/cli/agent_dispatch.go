@@ -557,6 +557,21 @@ func prepareLocalImplementDispatchRequest(ctx context.Context, store *db.Store, 
 	taskID := strings.TrimSpace(request.TaskID)
 	taskTitle := strings.TrimSpace(request.TaskTitle)
 	goalID := strings.TrimSpace(request.GoalID)
+	branchHint := strings.TrimSpace(request.Branch)
+	if taskID == "" && branchHint != "" {
+		existing, err := store.GetTaskByRepoBranch(ctx, repo.FullName(), branchHint)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return db.Task{}, localAgentDispatchRequest{}, err
+		}
+		if err == nil {
+			taskID = existing.ID
+			taskTitle = firstNonEmpty(taskTitle, existing.Title)
+			goalID = firstNonEmpty(goalID, existing.GoalID)
+			request.TaskID = taskID
+			request.TaskTitle = taskTitle
+			request.GoalID = goalID
+		}
+	}
 	if taskID == "" {
 		taskID = "adhoc-" + shortHash(request.Instructions+"\x00"+time.Now().UTC().Format(time.RFC3339Nano))
 		taskTitle = firstNonEmpty(taskTitle, shortTaskTitle(request.Instructions))
