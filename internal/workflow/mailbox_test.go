@@ -305,6 +305,133 @@ func TestMailboxRunDeliversModelOverride(t *testing.T) {
 	}
 }
 
+// okDeliveryResult is a minimal well-formed gitmoot_result so a fake delivery
+// classifies to a terminal state and the job persists its recorded usage.
+const okDeliveryResult = `{"gitmoot_result":{"decision":"implemented","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`
+
+// TestMailboxDeliverDeltasCumulativeUsage pins the #661 wiring: when the adapter
+// flags usage CUMULATIVE (a codex resumed thread reports the session's running
+// total), the mailbox records only this job's per-session delta, not the whole
+// cumulative. Two sequential deliveries on the SAME agent runtime ref report
+// cumulatives 1000/100 then 1500/150; the first job persists the full 1000/100
+// (baseline 0) and the second persists only the 500/50 increase.
+func TestMailboxDeliverDeltasCumulativeUsage(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+	agent := runtime.Agent{Name: "planner", Runtime: runtime.CodexRuntime, RuntimeRef: "019f3041-cfed-7e82-8766-b5ca75cf92da", RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	adapter := &fakeDelivery{
+		outputs:      []string{okDeliveryResult, okDeliveryResult},
+		inputTokens:  []int{1000, 1500},
+		outputTokens: []int{100, 150},
+		cumulative:   []bool{true, true},
+	}
+
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-a", Agent: "planner", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+		t.Fatalf("Enqueue job-a: %v", err)
+	}
+	if _, err := mailbox.Run(ctx, "job-a", agent, adapter); err != nil {
+		t.Fatalf("Run job-a: %v", err)
+	}
+	jobA, err := store.GetJob(ctx, "job-a")
+	if err != nil {
+		t.Fatalf("GetJob job-a: %v", err)
+	}
+	if jobA.InputTokens != 1000 || jobA.OutputTokens != 100 {
+		t.Fatalf("job-a usage = (%d, %d), want (1000, 100) — full cumulative on a fresh session baseline", jobA.InputTokens, jobA.OutputTokens)
+	}
+
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-b", Agent: "planner", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+		t.Fatalf("Enqueue job-b: %v", err)
+	}
+	if _, err := mailbox.Run(ctx, "job-b", agent, adapter); err != nil {
+		t.Fatalf("Run job-b: %v", err)
+	}
+	jobB, err := store.GetJob(ctx, "job-b")
+	if err != nil {
+		t.Fatalf("GetJob job-b: %v", err)
+	}
+	if jobB.InputTokens != 500 || jobB.OutputTokens != 50 {
+		t.Fatalf("job-b usage = (%d, %d), want (500, 50) — only the per-session delta, not the 1500/150 cumulative", jobB.InputTokens, jobB.OutputTokens)
+	}
+}
+
+// TestMailboxDeliverRecordsNonCumulativeVerbatim guards #664 at the mailbox seam:
+// usage NOT flagged cumulative (fresh sessions, single-use ephemeral/temp workers,
+// and every non-codex runtime) is recorded verbatim and NEVER routed through the
+// per-session delta table. Two deliveries on the same ref report independent per-job
+// counts and each lands in full — a delta would have clamped the second (smaller)
+// count against the first.
+func TestMailboxDeliverRecordsNonCumulativeVerbatim(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+	agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: "fresh-thread-xyz", RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	adapter := &fakeDelivery{
+		outputs:      []string{okDeliveryResult, okDeliveryResult},
+		inputTokens:  []int{3000, 2000},
+		outputTokens: []int{300, 200},
+		cumulative:   []bool{false, false},
+	}
+
+	for _, tc := range []struct {
+		id      string
+		wantIn  int
+		wantOut int
+	}{
+		{"job-c", 3000, 300},
+		{"job-d", 2000, 200},
+	} {
+		if _, err := mailbox.Enqueue(ctx, JobRequest{ID: tc.id, Agent: "impl", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+			t.Fatalf("Enqueue %s: %v", tc.id, err)
+		}
+		if _, err := mailbox.Run(ctx, tc.id, agent, adapter); err != nil {
+			t.Fatalf("Run %s: %v", tc.id, err)
+		}
+		job, err := store.GetJob(ctx, tc.id)
+		if err != nil {
+			t.Fatalf("GetJob %s: %v", tc.id, err)
+		}
+		if job.InputTokens != tc.wantIn || job.OutputTokens != tc.wantOut {
+			t.Fatalf("%s usage = (%d, %d), want (%d, %d) verbatim — a false flag must not be delta'd", tc.id, job.InputTokens, job.OutputTokens, tc.wantIn, tc.wantOut)
+		}
+	}
+}
+
+// TestMailboxDeliverCumulativeAmbiguousRefContributesZero pins the fallback: a
+// cumulative-flagged delivery on an empty or "last" runtime ref names no concrete,
+// stable session to key a delta on, so — as before #661 — it contributes 0 rather
+// than mis-attributing the whole cumulative to the job.
+func TestMailboxDeliverCumulativeAmbiguousRefContributesZero(t *testing.T) {
+	for _, ref := range []string{"", runtime.LastRef} {
+		t.Run("ref="+ref, func(t *testing.T) {
+			ctx := context.Background()
+			store := openTestStore(t)
+			mailbox := Mailbox{Store: store}
+			agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: ref, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+			adapter := &fakeDelivery{
+				outputs:      []string{okDeliveryResult},
+				inputTokens:  []int{2000},
+				outputTokens: []int{200},
+				cumulative:   []bool{true},
+			}
+			if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-e", Agent: "impl", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			if _, err := mailbox.Run(ctx, "job-e", agent, adapter); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			job, err := store.GetJob(ctx, "job-e")
+			if err != nil {
+				t.Fatalf("GetJob: %v", err)
+			}
+			if job.InputTokens != 0 || job.OutputTokens != 0 {
+				t.Fatalf("ambiguous-ref usage = (%d, %d), want (0, 0)", job.InputTokens, job.OutputTokens)
+			}
+		})
+	}
+}
+
 func TestMailboxEnqueuePersistsRootJobID(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1033,6 +1160,9 @@ type fakeDelivery struct {
 	outputs       []string
 	summaries     []string
 	refreshedRefs []string
+	inputTokens   []int
+	outputTokens  []int
+	cumulative    []bool
 	prompts       []string
 	models        []string
 	agentRefs     []string
@@ -1061,6 +1191,15 @@ func (f *fakeDelivery) Deliver(_ context.Context, agent runtime.Agent, job runti
 	}
 	if index < len(f.refreshedRefs) {
 		result.RefreshedRuntimeRef = f.refreshedRefs[index]
+	}
+	if index < len(f.inputTokens) {
+		result.InputTokens = f.inputTokens[index]
+	}
+	if index < len(f.outputTokens) {
+		result.OutputTokens = f.outputTokens[index]
+	}
+	if index < len(f.cumulative) {
+		result.CumulativeUsage = f.cumulative[index]
 	}
 	return result, nil
 }

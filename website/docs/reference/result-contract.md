@@ -542,7 +542,7 @@ than failing:
 | --- | --- | --- |
 | **Claude Code** | Yes | Parsed from `usage.{input,output}_tokens` of the `--output-format json` envelope. |
 | **Kimi Code** | Best-effort | Captured if the `--output-format stream-json` stream emits a `usage` object; otherwise `0`. |
-| **Codex** | Fresh sessions only | Read from the last `turn.completed` usage of the `codex exec --json` JSONL stream (#658) for fresh sessions (ephemeral delegation workers, per-job `--runtime` overrides). Resumed sessions contribute `0`: codex reports session-cumulative usage there, which would attribute the whole session history to each job. Older CLIs that predate `--json` fall back to plain text and contribute `0`. |
+| **Codex** | Yes | Read from the last `turn.completed` usage of the `codex exec --json` JSONL stream (#658). Fresh sessions (ephemeral delegation workers, per-job `--runtime` overrides) and single-use workers report a per-job count directly. On a resumed session codex's usage is session-cumulative, so gitmoot records only the per-session delta — `max(0, cumulative_now − last_seen)`, tracked in the `runtime_session_usage` table (#661); a session reset that rolls the counter backwards clamps the delta to `0` and resyncs. Older CLIs that predate `--json` fall back to plain text and contribute `0`. |
 
 Capture is best-effort, so treat the budget as a coarse runaway-cost backstop,
 not a precise spend limit — a runtime that reports nothing (or an older codex CLI

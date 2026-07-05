@@ -151,8 +151,8 @@ cannot recurse or fan out forever:
   already used at least the budget is refused with a `delegation_cost_exceeded`
   event. Token capture is **best-effort per runtime** (Claude reports usage; Kimi
   reports it if its stream emits it; Codex reads usage from its `codex exec --json`
-  JSONL stream for fresh sessions only — resumed sessions contribute `0` because
-  codex reports session-cumulative usage there — falling back to `0` on an older CLI), so the budget can under-count
+  JSONL stream — a resumed session's usage is session-cumulative, so it records only
+  the per-session delta (#661) — falling back to `0` on an older CLI), so the budget can under-count
   but never over-counts. Leaving the knob at `0` skips the check entirely.
 - Per-root **dollar-cost** budget `[orchestrate].max_delegation_cost_usd`,
   **off by default** (`0` = unlimited): the cost analogue of the token budget
