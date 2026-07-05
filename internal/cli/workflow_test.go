@@ -849,6 +849,67 @@ func TestRecoverTaskImplementationFinalizesCleanCommittedWorktree(t *testing.T) 
 	}
 }
 
+func TestRecoverTaskImplementationRejectsMergedTask(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if err := store.UpsertTask(ctx, db.Task{
+		ID:           "task-001",
+		RepoFullName: "owner/repo",
+		State:        string(workflow.TaskMerged),
+		Branch:       "task-001-bootstrap",
+		WorktreePath: filepath.Join(home, "worktree"),
+	}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+
+	if _, err := recoverTaskImplementation(ctx, store, "task-001", "owner/repo", "lead", false, &stubTaskRecoverGitHub{}); err == nil || !strings.Contains(err.Error(), "state merged") {
+		t.Fatalf("recover merged task err = %v, want state merged", err)
+	}
+	if _, err := store.GetBranchLock(ctx, "owner/repo", "task-001-bootstrap"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("terminal task recovery created branch lock, err=%v", err)
+	}
+}
+
+func TestRecoverTaskImplementationReleasesCreatedLockOnBlockedRecovery(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "user.email", "gitmoot@example.com")
+	runGit(t, repoDir, "config", "user.name", "Gitmoot Test")
+	writeFile(t, filepath.Join(repoDir, "README.md"), "main\n")
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "initial")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/owner/repo.git")
+
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if err := store.UpsertRepo(ctx, db.Repo{Owner: "owner", Name: "repo", DefaultBranch: "main", CheckoutPath: repoDir, PollInterval: "30s"}); err != nil {
+		t.Fatalf("UpsertRepo returned error: %v", err)
+	}
+	if err := store.UpsertAgent(ctx, db.Agent{Name: "lead", Runtime: "shell", RuntimeRef: "true", RepoScope: "owner/repo", Capabilities: []string{"implement"}, AutonomyPolicy: "workspace-write", HealthStatus: "ok"}); err != nil {
+		t.Fatalf("UpsertAgent returned error: %v", err)
+	}
+	worktree, err := workflow.TaskWorktreePath(home, "owner/repo", "task-001")
+	if err != nil {
+		t.Fatalf("TaskWorktreePath returned error: %v", err)
+	}
+	runGit(t, repoDir, "worktree", "add", "-b", "task-001-bootstrap", worktree, "main")
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-001", RepoFullName: "owner/repo", GoalID: "goal-1", Title: "Bootstrap", State: string(workflow.TaskImplementing), Branch: "task-001-bootstrap", WorktreePath: worktree}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+
+	if _, err := recoverTaskImplementation(ctx, store, "task-001", "owner/repo", "lead", false, &stubTaskRecoverGitHub{}); err == nil || !strings.Contains(err.Error(), "no recoverable commit") {
+		t.Fatalf("recover clean base task err = %v, want no recoverable commit", err)
+	}
+	if _, err := store.GetBranchLock(ctx, "owner/repo", "task-001-bootstrap"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("blocked recovery leaked created branch lock, err=%v", err)
+	}
+}
+
 func TestRecoverTaskImplementationBlocksActiveJobAndWrongLockOwner(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

@@ -568,6 +568,9 @@ func recoverTaskImplementation(ctx context.Context, store *db.Store, taskID stri
 		}
 		return workflow.JobPayload{}, err
 	}
+	if !taskBranchReusableForImplement(task.State) {
+		return workflow.JobPayload{}, fmt.Errorf("task %s is in state %s; task recover only supports active implementation states", task.ID, task.State)
+	}
 	requestRepo, err := resolveTaskRepoFlag(repoFlag, task.RepoFullName, "task recover")
 	if err != nil {
 		return workflow.JobPayload{}, err
@@ -602,10 +605,16 @@ func recoverTaskImplementation(ctx context.Context, store *db.Store, taskID stri
 	} else if ok {
 		return workflow.JobPayload{}, fmt.Errorf("task %s still has active implement job %s; wait for it, cancel it, or resolve it before recovering", task.ID, active.ID)
 	}
-	lock, err := ensureTaskRecoverBranchLock(ctx, store, requestRepo, task.Branch, strings.TrimSpace(owner))
+	lock, createdLock, err := ensureTaskRecoverBranchLock(ctx, store, requestRepo, task.Branch, strings.TrimSpace(owner))
 	if err != nil {
 		return workflow.JobPayload{}, err
 	}
+	releaseCreatedLock := createdLock
+	defer func() {
+		if releaseCreatedLock {
+			_, _ = store.ReleaseLockWithEvent(ctx, lock, db.BranchLockEvent{Kind: "released", Message: "released after failed task recover"})
+		}
+	}()
 	headSHA, err := (gitutil.Client{Dir: task.WorktreePath}).HeadSHA(ctx)
 	if err != nil {
 		return workflow.JobPayload{}, fmt.Errorf("resolve task worktree head: %w", err)
@@ -671,6 +680,7 @@ func recoverTaskImplementation(ctx context.Context, store *db.Store, taskID stri
 		_ = finishTaskRecoverJob(ctx, store, job.ID, state, finalized, err.Error())
 		return workflow.JobPayload{}, err
 	}
+	releaseCreatedLock = false
 	finalized.Result = &workflow.AgentResult{Decision: "implemented", Summary: "Recovered implementation worktree and opened/adopted PR."}
 	if err := finishTaskRecoverJob(ctx, store, job.ID, string(workflow.JobSucceeded), finalized, "task recovery finalized implementation"); err != nil {
 		return workflow.JobPayload{}, err
@@ -792,22 +802,23 @@ func taskRecoverBaseHead(ctx context.Context, store *db.Store, task db.Task, rep
 	return "", fmt.Errorf("resolve task recovery base %s: %w", base, lastErr)
 }
 
-func ensureTaskRecoverBranchLock(ctx context.Context, store *db.Store, repo string, branch string, owner string) (db.BranchLock, error) {
+func ensureTaskRecoverBranchLock(ctx context.Context, store *db.Store, repo string, branch string, owner string) (db.BranchLock, bool, error) {
 	if strings.TrimSpace(branch) == "" {
-		return db.BranchLock{}, errors.New("task recover requires a branch")
+		return db.BranchLock{}, false, errors.New("task recover requires a branch")
 	}
 	lock := db.BranchLock{RepoFullName: repo, Branch: branch, Owner: owner}
-	if _, err := store.CreateLock(ctx, lock); err != nil {
-		return db.BranchLock{}, err
+	created, err := store.CreateLock(ctx, lock)
+	if err != nil {
+		return db.BranchLock{}, false, err
 	}
 	current, err := store.GetBranchLock(ctx, repo, branch)
 	if err != nil {
-		return db.BranchLock{}, err
+		return db.BranchLock{}, false, err
 	}
 	if current.Owner != owner {
-		return db.BranchLock{}, fmt.Errorf("branch %s is locked by %s, not %s", branch, current.Owner, owner)
+		return db.BranchLock{}, false, fmt.Errorf("branch %s is locked by %s, not %s", branch, current.Owner, owner)
 	}
-	return current, nil
+	return current, created, nil
 }
 
 func taskRecoverSkipFanout(ctx context.Context, store *db.Store, repo string, branch string) bool {
