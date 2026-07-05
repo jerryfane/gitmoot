@@ -562,6 +562,13 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 	if IsFreshRef(agent.RuntimeRef) {
 		return a.deliverFresh(ctx, agent, job, model)
 	}
+	// Template-backed Claude agents are coordinator-class jobs: they execute a
+	// long-form prompt recipe and must never resume whichever interactive Claude
+	// session happens to be "last". Treat a legacy --session last registration as
+	// a per-job temp session instead of --continue.
+	if agent.RuntimeRef == LastRef && strings.TrimSpace(agent.TemplateID) != "" {
+		return a.deliverFresh(ctx, agent, job, model)
+	}
 	// The Claude CLI intermittently fails a delivery with a transient
 	// "401 socket connection was closed unexpectedly" under sustained
 	// concurrency; a byte-identical retry typically clears it. Retry on that

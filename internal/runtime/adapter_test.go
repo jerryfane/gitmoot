@@ -621,6 +621,40 @@ func TestClaudeDeliverLastSessionCommand(t *testing.T) {
 	runner.want(t, 0, "claude", "--continue", "-p", "--output-format", "json", "--", "review")
 }
 
+func TestClaudeTemplateAgentIgnoresLastSession(t *testing.T) {
+	minted := "550e8400-e29b-41d4-a716-446655440099"
+	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"coordinated"}`}}}
+	adapter := ClaudeAdapter{
+		Runner: runner,
+		NewRuntimeRef: func() (string, error) {
+			return minted, nil
+		},
+	}
+	agent := Agent{
+		Name:       "lead",
+		Role:       "agent",
+		Runtime:    ClaudeRuntime,
+		RuntimeRef: LastRef,
+		RepoScope:  "jerryfane/gitmoot",
+		TemplateID: "coordinator",
+		Model:      "opus",
+	}
+
+	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "coordinate"})
+	if err != nil {
+		t.Fatalf("Deliver returned error: %v", err)
+	}
+	if result.Summary != "coordinated" {
+		t.Fatalf("Summary = %q, want coordinated", result.Summary)
+	}
+	runner.want(t, 0, "claude", "--model", "opus", "--session-id", minted, "-p", "--output-format", "json", "--", "coordinate")
+	for _, arg := range runner.calls[0] {
+		if arg == "--continue" || arg == "--resume" {
+			t.Fatalf("template-backed Claude last agent must use an isolated session, got %v", runner.calls[0])
+		}
+	}
+}
+
 func TestClaudeDeliverCommandAppliesAutonomyPolicy(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
