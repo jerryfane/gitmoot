@@ -264,7 +264,7 @@ func runTask(args []string, stdout, stderr io.Writer) int {
 func printTaskUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot task run <id> --repo owner/repo --owner <agent> [--branch <branch>] [--base <branch>]")
-	fmt.Fprintln(w, "  gitmoot task recover <id> --repo owner/repo [--owner <agent>] [--skip-native-review-fanout] [--json]")
+	fmt.Fprintln(w, "  gitmoot task recover <id> --owner <agent> [--repo owner/repo] [--skip-native-review-fanout] [--json]")
 	fmt.Fprintln(w, "  gitmoot task list [--repo owner/repo] [--state state] [--json]")
 }
 

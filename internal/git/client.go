@@ -323,6 +323,12 @@ func (c Client) RevParse(ctx context.Context, rev string) (string, error) {
 	if rev == "" {
 		return "", errors.New("git revision is required")
 	}
+	// Defense-in-depth against argument injection: a rev starting with '-' would be
+	// parsed by git as a flag, not a revision. No legitimate revision (SHA, HEAD,
+	// HEAD~1, refs/…, owner/branch) starts with '-'. Mirrors validateBranch.
+	if strings.HasPrefix(rev, "-") {
+		return "", fmt.Errorf("git revision %q must not start with '-'", rev)
+	}
 	result, err := c.run(ctx, "rev-parse", rev)
 	if err != nil {
 		return "", err
