@@ -2997,6 +2997,60 @@ func (s *Store) UpdateJobUsage(ctx context.Context, id string, inputTokens int, 
 	return requireAffected(result, "job", id)
 }
 
+// RecordRuntimeSessionUsageDelta converts a runtime session's CUMULATIVE token
+// counters into this delivery's per-job usage. codex reports turn.completed usage
+// as the session's running total on a resumed thread (#661), so a job's real cost
+// is the increase since the last delivery on that session. It reads the prior
+// baseline for sessionKey (0 if none), returns deltaInput/deltaOutput =
+// max(0, cumulative_now - prev), and upserts the new cumulative as the baseline —
+// all inside ONE transaction so two daemon workers racing on the same session
+// cannot interleave the read and the write (the store also caps the pool at a
+// single connection). A counter that went backwards (codex session
+// compaction/rollover resets it) yields a 0 delta for the crossing job AND resyncs
+// the baseline to the new lower cumulative: a safe under-count rather than a
+// spurious huge delta. Negative inputs are clamped to 0 so a malformed usage
+// report can never corrupt the baseline.
+func (s *Store) RecordRuntimeSessionUsageDelta(ctx context.Context, sessionKey string, cumInput, cumOutput int) (deltaInput int, deltaOutput int, err error) {
+	if cumInput < 0 {
+		cumInput = 0
+	}
+	if cumOutput < 0 {
+		cumOutput = 0
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+
+	var prevInput, prevOutput int
+	err = tx.QueryRowContext(ctx, `SELECT input_cum, output_cum FROM runtime_session_usage WHERE session_key = ?`, sessionKey).Scan(&prevInput, &prevOutput)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, err
+	}
+
+	if deltaInput = cumInput - prevInput; deltaInput < 0 {
+		deltaInput = 0
+	}
+	if deltaOutput = cumOutput - prevOutput; deltaOutput < 0 {
+		deltaOutput = 0
+	}
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runtime_session_usage(session_key, input_cum, output_cum, updated_at)
+		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(session_key) DO UPDATE SET
+			input_cum = excluded.input_cum,
+			output_cum = excluded.output_cum,
+			updated_at = excluded.updated_at`,
+		sessionKey, cumInput, cumOutput); err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return deltaInput, deltaOutput, nil
+}
+
 func (s *Store) AddJobEvent(ctx context.Context, event JobEvent) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO job_events(job_id, kind, message) VALUES (?, ?, ?)`, event.JobID, event.Kind, event.Message)
 	return err
@@ -7553,5 +7607,24 @@ ALTER TABLE jobs ADD COLUMN externally_driven INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN runner_pid INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN runner_boot_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE resource_locks ADD COLUMN owner_boot_id TEXT NOT NULL DEFAULT '';
+	`,
+	// #661 per-codex-session token delta tracking. codex reports turn.completed
+	// usage as SESSION-CUMULATIVE on a resumed thread (the session's running
+	// total, not the turn's), so attributing it to a single job needs the last-seen
+	// cumulative counters per runtime session. This table stores them keyed by
+	// runtime+ref; RecordRuntimeSessionUsageDelta reads the prior baseline, returns
+	// max(0, cumulative_now - prev) as the job's usage, and upserts the new
+	// baseline — all in one transaction. Pure additive append (CREATE TABLE only):
+	// the table stays empty until a resumed codex delivery records usage, and every
+	// existing DB reads identically. No cross-runtime use today (only codex sets
+	// Result.CumulativeUsage). No GC/retention in v1 — orphan rows for dead threads
+	// are tens of bytes; a bounded cleanup pass is a follow-up.
+	`
+CREATE TABLE runtime_session_usage (
+	session_key TEXT PRIMARY KEY,
+	input_cum INTEGER NOT NULL DEFAULT 0,
+	output_cum INTEGER NOT NULL DEFAULT 0,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 	`,
 }
