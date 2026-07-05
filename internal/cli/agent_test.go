@@ -535,7 +535,7 @@ func TestRunAgentAskDispatchesAndStoresResult(t *testing.T) {
 			t.Fatalf("ask output missing %q:\n%s", want, stdout.String())
 		}
 	}
-	runner.want(t, 0, repoDir, "codex", "exec", "resume", "550e8400-e29b-41d4-a716-446655440021", "--")
+	runner.want(t, 0, repoDir, "codex", "exec", "--json", "resume", "550e8400-e29b-41d4-a716-446655440021", "--")
 	if !strings.Contains(runner.calls[0].args[len(runner.calls[0].args)-1], "Write a plan") {
 		t.Fatalf("ask prompt missing message:\n%s", runner.calls[0].args[len(runner.calls[0].args)-1])
 	}
