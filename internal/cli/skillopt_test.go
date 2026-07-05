@@ -2690,7 +2690,7 @@ func TestSkillOptTrainContinueGeneratesOptionsWithCurrentSkill(t *testing.T) {
 		t.Fatalf("runtime calls = %+v, want one start and delivery per option", runner.calls)
 	}
 	runner.want(t, 0, repoDir, "codex", "exec", "--json", "--")
-	runner.want(t, 1, repoDir, "codex", "exec", "resume", "550e8400-e29b-41d4-a716-446655440201", "--")
+	runner.want(t, 1, repoDir, "codex", "exec", "--json", "resume", "550e8400-e29b-41d4-a716-446655440201", "--")
 	if !strings.Contains(runner.calls[1].args[len(runner.calls[1].args)-1], "Option label: A") || !strings.Contains(runner.calls[1].args[len(runner.calls[1].args)-1], "Generate one review option") {
 		t.Fatalf("generation prompt = %q", runner.calls[1].args[len(runner.calls[1].args)-1])
 	}
