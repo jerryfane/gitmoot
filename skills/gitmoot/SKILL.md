@@ -1,6 +1,6 @@
 ---
 name: gitmoot
-description: Use Gitmoot for local-first AI agent coordination across repositories, goals, reviews, GitHub PR comments, agent subscriptions, daemon checks, stuck jobs, branch locks, agent-templates, template capture and publish/pull, custom prompt agents, orchestration, heartbeats, event webhooks, the web dashboard, per-job runtime overrides, and Codex, Claude Code, or Kimi Code runtime workflows.
+description: Use Gitmoot for local-first AI agent coordination across repositories, goals, reviews, GitHub PR comments, agent subscriptions, daemon checks, stuck jobs, branch locks, agent-templates, template capture and publish/pull, custom prompt agents, orchestration, heartbeats, event webhooks, the web dashboard, per-job runtime overrides, the config-driven runtime metadata registry, and Codex, Claude Code, or Kimi Code runtime workflows.
 license: Apache-2.0
 compatibility: Requires the gitmoot CLI, git, GitHub CLI authentication, network access to GitHub, and a supported runtime such as Codex, Claude Code, or Kimi Code.
 metadata:
@@ -140,7 +140,11 @@ self-evaluation; see the `verifier` and `decompose-and-verify` recipes and the
 [RESULT_CONTRACT.md](references/RESULT_CONTRACT.md)). An agent (via `--model` on start/subscribe/type set) and an
 individual job or delegation (via `--model` on run/ask/review/implement or the
 delegation `model` field) can pin a runtime model, with the per-job/delegation
-value overriding the agent default. Use
+value overriding the agent default. Use `gitmoot runtime list` to inspect each
+built-in runtime's resolved metadata (capabilities, default/known models, and
+where token usage is read from); operators can override a built-in runtime's
+metadata without recompiling via a `[runtimes.<name>]` config section (see CLI.md
+§ Runtime Metadata Registry). Use
 `gitmoot plugin doctor` when checking whether Codex, Claude Code, or Kimi Code
 can discover Gitmoot through an installed runtime plugin. Use
 `gitmoot plugin codex-launch --repo <path>` to print a Codex launch command that

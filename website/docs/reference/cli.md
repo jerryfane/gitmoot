@@ -79,6 +79,41 @@ Gitmoot home on Linux, macOS, or Windows. It prints a `codex-face --cd ...
 --add-dir ... -s workspace-write` launch command, or a persistent config
 snippet with `--config-snippet`.
 
+## Runtime Metadata Registry
+
+Gitmoot drives four built-in runtimes (`codex`, `claude`, `kimi`, plus the
+subscribe-only `shell`; the legacy `kimi-cli` is also compiled in). Each carries
+declarative metadata — advertised capabilities, a default model, an advisory list
+of known-valid models, and a descriptor of where token usage is read from. Inspect
+the resolved registry:
+
+```sh
+gitmoot runtime list
+gitmoot runtime list --json
+```
+
+The values come from the compiled built-in defaults, overlaid with any
+`[runtimes.<name>]` overrides in `config.toml`. Override a built-in runtime's
+metadata **without recompiling** — for example to point it at a new model id or
+record its known models:
+
+```toml
+[runtimes.codex]
+default_model = "gpt-5.5-codex"
+models = ["gpt-5.5-codex", "gpt-5.4-codex"]
+capabilities = ["review", "implement", "ask"]
+usage_source = "codex exec --json turn.completed usage"
+```
+
+This is **metadata only** — adapter behavior (auth, sandbox policy, session
+resume, stream parsing) stays in Go. `models` is **advisory**: Gitmoot never
+rejects a `--model` based on it, so populating it cannot change how a job runs.
+With no `[runtimes.*]` section behavior is byte-identical.
+
+A `[runtimes.<name>]` section can only tweak a **built-in** runtime's metadata; it
+cannot add a new first-class runtime (that requires a code change). An unknown
+runtime name is a config error surfaced by `gitmoot runtime list`.
+
 ## Repo And Daemon Status
 
 ```sh

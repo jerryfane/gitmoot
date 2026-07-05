@@ -155,11 +155,13 @@ func (f Factory) Adapter(name string) (Adapter, error) {
 
 // SupportedRuntimes enumerates every runtime name the adapter Factory can
 // construct — the single source of truth callers (e.g. the per-job --runtime
-// override validation) use instead of hard-coding runtime names. Keep it in
-// lockstep with Factory.Adapter; TestSupportedRuntimesMatchFactory proves the
-// coupling both ways.
+// override validation) use instead of hard-coding runtime names. It is derived
+// from the built-in runtime metadata registry's dispatchable entries, so the
+// enumeration, the registry, and Factory.Adapter share one source of truth; keep
+// it in lockstep with Factory.Adapter (TestSupportedRuntimesMatchFactory proves
+// the coupling both ways).
 func SupportedRuntimes() []string {
-	return []string{CodexRuntime, ClaudeRuntime, KimiRuntime, KimiCLIRuntime, ShellRuntime}
+	return builtinRegistry.dispatchableNames()
 }
 
 // FreshRefPrefix marks a runtime reference that names no existing session:

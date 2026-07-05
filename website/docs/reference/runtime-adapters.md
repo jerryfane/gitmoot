@@ -25,6 +25,30 @@ agent template and rendered job prompt before handing work to an adapter.
 - **Shell** invokes a configured shell command and is mainly for smoke tests,
   demos, and adapter contract checks.
 
+## Metadata Registry
+
+Each built-in runtime carries declarative metadata — advertised capabilities, a
+default model, an advisory list of known-valid models, and a descriptor of where
+token usage is read from — seeded from compiled defaults that reproduce Gitmoot's
+historical behavior. Inspect the resolved registry with `gitmoot runtime list`
+(add `--json` for machine output).
+
+Operators can override a built-in runtime's metadata **without recompiling** via a
+`[runtimes.<name>]` section in `config.toml`:
+
+```toml
+[runtimes.codex]
+default_model = "gpt-5.5-codex"
+models = ["gpt-5.5-codex", "gpt-5.4-codex"]
+capabilities = ["review", "implement", "ask"]
+```
+
+This is metadata only — adapter *behavior* (auth, sandbox, session resume, stream
+parsing) stays in Go. `models` is advisory (Gitmoot never rejects a `--model`
+based on it), and with no `[runtimes.*]` section behavior is byte-identical. The
+section can only tweak a **built-in** runtime; adding a new first-class runtime is
+a code change, and an unknown runtime name is a config error.
+
 ## Agent Session Values
 
 `RuntimeRef` is runtime-specific:
