@@ -608,7 +608,7 @@ func recoverTaskImplementation(ctx context.Context, store *db.Store, taskID stri
 		return workflow.JobPayload{}, fmt.Errorf("task %s still has active implement job %s; wait for it, cancel it, or resolve it before recovering", task.ID, active.ID)
 	}
 	if strings.TrimSpace(task.WorktreePath) != "" && taskWorktreeHasLiveProcess(task.WorktreePath) {
-		return workflow.JobPayload{}, fmt.Errorf("task %s worktree %s still has a live process; wait for it to exit or stop the orphaned implementer before recovering", task.ID, task.WorktreePath)
+		return workflow.JobPayload{}, fmt.Errorf("task %s worktree %s still has a live process; wait for it to exit or stop the orphaned implementer before recovering (this can include your own shell if you are inspecting the worktree; run recovery from outside that directory)", task.ID, task.WorktreePath)
 	}
 	lock, createdLock, err := ensureTaskRecoverBranchLock(ctx, store, requestRepo, task.Branch, strings.TrimSpace(owner))
 	if err != nil {

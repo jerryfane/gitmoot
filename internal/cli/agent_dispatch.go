@@ -573,7 +573,7 @@ func prepareLocalImplementDispatchRequest(ctx context.Context, store *db.Store, 
 				return db.Task{}, localAgentDispatchRequest{}, fmt.Errorf("branch %s already has active implement job %s for task %s", branchHint, active.ID, existing.ID)
 			}
 			if strings.TrimSpace(existing.WorktreePath) != "" && taskWorktreeHasLiveProcess(existing.WorktreePath) {
-				return db.Task{}, localAgentDispatchRequest{}, fmt.Errorf("branch %s has a live process still inside task worktree %s; wait for it to exit or stop the orphaned implementer before retrying implement", branchHint, existing.WorktreePath)
+				return db.Task{}, localAgentDispatchRequest{}, fmt.Errorf("branch %s has a live process still inside task worktree %s; wait for it to exit or stop the orphaned implementer before retrying implement (this can include your own shell if you are inspecting the worktree; retry from outside that directory)", branchHint, existing.WorktreePath)
 			}
 			if dirty, err := taskWorktreeDirty(ctx, existing); err != nil {
 				return db.Task{}, localAgentDispatchRequest{}, err
