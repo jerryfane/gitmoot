@@ -63,6 +63,15 @@ type Job struct {
 	Repository  string
 	PullRequest int
 	Model       string
+	// RuntimeDefaultModel is the runtime's configured registry default_model
+	// (#652), threaded in by the dispatch layer from the HOME-AWARE resolved runtime
+	// registry (built-in defaults overlaid with [runtimes.<name>] config). It is the
+	// FINAL model fallback: effectiveModel uses it ONLY when neither the job (Model)
+	// nor the agent (Agent.Model) pins a model, so an agent/job --model always wins.
+	// Empty — the built-in default for every runtime, and the value when no config
+	// sets it — means "no registry default", so delivery defers to the runtime CLI's
+	// own default exactly as before #652 (byte-identical).
+	RuntimeDefaultModel string
 }
 
 type Result struct {
@@ -155,11 +164,13 @@ func (f Factory) Adapter(name string) (Adapter, error) {
 
 // SupportedRuntimes enumerates every runtime name the adapter Factory can
 // construct — the single source of truth callers (e.g. the per-job --runtime
-// override validation) use instead of hard-coding runtime names. Keep it in
-// lockstep with Factory.Adapter; TestSupportedRuntimesMatchFactory proves the
-// coupling both ways.
+// override validation) use instead of hard-coding runtime names. It is derived
+// from the built-in runtime metadata registry's dispatchable entries, so the
+// enumeration, the registry, and Factory.Adapter share one source of truth; keep
+// it in lockstep with Factory.Adapter (TestSupportedRuntimesMatchFactory proves
+// the coupling both ways).
 func SupportedRuntimes() []string {
-	return []string{CodexRuntime, ClaudeRuntime, KimiRuntime, KimiCLIRuntime, ShellRuntime}
+	return builtinRegistry.dispatchableNames()
 }
 
 // FreshRefPrefix marks a runtime reference that names no existing session:
@@ -536,14 +547,21 @@ func (a CodexAdapter) sessionResolver() CodexSessionResolver {
 	return CodexSessionIndex{}
 }
 
-// effectiveModel resolves which model a delivered job runs on: the per-job/
-// per-delegation override (job.Model) wins, falling back to the agent's default
-// (agent.Model). An empty result means "no --model arg" (runtime default).
+// effectiveModel resolves which model a delivered job runs on. Precedence, most
+// specific first: the per-job/per-delegation override (job.Model) wins, then the
+// agent's configured default (agent.Model), then — when NEITHER pins a model — the
+// runtime's configured registry default_model (job.RuntimeDefaultModel, #652). An
+// empty result means "no --model arg" (the runtime CLI's own default). Because the
+// registry default is consulted last and defaults to empty, an agent/job pin
+// always wins and an unset registry default is byte-identical to before #652.
 func effectiveModel(agent Agent, job Job) string {
 	if job.Model != "" {
 		return job.Model
 	}
-	return agent.Model
+	if agent.Model != "" {
+		return agent.Model
+	}
+	return strings.TrimSpace(job.RuntimeDefaultModel)
 }
 
 func codexSandboxArgs(agent Agent) []string {
