@@ -132,15 +132,124 @@ func createPipelineRun(ctx context.Context, store *db.Store, rec db.Pipeline, sp
 	return run, nil
 }
 
-// runPipelineScanOnce advances every in-flight pipeline run once (#681). It is the
-// scan entry point wired next to runHeartbeatScanOnce; the daemon supervisor-loop
-// wiring lands in a later step. Only state='running' runs are advanced, so parked
-// (blocked/failed) and terminal runs consume zero compute. A per-run error is
-// collected (first wins) but never stops the remaining runs. Runs whose pipeline
-// was removed, whose stored spec no longer parses, or whose spec drifted (hash no
-// longer matches the run's snapshot) are skipped rather than executed against a
-// changed spec.
+// runPipelineScanOnce is the pipeline scan wired into BOTH daemon supervisor loops
+// next to runHeartbeatScanOnce (#681). Each tick is two passes, mirroring the
+// heartbeat idiom:
+//
+//	SCHEDULE pass — for each enabled pipeline whose interval is due and that has no
+//	  active run, create a fresh scheduled run and advance next_due anchored to now
+//	  (missed ticks coalesce into one run; a durable next_due makes it restart-safe).
+//	ADVANCE  pass — advance every in-flight (state='running') run once.
+//
+// Ordering matters: the schedule pass creates the run rows, then the advance pass
+// enqueues their ready root stages, so a scheduled run and a manual `pipeline run`
+// reach the worker by the identical code path. Off-by-default and zero-cost when
+// idle: a pipeline with no interval is skipped before any state touch, and a parked
+// or terminal run is never advanced. A per-pipeline / per-run error is collected
+// (first wins) but never stops the rest; the daemon caller logs it and never aborts
+// the loop.
 func runPipelineScanOnce(ctx context.Context, store *db.Store, enqueue pipelineStageEnqueuer, now time.Time) error {
+	now = now.UTC()
+	var firstErr error
+	if err := schedulePipelineRuns(ctx, store, now); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := advancePipelineRuns(ctx, store, enqueue, now); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// schedulePipelineRuns is runPipelineScanOnce's SCHEDULE pass (#681): it creates a
+// run for each enabled pipeline whose interval schedule is due and has no active
+// run. A per-pipeline error is collected (first wins) but never stops the rest.
+func schedulePipelineRuns(ctx context.Context, store *db.Store, now time.Time) error {
+	pipelines, err := store.ListPipelines(ctx)
+	if err != nil {
+		return err
+	}
+	now = now.UTC()
+	var firstErr error
+	for _, rec := range pipelines {
+		if err := scheduleOnePipeline(ctx, store, rec, now); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// scheduleOnePipeline fires (or skips) one pipeline's interval schedule, mirroring
+// runOneHeartbeat. Only an ENABLED pipeline with an interval that is DUE and has NO
+// active run creates a run; the guards otherwise skip it. next_due is advanced
+// ANCHORED TO NOW (not the old due time) so a long-idle scheduler that missed many
+// intervals fires exactly ONE run and schedules the next one interval out — never a
+// backlog replay.
+func scheduleOnePipeline(ctx context.Context, store *db.Store, rec db.Pipeline, now time.Time) error {
+	// Only an enabled, scheduled (interval set) pipeline auto-runs; a disabled or
+	// manual-only pipeline is never fired by the scheduler.
+	if !rec.Enabled || strings.TrimSpace(rec.Interval) == "" {
+		return nil
+	}
+	interval, err := time.ParseDuration(strings.TrimSpace(rec.Interval))
+	if err != nil {
+		return fmt.Errorf("pipeline %s interval: %w", rec.Name, err)
+	}
+	if interval <= 0 {
+		return fmt.Errorf("pipeline %s interval must be positive", rec.Name)
+	}
+	jitter := time.Duration(0)
+	if trimmed := strings.TrimSpace(rec.Jitter); trimmed != "" {
+		if jitter, err = time.ParseDuration(trimmed); err != nil {
+			return fmt.Errorf("pipeline %s jitter: %w", rec.Name, err)
+		}
+	}
+	// Not yet due: a zero next_due (the first scan after enable) is in the past, so a
+	// freshly enabled pipeline fires immediately; a future next_due is skipped WITHOUT
+	// advancing (mirrors the heartbeat due check).
+	if !rec.NextDueAt.IsZero() && now.Before(rec.NextDueAt) {
+		return nil
+	}
+	nextDue := now.Add(interval + heartbeatJitter(jitter))
+	// A scheduled pipeline needs a managed repo: its stage jobs need one for the
+	// worker to claim them (the same precondition `pipeline run` enforces). Without a
+	// repo the run would wedge (queued jobs no worker claims keep the overlap guard
+	// tripped forever), so skip the run but ADVANCE next_due so a misconfigured
+	// schedule does not hot-loop and self-recovers once a repo is set (the heartbeat
+	// repo-unmanaged idiom). AdvancePipelineNextDue touches only next_due, so the
+	// last-run display is preserved.
+	if strings.TrimSpace(rec.Repo) == "" {
+		return store.AdvancePipelineNextDue(ctx, rec.Name, nextDue)
+	}
+	// Overlap guard: one active (state='running') run per pipeline. A run in flight
+	// means skip WITHOUT advancing next_due, so the next scheduled run fires as soon
+	// as this one settles. A parked (blocked/failed) run does NOT count as active,
+	// mirroring `pipeline run`'s ActivePipelineRun guard.
+	if _, active, err := store.ActivePipelineRun(ctx, rec.Name); err != nil {
+		return err
+	} else if active {
+		return nil
+	}
+	spec, err := pipeline.Load([]byte(rec.SpecYAML))
+	if err != nil {
+		// A stored spec that no longer parses can't be run (`pipeline add` validates,
+		// so this is defensive); advance next_due so a broken spec does not hot-loop.
+		return store.AdvancePipelineNextDue(ctx, rec.Name, nextDue)
+	}
+	if _, err := createPipelineRun(ctx, store, rec, spec, "schedule", now); err != nil {
+		return err
+	}
+	// createPipelineRun stamped last_run_*; advance ONLY next_due (anchored to now).
+	// The ADVANCE pass that follows enqueues this run's ready root stages.
+	return store.AdvancePipelineNextDue(ctx, rec.Name, nextDue)
+}
+
+// advancePipelineRuns is runPipelineScanOnce's ADVANCE pass (#681): it advances
+// every in-flight (state='running') run once, so parked (blocked/failed) and
+// terminal runs consume zero compute. A per-run error is collected (first wins) but
+// never stops the remaining runs. Runs whose pipeline was removed, whose stored
+// spec no longer parses, or whose spec drifted (hash no longer matches the run's
+// snapshot) are skipped rather than executed against a changed spec.
+func advancePipelineRuns(ctx context.Context, store *db.Store, enqueue pipelineStageEnqueuer, now time.Time) error {
 	runs, err := store.ListActivePipelineRuns(ctx)
 	if err != nil {
 		return err

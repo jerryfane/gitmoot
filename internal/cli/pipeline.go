@@ -35,6 +35,10 @@ func runPipeline(args []string, stdout, stderr io.Writer) int {
 		return runPipelineRunCmd(args[1:], stdout, stderr)
 	case "show":
 		return runPipelineShow(args[1:], stdout, stderr)
+	case "resume":
+		return runPipelineResume(args[1:], stdout, stderr)
+	case "cancel":
+		return runPipelineCancel(args[1:], stdout, stderr)
 	case "enable":
 		return runPipelineSetEnabled(args[1:], true, stdout, stderr)
 	case "disable":
@@ -54,6 +58,8 @@ func printPipelineUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot pipeline list [--json]")
 	fmt.Fprintln(w, "  gitmoot pipeline run <name>")
 	fmt.Fprintln(w, "  gitmoot pipeline show <name|run-id> [--json]")
+	fmt.Fprintln(w, "  gitmoot pipeline resume <run-id> [--from <stage>]")
+	fmt.Fprintln(w, "  gitmoot pipeline cancel <run-id>")
 	fmt.Fprintln(w, "  gitmoot pipeline enable <name>")
 	fmt.Fprintln(w, "  gitmoot pipeline disable <name>")
 	fmt.Fprintln(w, "  gitmoot pipeline remove <name>")

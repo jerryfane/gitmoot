@@ -187,6 +187,35 @@ func (s *Store) UpdatePipelineScheduleState(ctx context.Context, state PipelineS
 	return nil
 }
 
+// AdvancePipelineNextDue advances ONLY a pipeline's schedule anchor (next_due_at),
+// leaving the spec, enabled flag, and last-run bookkeeping (last_run_at / id /
+// status) untouched. The scan-based scheduler calls it after creating a scheduled
+// run (createPipelineRun already stamped the last-run columns) and when it skips a
+// due-but-not-runnable pipeline (no repo / unparseable spec), so a misconfigured
+// schedule advances rather than hot-looping and without clobbering the last-run
+// display. It mirrors UpsertHeartbeatState's next_due role (time stored as
+// RFC3339Nano UTC text). A missing pipeline row is an error so a lost row surfaces.
+func (s *Store) AdvancePipelineNextDue(ctx context.Context, name string, nextDue time.Time) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("pipeline name is required")
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE pipelines SET next_due_at = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		formatHeartbeatTime(nextDue), name)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return errors.New("pipeline " + name + " not found")
+	}
+	return nil
+}
+
 // scanPipeline reads one pipelines row (from *sql.Row or *sql.Rows) into a
 // Pipeline, decoding the integer enabled flag and the RFC3339 text timestamps.
 func scanPipeline(row interface{ Scan(...any) error }) (Pipeline, error) {
