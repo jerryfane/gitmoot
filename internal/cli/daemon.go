@@ -4559,6 +4559,17 @@ func (w jobWorker) allocatePoolIsolationWorktree(ctx context.Context, job db.Job
 		return poolIsolatedDispatch{}, false
 	}
 	payload.WorktreePath = path
+	// The detached worktree is the COMMITTED TIP of the base ref, so it omits
+	// gitignored paths (e.g. vendored repos/**) and uncommitted working-tree
+	// changes. Point the isolated read-only job at the canonical repo checkout so an
+	// analysis task does not silently report working-tree state as missing (#654),
+	// exactly as read-only delegation fan-out does (engine.go, #394 part 2). Append
+	// to Instructions so the note is carried in the delivered prompt; the reap path
+	// restores payloadBeforeIsolation on a bounce/defer, reverting this too. A blank
+	// checkout path yields "" ⇒ byte-identical (no note).
+	if note := workflow.ReadOnlyWorktreeContextNote(repoRecord.CheckoutPath); note != "" {
+		payload.Instructions += note
+	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		_ = client.RemoveWorktreeForce(context.WithoutCancel(ctx), path)

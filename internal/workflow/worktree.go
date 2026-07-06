@@ -426,6 +426,19 @@ func readOnlyWorktreeContextNote(baseCheckout string) string {
 	return "\n\nWorktree context (read-only): you are running in a detached git worktree checked out at the COMMITTED TIP of the base branch. It does NOT contain gitignored paths (for example vendored clones under repos/**) or any uncommitted working-tree changes. If a path this task references is absent from your working directory, read it from the canonical base checkout at " + base + " before concluding it is missing — do not report a working-tree feature as absent without checking there. This is a read-only analysis; do not write outside your worktree."
 }
 
+// ReadOnlyWorktreeContextNote is the exported entry point to
+// readOnlyWorktreeContextNote for callers outside the workflow package — namely
+// the daemon's top-level pool-isolation path (#696), which auto-isolates a
+// contended top-level read-only (ask/review) job into a detached committed-tip
+// worktree exactly as read-only delegation fan-out does (#394 part 2) and must
+// append the identical #654 note so an isolated analysis job is pointed at the
+// canonical checkout for gitignored/uncommitted paths. It is a thin pass-through
+// so the delegation and top-level paths share one source of truth for the text;
+// a blank baseCheckout yields "" (byte-identical, no note).
+func ReadOnlyWorktreeContextNote(baseCheckout string) string {
+	return readOnlyWorktreeContextNote(baseCheckout)
+}
+
 // isReadOnlyDelegationWorktree reports whether a job ran in a detached read-only
 // delegation worktree that must be disposed. Only read-only delegation children
 // allocate one; implement children carry a branch and are cleaned through the

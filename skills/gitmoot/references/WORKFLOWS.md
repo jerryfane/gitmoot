@@ -731,19 +731,21 @@ Each child job carries job-tree linkage fields — `parent_job_id`,
 can be traced back to its parent, its originating delegation, and the root of the
 tree. See `RESULT_CONTRACT.md` for the full delegation field reference.
 
-**Read-only fan-out runs at the committed tip.** When a coordinator emits **two
-or more** read-only (`ask`/`review`) siblings, Gitmoot auto-isolates each into a
-detached `git worktree` at the **committed tip** of the base branch so they run
-in parallel instead of serializing on the shared checkout. That worktree does
-**not** contain gitignored paths (e.g. vendored clones under `repos/**`) or any
-uncommitted working-tree changes, so an analysis/research leg cannot see the
-operator's live working tree there. Each such child's prompt now carries a note
-with the canonical base-checkout absolute path so a worker whose sandbox can read
-it (e.g. codex) reaches the real tree instead of reporting a working-tree feature
-as absent. A **single** read-only delegation stays in the shared base checkout
-and sees everything, so for whole-working-tree analysis (auditing gitignored
-vendored repos, or in-flight uncommitted WIP) either fan out to exactly **one**
-read-only leg or pass an **absolute** path to the file/dir under analysis.
+**Contended read-only jobs run at the committed tip.** When a same-repo read-only
+(`ask`/`review`) job would otherwise serialize on the shared checkout — a
+coordinator emits **two or more** read-only siblings, or two-plus
+independently-fired top-level read-only jobs land on one repo — Gitmoot
+auto-isolates each into a detached `git worktree` at the **committed tip** of the
+base branch so they run in parallel. That worktree does **not** contain gitignored
+paths (e.g. vendored clones under `repos/**`) or any uncommitted working-tree
+changes, so an analysis/research leg cannot see the operator's live working tree
+there. Every auto-isolated job's prompt now carries a note with the canonical
+base-checkout absolute path so a worker whose sandbox can read it (e.g. codex)
+reaches the real tree instead of reporting a working-tree feature as absent. A
+**single**, uncontended read-only job stays in the shared base checkout and sees
+everything, so for whole-working-tree analysis (auditing gitignored vendored
+repos, or in-flight uncommitted WIP) either keep the job uncontended or pass an
+**absolute** path to the file/dir under analysis.
 
 ## Coordinator-Owned Review
 

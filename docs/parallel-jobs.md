@@ -66,18 +66,19 @@ Parallelism under `pool` is bounded by **two** independent locks:
    plain, top-level same-repo `implement` job with no worktree still shares the
    `repo:<repo>` key and serializes even under `pool`.
 
-   **Read-only fan-out worktrees are the committed tip.** An auto-isolated
+   **Auto-isolated read-only worktrees are the committed tip.** An auto-isolated
    read-only worktree is a detached `git worktree add` at the **committed tip** of
    the base branch, so it does **not** contain gitignored paths (e.g. vendored
-   clones under `repos/**`) or any uncommitted working-tree changes. This only
-   kicks in for **two or more** read-only siblings (the fan-out that would
-   otherwise serialize); a **single** read-only delegation stays in the shared
-   base checkout and sees everything. Each fan-out child's prompt now carries a
+   clones under `repos/**`) or any uncommitted working-tree changes. Isolation only
+   kicks in when a same-repo read-only job is **contended** — a fan-out of **two or
+   more** read-only siblings, or two-plus independently-fired top-level `ask`/`review`
+   jobs on one repo; a **single**, uncontended read-only job stays in the shared
+   base checkout and sees everything. Every auto-isolated job's prompt now carries a
    note with the canonical base-checkout absolute path, so a worker whose sandbox
    can read it (e.g. codex) reaches the real tree instead of reporting a
    working-tree feature as missing. For whole-working-tree analysis that must see
-   gitignored or uncommitted state, either run a **single** read-only delegation
-   (no fan-out → stays in the base checkout) or pass an **absolute** path to the
+   gitignored or uncommitted state, either keep the job uncontended (a lone
+   read-only job stays in the base checkout) or pass an **absolute** path to the
    file/dir under analysis.
 2. **Runtime session lock (`runtime:<runtime>:<ref>`).** Two jobs that use the
    **same** agent/runtime session serialize on the session lock even when their

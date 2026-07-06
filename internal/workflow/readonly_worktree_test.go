@@ -404,4 +404,13 @@ func TestReadOnlyWorktreeContextNote(t *testing.T) {
 	if again := readOnlyWorktreeContextNote(base); again != note {
 		t.Fatalf("note is non-deterministic: %q != %q", again, note)
 	}
+	// The exported wrapper the daemon's top-level pool-isolation path uses (#696)
+	// MUST return byte-identical text so top-level auto-isolated read-only jobs and
+	// read-only delegation fan-out share one committed-tip note.
+	if got := ReadOnlyWorktreeContextNote(base); got != note {
+		t.Fatalf("ReadOnlyWorktreeContextNote diverged from readOnlyWorktreeContextNote: %q != %q", got, note)
+	}
+	if got := ReadOnlyWorktreeContextNote(""); got != "" {
+		t.Fatalf("ReadOnlyWorktreeContextNote(\"\") = %q, want empty (byte-identical no-note path)", got)
+	}
 }
