@@ -7761,4 +7761,30 @@ CREATE TABLE job_gates (
 );
 CREATE INDEX idx_job_gates_job ON job_gates(job_id);
 	`,
+	// #681 pipeline registry: one row per named pipeline holding the verbatim spec
+	// YAML + its content hash (a run snapshots the hash it was created from), the
+	// interval/jitter schedule fields (heartbeat idiom), and the durable schedule
+	// state (last_run_at/next_due_at/last_run_id/last_status) that makes an
+	// interval schedule restart-safe. name is the primary key and the stem of the
+	// pipeline's hidden shell runner agent. Pure additive append (CREATE TABLE
+	// only): the table stays empty until `gitmoot pipeline add` runs, so every
+	// existing DB reads identically. The per-run and per-stage tables are separate
+	// additive migrations appended by the run/advancer step.
+	`
+CREATE TABLE pipelines (
+	name TEXT PRIMARY KEY,
+	repo TEXT NOT NULL DEFAULT '',
+	spec_yaml TEXT NOT NULL DEFAULT '',
+	spec_hash TEXT NOT NULL DEFAULT '',
+	enabled INTEGER NOT NULL DEFAULT 0,
+	interval TEXT NOT NULL DEFAULT '',
+	jitter TEXT NOT NULL DEFAULT '',
+	last_run_at TEXT NOT NULL DEFAULT '',
+	next_due_at TEXT NOT NULL DEFAULT '',
+	last_run_id TEXT NOT NULL DEFAULT '',
+	last_status TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+	`,
 }
