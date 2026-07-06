@@ -2802,7 +2802,7 @@ func (s *Store) ClaimRunningJob(ctx context.Context, id string, from string, to 
 //
 // It is a STRICT no-op when currentBootID is "" (a non-Linux host or a boot id
 // that could not be read): with no boot identity there is nothing to compare
-// against, so behavior is byte-identical to before this feature. The `!= ”`
+// against, so behavior is byte-identical to before this feature. The `!= ''`
 // guard likewise never touches identity-less legacy rows (pre-upgrade running
 // jobs), leaving them to the existing age/lease recovery. It NEVER touches a
 // same-boot job — same-boot liveness stays governed by the age/lease gate, so no
@@ -2875,7 +2875,7 @@ func (s *Store) RequeueRunningJobsFromForeignBoot(ctx context.Context, currentBo
 // foreign boot), so this method only reclaims the lock row. It returns the number
 // of locks released.
 //
-// It is a STRICT no-op when currentBootID is "" and, via the `!= ”` guard, never
+// It is a STRICT no-op when currentBootID is "" and, via the `!= ''` guard, never
 // reclaims an identity-less lock (a non-pid-stamping acquire or a legacy row),
 // which stays governed by its lease/TTL. Because a foreign boot id can only have
 // been written by a process on a prior boot, it can never match an in-flight owner
