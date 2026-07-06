@@ -4178,6 +4178,72 @@ func TestRunQueuedJobsPoolIsolatesContendedReadJob(t *testing.T) {
 	}
 }
 
+func TestPoolIsolationAppendsCommittedTipNote(t *testing.T) {
+	// #696: three same-repo top-level read-only (ask) jobs submitted together under
+	// the pool run concurrently — one in the shared checkout, the other two
+	// auto-isolated into detached committed-tip worktrees (#394 part 2). Each
+	// auto-isolated job must carry the #654 canonical-checkout note in its prompt
+	// (parity with read-only delegation fan-out), while the un-isolated job that
+	// runs in the shared base checkout stays byte-identical (no note). Every
+	// worktree is disposed on completion.
+	ctx := context.Background()
+	home := t.TempDir()
+	checkout := createDaemonWorkerGitCheckout(t, "main")
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	seedDaemonWorkerAgent(t, store, "audit", runtime.ShellRuntime, "unused", []string{"ask"}, "owner/repo")
+	const goal = "audit the config loader"
+	for i, id := range []string{"job-1", "job-2", "job-3"} {
+		enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: id, Agent: "audit", Action: "ask", Repo: "owner/repo", Branch: "main", PullRequest: i + 1, Instructions: goal})
+	}
+	adapter := &cliWorkerFakeAdapter{output: poolSchedulerAskResult}
+	worker := poolSchedulerWorker(t, store, adapter, true)
+	worker.ConfigHome = home // enable isolation
+
+	if err := runQueuedJobsForRepo(ctx, worker, 3, "", ""); err != nil {
+		t.Fatalf("pool run: %v", err)
+	}
+
+	isolated, shared := 0, 0
+	for _, id := range []string{"job-1", "job-2", "job-3"} {
+		job, err := store.GetJob(ctx, id)
+		if err != nil {
+			t.Fatalf("GetJob %s: %v", id, err)
+		}
+		if job.State != string(workflow.JobSucceeded) {
+			t.Fatalf("%s state = %q, want succeeded (all three read jobs must run concurrently, not stay queued)", id, job.State)
+		}
+		payload, err := daemonJobPayload(job)
+		if err != nil {
+			t.Fatalf("payload %s: %v", id, err)
+		}
+		if payload.WorktreePath != "" {
+			isolated++
+			if _, statErr := os.Stat(payload.WorktreePath); !os.IsNotExist(statErr) {
+				t.Fatalf("%s isolation worktree %s was not cleaned up", id, payload.WorktreePath)
+			}
+			// The auto-isolated job runs in a detached committed-tip worktree, so it
+			// must carry the #654 note pointing at the canonical repo checkout.
+			if !strings.Contains(payload.Instructions, "COMMITTED TIP") || !strings.Contains(payload.Instructions, checkout) {
+				t.Fatalf("%s isolated but Instructions missing committed-tip note pointing at %q: %q", id, checkout, payload.Instructions)
+			}
+			if !strings.HasPrefix(payload.Instructions, goal) {
+				t.Fatalf("%s note must be APPENDED after the original goal, got %q", id, payload.Instructions)
+			}
+		} else {
+			shared++
+			// The un-isolated job stays in the shared base checkout: its prompt must
+			// be byte-identical (no committed-tip note appended).
+			if payload.Instructions != goal {
+				t.Fatalf("%s ran in the shared checkout but its Instructions changed: %q (want byte-identical %q)", id, payload.Instructions, goal)
+			}
+		}
+	}
+	if isolated != 2 || shared != 1 {
+		t.Fatalf("isolated=%d shared=%d, want exactly 2 isolated + 1 shared", isolated, shared)
+	}
+}
+
 func TestRunQueuedJobsPoolRecoversWorkerPanicAndCleansWorktree(t *testing.T) {
 	// A panicking worker must not hang the pool or crash the daemon, and any
 	// isolation worktree allocated for the contended job must still be disposed
