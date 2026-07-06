@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -158,8 +159,20 @@ func TestMigrateAddsPipelinesToUpgradedDB(t *testing.T) {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	store := &Store{db: raw}
-	// Apply every migration except the last (the pipelines table).
-	for version, migration := range migrations[:len(migrations)-1] {
+	// Apply every migration BEFORE the pipelines table. Located by content so this
+	// stays correct as later steps append further migrations (the per-run/per-stage
+	// tables) after the pipelines one.
+	pipelinesIdx := -1
+	for i, m := range migrations {
+		if strings.Contains(m, "CREATE TABLE pipelines") {
+			pipelinesIdx = i
+			break
+		}
+	}
+	if pipelinesIdx < 0 {
+		t.Fatalf("pipelines migration not found")
+	}
+	for version, migration := range migrations[:pipelinesIdx] {
 		if err := store.applyMigration(ctx, version+1, migration); err != nil {
 			t.Fatalf("applyMigration(%d): %v", version+1, err)
 		}

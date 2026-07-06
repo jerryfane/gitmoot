@@ -648,6 +648,15 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 	if err := m.ensureRunning(ctx, job.ID); err != nil {
 		return AgentResult{}, err
 	}
+	// A #681 pipeline stage is a LEAF: it runs a shell command and returns a
+	// decision. Its ParentJobID is empty, so any delegations[] the stage command
+	// emitted would otherwise dispatch as TOP-LEVEL jobs in AdvanceJob. Strip them
+	// for a pipeline-sender job so a stage can never spawn phantom children; the
+	// advancer already ignores stage delegations, and this makes stages-as-leaves
+	// hold at the engine seam too. Cheap and byte-identical for every other sender.
+	if payload.Sender == PipelineJobSender && len(result.Delegations) > 0 {
+		result.Delegations = nil
+	}
 	payload.Result = &result
 	// Shadow-log returned learnings + write any mechanical fact at job terminal
 	// (#626 WRITE path). No-op when the hook is unset or the agent is not enrolled,

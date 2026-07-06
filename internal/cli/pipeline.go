@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jerryfane/gitmoot/internal/daemon"
 	"github.com/jerryfane/gitmoot/internal/db"
@@ -30,6 +31,8 @@ func runPipeline(args []string, stdout, stderr io.Writer) int {
 		return runPipelineAdd(args[1:], stdout, stderr)
 	case "list":
 		return runPipelineList(args[1:], stdout, stderr)
+	case "run":
+		return runPipelineRunCmd(args[1:], stdout, stderr)
 	case "show":
 		return runPipelineShow(args[1:], stdout, stderr)
 	case "enable":
@@ -49,7 +52,8 @@ func printPipelineUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot pipeline add <spec.yaml> [--enable]")
 	fmt.Fprintln(w, "  gitmoot pipeline list [--json]")
-	fmt.Fprintln(w, "  gitmoot pipeline show <name> [--json]")
+	fmt.Fprintln(w, "  gitmoot pipeline run <name>")
+	fmt.Fprintln(w, "  gitmoot pipeline show <name|run-id> [--json]")
 	fmt.Fprintln(w, "  gitmoot pipeline enable <name>")
 	fmt.Fprintln(w, "  gitmoot pipeline disable <name>")
 	fmt.Fprintln(w, "  gitmoot pipeline remove <name>")
@@ -269,26 +273,46 @@ func runPipelineShow(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	var (
-		record db.Pipeline
-		found  bool
+		record   db.Pipeline
+		found    bool
+		runView  pipelineRunView
+		runFound bool
 	)
 	if err := withStore(*home, func(store *db.Store) error {
+		ctx := context.Background()
 		var err error
-		record, found, err = store.GetPipeline(context.Background(), name)
+		// `show <name|run-id>`: a pipeline name resolves to the registry view; a run
+		// id (its distinct "prun-" marker never collides with a name) resolves to the
+		// run funnel. Try the pipeline first — a name is the common case.
+		record, found, err = store.GetPipeline(ctx, name)
+		if err != nil {
+			return err
+		}
+		if found {
+			return nil
+		}
+		runView, runFound, err = loadPipelineRunView(ctx, store, name)
 		return err
 	}); err != nil {
 		fmt.Fprintf(stderr, "pipeline show: %v\n", err)
 		return 1
 	}
-	if !found {
-		fmt.Fprintf(stderr, "pipeline %s not found\n", name)
-		return 1
+	if found {
+		if *jsonOut {
+			return encodePipelineJSON(stdout, stderr, pipelineToJSON(record, true))
+		}
+		printPipeline(stdout, record)
+		return 0
 	}
-	if *jsonOut {
-		return encodePipelineJSON(stdout, stderr, pipelineToJSON(record, true))
+	if runFound {
+		if *jsonOut {
+			return encodePipelineJSON(stdout, stderr, pipelineRunToJSON(runView))
+		}
+		printPipelineRunFunnel(stdout, runView)
+		return 0
 	}
-	printPipeline(stdout, record)
-	return 0
+	fmt.Fprintf(stderr, "pipeline or run %s not found\n", name)
+	return 1
 }
 
 func runPipelineSetEnabled(args []string, enabled bool, stdout, stderr io.Writer) int {
@@ -456,4 +480,258 @@ func enabledLabel(enabled bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+// runPipelineRunCmd is `gitmoot pipeline run <name>`: it creates a manual run of a
+// registered pipeline, enqueues its ready root stages (via one advance pass), and
+// prints the run id (script-stable, so `RUN=$(gitmoot pipeline run foo)` works).
+// It enforces the two run preconditions: the pipeline must carry a repo (stage
+// jobs need a managed repo for the worker to claim them) and it must have no
+// in-flight run (one active run per pipeline). Manual runs ignore the schedule's
+// enabled flag — a disabled pipeline can still be run by hand.
+func runPipelineRunCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pipeline run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		printPipelineUsage(stderr)
+		if len(args) == 0 {
+			fmt.Fprintln(stderr, "pipeline run requires a name")
+			return 2
+		}
+		return 0
+	}
+	name := strings.TrimSpace(args[0])
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "pipeline run accepts exactly one name")
+		return 2
+	}
+	var runID string
+	if err := withStore(*home, func(store *db.Store) error {
+		ctx := context.Background()
+		rec, ok, err := store.GetPipeline(ctx, name)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("pipeline %s not found", name)
+		}
+		if strings.TrimSpace(rec.Repo) == "" {
+			return fmt.Errorf("pipeline %s has no repo; stages need a managed repo to run", name)
+		}
+		if active, ok, err := store.ActivePipelineRun(ctx, name); err != nil {
+			return err
+		} else if ok {
+			return fmt.Errorf("pipeline %s already has an active run %s", name, active.ID)
+		}
+		spec, err := pipeline.Load([]byte(rec.SpecYAML))
+		if err != nil {
+			return fmt.Errorf("stored spec is invalid: %w", err)
+		}
+		now := time.Now().UTC()
+		run, err := createPipelineRun(ctx, store, rec, spec, "manual", now)
+		if err != nil {
+			return err
+		}
+		enqueue := newPipelineStageEnqueuer(store, *home)
+		if _, err := advancePipelineRun(ctx, store, enqueue, rec, spec, run, now); err != nil {
+			return err
+		}
+		runID = run.ID
+		return nil
+	}); err != nil {
+		fmt.Fprintf(stderr, "pipeline run: %v\n", err)
+		return 1
+	}
+	writeLine(stdout, "%s", runID)
+	return 0
+}
+
+// pipelineRunView is the resolved data behind `pipeline show <run-id>`: the run
+// row plus its stage rows ordered into spec/DAG order for the funnel.
+type pipelineRunView struct {
+	run    db.PipelineRun
+	stages []db.PipelineRunStage
+}
+
+// loadPipelineRunView loads a run and its stages, ordered for display. A missing
+// run returns ok=false (so `show` falls through to "not found").
+func loadPipelineRunView(ctx context.Context, store *db.Store, id string) (pipelineRunView, bool, error) {
+	run, ok, err := store.GetPipelineRun(ctx, id)
+	if err != nil || !ok {
+		return pipelineRunView{}, ok, err
+	}
+	stages, err := store.ListPipelineRunStages(ctx, run.ID)
+	if err != nil {
+		return pipelineRunView{}, false, err
+	}
+	return pipelineRunView{run: run, stages: orderPipelineRunStages(ctx, store, run, stages)}, true, nil
+}
+
+// orderPipelineRunStages reorders stage rows into spec (topological) order when the
+// run's pipeline + matching spec snapshot are available; otherwise it keeps the
+// store's stable stage_id order. Any stage rows not present in the spec (should not
+// happen) are appended so no data is dropped.
+func orderPipelineRunStages(ctx context.Context, store *db.Store, run db.PipelineRun, stages []db.PipelineRunStage) []db.PipelineRunStage {
+	rec, ok, err := store.GetPipeline(ctx, run.Pipeline)
+	if err != nil || !ok {
+		return stages
+	}
+	spec, err := pipeline.Load([]byte(rec.SpecYAML))
+	if err != nil || strings.TrimSpace(rec.SpecHash) != strings.TrimSpace(run.SpecHash) {
+		return stages
+	}
+	byID := make(map[string]db.PipelineRunStage, len(stages))
+	for _, stage := range stages {
+		byID[stage.StageID] = stage
+	}
+	ordered := make([]db.PipelineRunStage, 0, len(stages))
+	seen := make(map[string]struct{}, len(stages))
+	for _, stage := range spec.Stages {
+		if row, ok := byID[stage.ID]; ok {
+			ordered = append(ordered, row)
+			seen[stage.ID] = struct{}{}
+		}
+	}
+	for _, stage := range stages {
+		if _, ok := seen[stage.StageID]; !ok {
+			ordered = append(ordered, stage)
+		}
+	}
+	return ordered
+}
+
+// printPipelineRunFunnel renders a run as the TEXT FUNNEL (decision 9), e.g.
+// `source OK -> score OK -> deploy BLOCKED (needs: R2 token)`, preceded by the run
+// header. A failed run surfaces the exact `gitmoot report bug --job <stage-job>`
+// command for the halted stage (NO auto-filing).
+func printPipelineRunFunnel(stdout io.Writer, view pipelineRunView) {
+	run := view.run
+	writeLine(stdout, "run: %s", run.ID)
+	writeLine(stdout, "pipeline: %s", run.Pipeline)
+	writeLine(stdout, "trigger: %s", firstNonEmpty(run.Trigger, "-"))
+	writeLine(stdout, "state: %s", run.State)
+	writeLine(stdout, "started: %s", heartbeatTimeForStatus(run.StartedAt))
+	writeLine(stdout, "finished: %s", heartbeatTimeForStatus(run.FinishedAt))
+	if strings.TrimSpace(run.HaltStage) != "" {
+		writeLine(stdout, "halt_stage: %s", run.HaltStage)
+	}
+	if strings.TrimSpace(run.HaltReason) != "" {
+		writeLine(stdout, "halt_reason: %s", run.HaltReason)
+	}
+	if needs := decodePipelineNeeds(run.NeedsJSON); len(needs) > 0 {
+		writeLine(stdout, "needs: %s", strings.Join(needs, ", "))
+	}
+	writeLine(stdout, "")
+	writeLine(stdout, "%s", pipelineFunnelLine(view.stages))
+	if run.State == pipeline.RunFailed {
+		if jobID := haltStageJobID(view); jobID != "" {
+			writeLine(stdout, "")
+			writeLine(stdout, "stage failed; report it with:")
+			writeLine(stdout, "  gitmoot report bug --job %s", jobID)
+		}
+	}
+}
+
+// pipelineFunnelLine joins each stage's `<id> <LABEL>` into the funnel line.
+func pipelineFunnelLine(stages []db.PipelineRunStage) string {
+	parts := make([]string, 0, len(stages))
+	for _, stage := range stages {
+		parts = append(parts, stage.StageID+" "+pipelineStageFunnelLabel(stage))
+	}
+	return strings.Join(parts, " -> ")
+}
+
+// pipelineStageFunnelLabel is the funnel status token for a stage: OK for a
+// succeeded stage, BLOCKED (needs: ...) for a parked stage, else the uppercased
+// state (PENDING/QUEUED/RUNNING/FAILED/SKIPPED/CANCELLED).
+func pipelineStageFunnelLabel(stage db.PipelineRunStage) string {
+	switch stage.State {
+	case pipeline.StageSucceeded:
+		return "OK"
+	case pipeline.StageBlocked:
+		if needs := decodePipelineNeeds(stage.NeedsJSON); len(needs) > 0 {
+			return fmt.Sprintf("BLOCKED (needs: %s)", strings.Join(needs, ", "))
+		}
+		return "BLOCKED"
+	default:
+		return strings.ToUpper(stage.State)
+	}
+}
+
+// haltStageJobID returns the job id of the run's halt stage (for the bug-report
+// command).
+func haltStageJobID(view pipelineRunView) string {
+	for _, stage := range view.stages {
+		if stage.StageID == view.run.HaltStage {
+			return strings.TrimSpace(stage.JobID)
+		}
+	}
+	return ""
+}
+
+type pipelineRunStageJSON struct {
+	ID      string   `json:"id"`
+	State   string   `json:"state"`
+	JobID   string   `json:"job_id,omitempty"`
+	Attempt int      `json:"attempt,omitempty"`
+	Needs   []string `json:"needs,omitempty"`
+	Summary string   `json:"summary,omitempty"`
+}
+
+type pipelineRunJSON struct {
+	ID         string                 `json:"id"`
+	Pipeline   string                 `json:"pipeline"`
+	Trigger    string                 `json:"trigger"`
+	State      string                 `json:"state"`
+	HaltStage  string                 `json:"halt_stage,omitempty"`
+	HaltReason string                 `json:"halt_reason,omitempty"`
+	Needs      []string               `json:"needs,omitempty"`
+	SpecHash   string                 `json:"spec_hash"`
+	StartedAt  string                 `json:"started_at,omitempty"`
+	FinishedAt string                 `json:"finished_at,omitempty"`
+	Funnel     string                 `json:"funnel"`
+	Stages     []pipelineRunStageJSON `json:"stages,omitempty"`
+}
+
+// pipelineRunToJSON projects a run view into its script-stable JSON shape.
+func pipelineRunToJSON(view pipelineRunView) pipelineRunJSON {
+	run := view.run
+	out := pipelineRunJSON{
+		ID:         run.ID,
+		Pipeline:   run.Pipeline,
+		Trigger:    run.Trigger,
+		State:      run.State,
+		HaltStage:  run.HaltStage,
+		HaltReason: run.HaltReason,
+		Needs:      decodePipelineNeeds(run.NeedsJSON),
+		SpecHash:   run.SpecHash,
+		StartedAt:  pipelineRunTimeJSON(run.StartedAt),
+		FinishedAt: pipelineRunTimeJSON(run.FinishedAt),
+		Funnel:     pipelineFunnelLine(view.stages),
+	}
+	for _, stage := range view.stages {
+		out.Stages = append(out.Stages, pipelineRunStageJSON{
+			ID:      stage.StageID,
+			State:   stage.State,
+			JobID:   stage.JobID,
+			Attempt: stage.Attempt,
+			Needs:   decodePipelineNeeds(stage.NeedsJSON),
+			Summary: stage.Summary,
+		})
+	}
+	return out
+}
+
+func pipelineRunTimeJSON(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
