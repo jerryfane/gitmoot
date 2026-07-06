@@ -7353,6 +7353,18 @@ func (w jobWorker) resyncReviewHead(ctx context.Context, job db.Job, payload wor
 		// #532 deferral / terminal path — only a definitively-open PR is re-synced.
 		return false, nil
 	}
+	// Confirm the resolved checkout is actually on the PR's head branch before
+	// re-targeting. A review that falls back to the registered shared checkout (which
+	// sits on `main`, not the PR branch) must NOT be re-synced to main's head — that
+	// would review the wrong tree and could post an approval against a SHA that is not
+	// the PR head. We only decline when we can POSITIVELY confirm the branch differs:
+	// a detached-HEAD worktree (CurrentBranch errors) is a legitimate #684 target and
+	// is left to proceed. We deliberately do NOT gate on head == pr.HeadSHA because the
+	// PR-watcher can lag the push, which is exactly the drift #684 exists to tolerate.
+	if b, err := (gitutil.Client{Dir: checkout}).CurrentBranch(ctx); err == nil &&
+		strings.TrimSpace(b) != strings.TrimSpace(payload.Branch) {
+		return false, nil
+	}
 	head, err := (gitutil.Client{Dir: checkout}).HeadSHA(ctx)
 	if err != nil {
 		return false, err

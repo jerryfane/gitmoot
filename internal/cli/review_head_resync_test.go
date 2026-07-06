@@ -204,6 +204,98 @@ func TestDefaultCheckoutFailsReviewHeadMismatchWhenPRClosed(t *testing.T) {
 	}
 }
 
+// #684 mode A safety guard: when a review falls back to the registered SHARED
+// checkout (which sits on `main`, not the PR branch — e.g. the task worktree was
+// cleaned up while a stale review was still queued), it must NOT be re-synced to
+// main's head. Re-targeting there would review main's tree (none of the PR's
+// changes) and could post an approval against a SHA that is not the PR head. The
+// branch mismatch (checkout on `main`, review pinned to `feat/x`) makes resync
+// decline, so the job keeps the existing head-mismatch failure.
+func TestDefaultCheckoutDeclinesResyncWhenCheckoutOnWrongBranch(t *testing.T) {
+	ctx := context.Background()
+	// The shared checkout sits on `main`, NOT the PR's head branch.
+	checkout := createDaemonWorkerGitCheckout(t, "main")
+	store := daemonWorkerStore(t)
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	worker := defaultJobWorker(store, io.Discard)
+
+	// The head the review was pinned to (the PR branch's tip) — differs from main's
+	// head, so validateReviewCheckout raises the head-SHA mismatch.
+	staleHead := daemonWorkerHeadSHA(t, checkout)
+	if err := os.WriteFile(checkout+"/main.txt", []byte("main advances\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	runDaemonWorkerGit(t, checkout, "add", "main.txt")
+	runDaemonWorkerGit(t, checkout, "commit", "-m", "advance main")
+	mainHead := daemonWorkerHeadSHA(t, checkout)
+	if mainHead == staleHead {
+		t.Fatal("test setup: main head did not advance")
+	}
+
+	// The PR is OPEN on branch feat/x — the store would otherwise green-light a resync.
+	if err := store.UpsertPullRequest(ctx, db.PullRequest{
+		RepoFullName: "owner/repo",
+		Number:       23,
+		HeadBranch:   "feat/x",
+		HeadSHA:      staleHead,
+		State:        "open",
+	}); err != nil {
+		t.Fatalf("UpsertPullRequest returned error: %v", err)
+	}
+
+	// The queued review is pinned to the feat/x branch + its stale head, but its task
+	// worktree is gone so it resolves the shared checkout (which is on main).
+	if _, err := (workflow.Mailbox{Store: store}).Enqueue(ctx, workflow.JobRequest{
+		ID:          "workflow-review-3",
+		Agent:       "reviewer",
+		Action:      "review",
+		Repo:        "owner/repo",
+		Branch:      "feat/x",
+		PullRequest: 23,
+		HeadSHA:     staleHead,
+		TaskID:      "review-task-3", // no task row → resolves the shared checkout
+	}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+	job, err := store.GetJob(ctx, "workflow-review-3")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	payload, err := daemonJobPayload(job)
+	if err != nil {
+		t.Fatalf("daemonJobPayload returned error: %v", err)
+	}
+
+	_, err = worker.defaultCheckout(ctx, job, payload, runtime.Agent{Name: "reviewer"})
+	if err == nil {
+		t.Fatal("defaultCheckout re-synced a review to a checkout on the wrong branch; want a clean head-mismatch failure")
+	}
+	if !strings.Contains(err.Error(), "not review job head") {
+		t.Fatalf("expected the review head-mismatch error, got: %v", err)
+	}
+
+	// The payload head is left unchanged (NOT re-targeted to main's head) and no
+	// re-sync event was recorded.
+	reloaded, err := store.GetJob(ctx, "workflow-review-3")
+	if err != nil {
+		t.Fatalf("GetJob (reload) returned error: %v", err)
+	}
+	reloadedPayload, err := daemonJobPayload(reloaded)
+	if err != nil {
+		t.Fatalf("daemonJobPayload (reload) returned error: %v", err)
+	}
+	if reloadedPayload.HeadSHA != staleHead {
+		t.Fatalf("wrong-branch HeadSHA = %q, want it left unchanged at %q (not main's head %q)", reloadedPayload.HeadSHA, staleHead, mainHead)
+	}
+	events, err := store.ListJobEvents(ctx, "workflow-review-3")
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	if hasResyncEvent(events, "review_head_resynced") {
+		t.Fatalf("events = %+v, want NO review_head_resynced event for a wrong-branch checkout", events)
+	}
+}
+
 // #684 failure mode B: a foreground review whose serialized runtime session is
 // busy must be LEFT QUEUED for the daemon to run (a review is naturally
 // asynchronous), not cancelled and dropped. Ask/implement keep their existing
@@ -281,6 +373,13 @@ func TestRunAgentReviewRequeuesQueuedJobWhenRuntimeSessionBusy(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("runtime calls = %+v, want none (job left queued, not run)", runner.calls)
+	}
+	// No daemon is running in this test, so the foreground caller MUST be told the
+	// review is only queued and will not run until a daemon picks it up — otherwise a
+	// bare "state: queued" reads as "the review ran" and the review silently never
+	// executes.
+	if out := stdout.String(); !strings.Contains(out, "daemon is not running") || !strings.Contains(out, "job run") {
+		t.Fatalf("foreground busy-review stdout missing daemon guidance; got:\n%s", out)
 	}
 
 	store = openCLIJobStore(t, home)
