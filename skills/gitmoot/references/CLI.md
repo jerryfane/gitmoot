@@ -518,6 +518,21 @@ line in human output. Genuine non-terminal failures (the job did not reach
 `succeeded`) still exit non-zero as before. A normal success with no advance error
 is byte-identical to prior behavior — no `advance_error` field is emitted.
 
+**Review resilience under branch churn.** A review job is pinned to the PR head
+SHA it was queued against; in an active dev loop the branch often advances (a new
+commit is pushed) before the queued review runs, leaving the registered checkout
+on a newer head. Rather than failing the review on that head-SHA mismatch, Gitmoot
+**re-syncs** it: when the PR is still **open**, the review is re-targeted to the
+checkout's current head — reviewing the newest commit is exactly what a human
+reviewer does — and a `review_head_resynced` job event records the old→new head.
+The mismatch is only allowed to fail cleanly when the PR is **closed/merged** (a
+stale review of a dead PR is not useful) or when the checkout is dirty. Relatedly,
+when a foreground `agent review` finds the agent's serialized runtime session
+**busy**, the review is now **left queued** for the daemon to run when the session
+frees (a `requeued_runtime_busy` event is recorded) instead of being cancelled and
+dropped; `agent ask`/`implement` stay synchronous and keep their existing
+busy-session cancel behavior.
+
 Start an orchestra of agents with `gitmoot orchestrate`:
 
 ```sh
