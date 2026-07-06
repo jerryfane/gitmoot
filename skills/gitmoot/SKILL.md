@@ -79,6 +79,16 @@ To restart the daemon without losing its Claude token, use
 `gitmoot daemon restart` (not stop + start); see CLI.md § Repo And Daemon
 Status for the runtime-auth persistence model.
 
+When a job is **blocked** and the user asks to "resume a blocked job", "clear a
+blocker", or "what does this job need" (#682), route to
+`gitmoot job gates <id>` to list the open resource gates — one per `needs[]` entry
+a blocked job recorded — then `gitmoot job gates clear <id> --need "<text>"` (or
+`--all`) to satisfy them. Clearing the **last** open gate auto-re-runs the blocked
+job via the same machinery as `gitmoot job retry` (resume on clear, no polling). A
+job whose tree is **paused awaiting a human** (`escalate_human` / ask-gate) is
+never auto-resumed by clearing gates — that still needs a `gitmoot resume`
+decision. See CLI.md § Resumable gates.
+
 For Gitmoot health or status questions, first use the injected SessionStart
 snapshot when it is present and sufficient. If more detail is needed, run the
 relevant read-only Gitmoot CLI checks and answer directly from the results.

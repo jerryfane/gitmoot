@@ -4,8 +4,8 @@ Gitmoot is a local-first coordinator for AI agents working across repositories,
 goals, reviews, pull request comments, daemon jobs, branch locks, agent
 templates (including GitHub-backed publish/pull), current-chat prompt import,
 multi-agent orchestration (the Orchestra delegations DAG), heartbeat schedules,
-an outbound event stream, and Codex, Claude Code, Kimi Code, or shell runtime
-workflows.
+declared multi-stage pipelines, an outbound event stream, and Codex, Claude Code,
+Kimi Code, or shell runtime workflows.
 
 This file is the machine-readable index of the Gitmoot docs — agents should
 start here, then open [`llms-full.txt`](https://gitmoot.io/llms-full.txt) for the
@@ -24,7 +24,8 @@ full expanded context.
 - [Cockpit Orchestrate Workflow](https://gitmoot.io/docs/workflows/cockpit-orchestrate-workflow): Watch an orchestra live in Herdr panes (`--cockpit`) plus the `[orchestrate]` config reference (budgets, timeouts, artifact inlining).
 - [Run Jobs In Parallel On A Repo](https://gitmoot.io/docs/workflows/parallel-jobs-workflow): Use `--parallel N` (or `--workers N`, now auto-`pool`) to run a repo's queued jobs N-wide; the two serialization layers (checkout lock + runtime session lock); SIGHUP warm reload, per-repo `max_parallel`, the `[admission]` host budget, and the `[github]` process-wide GitHub call budget + secondary-rate-limit backoff.
 - [Heartbeat Schedules Workflow](https://gitmoot.io/docs/workflows/heartbeat-schedules-workflow): Recurring agent work — `gitmoot agent heartbeat add` enqueues an ask/review (read-only) or policy-gated implement job on an interval, with an optional per-heartbeat `--runtime` override.
-- [SkillOpt Train Workflow](https://gitmoot.io/docs/workflows/skillopt-train-workflow): Run the full feedback, optimizer, candidate-review, and promotion loop, including judge↔human outcome capture, `judge-report`, and judge-prompt optimization.
+- [Pipelines Workflow](https://gitmoot.io/docs/workflows/pipelines-workflow): Run a fixed, repeatable multi-step flow as a declared DAG of shell-runtime stages (`gitmoot pipeline add|run|resume`), advanced by the daemon on demand or on an interval schedule; a `blocked` stage parks the run to resume. Off by default.
+- [SkillOpt Train Workflow](https://gitmoot.io/docs/workflows/skillopt-train-workflow): Run the full feedback, optimizer, candidate-review, and promotion loop, including judge↔human outcome capture, `judge-report`, judge-prompt optimization, and the off-by-default PACE anytime-valid commit gate (`pace_enabled`) for candidate promotion.
 
 ## Concepts
 
@@ -39,7 +40,7 @@ full expanded context.
 
 ## References
 
-- [CLI Reference](https://gitmoot.io/docs/reference/cli): Commands for install, home/config, daemon operations (restart, SIGHUP reload, runtime-auth persistence), watched repos, dashboard/TUI/web, agents (incl. heartbeats and template publish/pull), orchestrate, jobs, bug reports, locks, goals, interactive prompts, and SkillOpt.
+- [CLI Reference](https://gitmoot.io/docs/reference/cli): Commands for install, home/config, daemon operations (restart, SIGHUP reload, runtime-auth persistence), watched repos, dashboard/TUI/web, agents (incl. heartbeats and template publish/pull), orchestrate, pipelines, jobs (incl. resumable `job gates`/`gates clear` for blocked `needs` with auto-resume on last clear, and session jobs `job open/close/record`), review head-SHA re-sync, bug reports, locks, goals, interactive prompts, and SkillOpt.
 - [Runtime Adapters](https://gitmoot.io/docs/reference/runtime-adapters): Codex, Claude Code, Kimi Code, legacy kimi-cli, shell, and future runtimes; the config-driven metadata registry (`gitmoot runtime list`, `[runtimes.<name>]` overrides).
 - [Result Contract](https://gitmoot.io/docs/reference/result-contract): gitmoot_result shape, the delegations DAG (Orchestration), continuation, and termination bounds.
 - [Event Stream](https://gitmoot.io/docs/reference/event-stream): The `[events]` webhook contract — job.finished/failed/blocked/needs_attention/deferred and candidate.* events, schema_version 1, best-effort delivery.
@@ -48,7 +49,8 @@ full expanded context.
 - [Troubleshooting](https://gitmoot.io/docs/operations/troubleshooting): Diagnose GitHub auth, bug reports, runtimes, agent templates, remotes, permissions, daemon lifecycle, stuck/deferred jobs, and locks.
 - [Beta Smoke Tests](https://gitmoot.io/docs/operations/beta-smoke-tests): Deterministic smoke checklists for release validation.
 - [Docs Deployment](https://gitmoot.io/docs/operations/deployment): How the docs site itself is built and published.
-- [Release Notes](https://gitmoot.io/docs/release-notes/v0.8.6): Latest release (v0.8.6) — codex token usage captured correctly for every session shape: fresh sessions run with `--json`, resumed sessions record per-session deltas (not session-cumulative totals), ephemeral/temp workers flagged single-use so their first delivery counts (#658/#661/#662/#664/#669); kimi 0.19.2 emits no usage (documented, #659). Memory confirmed pool now fills from ordinary jobs, not just orchestrate runs (#647), and [memory] is advertised in the init template (#653). Session jobs: `gitmoot job open/close/record` tracks here-method work as first-class jobs (#660/#676). Daemon recovers jobs and reclaims runtime locks across reboots via boot_id (#668). Config-driven runtime metadata registry + resilient per-section default_model resolver (#674/#679). Workflow hardening: delegation budgets projected before enqueue (#666), read-only fan-out warning (#667), session isolation + task-run recovery (#671), policy-gated heartbeat implement action (#675). Dashboard: new Learning section (SkillOpt template evolution + memory brain graph) (#672/#677/#680), agent config + memory pool counts (#670), galaxy ring-collapse fixes (#648/#678), mobile-responsive UI (#644), template version diff (#643).
+- [Release Notes](https://gitmoot.io/docs/release-notes/v0.8.7): Latest release (v0.8.7) — first-class Pipelines: a declared DAG of shell-runtime stages the daemon advances on demand or on a schedule, off by default (`gitmoot pipeline add|run|resume`), with an advancer cadence decoupled from repo-poll backoff and a committed-tip note on read-only top-level isolation (#681/#694/#700/#699). Reliability batch: reviews **re-sync** to a newer PR head instead of failing on a head-SHA mismatch (#691); GitHub API calls share a process-wide budget with adaptive secondary-rate-limit backoff (#692); blocked jobs record their `needs` as **resumable gates** — `gitmoot job gates`/`gates clear` satisfy them and auto-resume on the last clear (#693); full-chain E2Es cover the batch (#695). SkillOpt gains the off-by-default PACE anytime-valid commit gate for candidate promotion (#687/#690). Polish: product-style README (#688); dashboard moose logo + favicon (#689).
+- [v0.8.6 Release Notes](https://gitmoot.io/docs/release-notes/v0.8.6): Codex token usage captured correctly for every session shape (#658/#661/#662/#664/#669); memory confirmed pool fills from ordinary jobs (#647); session jobs `job open/close/record` (#660/#676); daemon boot_id reboot recovery (#668); config-driven runtime metadata registry (#674/#679); dashboard Learning section (#672/#677/#680).
 - [Raw SKILL.md](https://gitmoot.io/SKILL.md): Agent skill entrypoint.
 - [Full LLM Context](https://gitmoot.io/llms-full.txt): Expanded Markdown context for agents.
 - [GitHub Repository](https://github.com/jerryfane/gitmoot): Source code and releases.
