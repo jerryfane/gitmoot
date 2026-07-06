@@ -694,6 +694,31 @@ type SkillOptPolicy struct {
 	// (the default) means a command MUST be supplied on the command line or in the
 	// corpus.
 	GateReplayCommand string
+
+	// PaceEnabled opts into the OFF-by-default PACE anytime-valid commit gate (#687):
+	// an ADDITIONAL promotion gate (never a replacement) layered on top of every
+	// existing auto-promote guardrail. When true, a guardrails-pass candidate is
+	// auto-promoted only when a testing-by-betting e-process over its recorded
+	// candidate-vs-champion pairwise outcomes (the Mode B bandit arm's win/loss tally,
+	// #481/#482) crosses the commit threshold 1/PaceAlpha; a budget-exhausted (reject)
+	// or not-yet-decisive (continue) stream FAILS SAFE to notify-only, mirroring the
+	// #627 gate_blocked behavior. false (the default) is byte-identical — the e-process
+	// is never consulted. The field is a plain bool (no accessor method) because it has
+	// no compound dependency: PACE rides the same pairwise stream #473 already reads.
+	PaceEnabled bool
+	// PaceAlpha is the PACE target false-commit probability in (0,1); the commit
+	// threshold is 1/PaceAlpha (#687). DefaultPaceAlpha (0.05 -> threshold 20) when
+	// unset. Only consulted when PaceEnabled.
+	PaceAlpha float64
+	// PaceLambda is the PACE bet fraction in [0,1] (#687): a candidate win scales the
+	// e-process wealth by (1+PaceLambda), a loss by (1-PaceLambda). 0 is a legal no-op
+	// (wealth never moves, never commits). DefaultPaceLambda (0.5) when unset. Only
+	// consulted when PaceEnabled.
+	PaceLambda float64
+	// PaceMaxPairs is the PACE discordant-pair budget (#687): after this many win/loss
+	// pairs without crossing the commit threshold the e-process rejects (notify-only).
+	// DefaultPaceMaxPairs when unset/<=0. Only consulted when PaceEnabled.
+	PaceMaxPairs int
 }
 
 // DefaultDeterministicCheckers is the safe default checker set used when the
@@ -707,6 +732,16 @@ var DefaultDeterministicCheckers = []string{"diff_size"}
 // deferred Mode B auto loop (#473). It is NOT applied when bandit_min_samples is
 // unset (nil stays nil, off); it is the value the config stub comments suggest.
 const DefaultBanditMinSamples = 30
+
+// Default PACE parameters (#687). Duplicated here as plain numbers (config cannot
+// import internal/skillopt without a cycle) but MUST stay in lockstep with
+// skillopt.DefaultPace* — a config test pins the pair. They seed PaceAlpha/PaceLambda/
+// PaceMaxPairs so an enabled PACE gate with no explicit knobs uses the RFC defaults.
+const (
+	DefaultPaceAlpha    = 0.05
+	DefaultPaceLambda   = 0.5
+	DefaultPaceMaxPairs = 200
+)
 
 func DefaultSkillOptPolicy() SkillOptPolicy {
 	return SkillOptPolicy{
@@ -735,6 +770,10 @@ func DefaultSkillOptPolicy() SkillOptPolicy {
 		Gate:                            false,
 		GateCorpusPath:                  "",
 		GateReplayCommand:               "",
+		PaceEnabled:                     false,
+		PaceAlpha:                       DefaultPaceAlpha,
+		PaceLambda:                      DefaultPaceLambda,
+		PaceMaxPairs:                    DefaultPaceMaxPairs,
 	}
 }
 
@@ -1003,6 +1042,46 @@ func applySkillOptPolicyField(policy *SkillOptPolicy, key string, value string) 
 		return nil
 	case "gate_replay_command":
 		policy.GateReplayCommand = strings.TrimSpace(value)
+		return nil
+	case "pace_enabled":
+		parsed, err := strconv.ParseBool(value)
+		policy.PaceEnabled = parsed
+		return err
+	case "pace_alpha":
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return err
+		}
+		// alpha is a false-commit probability: it must be in (0,1). 0/negative gives
+		// an infinite commit threshold (never commits) and >=1 makes the threshold
+		// <=1 (commits on the prior), so both are hard errors rather than a clamp.
+		if parsed <= 0 || parsed >= 1 {
+			return fmt.Errorf("pace_alpha %v must be in (0,1)", parsed)
+		}
+		policy.PaceAlpha = parsed
+		return nil
+	case "pace_lambda":
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return err
+		}
+		// lambda is the bet fraction in [0,1]: 0 is a legal no-op; >1 would make a
+		// loss multiply wealth by a negative number (nonsensical) and <0 inverts the
+		// bet, so both extremes are hard errors.
+		if parsed < 0 || parsed > 1 {
+			return fmt.Errorf("pace_lambda %v must be in [0,1]", parsed)
+		}
+		policy.PaceLambda = parsed
+		return nil
+	case "pace_max_pairs":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return err
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("pace_max_pairs %d must be positive", parsed)
+		}
+		policy.PaceMaxPairs = parsed
 		return nil
 	default:
 		return nil

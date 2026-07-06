@@ -61,7 +61,7 @@ func TestRunCandidateNotifyEmitsAwaitingExactlyOnce(t *testing.T) {
 	store, version, candidate, _ := candidateNotifyFixture(t)
 	sink := &recordingSink{}
 
-	if err := runCandidateNotify(ctx, store, sink, config.DefaultSkillOptPolicy(), candidate, version, nil, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, config.DefaultSkillOptPolicy(), candidate, version, nil, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestRunCandidateNotifyNilSinkIsNoOp(t *testing.T) {
 	ctx := context.Background()
 	store, version, candidate, _ := candidateNotifyFixture(t)
 
-	if err := runCandidateNotify(ctx, store, nil, config.DefaultSkillOptPolicy(), candidate, version, nil, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, nil, config.DefaultSkillOptPolicy(), candidate, version, nil, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify with nil sink returned error: %v", err)
 	}
 	after, err := store.GetAgentTemplateVersionByID(ctx, version.ID)
@@ -219,9 +219,9 @@ func TestNotifyAndMaybeAutoPromoteFlushesPerInvocationSink(t *testing.T) {
 func TestResolveBanditConfidenceNoArmIsNil(t *testing.T) {
 	ctx := context.Background()
 	store, version, _, _ := candidateNotifyFixture(t)
-	conf, samples, summary := resolveBanditConfidence(ctx, store, version)
-	if conf != nil || samples != 0 || summary != "" {
-		t.Fatalf("no-arm confidence = (%v, %d, %q), want (nil, 0, \"\")", conf, samples, summary)
+	conf, samples, summary, wins, losses := resolveBanditConfidence(ctx, store, version)
+	if conf != nil || samples != 0 || summary != "" || wins != 0 || losses != 0 {
+		t.Fatalf("no-arm confidence = (%v, %d, %q, %d, %d), want (nil, 0, \"\", 0, 0)", conf, samples, summary, wins, losses)
 	}
 }
 
@@ -245,7 +245,7 @@ func TestResolveBanditConfidenceComputesFromArms(t *testing.T) {
 		t.Fatalf("seed challenger arm: %v", err)
 	}
 
-	conf, samples, summary := resolveBanditConfidence(ctx, store, version)
+	conf, samples, summary, wins, losses := resolveBanditConfidence(ctx, store, version)
 	if conf == nil {
 		t.Fatal("expected a non-nil confidence when the challenger arm has pulls")
 	}
@@ -257,6 +257,11 @@ func TestResolveBanditConfidenceComputesFromArms(t *testing.T) {
 	}
 	if !strings.Contains(summary, "over 40 samples") {
 		t.Fatalf("summary = %q, want it to name 40 samples", summary)
+	}
+	// The challenger arm Alpha=40, Beta=2 decodes to 39 candidate wins / 1 loss
+	// (wins = Alpha-1, losses = Beta-1) — the PACE (#687) discordant-pair stream.
+	if wins != 39 || losses != 1 {
+		t.Fatalf("win/loss = (%d, %d), want (39, 1) from Alpha=40, Beta=2", wins, losses)
 	}
 }
 

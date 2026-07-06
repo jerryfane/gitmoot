@@ -1143,6 +1143,23 @@ passing gate run before it may be promoted to canary or current; otherwise the
 promotion seam blocks. On a gate failure the protocol allows exactly one retry
 feeding the failing replay log back to the optimizer, then rejects.
 
+When `[skillopt].pace_enabled` is on, an **additional** off-by-default
+**PACE anytime-valid commit gate** (`#687`) sits on the auto-promote path: a
+guardrails-pass candidate is auto-promoted only when a model-free
+testing-by-betting e-process over its recorded candidate-vs-champion pairwise
+outcomes (the Mode B bandit arm's win/loss tally, `#481`/`#482`) crosses the
+commit threshold `1/pace_alpha`. Each discordant pair bets `pace_lambda` of the
+wealth (`E ← E·(1+λ(2w−1))`, ties discarded); the gate **stops early** the moment
+it is decisive and **rejects** once `pace_max_pairs` discordant pairs are spent
+without crossing — so peeking-until-you-win cannot p-hack a promotion (Ville's
+inequality bounds the false-commit probability by `pace_alpha`). It is a strictly
+additional gate: **every** existing guardrail (`auto_promote_min_samples`/
+`_min_score`/`require_external_ci`/`_min_confidence`/canary/replay gate) still
+applies, and a non-decisive or budget-exhausted stream **fails safe** to a
+`pace_blocked` notify (no promotion). Off (the default) it is never consulted —
+byte-identical. Knobs: `pace_alpha` (default `0.05` → threshold 20), `pace_lambda`
+(default `0.5`), `pace_max_pairs` (default `200`).
+
 `skillopt pairwise import <packet-dir>` ingests a **blinded paired-review
 packet** produced by the gitmoot-skillopt fork (the `pairwise-review.json`
 packet plus its secret map and the reviewer's picks), de-blinds it, and stores

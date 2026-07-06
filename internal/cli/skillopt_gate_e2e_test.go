@@ -89,7 +89,7 @@ func TestGateRejectedRunViaCLIStillBlocksPromotionE2E(t *testing.T) {
 	policy := gateGuardPolicy()
 	candidate, feedback := gateGuardInputs()
 	sink := &recordingSink{}
-	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, feedback, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, feedback, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify: %v", err)
 	}
 	after, err := store.GetAgentTemplateVersionByID(ctx, version.ID)
@@ -124,7 +124,7 @@ func TestGateAcceptedRunViaCLIUnblocksPromotionE2E(t *testing.T) {
 	// (1) BEFORE any gate run: guardrails pass + gate enabled → BLOCKED (no accepted
 	// run yet). This mirrors #635's block leg but as the baseline for the unblock.
 	sink1 := &recordingSink{}
-	if err := runCandidateNotify(ctx, store, sink1, policy, candidate, version, feedback, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink1, policy, candidate, version, feedback, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify (pre-gate): %v", err)
 	}
 	if pre, _ := store.GetAgentTemplateVersionByID(ctx, version.ID); pre.State != "pending" {
@@ -147,7 +147,7 @@ func TestGateAcceptedRunViaCLIUnblocksPromotionE2E(t *testing.T) {
 	// (3) The SAME promotion guard now promotes the candidate to current, consuming
 	// the CLI-produced accepted run.
 	sink2 := &recordingSink{}
-	if err := runCandidateNotify(ctx, store, sink2, policy, candidate, version, feedback, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink2, policy, candidate, version, feedback, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify (post-gate): %v", err)
 	}
 	promoted, err := store.GetAgentTemplateVersionByID(ctx, version.ID)
