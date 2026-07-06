@@ -7291,13 +7291,19 @@ func isReviewHeadMismatch(cause error) bool {
 	return strings.Contains(cause.Error(), "not review job head")
 }
 
-// reviewPullRequestClosed reports whether the review's PR is known to be closed or
-// merged, using the locally-tracked pull_requests record. A missing record
-// (sql.ErrNoRows) is deliberately treated as NOT closed so the resilient #684
-// re-sync still applies to a PR the local store has not recorded yet; a real DB
-// error is surfaced so the caller declines to re-sync and falls through to the
-// existing behavior.
-func (w jobWorker) reviewPullRequestClosed(ctx context.Context, repo string, number int) (bool, error) {
+// reviewPullRequestOpen reports whether the review's PR is KNOWN to be open, using
+// the locally-tracked pull_requests record (the daemon's PR-watcher upserts an
+// open record for every PR it watches before it fans out review jobs, so a genuine
+// #684 review of an active PR has one). Re-sync is gated on a definitively-open PR:
+//
+//   - record found + state open (or any non-closed/-merged state) ⇒ open (re-sync).
+//   - record found + state closed/merged ⇒ NOT open (a stale review of a dead PR
+//     must not silently pass; keep the existing terminal path).
+//   - NO record (sql.ErrNoRows) ⇒ NOT open. The store has no evidence the PR is
+//     live, so it falls through to the existing #532 checkout-contention deferral
+//     rather than re-targeting to a possibly-unrelated checkout head.
+//   - a real DB error ⇒ surfaced; the caller declines to re-sync.
+func (w jobWorker) reviewPullRequestOpen(ctx context.Context, repo string, number int) (bool, error) {
 	pr, err := w.Store.GetPullRequest(ctx, repo, int64(number))
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -7306,7 +7312,7 @@ func (w jobWorker) reviewPullRequestClosed(ctx context.Context, repo string, num
 		return false, err
 	}
 	state := strings.ToLower(strings.TrimSpace(pr.State))
-	return state == "closed" || state == "merged", nil
+	return state != "closed" && state != "merged", nil
 }
 
 // resyncReviewHead handles #684 head-SHA drift for a PR review job. A review is
@@ -7336,13 +7342,15 @@ func (w jobWorker) resyncReviewHead(ctx context.Context, job db.Job, payload wor
 	if payload.PullRequest <= 0 {
 		return false, nil
 	}
-	closed, err := w.reviewPullRequestClosed(ctx, payload.Repo, payload.PullRequest)
+	open, err := w.reviewPullRequestOpen(ctx, payload.Repo, payload.PullRequest)
 	if err != nil {
 		// Undeterminable PR state (a DB read error) ⇒ do not re-sync; fall through to
 		// the existing deferral/terminal path rather than reviewing a possibly-dead PR.
 		return false, nil
 	}
-	if closed {
+	if !open {
+		// A closed/merged PR, or one the store has no record of, keeps the existing
+		// #532 deferral / terminal path — only a definitively-open PR is re-synced.
 		return false, nil
 	}
 	head, err := (gitutil.Client{Dir: checkout}).HeadSHA(ctx)
