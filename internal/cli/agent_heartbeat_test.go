@@ -177,6 +177,127 @@ func TestAgentHeartbeatAddReviewSucceedsWithCapability(t *testing.T) {
 	}
 }
 
+// TestAgentHeartbeatAddImplementRejectsReadOnlyPolicy proves the write path
+// refuses an implement heartbeat for an agent whose autonomy policy grants no
+// headless write (the default auto), even when it holds the implement capability.
+func TestAgentHeartbeatAddImplementRejectsReadOnlyPolicy(t *testing.T) {
+	home := t.TempDir()
+	if err := withStore(home, func(store *db.Store) error {
+		return store.UpsertAgent(context.Background(), db.Agent{
+			Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+			Capabilities: []string{"ask", "implement"}, AutonomyPolicy: "auto", RuntimeRef: "last",
+		})
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"agent", "heartbeat", "add", "builder", "nightly",
+		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--action", "implement",
+		"--prompt", "p", "--home", home}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for implement heartbeat under read-only policy")
+	}
+	if !strings.Contains(stderr.String(), "write") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	heartbeats, err := config.LoadHeartbeats(config.PathsForHome(home))
+	if err != nil {
+		t.Fatalf("LoadHeartbeats: %v", err)
+	}
+	if len(heartbeats) != 0 {
+		t.Fatalf("implement heartbeat was written despite read-only policy: %+v", heartbeats)
+	}
+}
+
+// TestAgentHeartbeatAddImplementRejectsMissingCapability proves an implement
+// heartbeat is refused for a write-policy agent that lacks the implement capability.
+func TestAgentHeartbeatAddImplementRejectsMissingCapability(t *testing.T) {
+	home := t.TempDir()
+	if err := withStore(home, func(store *db.Store) error {
+		return store.UpsertAgent(context.Background(), db.Agent{
+			Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+			Capabilities: []string{"ask"}, AutonomyPolicy: "danger-full-access", RuntimeRef: "last",
+		})
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"agent", "heartbeat", "add", "builder", "nightly",
+		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--action", "implement",
+		"--prompt", "p", "--home", home}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for implement heartbeat without implement capability")
+	}
+	if !strings.Contains(stderr.String(), "implement capability") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+// TestAgentHeartbeatAddImplementSucceedsWithWritePolicy is the positive
+// counterpart: an agent with the implement capability AND a write-granting policy
+// may register an implement heartbeat, and a per-heartbeat --runtime override is
+// persisted alongside it.
+func TestAgentHeartbeatAddImplementSucceedsWithWritePolicy(t *testing.T) {
+	home := t.TempDir()
+	if err := withStore(home, func(store *db.Store) error {
+		return store.UpsertAgent(context.Background(), db.Agent{
+			Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+			Capabilities: []string{"ask", "implement"}, AutonomyPolicy: "danger-full-access", RuntimeRef: "last",
+		})
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"agent", "heartbeat", "add", "builder", "nightly",
+		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--action", "implement",
+		"--runtime", "claude", "--prompt", "Fix the top lint error.", "--home", home}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("implement add exit=%d stderr=%s", code, stderr.String())
+	}
+	heartbeats, err := config.LoadHeartbeats(config.PathsForHome(home))
+	if err != nil || len(heartbeats) != 1 {
+		t.Fatalf("implement heartbeat not persisted: %+v err=%v", heartbeats, err)
+	}
+	if heartbeats[0].Action != "implement" || heartbeats[0].Runtime != "claude" {
+		t.Fatalf("implement/runtime not persisted: %+v", heartbeats[0])
+	}
+	// The show surface must report the runtime override.
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"agent", "heartbeat", "show", "builder", "nightly", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("show exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "runtime: claude") {
+		t.Fatalf("show did not surface runtime override: %q", stdout.String())
+	}
+}
+
+// TestAgentHeartbeatAddRejectsBadRuntime proves an unsupported --runtime override
+// (e.g. shell) is refused before any config write.
+func TestAgentHeartbeatAddRejectsBadRuntime(t *testing.T) {
+	home := t.TempDir()
+	if _, err := initializedPaths(home); err != nil {
+		t.Fatalf("initializedPaths: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"agent", "heartbeat", "add", "repo-maintainer", "daily",
+		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--runtime", "shell",
+		"--prompt", "p", "--home", home}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for shell runtime override")
+	}
+	if !strings.Contains(stderr.String(), "invalid runtime") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	heartbeats, err := config.LoadHeartbeats(config.PathsForHome(home))
+	if err != nil {
+		t.Fatalf("LoadHeartbeats: %v", err)
+	}
+	if len(heartbeats) != 0 {
+		t.Fatalf("heartbeat written despite bad runtime: %+v", heartbeats)
+	}
+}
+
 // TestDaemonHeartbeatLinesOffByDefault asserts the status observability surface is
 // empty when no heartbeats are configured (off-by-default: status is unchanged).
 func TestDaemonHeartbeatLinesOffByDefault(t *testing.T) {
@@ -220,5 +341,52 @@ prompt = "p"
 		!strings.Contains(joined, "repo-maintainer/daily") ||
 		!strings.Contains(joined, "last_status=enqueued") {
 		t.Fatalf("status lines missing expected detail: %q", joined)
+	}
+}
+
+// TestDaemonHeartbeatLinesSurfacesRuntimeOverride asserts the #611 runtime override
+// (#611) is surfaced as `runtime=<X>` on the status line of the heartbeat that
+// carries one, and is ABSENT from a sibling heartbeat that runs on the agent default
+// (the byte-identical pre-#611 line).
+func TestDaemonHeartbeatLinesSurfacesRuntimeOverride(t *testing.T) {
+	home := t.TempDir()
+	paths, err := initializedPaths(home)
+	if err != nil {
+		t.Fatalf("initializedPaths: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+`
+[agents.repo-maintainer.heartbeats.override]
+enabled = true
+repo = "jerryfane/gitmoot"
+interval = "24h"
+runtime = "claude"
+prompt = "p"
+
+[agents.repo-maintainer.heartbeats.plain]
+enabled = true
+repo = "jerryfane/gitmoot"
+interval = "24h"
+prompt = "p"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	lines := daemonHeartbeatLines(paths, home)
+	var overrideLine, plainLine string
+	for _, line := range lines {
+		if strings.Contains(line, "repo-maintainer/override") {
+			overrideLine = line
+		}
+		if strings.Contains(line, "repo-maintainer/plain") {
+			plainLine = line
+		}
+	}
+	if overrideLine == "" || plainLine == "" {
+		t.Fatalf("expected both heartbeat lines, got:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(overrideLine, "runtime=claude") {
+		t.Fatalf("override heartbeat line must surface runtime=claude: %q", overrideLine)
+	}
+	if strings.Contains(plainLine, "runtime=") {
+		t.Fatalf("default heartbeat line must NOT surface a runtime: %q", plainLine)
 	}
 }
