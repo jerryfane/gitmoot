@@ -246,6 +246,20 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		return localAgentJobOutput{}, err
 	}
 	if !acquired {
+		// #684 failure mode B: a review is naturally asynchronous — a busy runtime
+		// session just means "run me a moment later", exactly the daemon's own
+		// runtime-busy handling (it bounces errRuntimeSessionBusy and keeps the job
+		// QUEUED). Rather than cancelling and dropping a foreground review when the
+		// serialized runtime session is busy (the reported "queued job … was not run"
+		// drop), LEAVE it QUEUED so the daemon runs it when the session frees. Ask /
+		// implement stay synchronous (the caller is waiting on the answer / the
+		// mutation) and keep the existing cancel-and-report behavior byte-identically.
+		if request.Action == "review" {
+			waitMessage := fmt.Sprintf("runtime session %s is busy; review job %s left queued for the daemon to run when the session frees", lockKey, job.ID)
+			_ = store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "runtime_lock_wait", Message: waitMessage})
+			_ = store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "requeued_runtime_busy", Message: waitMessage})
+			return buildLocalAgentJobOutput(job, request)
+		}
 		message := fmt.Sprintf("runtime session %s is busy; synchronous ask was not run", lockKey)
 		_, _ = store.TransitionJobStateWithEvent(ctx, job.ID, string(workflow.JobQueued), string(workflow.JobCancelled), db.JobEvent{
 			JobID:   job.ID,

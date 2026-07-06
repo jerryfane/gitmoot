@@ -21,6 +21,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
 var newRuntimeFactory = func() runtime.Factory {
@@ -510,6 +511,13 @@ func dispatchAgentCommand(options agentRunOptions, action string, reason string,
 	}
 	if options.background {
 		output.WatchCommand = jobWatchCommand(output.JobID, options.home)
+	}
+	// Resolve daemon liveness whenever the job is left QUEUED — for a background job
+	// (always queued) and, per #684, for a FOREGROUND review that was re-queued
+	// because its runtime session was busy. Both need the daemon-hint below;
+	// otherwise a foreground caller would see a bare "state: queued" with no clue the
+	// review has not run and no daemon guidance.
+	if output.State == string(workflow.JobQueued) {
 		running, err := daemonIsRunning(options.home)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", errLabel, err)
@@ -808,9 +816,23 @@ func looksLikeImplementationRequest(message string) bool {
 }
 
 func printQueuedDaemonHint(stdout io.Writer, output localAgentJobOutput, background bool, home string) {
-	if background && !output.DaemonRunning {
+	if output.State != string(workflow.JobQueued) {
+		return
+	}
+	if !output.DaemonRunning {
+		// No daemon to pick the job up: without this, a foreground `agent review`
+		// whose runtime session was busy (#684) would exit 0 showing "state: queued"
+		// and silently never run. Point the caller at the daemon or a manual run.
 		writeLine(stdout, "queued: daemon is not running")
 		writeLine(stdout, "process: %s", daemonStartHint(home, output.Repo))
+		writeLine(stdout, "or: %s", jobRunCommand(output.JobID, home))
+		return
+	}
+	if !background {
+		// A foreground review left queued because its runtime session was busy: the
+		// daemon IS up and will run it when the session frees. Say so explicitly so
+		// the caller does not read "state: queued" as "the review already ran".
+		writeLine(stdout, "queued: runtime session busy; the daemon will run this review when the session frees")
 		writeLine(stdout, "or: %s", jobRunCommand(output.JobID, home))
 	}
 }

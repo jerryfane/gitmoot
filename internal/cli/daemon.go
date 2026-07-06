@@ -7040,6 +7040,18 @@ func (w jobWorker) defaultCheckout(ctx context.Context, job db.Job, payload work
 		switch {
 		case payload.PullRequest > 0 && strings.TrimSpace(payload.TaskID) != "":
 			if err := w.validateReviewCheckout(ctx, payload, checkout); err != nil {
+				// #684: the PR branch commonly advances between enqueue and execution
+				// in an active dev loop, leaving the checkout on a NEWER head than the
+				// one the review was pinned to. Re-target the review to the checkout's
+				// current head (reviewing the newest commit is what a human reviewer
+				// does) when the PR is still open, instead of failing on the mismatch.
+				// A closed/merged PR, a dirty tree, or any other checkout error keeps
+				// the existing terminal / deferral path.
+				if resynced, resyncErr := w.resyncReviewHead(ctx, job, payload, checkout, err); resyncErr != nil {
+					return "", resyncErr
+				} else if resynced {
+					return checkout, nil
+				}
 				return "", err
 			}
 		case payload.PullRequest <= 0 && strings.TrimSpace(payload.Branch) == "":
@@ -7265,6 +7277,123 @@ func (w jobWorker) validateReviewCheckout(ctx context.Context, payload workflow.
 		return fmt.Errorf("checkout head is %s, not review job head %s", head, expectedHead)
 	}
 	return nil
+}
+
+// isReviewHeadMismatch reports whether a checkout pre-flight error is specifically
+// the review head-SHA drift emitted by validateReviewCheckout ("checkout head is
+// X, not review job head Y") — NOT a dirty tree, a missing head, or a branch
+// mismatch. Only that one condition is eligible for the #684 re-sync; every other
+// checkout error keeps its existing terminal / deferral path.
+func isReviewHeadMismatch(cause error) bool {
+	if cause == nil {
+		return false
+	}
+	return strings.Contains(cause.Error(), "not review job head")
+}
+
+// reviewPullRequestOpen reports whether the review's PR is KNOWN to be open, using
+// the locally-tracked pull_requests record (the daemon's PR-watcher upserts an
+// open record for every PR it watches before it fans out review jobs, so a genuine
+// #684 review of an active PR has one). Re-sync is gated on a definitively-open PR:
+//
+//   - record found + state open (or any non-closed/-merged state) ⇒ open (re-sync).
+//   - record found + state closed/merged ⇒ NOT open (a stale review of a dead PR
+//     must not silently pass; keep the existing terminal path).
+//   - NO record (sql.ErrNoRows) ⇒ NOT open. The store has no evidence the PR is
+//     live, so it falls through to the existing #532 checkout-contention deferral
+//     rather than re-targeting to a possibly-unrelated checkout head.
+//   - a real DB error ⇒ surfaced; the caller declines to re-sync.
+func (w jobWorker) reviewPullRequestOpen(ctx context.Context, repo string, number int) (bool, error) {
+	pr, err := w.Store.GetPullRequest(ctx, repo, int64(number))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	state := strings.ToLower(strings.TrimSpace(pr.State))
+	return state != "closed" && state != "merged", nil
+}
+
+// resyncReviewHead handles #684 head-SHA drift for a PR review job. A review is
+// pinned to the PR head SHA at enqueue; in an active dev loop the branch often
+// advances (a newer commit is pushed) before the queued review runs, so the
+// registered checkout sits on a NEWER head than the one the review was pinned to.
+// validateReviewCheckout then rejects it with "checkout head is <new>, not review
+// job head <old>", and the job ultimately fails — even though reviewing the
+// checkout's current head is strictly more useful (it is exactly what a human
+// reviewer does). resyncReviewHead re-targets the review to the checkout's current
+// head instead of failing, but ONLY when:
+//
+//   - the validation failure was specifically the review head-SHA mismatch (a
+//     dirty tree, a missing head, or a branch mismatch is left untouched), and
+//   - the PR is still OPEN (a closed/merged PR keeps the existing terminal path so
+//     a stale review of a dead PR does not silently pass).
+//
+// On a re-sync it persists the current head onto the job payload (RunJob re-reads
+// the payload from the store, so the delivered review prompt and the posted PR
+// comment carry the new head) and records a review_head_resynced event, then
+// returns true so defaultCheckout proceeds with the review. Every declined case
+// returns false so the caller's existing error path runs byte-identically.
+func (w jobWorker) resyncReviewHead(ctx context.Context, job db.Job, payload workflow.JobPayload, checkout string, cause error) (bool, error) {
+	if !isReviewHeadMismatch(cause) {
+		return false, nil
+	}
+	if payload.PullRequest <= 0 {
+		return false, nil
+	}
+	open, err := w.reviewPullRequestOpen(ctx, payload.Repo, payload.PullRequest)
+	if err != nil {
+		// Undeterminable PR state (a DB read error) ⇒ do not re-sync; fall through to
+		// the existing deferral/terminal path rather than reviewing a possibly-dead PR.
+		return false, nil
+	}
+	if !open {
+		// A closed/merged PR, or one the store has no record of, keeps the existing
+		// #532 deferral / terminal path — only a definitively-open PR is re-synced.
+		return false, nil
+	}
+	// Confirm the resolved checkout is actually on the PR's head branch before
+	// re-targeting. A review that falls back to the registered shared checkout (which
+	// sits on `main`, not the PR branch) must NOT be re-synced to main's head — that
+	// would review the wrong tree and could post an approval against a SHA that is not
+	// the PR head. We only decline when we can POSITIVELY confirm the branch differs:
+	// a detached-HEAD worktree (CurrentBranch errors) is a legitimate #684 target and
+	// is left to proceed. We deliberately do NOT gate on head == pr.HeadSHA because the
+	// PR-watcher can lag the push, which is exactly the drift #684 exists to tolerate.
+	if b, err := (gitutil.Client{Dir: checkout}).CurrentBranch(ctx); err == nil &&
+		strings.TrimSpace(b) != strings.TrimSpace(payload.Branch) {
+		return false, nil
+	}
+	head, err := (gitutil.Client{Dir: checkout}).HeadSHA(ctx)
+	if err != nil {
+		return false, err
+	}
+	head = strings.TrimSpace(head)
+	previous := strings.TrimSpace(payload.HeadSHA)
+	if head == "" || head == previous {
+		// Nothing to re-target to (empty or already-current head); let the caller's
+		// existing path handle it.
+		return false, nil
+	}
+	payload.HeadSHA = head
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	if err := w.Store.UpdateJobPayload(ctx, job.ID, string(encoded)); err != nil {
+		return false, err
+	}
+	if eventErr := w.Store.AddJobEvent(ctx, db.JobEvent{
+		JobID: job.ID,
+		Kind:  "review_head_resynced",
+		Message: fmt.Sprintf("PR #%d branch advanced from %s to %s before the review ran; re-targeting the review to the current head",
+			payload.PullRequest, previous, head),
+	}); eventErr != nil {
+		return false, eventErr
+	}
+	writeLine(w.Stdout, "job %s review head re-synced %s -> %s (PR #%d advanced)", job.ID, previous, head, payload.PullRequest)
+	return true, nil
 }
 
 func implementationLockOwner(agent runtime.Agent, payload workflow.JobPayload) string {
