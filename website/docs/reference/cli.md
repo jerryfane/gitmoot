@@ -1314,7 +1314,7 @@ is a succeeded job but folds as a stage **failure** by default):
 `pipeline run` prints only the run id (script-stable), ignores the `enabled` flag but
 still needs a `repo` and refuses to start while a run is active. `pipeline show
 <run-id>` renders the **text funnel** (`source OK -> score BLOCKED (needs: R2 token)
--> deploy PENDING`); a **failed** run also prints the exact `gitmoot report bug --job
+-> deploy SKIPPED`); a **failed** run also prints the exact `gitmoot report bug --job
 <stage-job>` command (never auto-filed). `pipeline resume` re-runs a **parked** run
 from its halted stage (or `--from`) plus its transitive dependents while **never**
 re-running a succeeded stage. A pipeline stage is a **leaf**: a stage result carrying

@@ -143,7 +143,7 @@ halt_stage: score
 halt_reason: secret missing
 needs: R2 token
 
-source OK -> score BLOCKED (needs: R2 token) -> deploy PENDING
+source OK -> score BLOCKED (needs: R2 token) -> deploy SKIPPED
 ```
 
 Funnel labels are `OK` for a succeeded stage, `BLOCKED (needs: …)` for a parked

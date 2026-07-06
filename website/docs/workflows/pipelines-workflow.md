@@ -123,7 +123,7 @@ halt_stage: score
 halt_reason: secret missing
 needs: R2 token
 
-source OK -> score BLOCKED (needs: R2 token) -> deploy PENDING
+source OK -> score BLOCKED (needs: R2 token) -> deploy SKIPPED
 ```
 
 The operator provisions what the stage needs out of band (here, an R2 token), then

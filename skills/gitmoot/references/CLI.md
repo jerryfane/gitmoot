@@ -1439,7 +1439,7 @@ printf '%s' '{"gitmoot_result":{"decision":"blocked","summary":"secret missing",
 `pipeline run` prints only the run id (script-stable: `RUN=$(gitmoot pipeline run
 nightly-sync)`); a manual run ignores `enabled` but still needs a `repo` and refuses
 to start while a run is already active. `pipeline show <run-id>` renders the **text
-funnel** (`source OK -> score BLOCKED (needs: R2 token) -> deploy PENDING`) under a
+funnel** (`source OK -> score BLOCKED (needs: R2 token) -> deploy SKIPPED`) under a
 run header; a **failed** run also prints the exact `gitmoot report bug --job
 <stage-job>` command (gitmoot never auto-files it).
 
