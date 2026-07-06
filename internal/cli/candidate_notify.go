@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"time"
@@ -91,8 +92,8 @@ func notifyAndMaybeAutoPromoteCandidate(ctx context.Context, store *db.Store, ho
 	// short-lived CLI command exits, or the candidate.* POST never lands.
 	sink := buildDaemonEventSink(store, home)
 	defer events.FlushSink(ctx, sink)
-	confidence, confidenceSamples, confidenceSummary := resolveBanditConfidence(ctx, store, version)
-	return runCandidateNotify(ctx, store, sink, policy, candidate, version, feedbackEvents, feedbackUnavailable, confidence, confidenceSamples, confidenceSummary)
+	confidence, confidenceSamples, confidenceSummary, pairwiseWins, pairwiseLosses := resolveBanditConfidence(ctx, store, version)
+	return runCandidateNotify(ctx, store, sink, policy, candidate, version, feedbackEvents, feedbackUnavailable, confidence, confidenceSamples, confidenceSummary, pairwiseWins, pairwiseLosses)
 }
 
 // resolveBanditConfidence looks up the #473 Mode B bandit confidence backing a
@@ -100,20 +101,24 @@ func notifyAndMaybeAutoPromoteCandidate(ctx context.Context, store *db.Store, ho
 // champion arm is the template's current promoted version. When the challenger
 // has at least one recorded pull it computes P(challenger>champion) from the two
 // Beta posteriors and returns (confidence, challengerPulls, "NN% likely better
-// over K samples"). When there is no bandit evidence (no challenger arm, or no
-// store) it returns (nil, 0, "") so EvaluateAutoPromote ignores the confidence
-// guardrail and the awaiting detail is unchanged — byte-identical to #471 when
-// Mode B was never exercised. Missing rows degrade to the Beta(1,1) prior; any
-// read error degrades to "no confidence" (fail safe, never block the notify).
-func resolveBanditConfidence(ctx context.Context, store *db.Store, version db.AgentTemplateVersion) (*float64, int, string) {
+// over K samples") plus the challenger arm's raw candidate-vs-champion win/loss
+// counts (the #481/#482 discordant-pair tally: wins = Alpha-1, losses = Beta-1 under
+// the Beta(1,1) prior) — the paired outcome stream the #687 PACE gate consumes. When
+// there is no bandit evidence (no challenger arm, or no store) it returns
+// (nil, 0, "", 0, 0) so EvaluateAutoPromote ignores the confidence guardrail, the
+// awaiting detail is unchanged, and PACE sees zero pairs (never commits) — byte-
+// identical to #471 when Mode B was never exercised. Missing rows degrade to the
+// Beta(1,1) prior; any read error degrades to "no confidence" (fail safe, never
+// block the notify).
+func resolveBanditConfidence(ctx context.Context, store *db.Store, version db.AgentTemplateVersion) (*float64, int, string, int, int) {
 	if store == nil {
-		return nil, 0, ""
+		return nil, 0, "", 0, 0
 	}
 	challengerArm, found, err := store.GetBanditArm(ctx, version.TemplateID, version.ID)
 	if err != nil || !found || challengerArm.Pulls == 0 {
 		// No A/B evidence for this candidate: Mode B contributes nothing, so the
-		// optional confidence guardrail stays a no-op.
-		return nil, 0, ""
+		// optional confidence guardrail stays a no-op and PACE sees no pairs.
+		return nil, 0, "", 0, 0
 	}
 	champion := skillopt.BetaParams{Alpha: 1, Beta: 1}
 	if tmpl, terr := store.GetAgentTemplate(ctx, version.TemplateID); terr == nil && strings.TrimSpace(tmpl.VersionID) != "" {
@@ -124,7 +129,26 @@ func resolveBanditConfidence(ctx context.Context, store *db.Store, version db.Ag
 	challenger := skillopt.BetaParams{Alpha: challengerArm.Alpha, Beta: challengerArm.Beta}
 	prob := skillopt.ProbChallengerBeats(champion, challenger, rand.New(rand.NewSource(banditConfidenceSeed)), skillopt.DefaultProbDraws)
 	summary := skillopt.ConfidenceSummary(prob, challengerArm.Pulls)
-	return &prob, challengerArm.Pulls, summary
+	wins, losses := banditArmWinLoss(challengerArm)
+	return &prob, challengerArm.Pulls, summary, wins, losses
+}
+
+// banditArmWinLoss recovers the candidate-vs-champion discordant-pair tally from a
+// Beta(1+wins, 1+losses) arm: wins = Alpha-1, losses = Beta-1, each clamped at 0 and
+// rounded (Alpha/Beta are integer-valued in practice, seeded at 1 and incremented by
+// 1 per outcome). This is the paired win/loss stream the PACE e-process (#687)
+// consumes — the bandit only ever records discordant win/loss pulls, so ties are
+// already excluded.
+func banditArmWinLoss(arm db.BanditArm) (int, int) {
+	wins := int(math.Round(arm.Alpha - 1))
+	losses := int(math.Round(arm.Beta - 1))
+	if wins < 0 {
+		wins = 0
+	}
+	if losses < 0 {
+		losses = 0
+	}
+	return wins, losses
 }
 
 // runCandidateNotify is the testable core of the post-import notify+auto-promote
@@ -136,7 +160,7 @@ func resolveBanditConfidence(ctx context.Context, store *db.Store, version db.Ag
 // candidate.auto_promoted. Splitting it from the home/sink/feedback resolution lets
 // a recording sink assert the exactly-once emit and the no-double-emit invariant
 // deterministically.
-func runCandidateNotify(ctx context.Context, store *db.Store, sink events.Sink, policy config.SkillOptPolicy, candidate skillopt.CandidatePackage, version db.AgentTemplateVersion, feedbackEvents []db.FeedbackEvent, feedbackUnavailable bool, confidence *float64, confidenceSamples int, confidenceSummary string) error {
+func runCandidateNotify(ctx context.Context, store *db.Store, sink events.Sink, policy config.SkillOptPolicy, candidate skillopt.CandidatePackage, version db.AgentTemplateVersion, feedbackEvents []db.FeedbackEvent, feedbackUnavailable bool, confidence *float64, confidenceSamples int, confidenceSummary string, pairwiseWins, pairwiseLosses int) error {
 	decision := skillopt.EvaluateAutoPromote(policy, candidate, feedbackEvents, feedbackUnavailable, confidence, confidenceSamples)
 
 	// (3) Always-on notify (when [events] is configured), independent of the
@@ -153,6 +177,23 @@ func runCandidateNotify(ctx context.Context, store *db.Store, sink events.Sink, 
 	}
 	if store == nil {
 		return nil
+	}
+	// (4p) PACE anytime-valid commit gate (#687): when [skillopt].pace_enabled is on,
+	// a guardrails-pass candidate must ALSO have its recorded candidate-vs-champion
+	// pairwise outcomes (the Mode B bandit arm's win/loss tally, #481/#482) cross the
+	// e-process commit threshold 1/pace_alpha before it may be promoted. This is an
+	// ADDITIONAL gate (never a replacement): every existing guardrail already passed
+	// above (decision.Promote), and PACE is layered on top. It is model-free arithmetic
+	// (no LLM call). A non-commit verdict — budget exhausted (reject) OR not yet
+	// decisive (continue) — FAILS SAFE to a pace_blocked notify and stops short of
+	// promotion, mirroring the #627 gate_blocked behavior. Off by default
+	// (pace_enabled=false) this block never runs and the path below is byte-identical.
+	if policy.PaceEnabled {
+		paceCfg := skillopt.PaceConfig{Alpha: policy.PaceAlpha, Lambda: policy.PaceLambda, MaxPairs: policy.PaceMaxPairs}
+		if verdict, reason := skillopt.PaceGateReason(paceCfg, pairwiseWins, pairwiseLosses); verdict != skillopt.PaceCommit {
+			emitCandidateEvent(ctx, sink, events.EventCandidateAwaitingPromotion, version, "pace_blocked", reason)
+			return nil
+		}
 	}
 	// (4z) Pre-canary replay gate (#627): when [skillopt].gate_enabled is on, a
 	// guardrails-pass candidate must ALSO carry a PASSING deterministic replay-gate

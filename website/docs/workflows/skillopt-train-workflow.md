@@ -748,6 +748,32 @@ may be promoted to canary or current; otherwise the promotion seam blocks with a
 `auto_trace_enabled` dependency), and with it off the promote path is
 byte-identical to before. Promotion itself stays manual.
 
+### PACE anytime-valid commit gate (#687)
+
+`pace_enabled` adds an **additional**, off-by-default promotion gate on the
+auto-promote path. When on, a guardrails-pass candidate is auto-promoted only when
+a **model-free** testing-by-betting e-process over its recorded
+candidate-vs-champion pairwise outcomes (the Mode B bandit arm's win/loss tally,
+`#481`/`#482`) crosses the commit threshold `1/pace_alpha`:
+
+```toml
+[skillopt]
+pace_enabled = true
+pace_alpha = 0.05      # target false-commit probability; threshold = 1/alpha = 20
+pace_lambda = 0.5      # bet fraction: win → wealth ×(1+λ), loss → ×(1−λ)
+pace_max_pairs = 200   # discordant-pair budget before a non-decisive stream rejects
+```
+
+Each discordant pair updates wealth `E ← E·(1+λ(2w−1))` (ties discarded). The gate
+**stops early** the moment it is decisive and **rejects** once `pace_max_pairs`
+pairs are spent without crossing, so peeking-until-you-win cannot p-hack a
+promotion — Ville's inequality bounds the false-commit probability by `pace_alpha`
+at any stopping time. PACE is **strictly additional**: every existing guardrail
+(`auto_promote_min_samples`/`_min_score`/`require_external_ci`/`_min_confidence`/
+canary/replay gate) still applies, and a non-decisive or budget-exhausted stream
+**fails safe** to a `pace_blocked` notify (no promotion). Off (the default) it is
+never consulted — byte-identical.
+
 ## Candidate Review And Next Iteration
 
 The candidate review step publishes the candidate summary, preview/PR links

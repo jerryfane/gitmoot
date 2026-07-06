@@ -45,7 +45,7 @@ func TestRunCandidateNotifyAutoPromoteOffStaysPending(t *testing.T) {
 	autoPromoteCandidateScore(&candidate, 0.99)
 	sink := &recordingSink{}
 
-	if err := runCandidateNotify(ctx, store, sink, config.DefaultSkillOptPolicy(), candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, config.DefaultSkillOptPolicy(), candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestRunCandidateNotifyAutoPromoteGuardrailsPass(t *testing.T) {
 	autoPromoteCandidateScore(&candidate, 0.96)
 	sink := &recordingSink{}
 
-	if err := runCandidateNotify(ctx, store, sink, autoPromotePolicy(1, 0.9), candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, autoPromotePolicy(1, 0.9), candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestRunCandidateNotifyAutoPromoteGuardrailFailStaysPending(t *testing.T) {
 
 	// A near-neutral (no external CI) feedback event fails require_external_ci.
 	nearNeutral := db.FeedbackEvent{Choice: "a", Reasoning: "PR #7 merged through an empty gate (no external CI); near-neutral, not a strong positive."}
-	if err := runCandidateNotify(ctx, store, sink, autoPromotePolicy(1, 0.9), candidate, version, []db.FeedbackEvent{nearNeutral}, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, autoPromotePolicy(1, 0.9), candidate, version, []db.FeedbackEvent{nearNeutral}, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestRunCandidateNotifyBanditConfidencePromotes(t *testing.T) {
 
 	confidence := 0.97
 	summary := skillopt.ConfidenceSummary(confidence, 80)
-	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, &confidence, 80, summary); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, &confidence, 80, summary, 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestRunCandidateNotifyModeBNoScoreNoFeedbackPromotes(t *testing.T) {
 	confidence := 0.97
 	summary := skillopt.ConfidenceSummary(confidence, 80)
 	// EMPTY feedback events — the defining property of a Mode B candidate.
-	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, nil, false, &confidence, 80, summary); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, nil, false, &confidence, 80, summary, 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestRunCandidateNotifyBanditConfidenceBelowFloorStaysPending(t *testing.T) 
 	policy.AutoPromoteMinConfidence = floatPtrCLI(0.95)
 
 	confidence := 0.60
-	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, &confidence, 80, skillopt.ConfidenceSummary(confidence, 80)); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, &confidence, 80, skillopt.ConfidenceSummary(confidence, 80), 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 	if got := len(sink.byType(events.EventCandidateAutoPromoted)); got != 0 {
@@ -255,7 +255,7 @@ func TestRunCandidateNotifyNoBanditConfidenceUnchanged(t *testing.T) {
 	sink := &recordingSink{}
 
 	// No min_confidence floor; nil confidence; empty summary.
-	if err := runCandidateNotify(ctx, store, sink, autoPromotePolicy(1, 0.9), candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, autoPromotePolicy(1, 0.9), candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 	awaiting := sink.byType(events.EventCandidateAwaitingPromotion)

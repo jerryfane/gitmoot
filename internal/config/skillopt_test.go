@@ -586,3 +586,92 @@ revert_detection_enabled = maybe
 		t.Fatal("expected an error for a non-bool revert_detection_enabled")
 	}
 }
+
+// TestLoadSkillOptPolicyPaceDefaults: with no [skillopt] section (or the section
+// present without pace keys) the PACE gate (#687) is OFF and its parameters carry
+// the RFC defaults, so behavior is byte-identical.
+func TestLoadSkillOptPolicyPaceDefaults(t *testing.T) {
+	policy := DefaultSkillOptPolicy()
+	if policy.PaceEnabled {
+		t.Fatalf("pace must default OFF, got %+v", policy)
+	}
+	if policy.PaceAlpha != DefaultPaceAlpha || policy.PaceLambda != DefaultPaceLambda || policy.PaceMaxPairs != DefaultPaceMaxPairs {
+		t.Fatalf("pace params = (%v, %v, %d), want the Default* constants", policy.PaceAlpha, policy.PaceLambda, policy.PaceMaxPairs)
+	}
+}
+
+// TestLoadSkillOptPolicyParsesPace: the PACE keys parse into the policy.
+func TestLoadSkillOptPolicyParsesPace(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[skillopt]
+pace_enabled = true
+pace_alpha = 0.01
+pace_lambda = 0.25
+pace_max_pairs = 64
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	policy, err := LoadSkillOptPolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadSkillOptPolicy returned error: %v", err)
+	}
+	if !policy.PaceEnabled {
+		t.Fatalf("expected PaceEnabled true, got %+v", policy)
+	}
+	if policy.PaceAlpha != 0.01 || policy.PaceLambda != 0.25 || policy.PaceMaxPairs != 64 {
+		t.Fatalf("pace params = (%v, %v, %d), want (0.01, 0.25, 64)", policy.PaceAlpha, policy.PaceLambda, policy.PaceMaxPairs)
+	}
+}
+
+// TestLoadSkillOptPolicyPaceLambdaZeroAllowed: lambda=0 is a legal no-op and must
+// parse (not be rejected as out of range).
+func TestLoadSkillOptPolicyPaceLambdaZeroAllowed(t *testing.T) {
+	paths := PathsForHome(t.TempDir())
+	if err := Initialize(paths); err != nil {
+		t.Fatalf("Initialize returned error: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+`
+[skillopt]
+pace_lambda = 0
+`), 0o600); err != nil {
+		t.Fatalf("write config returned error: %v", err)
+	}
+	policy, err := LoadSkillOptPolicy(paths)
+	if err != nil {
+		t.Fatalf("LoadSkillOptPolicy returned error: %v", err)
+	}
+	if policy.PaceLambda != 0 {
+		t.Fatalf("pace_lambda = %v, want 0 (legal no-op)", policy.PaceLambda)
+	}
+}
+
+// TestLoadSkillOptPolicyRejectsBadPace: out-of-range alpha/lambda and a non-positive
+// max_pairs are hard config errors.
+func TestLoadSkillOptPolicyRejectsBadPace(t *testing.T) {
+	cases := map[string]string{
+		"alpha too high": "pace_alpha = 1.0",
+		"alpha zero":     "pace_alpha = 0",
+		"lambda too high": "pace_lambda = 1.5",
+		"lambda negative": "pace_lambda = -0.1",
+		"max_pairs zero":  "pace_max_pairs = 0",
+		"max_pairs neg":   "pace_max_pairs = -3",
+	}
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			paths := PathsForHome(t.TempDir())
+			if err := Initialize(paths); err != nil {
+				t.Fatalf("Initialize returned error: %v", err)
+			}
+			if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+"\n[skillopt]\n"+line+"\n"), 0o600); err != nil {
+				t.Fatalf("write config returned error: %v", err)
+			}
+			if _, err := LoadSkillOptPolicy(paths); err == nil {
+				t.Fatalf("expected an error for %q", line)
+			}
+		})
+	}
+}

@@ -163,7 +163,7 @@ func TestRunCandidateNotifyCanaryRoutesToCanary(t *testing.T) {
 	policy.AutoPromoteCanary = true
 	policy.AutoPromoteCanarySample = floatPtrCLI(0.1)
 
-	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 
@@ -207,7 +207,7 @@ func TestRunCandidateNotifyCanaryOffByDefaultDirectPromote(t *testing.T) {
 	autoPromoteCandidateScore(&candidate, 0.96)
 	sink := &recordingSink{}
 
-	if err := runCandidateNotify(ctx, store, sink, autoPromotePolicy(1, 0.9), candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, autoPromotePolicy(1, 0.9), candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 	if got := len(sink.byType(events.EventCandidateCanaryStarted)); got != 0 {
@@ -237,7 +237,7 @@ func TestRunCandidateNotifyCanaryWithoutSampleStaysPending(t *testing.T) {
 	policy := autoPromotePolicy(1, 0.9)
 	policy.AutoPromoteCanary = true // no AutoPromoteCanarySample => misconfigured
 
-	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify returned error: %v", err)
 	}
 	if got := len(sink.byType(events.EventCandidateCanaryStarted)); got != 0 {

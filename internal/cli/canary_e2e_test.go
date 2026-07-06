@@ -39,7 +39,7 @@ func canaryE2EFixture(t *testing.T) (store *db.Store, championID, canaryID, cham
 	policy := autoPromotePolicy(1, 0.9)
 	policy.AutoPromoteCanary = true
 	policy.AutoPromoteCanarySample = floatPtrCLI(0.5)
-	if err := runCandidateNotify(ctx, store, &recordingSink{}, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, &recordingSink{}, policy, candidate, version, []db.FeedbackEvent{realCIFeedbackEvent()}, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify (canary promote): %v", err)
 	}
 

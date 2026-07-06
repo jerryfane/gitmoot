@@ -228,7 +228,7 @@ func TestGatePromotionGuardBlocksThenAllows(t *testing.T) {
 	sink := &recordingSink{}
 
 	// (1) Gate enabled, no accepted gate run -> blocked, no promotion.
-	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, feedback, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink, policy, candidate, version, feedback, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify (blocked) returned error: %v", err)
 	}
 	after, err := store.GetAgentTemplateVersionByID(ctx, version.ID)
@@ -250,7 +250,7 @@ func TestGatePromotionGuardBlocksThenAllows(t *testing.T) {
 		t.Fatalf("InsertSkillOptGateRun returned error: %v", err)
 	}
 	sink2 := &recordingSink{}
-	if err := runCandidateNotify(ctx, store, sink2, policy, candidate, version, feedback, false, nil, 0, ""); err != nil {
+	if err := runCandidateNotify(ctx, store, sink2, policy, candidate, version, feedback, false, nil, 0, "", 0, 0); err != nil {
 		t.Fatalf("runCandidateNotify (allowed) returned error: %v", err)
 	}
 	promoted, err := store.GetAgentTemplateVersionByID(ctx, version.ID)

@@ -274,6 +274,24 @@ path = ""
 #     and emits a per-item GateReplayResult JSON ({"rubric":{...}} or
 #     {"hard_verifier":true,"hard_passed":bool}) on stdout — the command IS the
 #     deterministic map. A corpus's own replay_command overrides this default.
+#   pace_enabled (#687): OFF by default. The PACE anytime-valid commit gate — an
+#     ADDITIONAL auto-promote gate (never a replacement) layered on top of every
+#     existing guardrail. When on, a guardrails-pass candidate is auto-promoted only
+#     when a testing-by-betting e-process over its recorded candidate-vs-champion
+#     pairwise outcomes (the Mode B bandit arm's win/loss tally, #481/#482) crosses the
+#     commit threshold 1/pace_alpha; a budget-exhausted or not-yet-decisive stream
+#     FAILS SAFE to a pace_blocked notify (no promotion). It is model-free arithmetic —
+#     no extra LLM calls — and rides the pairwise comparisons #473 already records.
+#     OFF ⇒ byte-identical (the e-process is never consulted).
+#   pace_alpha (#687): PACE target false-commit probability in (0,1); the commit
+#     threshold is 1/pace_alpha (0.05 -> 20). Default 0.05. Only consulted when
+#     pace_enabled.
+#   pace_lambda (#687): PACE bet fraction in [0,1]; a candidate win scales the wealth
+#     by (1+pace_lambda), a loss by (1-pace_lambda). Default 0.5. Only consulted when
+#     pace_enabled.
+#   pace_max_pairs (#687): PACE discordant-pair budget; after this many win/loss pairs
+#     without crossing the threshold the e-process rejects (notify-only). Default 200.
+#     Only consulted when pace_enabled.
 # [skillopt]
 # auto_trace_enabled = false
 # cross_family_review_enabled = false
@@ -286,6 +304,10 @@ path = ""
 # gate_enabled = false
 # gate_corpus = .gitmoot/skillopt/gate-corpus.json
 # gate_replay_command = sh .gitmoot/skillopt/gate-replay.sh
+# pace_enabled = false
+# pace_alpha = 0.05
+# pace_lambda = 0.5
+# pace_max_pairs = 200
 # auto_promote = false
 # auto_promote_min_samples = 0
 # auto_promote_min_score = 0.0
