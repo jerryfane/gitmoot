@@ -161,7 +161,7 @@ func TestAgentPromptWithoutRecordIsByteIdenticalAndOpensNoJob(t *testing.T) {
 }
 
 // TestAgentPromptRecordRepoFlagOverridesScope proves --repo overrides the agent's
-// repo_scope, and that an id resolving to a bare template (no agent) is rejected.
+// repo_scope for the registered-agent path (unchanged behavior).
 func TestAgentPromptRecordRepoFlagOverridesScope(t *testing.T) {
 	home, store := seedPromptRecordFixture(t)
 	seedDaemonWorkerRepo(t, store, "owner/other", t.TempDir())
@@ -184,14 +184,68 @@ func TestAgentPromptRecordRepoFlagOverridesScope(t *testing.T) {
 	if payload.Repo != "owner/other" {
 		t.Fatalf("session job repo = %q, want owner/other (--repo override)", payload.Repo)
 	}
+}
 
-	// A bare template id (no agent record) cannot be recorded against.
-	stdout.Reset()
-	stderr.Reset()
-	if code := runAgentPrompt([]string{"planner", "--record", "--repo", "owner/repo", "--home", home}, io.Discard, &stderr); code == 0 {
-		t.Fatalf("agent prompt --record on a bare template exit code = 0, want non-zero")
+// TestAgentPromptRecordBareTemplateOpensSessionJob proves the #673 extension: an id
+// that resolves to a bare TEMPLATE (no registered agent of that name) plus an
+// explicit --repo opens a running externally_driven session job recorded against
+// the TEMPLATE id as the agent identity + that repo.
+func TestAgentPromptRecordBareTemplateOpensSessionJob(t *testing.T) {
+	home, store := seedPromptRecordFixture(t)
+	// The fixture registers an agent named "lead" carrying the "planner" template;
+	// no agent is named "planner", so `planner` resolves to the bare template.
+
+	var stdout, stderr bytes.Buffer
+	if code := runAgentPrompt([]string{"planner", "--record", "--repo", "owner/repo", "--type", "implement", "--home", home, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("agent prompt --record on a bare template exit code = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "not found") {
-		t.Fatalf("bare-template --record stderr = %q, want an agent-not-found error", stderr.String())
+	var out agentPromptOutput
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode JSON %q: %v", stdout.String(), err)
+	}
+	if strings.TrimSpace(out.JobID) == "" {
+		t.Fatalf("bare-template --record --json carried no job_id: %q", stdout.String())
+	}
+	if !strings.Contains(out.Content, "Plan the work carefully.") {
+		t.Fatalf("bare-template --record content = %q, want the resolved template prompt", out.Content)
+	}
+
+	session := sessionJobsFor(t, store)
+	if len(session) != 1 {
+		t.Fatalf("session jobs = %d, want exactly 1 opened by --record", len(session))
+	}
+	job := session[0]
+	if job.ID != out.JobID {
+		t.Fatalf("session job id = %q, want the JSON job_id %q", job.ID, out.JobID)
+	}
+	if job.State != string(workflow.JobRunning) || !job.ExternallyDriven {
+		t.Fatalf("recorded session job = %+v, want running externally_driven", job)
+	}
+	if job.Agent != "planner" {
+		t.Fatalf("recorded session job agent = %q, want the template id planner (#673)", job.Agent)
+	}
+	if payload, err := workflow.ParseJobPayload(job.Payload); err != nil {
+		t.Fatalf("ParseJobPayload returned error: %v", err)
+	} else if payload.Repo != "owner/repo" {
+		t.Fatalf("recorded session job repo = %q, want owner/repo (the --repo value)", payload.Repo)
+	}
+}
+
+// TestAgentPromptRecordBareTemplateRequiresRepo proves that recording a bare
+// template WITHOUT --repo fails with a clear, actionable error and opens no job —
+// a template has no repo scope to fall back on (#673).
+func TestAgentPromptRecordBareTemplateRequiresRepo(t *testing.T) {
+	home, store := seedPromptRecordFixture(t)
+
+	var stderr bytes.Buffer
+	if code := runAgentPrompt([]string{"planner", "--record", "--home", home}, io.Discard, &stderr); code == 0 {
+		t.Fatalf("agent prompt --record on a bare template without --repo exit code = 0, want non-zero")
+	}
+	msg := stderr.String()
+	if !strings.Contains(msg, "--repo") || !strings.Contains(msg, "template") {
+		t.Fatalf("bare-template --record without --repo stderr = %q, want a clear --repo-required error", msg)
+	}
+	if session := sessionJobsFor(t, store); len(session) != 0 {
+		t.Fatalf("bare-template --record without --repo opened %d session job(s), want 0", len(session))
 	}
 }

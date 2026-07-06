@@ -302,6 +302,16 @@ func validateSessionAgentRepo(ctx context.Context, store *db.Store, agentName, r
 		}
 		return "", err
 	}
+	return validateSessionRepo(ctx, store, repoFlag)
+}
+
+// validateSessionRepo confirms the repo is a well-formed owner/repo that gitmoot
+// tracks, returning the canonical full name. It is the repo-only half of
+// validateSessionAgentRepo: the bare-template `--record` path (#673) has no agent
+// to validate (a template id is not a registered agent), so it validates just the
+// explicitly provided repo. Requiring the repo be tracked keeps the recorded
+// session job consistent with the registered-agent path and rejects typos.
+func validateSessionRepo(ctx context.Context, store *db.Store, repoFlag string) (string, error) {
 	repo, err := daemon.ParseRepository(repoFlag)
 	if err != nil {
 		return "", err
