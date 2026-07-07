@@ -411,3 +411,191 @@ func TestRecentPromotionRequestExists(t *testing.T) {
 }
 
 const chatMinuteMs = 60_000
+
+// TestChatThreadRollupHelpers proves the three dashboard-facing aggregate helpers
+// (ListChatThreadMessageStats, CountUnreadMentionsByThread,
+// ListChatThreadParticipants) return correct per-thread rollups in bounded queries:
+// message counts + the last message (greatest (ts_ms, seq)), resolved+unread
+// mention counts (origin-scoped), and the author ∪ resolved-mention participant set.
+func TestChatThreadRollupHelpers(t *testing.T) {
+	ctx := context.Background()
+	store := openChatTestStore(t)
+
+	busy, _ := store.CreateChatThread(ctx, ChatThread{Slug: "busy", Repo: "o/r"})
+	empty, _ := store.CreateChatThread(ctx, ChatThread{Slug: "empty", Repo: "o/r"})
+
+	m1, err := store.AddChatMessage(ctx, ChatMessage{ThreadID: busy.ID, AuthorKind: ChatAuthorKindHuman, AuthorName: "jerry", Body: "@codex-b @ghost"})
+	if err != nil {
+		t.Fatalf("AddChatMessage m1: %v", err)
+	}
+	if err := store.AddChatMentions(ctx, []ChatMention{
+		{MessageID: m1.ID, ThreadID: busy.ID, Agent: "codex-b", Resolved: true, Unread: true},
+		{MessageID: m1.ID, ThreadID: busy.ID, Agent: "ghost", Resolved: false, Unread: true},
+	}); err != nil {
+		t.Fatalf("AddChatMentions: %v", err)
+	}
+	if _, err := store.AddChatMessage(ctx, ChatMessage{ThreadID: busy.ID, AuthorKind: ChatAuthorKindAgent, AuthorName: "codex-b", Kind: ChatKindJobResult, Body: "done"}); err != nil {
+		t.Fatalf("AddChatMessage m2: %v", err)
+	}
+
+	// Message stats: busy has 2 messages, last is codex-b's job_result; empty absent.
+	stats, err := store.ListChatThreadMessageStats(ctx)
+	if err != nil {
+		t.Fatalf("ListChatThreadMessageStats: %v", err)
+	}
+	byThread := map[string]ChatThreadMessageStat{}
+	for _, s := range stats {
+		byThread[s.ThreadID] = s
+	}
+	if _, ok := byThread[empty.ID]; ok {
+		t.Fatal("empty thread must be absent from message stats")
+	}
+	bs := byThread[busy.ID]
+	if bs.MessageCount != 2 || bs.LastAuthorName != "codex-b" || bs.LastKind != ChatKindJobResult || bs.LastBody != "done" {
+		t.Fatalf("busy stats = %+v, want count 2 / last codex-b job_result 'done'", bs)
+	}
+
+	// Unread mentions: only the resolved @codex-b counts.
+	counts, err := store.CountUnreadMentionsByThread(ctx)
+	if err != nil {
+		t.Fatalf("CountUnreadMentionsByThread: %v", err)
+	}
+	unread := map[string]int{}
+	for _, c := range counts {
+		unread[c.ThreadID] = c.Count
+	}
+	if unread[busy.ID] != 1 {
+		t.Fatalf("busy unread = %d, want 1 (resolved only)", unread[busy.ID])
+	}
+
+	// Marking the thread read clears the unread badge.
+	if _, err := store.MarkThreadRead(ctx, "codex-b", busy.ID); err != nil {
+		t.Fatalf("MarkThreadRead: %v", err)
+	}
+	counts, _ = store.CountUnreadMentionsByThread(ctx)
+	for _, c := range counts {
+		if c.ThreadID == busy.ID && c.Count != 0 {
+			t.Fatalf("busy unread after read = %d, want 0", c.Count)
+		}
+	}
+
+	// Participants: authors (jerry, codex-b) ∪ resolved mentions (codex-b); @ghost
+	// excluded. Sorted (thread_id, name).
+	parts, err := store.ListChatThreadParticipants(ctx)
+	if err != nil {
+		t.Fatalf("ListChatThreadParticipants: %v", err)
+	}
+	var busyParts []string
+	for _, p := range parts {
+		if p.ThreadID == busy.ID {
+			busyParts = append(busyParts, p.Name)
+		}
+	}
+	if len(busyParts) != 2 || busyParts[0] != "codex-b" || busyParts[1] != "jerry" {
+		t.Fatalf("busy participants = %v, want [codex-b jerry]", busyParts)
+	}
+}
+
+// TestChatParticipantsExcludeSystem proves a `system` message (the authorless
+// ask-gate post, stamped author_name "system" by chat_link.go) never leaks into a
+// thread's participant set — neither the corpus-wide ListChatThreadParticipants nor
+// the thread-scoped ListChatThreadParticipantsForThread returns a bogus "system"
+// chip — while a real human ("jerry") and a real agent ("reviewer") do.
+func TestChatParticipantsExcludeSystem(t *testing.T) {
+	ctx := context.Background()
+	store := openChatTestStore(t)
+	thread, _ := store.CreateChatThread(ctx, ChatThread{Slug: "adapter-review", Repo: "o/r"})
+
+	if _, err := store.AddChatMessage(ctx, ChatMessage{ThreadID: thread.ID, AuthorKind: ChatAuthorKindAgent, AuthorName: "reviewer", Body: "looking now"}); err != nil {
+		t.Fatalf("AddChatMessage reviewer: %v", err)
+	}
+	// The ask-gate system post: author_kind=system, author_name="system" (exactly what
+	// workflow/chat_link.go writes). This must NOT become a participant.
+	if _, err := store.AddChatMessage(ctx, ChatMessage{ThreadID: thread.ID, AuthorKind: ChatAuthorKindSystem, AuthorName: "system", Kind: ChatKindSystem, Body: "paused: awaiting an answer"}); err != nil {
+		t.Fatalf("AddChatMessage system: %v", err)
+	}
+	if _, err := store.AddChatMessage(ctx, ChatMessage{ThreadID: thread.ID, AuthorKind: ChatAuthorKindHuman, AuthorName: "jerry", Body: "go ahead"}); err != nil {
+		t.Fatalf("AddChatMessage jerry: %v", err)
+	}
+
+	// Corpus-wide list path.
+	parts, err := store.ListChatThreadParticipants(ctx)
+	if err != nil {
+		t.Fatalf("ListChatThreadParticipants: %v", err)
+	}
+	var got []string
+	for _, p := range parts {
+		if p.ThreadID == thread.ID {
+			got = append(got, p.Name)
+		}
+	}
+	if len(got) != 2 || got[0] != "jerry" || got[1] != "reviewer" {
+		t.Fatalf("list participants = %v, want [jerry reviewer] (no \"system\")", got)
+	}
+
+	// Thread-scoped detail path must return the identical set.
+	scoped, err := store.ListChatThreadParticipantsForThread(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("ListChatThreadParticipantsForThread: %v", err)
+	}
+	if len(scoped) != 2 || scoped[0] != "jerry" || scoped[1] != "reviewer" {
+		t.Fatalf("scoped participants = %v, want [jerry reviewer] (no \"system\")", scoped)
+	}
+}
+
+// TestChatThreadScopedRollups proves the single-thread detail helpers
+// (CountUnreadMentionsForThread, ListChatThreadParticipantsForThread) return the
+// same values the corpus-wide list aggregates do, per thread, and that the mention
+// side is origin-scoped (a mention stamped for another home never counts).
+func TestChatThreadScopedRollups(t *testing.T) {
+	ctx := context.Background()
+	store := openChatTestStore(t)
+
+	busy, _ := store.CreateChatThread(ctx, ChatThread{Slug: "busy", Repo: "o/r"})
+	quiet, _ := store.CreateChatThread(ctx, ChatThread{Slug: "quiet", Repo: "o/r"})
+
+	m1, _ := store.AddChatMessage(ctx, ChatMessage{ThreadID: busy.ID, AuthorKind: ChatAuthorKindHuman, AuthorName: "jerry", Body: "@codex-b @ghost"})
+	if err := store.AddChatMentions(ctx, []ChatMention{
+		{MessageID: m1.ID, ThreadID: busy.ID, Agent: "codex-b", Resolved: true, Unread: true},
+		{MessageID: m1.ID, ThreadID: busy.ID, Agent: "ghost", Resolved: false, Unread: true},
+	}); err != nil {
+		t.Fatalf("AddChatMentions: %v", err)
+	}
+
+	// Scoped unread count equals the corpus-wide GROUP BY for this thread (only the
+	// resolved @codex-b counts).
+	got, err := store.CountUnreadMentionsForThread(ctx, busy.ID)
+	if err != nil {
+		t.Fatalf("CountUnreadMentionsForThread(busy): %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("busy scoped unread = %d, want 1", got)
+	}
+	if zero, _ := store.CountUnreadMentionsForThread(ctx, quiet.ID); zero != 0 {
+		t.Fatalf("quiet scoped unread = %d, want 0", zero)
+	}
+
+	// A mention stamped for a DIFFERENT home must NOT count locally (origin-scope).
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO chat_mentions(message_id, thread_id, agent, agent_origin, resolved, unread)
+			VALUES (?, ?, 'codex-b', 'other-home', 1, 1)`, m1.ID, busy.ID); err != nil {
+		t.Fatalf("seed foreign-origin mention: %v", err)
+	}
+	if still, _ := store.CountUnreadMentionsForThread(ctx, busy.ID); still != 1 {
+		t.Fatalf("busy scoped unread after foreign mention = %d, want 1 (origin-scoped)", still)
+	}
+	// The corpus-wide aggregate and the scoped variant must still agree.
+	counts, _ := store.CountUnreadMentionsByThread(ctx)
+	byThread := map[string]int{}
+	for _, c := range counts {
+		byThread[c.ThreadID] = c.Count
+	}
+	if byThread[busy.ID] != 1 {
+		t.Fatalf("corpus unread = %d, want 1 (must agree with scoped, origin-scoped)", byThread[busy.ID])
+	}
+	// The foreign-origin agent is likewise excluded from the participant set.
+	scoped, _ := store.ListChatThreadParticipantsForThread(ctx, busy.ID)
+	if len(scoped) != 2 || scoped[0] != "codex-b" || scoped[1] != "jerry" {
+		t.Fatalf("scoped participants = %v, want [codex-b jerry]", scoped)
+	}
+}
