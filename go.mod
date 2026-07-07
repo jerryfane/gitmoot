@@ -14,6 +14,13 @@ require (
 	modernc.org/sqlite v1.50.1
 )
 
+// DEV WIRING (#704): the Pipelines DataSource methods depend on the gitmoot-dashboard
+// Pipelines/PipelineRun contract, which is not yet published. Point at the local Stage A
+// worktree until the dashboard PR (dashboard#37) merges; the lead swaps this for the
+// real pseudo-version (go get github.com/jerryfane/gitmoot-dashboard@<newrev>) before
+// this PR opens for merge. TEMPORARY — must not merge with the replace in place.
+replace github.com/jerryfane/gitmoot-dashboard => /root/gitmoot-dashboard-wt/pipelines
+
 require (
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
