@@ -1359,6 +1359,17 @@ func runAgentSubscribe(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	// preset-delivery is a sticky per-agent preference. When re-subscribing an
+	// existing agent (e.g. to refresh its session/repo) without passing the flag,
+	// we must preserve the stored mode rather than write empty — which normalizes
+	// to full and would silently disable a previously-chosen auto/referenced mode.
+	presetDeliveryExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "preset-delivery" {
+			presetDeliveryExplicit = true
+		}
+	})
+
 	normalizedRepos, err := normalizeRepoFlags(repos)
 	if err != nil {
 		fmt.Fprintf(stderr, "invalid repo: %v\n", err)
@@ -1419,6 +1430,11 @@ func runAgentSubscribe(args []string, stdout, stderr io.Writer) int {
 		if agent.TemplateID != "" {
 			if _, err := loadInstalledTemplate(context.Background(), store, agent.TemplateID); err != nil {
 				return err
+			}
+		}
+		if !presetDeliveryExplicit {
+			if existing, err := store.GetAgent(context.Background(), agent.Name); err == nil {
+				agent.PresetDelivery = existing.PresetDelivery
 			}
 		}
 		return persistAgentSubscription(context.Background(), store, agent, normalizedRepos)

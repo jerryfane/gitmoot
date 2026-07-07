@@ -102,3 +102,88 @@ func TestAgentSubscribePresetDeliveryFlag(t *testing.T) {
 		t.Fatalf("subscribe invalid mode exit = %d, want 2 (stderr=%s)", code, stderr.String())
 	}
 }
+
+// TestAgentReSubscribePreservesPresetDelivery guards the review finding: re-running
+// `agent subscribe` on an existing agent WITHOUT --preset-delivery must not silently
+// reset the sticky mode back to full. A brand-new subscribe without the flag still
+// defaults to full.
+func TestAgentReSubscribePreservesPresetDelivery(t *testing.T) {
+	home := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"agent", "subscribe", "audit",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440001",
+		"--role", "reviewer",
+		"--repo", "jerryfane/gitmoot",
+		"--capability", "review",
+		"--preset-delivery", "auto",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("subscribe exit = %d, stderr=%s", code, stderr.String())
+	}
+	if got := agentPresetDelivery(t, home, "audit"); got != db.PresetDeliveryAuto {
+		t.Fatalf("subscribed preset delivery = %q, want %q", got, db.PresetDeliveryAuto)
+	}
+
+	// Re-subscribe to refresh the session with NO --preset-delivery flag: the
+	// previously-chosen auto mode must survive.
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"agent", "subscribe", "audit",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440099",
+		"--role", "reviewer",
+		"--repo", "jerryfane/gitmoot",
+		"--capability", "review",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("re-subscribe exit = %d, stderr=%s", code, stderr.String())
+	}
+	if got := agentPresetDelivery(t, home, "audit"); got != db.PresetDeliveryAuto {
+		t.Fatalf("re-subscribe preset delivery = %q, want %q (should be preserved)", got, db.PresetDeliveryAuto)
+	}
+
+	// Explicitly passing --preset-delivery on re-subscribe still overrides.
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"agent", "subscribe", "audit",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440099",
+		"--role", "reviewer",
+		"--repo", "jerryfane/gitmoot",
+		"--capability", "review",
+		"--preset-delivery", "full",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("re-subscribe override exit = %d, stderr=%s", code, stderr.String())
+	}
+	if got := agentPresetDelivery(t, home, "audit"); got != db.PresetDeliveryFull {
+		t.Fatalf("re-subscribe override preset delivery = %q, want %q", got, db.PresetDeliveryFull)
+	}
+
+	// A brand-new agent without the flag still defaults to full.
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"agent", "subscribe", "planner",
+		"--home", home,
+		"--runtime", "codex",
+		"--session", "550e8400-e29b-41d4-a716-446655440002",
+		"--role", "coordinator",
+		"--repo", "jerryfane/gitmoot",
+		"--capability", "ask",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("subscribe planner exit = %d, stderr=%s", code, stderr.String())
+	}
+	if got := agentPresetDelivery(t, home, "planner"); got != db.PresetDeliveryFull {
+		t.Fatalf("new agent default preset delivery = %q, want %q", got, db.PresetDeliveryFull)
+	}
+}

@@ -383,7 +383,10 @@ blocked). `read-only`/`ask`/`review` agents are unaffected.
 
 `agent subscribe` accepts `--preset-delivery full|referenced|auto` (default
 `full`), and `agent update <name> --preset-delivery <mode>` flips it in place on
-an already-registered agent. It controls how the agent's installed preset
+an already-registered agent. The mode is a sticky per-agent preference:
+re-running `agent subscribe` on an existing agent WITHOUT `--preset-delivery`
+(e.g. to refresh its session/repo) preserves the stored mode; only brand-new
+agents default to `full`. It controls how the agent's installed preset
 (template) prompt is delivered on each job:
 
 | mode | behavior |
