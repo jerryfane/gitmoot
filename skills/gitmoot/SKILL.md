@@ -211,7 +211,13 @@ options. To improve the *judge's rubric* (not the model) from accumulated human
 feedback, run `gitmoot skillopt rubric induce --template <id>` — an offline,
 deterministic tool that induces a criterion-separated rubric from captured
 trait feedback, meta-evaluates it for coverage/redundancy, and writes a frozen
-JSON for human review; it never auto-injects.
+JSON for human review; it never auto-injects. To generate Autodata-style
+synthetic review items, use the explicit, off-by-default `gitmoot skillopt synth
+--template <id> --repo owner/repo --weak <agent> --strong <agent> [--judge
+<agent>]`: it keeps only items a strong agent beats a weak agent on and a judge
+deems well-formed, stores them `pending_human_approval`, and requires
+`gitmoot skillopt synth approve <item-id>` before an item may be used — nothing
+runs it automatically.
 
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).
