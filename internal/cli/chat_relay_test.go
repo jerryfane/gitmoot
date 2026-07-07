@@ -11,6 +11,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
 // startTestChatRelay boots a relay server on a short temp socket dir (unix socket
@@ -39,6 +40,74 @@ func seedRelayThread(t *testing.T, store *db.Store, repo, slug string) db.ChatTh
 		t.Fatalf("CreateChatThread: %v", err)
 	}
 	return thread
+}
+
+// TestBuildSeatAwareAdapterElevation pins the #732 seat-classification fix: the
+// daemon elevates a codex agent to ChatSeat (workspace-write+network) — and injects
+// the relay env — ONLY for a real `gitmoot moot` seat (payload.MootSeat) that also
+// gets a working relay, NOT for any ThreadID-carrying job (chat-task promotions /
+// continuations) and NOT when no relay is running. Elevation is coupled to real
+// relay injection so a seat never carries the extra privilege without a relay.
+func TestBuildSeatAwareAdapterElevation(t *testing.T) {
+	store := openCLIJobStore(t, t.TempDir())
+	defer store.Close()
+	thread := seedRelayThread(t, store, "owner/repo", "room")
+	server, _ := startTestChatRelay(t, store)
+
+	// A factory whose adapter is unused here — the point is the agent-elevation +
+	// token side effects, which we assert directly.
+	factory := func(runtime.Agent, string) (workflow.DeliveryAdapter, error) {
+		return runtime.ShellAdapter{}, nil
+	}
+
+	cases := []struct {
+		name         string
+		relay        *chatRelayServer
+		payload      workflow.JobPayload
+		wantElevated bool
+		wantToken    bool
+	}{
+		{
+			name:         "moot seat with relay elevates and injects",
+			relay:        server,
+			payload:      workflow.JobPayload{MootSeat: true, ThreadID: thread.ID},
+			wantElevated: true,
+			wantToken:    true,
+		},
+		{
+			name:         "threadid-only job is not a seat",
+			relay:        server,
+			payload:      workflow.JobPayload{ThreadID: thread.ID},
+			wantElevated: false,
+			wantToken:    false,
+		},
+		{
+			name:         "moot seat without relay is not elevated",
+			relay:        nil,
+			payload:      workflow.JobPayload{MootSeat: true, ThreadID: thread.ID},
+			wantElevated: false,
+			wantToken:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := jobWorker{Store: store, RelayServer: tc.relay, AdapterFactory: factory, Stdout: io.Discard}
+			agent := runtime.Agent{Name: "alice", Runtime: runtime.CodexRuntime}
+			_, token, err := w.buildSeatAwareAdapter(&agent, "", tc.payload)
+			if err != nil {
+				t.Fatalf("buildSeatAwareAdapter: %v", err)
+			}
+			if token != "" {
+				t.Cleanup(func() { tc.relay.ReleaseSeat(token) })
+			}
+			if agent.ChatSeat != tc.wantElevated {
+				t.Fatalf("agent.ChatSeat = %v, want %v", agent.ChatSeat, tc.wantElevated)
+			}
+			if (token != "") != tc.wantToken {
+				t.Fatalf("token present = %v (%q), want %v", token != "", token, tc.wantToken)
+			}
+		})
+	}
 }
 
 // TestChatRelayRoundTrip proves a relay send lands in the daemon's store (authored

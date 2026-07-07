@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -50,9 +51,21 @@ const (
 // make the daemon allocate unboundedly. Chat bodies are small; 8 MiB is ample.
 const chatRelayMaxFrame = 8 << 20
 
-// chatRelayDialTimeout bounds a single client relay round-trip. `chat wait` loops
-// these snapshots client-side, so each call is a quick, non-blocking op.
+// chatRelayDialTimeout bounds the CONNECT to the relay socket. A live listener
+// accepts immediately and a dead socket fails fast (ECONNREFUSED / ENOENT), so this
+// only needs to catch a wedged daemon; it is intentionally NOT the whole round-trip
+// budget (see chatRelayRoundTripTimeout).
 const chatRelayDialTimeout = 30 * time.Second
+
+// chatRelayRoundTripTimeout is the read/write deadline for one connected relay
+// exchange, on BOTH ends. It is deliberately much larger than dial: the server does
+// the actual AddChatMessage write, which under cross-process WAL contention retries
+// up to maxSeqAssignRetries times and can wait on the 15s SQLite busy_timeout, so a
+// tight wall (the old shared 30s) could fire mid-retry and fail a `chat send` the
+// direct in-process path — which has no transport wall — would have completed. This
+// bound comfortably exceeds any realistic chat-write completion (tiny writes drain
+// in ms even under heavy contention) while still reaping a genuinely hung peer.
+const chatRelayRoundTripTimeout = 120 * time.Second
 
 // chatRelayRequest is one relay operation. `op` is "send" or "wait"; the daemon
 // carries no request `type` byte (unlike entmoot) — op lives in the JSON.
@@ -123,7 +136,7 @@ func chatRelayRoundTrip(sock string, req chatRelayRequest) (chatRelayResponse, e
 		return chatRelayResponse{}, fmt.Errorf("dial chat relay: %w", err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(chatRelayDialTimeout))
+	_ = conn.SetDeadline(time.Now().Add(chatRelayRoundTripTimeout))
 	if err := writeChatRelayFrame(conn, req); err != nil {
 		return chatRelayResponse{}, fmt.Errorf("write chat relay request: %w", err)
 	}
@@ -223,13 +236,23 @@ type chatRelayServer struct {
 	tokens map[string]chatRelaySeat
 }
 
-// chatRelaySocketPath is the socket path for a home's daemon relay:
-// <TMPDIR>/gitmoot-relay-<uid>/chat.sock. It lives in TMPDIR (not the read-only
-// home) because that is unambiguously inside a codex workspace-write seat's
-// writable roots; the daemon passes the exact path to the seat via env, so
-// nothing is hard-coded on the seat side.
-func chatRelaySocketDir() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("gitmoot-relay-%d", os.Getuid()))
+// chatRelaySocketDir is the socket directory for a home's daemon relay:
+// <TMPDIR>/gitmoot-relay-<uid>-<home-hash>. It is keyed by BOTH the uid AND a hash
+// of the resolved gitmoot home so two same-uid daemons on DIFFERENT homes — e.g.
+// the live /root/.gitmoot daemon and a throwaway /tmp E2E daemon (the documented
+// isolation pattern) — never share and therefore never clobber each other's socket
+// path. Without the home component, the second daemon's Start() would os.Remove the
+// live daemon's socket and bind its own listener at the identical path, hijacking
+// every already-dispatched seat (whose minted tokens it does not hold) and, on its
+// own exit, unlinking the live relay's socket for good. It lives in TMPDIR (not the
+// read-only home) because that is unambiguously inside a codex workspace-write
+// seat's writable roots; the daemon passes the exact path to the seat via env, so
+// nothing is hard-coded on the seat side. homeRoot is the resolved `.gitmoot` root
+// (config.Paths.Home); the short hash keeps the socket path inside the ~108-byte
+// unix-socket limit regardless of how deep the home is.
+func chatRelaySocketDir(homeRoot string) string {
+	sum := sha256.Sum256([]byte(homeRoot))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gitmoot-relay-%d-%s", os.Getuid(), hex.EncodeToString(sum[:6])))
 }
 
 // newChatRelayServer constructs a relay server bound to dir/chat.sock. dir is the
@@ -328,7 +351,7 @@ func (s *chatRelayServer) lookupSeat(token string) (chatRelaySeat, bool) {
 
 func (s *chatRelayServer) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(chatRelayDialTimeout))
+	_ = conn.SetDeadline(time.Now().Add(chatRelayRoundTripTimeout))
 	// TRUST BOUNDARY: reject any peer whose uid differs from the daemon's. The
 	// socket is already 0600/dir-0700 same-uid, so this is defense-in-depth and
 	// does NOT widen the boundary (any same-uid process can already open the

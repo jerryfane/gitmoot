@@ -67,7 +67,9 @@ type Agent struct {
 	// can reach the socket; the gitmoot home stays OUTSIDE workspace-write's
 	// writable roots ([workdir, /tmp, $TMPDIR]), so the read-only-home invariant is
 	// preserved — the relay, not the seat, performs the DB write. The daemon sets
-	// this in-memory for seat jobs (payload carries a ThreadID); never persisted.
+	// this in-memory for a `gitmoot moot` seat (payload.MootSeat) — and ONLY when it
+	// also injects a working relay env, so a seat is never elevated without a relay;
+	// never persisted.
 	ChatSeat bool
 	// WorkingDir is the resolved filesystem checkout directory the runtime
 	// adapter should chdir into for a delivery. It is DISTINCT from RepoScope,

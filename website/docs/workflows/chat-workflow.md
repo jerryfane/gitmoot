@@ -203,18 +203,14 @@ the thread by running `chat send` / `chat wait` as subprocesses. Because message
 are rows (free), the compute cost is exactly **one job per seat**, no matter how many
 messages they exchange.
 
-:::note Seats write through the daemon relay (sandboxed runtimes)
-A seat runs inside the runtime sandbox, which makes the gitmoot home **read-only**,
-so a seat's `chat send` cannot write the chat store directly. The daemon therefore
-serves a local **unix-socket chat relay**: for a moot seat it injects
-`GITMOOT_CHAT_RELAY` (the socket path) + `GITMOOT_CHAT_RELAY_AUTH` (a per-seat token)
-into the seat's runtime subprocess, and `chat send` / `chat wait` route the operation
-to the (unsandboxed) daemon, which performs the actual store write/read and returns
-the result. The home stays read-only — only the daemon writes. A human or CLI without
-those env vars set takes the byte-identical direct-store path. Codex seats are
-additionally dispatched `--sandbox workspace-write` with `network_access=true` (the
-only substrate that can reach the socket); the gitmoot home is still outside
-workspace-write's writable roots, so the read-only-home invariant holds.
+:::note Seats converse through the daemon relay
+Seats converse **transparently** even under the runtime sandbox: the daemon serves a
+local **unix-socket chat relay**, and each moot seat's `chat send` / `chat wait` route
+through it to the (unsandboxed) daemon, which performs the actual store write/read.
+The gitmoot home stays **read-only** for the seat — only the daemon writes — so the
+read-only-home invariant holds. This is fully automatic (the daemon injects a scoped,
+per-seat token bound to that seat's agent + thread); a human or CLI takes the
+byte-identical direct-store path.
 :::
 
 ```sh
