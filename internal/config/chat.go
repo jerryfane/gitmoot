@@ -16,6 +16,18 @@ const (
 	DefaultChatAutoRespondCooldown = 2 * time.Minute
 )
 
+// Default knobs for `gitmoot moot` (#534 V1.5), the owner-decided design-jam
+// values. moot_max_seats bounds how many agents a single moot convenes (a moot
+// with more seats than this is REJECTED, config-able). moot_message_cap is the
+// HARD per-thread cap on agent-authored conversation turns: on reaching it the
+// moot hard-stops (no auto-extension), `chat send --as` is rejected, and a
+// visible overrun system message is posted. Both are always resolved (a moot is
+// convened by an explicit command, not gated by the auto_respond kill switch).
+const (
+	DefaultChatMootMaxSeats   = 6
+	DefaultChatMootMessageCap = 30
+)
+
 // ChatSettings is the resolved, off-by-default global knob set for the chat
 // auto-respond sweep, parsed from the optional [chat] section. Enrollment is
 // PER-AGENT ([agents.<name>] chat_autorespond = true) — mirroring how [memory]
@@ -38,6 +50,14 @@ type ChatSettings struct {
 	// (thread, agent). A trigger seen inside the cooldown window is skipped (and left
 	// unread so it re-fires after the window), never dropped. Must be >= 0.
 	AutoRespondCooldown time.Duration
+	// MootMaxSeats is the maximum number of agents `gitmoot moot` will convene into
+	// a single moot. Convening more than this is rejected. Must be >= 1.
+	MootMaxSeats int
+	// MootMessageCap is the default HARD per-thread cap on agent-authored moot
+	// conversation turns (overridable per-moot via --max-messages). On reaching it
+	// the moot hard-stops: `chat send --as` is refused and a visible overrun system
+	// message is posted. Must be >= 1.
+	MootMessageCap int
 }
 
 // DefaultChatSettings returns the off-by-default resolved settings.
@@ -46,6 +66,8 @@ func DefaultChatSettings() ChatSettings {
 		AutoRespond:         false,
 		AutoRespondCap:      DefaultChatAutoRespondCap,
 		AutoRespondCooldown: DefaultChatAutoRespondCooldown,
+		MootMaxSeats:        DefaultChatMootMaxSeats,
+		MootMessageCap:      DefaultChatMootMessageCap,
 	}
 }
 
@@ -100,6 +122,18 @@ func LoadChatSettings(paths Paths) (ChatSettings, error) {
 				return ChatSettings{}, fmt.Errorf("parse [chat].auto_respond_cooldown: %w", err)
 			}
 			settings.AutoRespondCooldown = parsed
+		case "moot_max_seats":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return ChatSettings{}, fmt.Errorf("parse [chat].moot_max_seats: %w", err)
+			}
+			settings.MootMaxSeats = parsed
+		case "moot_message_cap":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return ChatSettings{}, fmt.Errorf("parse [chat].moot_message_cap: %w", err)
+			}
+			settings.MootMessageCap = parsed
 		}
 	}
 	if err := validateChatSettings(settings); err != nil {
@@ -114,6 +148,12 @@ func validateChatSettings(s ChatSettings) error {
 	}
 	if s.AutoRespondCooldown < 0 {
 		return fmt.Errorf("chat.auto_respond_cooldown must be >= 0, got %s", s.AutoRespondCooldown)
+	}
+	if s.MootMaxSeats < 1 {
+		return fmt.Errorf("chat.moot_max_seats must be >= 1, got %d", s.MootMaxSeats)
+	}
+	if s.MootMessageCap < 1 {
+		return fmt.Errorf("chat.moot_message_cap must be >= 1, got %d", s.MootMessageCap)
 	}
 	return nil
 }

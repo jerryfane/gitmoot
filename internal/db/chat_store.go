@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -948,6 +949,98 @@ func (s *Store) MarkChatChatMentionsRead(ctx context.Context, agent, threadID st
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ---- moot metadata (#534 V1.5) --------------------------------------------
+
+// Per-thread chat_thread_meta keys for `gitmoot moot`.
+const (
+	chatThreadMetaMoot           = "moot"
+	chatThreadMetaMootMessageCap = "moot_message_cap"
+)
+
+// SetChatThreadMeta upserts one per-thread metadata key (chat_thread_meta), the
+// chat_meta-style side-table that carries moot state without an ALTER of the V1
+// chat_threads table.
+func (s *Store) SetChatThreadMeta(ctx context.Context, threadID, key, value string) error {
+	threadID = strings.TrimSpace(threadID)
+	key = strings.TrimSpace(key)
+	if threadID == "" || key == "" {
+		return errors.New("chat thread meta requires a thread id and key")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO chat_thread_meta(thread_id, key, value, updated_at)
+			VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(thread_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+		threadID, key, value)
+	return err
+}
+
+// GetChatThreadMeta reads one per-thread metadata value. ok is false (no error)
+// when the key is absent.
+func (s *Store) GetChatThreadMeta(ctx context.Context, threadID, key string) (value string, ok bool, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT value FROM chat_thread_meta WHERE thread_id = ? AND key = ?`,
+		strings.TrimSpace(threadID), strings.TrimSpace(key)).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
+// MarkChatThreadMoot stamps a thread as a moot with the given HARD agent-message
+// cap (#534 V1.5). Idempotent: re-convening the same thread overwrites the cap.
+// The cap must be >= 1 (a moot always allows at least one turn).
+func (s *Store) MarkChatThreadMoot(ctx context.Context, threadID string, messageCap int) error {
+	if messageCap < 1 {
+		return fmt.Errorf("moot message cap must be >= 1, got %d", messageCap)
+	}
+	if err := s.SetChatThreadMeta(ctx, threadID, chatThreadMetaMoot, "1"); err != nil {
+		return err
+	}
+	return s.SetChatThreadMeta(ctx, threadID, chatThreadMetaMootMessageCap, strconv.Itoa(messageCap))
+}
+
+// ChatThreadMoot reports whether a thread was convened as a moot and, if so, its
+// HARD agent-message cap (#534 V1.5). A non-moot thread returns (false, 0). A moot
+// row with a missing/unparsable cap returns (true, 0) — the caller treats a
+// non-positive cap as "no cap enforced" so a malformed row never wedges sends.
+func (s *Store) ChatThreadMoot(ctx context.Context, threadID string) (isMoot bool, messageCap int, err error) {
+	flag, ok, err := s.GetChatThreadMeta(ctx, threadID, chatThreadMetaMoot)
+	if err != nil {
+		return false, 0, err
+	}
+	if !ok || strings.TrimSpace(flag) != "1" {
+		return false, 0, nil
+	}
+	capStr, ok, err := s.GetChatThreadMeta(ctx, threadID, chatThreadMetaMootMessageCap)
+	if err != nil {
+		return true, 0, err
+	}
+	if !ok {
+		return true, 0, nil
+	}
+	parsed, perr := strconv.Atoi(strings.TrimSpace(capStr))
+	if perr != nil {
+		return true, 0, nil
+	}
+	return true, parsed, nil
+}
+
+// CountChatMootMessages counts the agent-authored conversation turns in a thread —
+// kind='chat' AND author_kind='agent' (#534 V1.5). This is the moot cap metric: it
+// counts SEAT turns only, so human nudges (author_kind='human'), the system
+// announcement/overrun messages (kind='system'), and the seats' final job_result
+// conclusions (kind='job_result', which the cap never blocks) are all excluded.
+func (s *Store) CountChatMootMessages(ctx context.Context, threadID string) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM chat_messages WHERE thread_id = ? AND kind = ? AND author_kind = ?`,
+		strings.TrimSpace(threadID), ChatKindChat, ChatAuthorKindAgent).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // ---- helpers ---------------------------------------------------------------

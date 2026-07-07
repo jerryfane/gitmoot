@@ -410,10 +410,23 @@ path = ""
 # (default "2m", a Go duration) is the minimum spacing between an agent's auto-responses
 # in a thread; a trigger seen inside the window is deferred, never dropped. cap must be
 # >= 0 and cooldown >= 0.
+#
+# The [chat] section also carries the 'gitmoot moot' knobs (#534 V1.5). A moot
+# convenes N registered agents as SEATS (one background read-only ask job each)
+# that converse in one chat thread via 'gitmoot chat send'/'gitmoot chat wait'.
+# moot_max_seats (default 6) bounds how many agents one moot may convene (more is
+# rejected). moot_message_cap (default 30, overridable per-moot via --max-messages)
+# is the HARD per-thread cap on agent-authored turns: on the cap the moot HARD-STOPS
+# (no auto-extension), further 'chat send --as' is refused, and a VISIBLE overrun
+# system message is posted; each seat then posts its partial conclusions (know /
+# unsure / would-ask-next) via its gitmoot_result. Both must be >= 1. These are
+# resolved even when auto_respond is off (a moot is convened by an explicit command).
 # [chat]
 # auto_respond = false
 # auto_respond_cap = 4
 # auto_respond_cooldown = "2m"
+# moot_max_seats = 6
+# moot_message_cap = 30
 #
 # Enroll a specific agent (per-agent opt-in; omit for byte-identical default):
 # [agents.builder]

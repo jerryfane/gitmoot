@@ -122,3 +122,34 @@ role = "quiet"
 		t.Fatalf("quiet.ChatAutoRespond flipped to true after round-trip")
 	}
 }
+
+// TestLoadChatSettingsMootKnobs proves the moot knobs default correctly, parse an
+// override, and reject out-of-range values (both must be >= 1).
+func TestLoadChatSettingsMootKnobs(t *testing.T) {
+	// Defaults with no [chat] section.
+	def, err := LoadChatSettings(chatConfigFixture(t, ""))
+	if err != nil {
+		t.Fatalf("LoadChatSettings defaults: %v", err)
+	}
+	if def.MootMaxSeats != DefaultChatMootMaxSeats || def.MootMessageCap != DefaultChatMootMessageCap {
+		t.Fatalf("moot defaults = (%d, %d), want (%d, %d)", def.MootMaxSeats, def.MootMessageCap,
+			DefaultChatMootMaxSeats, DefaultChatMootMessageCap)
+	}
+
+	// Explicit overrides parse.
+	over, err := LoadChatSettings(chatConfigFixture(t, "\n[chat]\nmoot_max_seats = 8\nmoot_message_cap = 50\n"))
+	if err != nil {
+		t.Fatalf("LoadChatSettings overrides: %v", err)
+	}
+	if over.MootMaxSeats != 8 || over.MootMessageCap != 50 {
+		t.Fatalf("moot overrides = (%d, %d), want (8, 50)", over.MootMaxSeats, over.MootMessageCap)
+	}
+
+	// Out-of-range values are rejected (a config error, not silent mis-bounding).
+	if _, err := LoadChatSettings(chatConfigFixture(t, "\n[chat]\nmoot_max_seats = 0\n")); err == nil {
+		t.Fatal("moot_max_seats = 0 was accepted, want a validation error")
+	}
+	if _, err := LoadChatSettings(chatConfigFixture(t, "\n[chat]\nmoot_message_cap = 0\n")); err == nil {
+		t.Fatal("moot_message_cap = 0 was accepted, want a validation error")
+	}
+}
