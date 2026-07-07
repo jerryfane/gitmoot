@@ -534,6 +534,60 @@ func TestMootSerializationWarningUnit(t *testing.T) {
 	}
 }
 
+// writeMootDaemonRunMeta records a running/registered daemon's start argv in the
+// home's daemon.json (as a systemd `daemon run` self-registers, #505) so the
+// serialization preflight sees a flag-configured daemon rather than only config.toml.
+func writeMootDaemonRunMeta(t *testing.T, home string, args []string) {
+	t.Helper()
+	state := daemonProcessState(config.PathsForHome(home))
+	b, err := json.Marshal(daemonMeta{PID: os.Getpid(), Args: args})
+	if err != nil {
+		t.Fatalf("marshal daemon meta: %v", err)
+	}
+	if err := os.WriteFile(state.MetaFile, b, 0o600); err != nil {
+		t.Fatalf("write daemon.json: %v", err)
+	}
+}
+
+// TestMootSerializationWarningRunningPoolDaemon reproduces the LIVE deployment shape:
+// a daemon configured entirely by flags (systemd `daemon run --workers 6 --scheduler
+// pool`, self-registered in daemon.json) with NO [daemon] section in config.toml.
+// Reading only config.toml would FALSE-WARN; the preflight must instead read the
+// recorded daemon args and stay SILENT (that daemon runs seats concurrently).
+func TestMootSerializationWarningRunningPoolDaemon(t *testing.T) {
+	_, home := mootFixtureHome(t, "")
+	writeMootDaemonRunMeta(t, home, []string{"daemon", "run", "--poll", "30s", "--workers", "6", "--scheduler", "pool", "--watch-issues"})
+	if w := mootSerializationWarning(config.PathsForHome(home), "owner/repo", 3); w != "" {
+		t.Fatalf("pool/6 daemon (recorded in daemon.json) warned: %q", w)
+	}
+	// `--workers N` without an explicit --scheduler autoSelects pool, exactly as the
+	// daemon resolves it at start — so it must also suppress the warning.
+	_, autoHome := mootFixtureHome(t, "")
+	writeMootDaemonRunMeta(t, autoHome, []string{"daemon", "run", "--workers", "4"})
+	if w := mootSerializationWarning(config.PathsForHome(autoHome), "owner/repo", 3); w != "" {
+		t.Fatalf("--workers 4 (autoSelect pool) warned: %q", w)
+	}
+	// A daemon genuinely started at 1/barrier (recorded) still warns.
+	_, serialHome := mootFixtureHome(t, "")
+	writeMootDaemonRunMeta(t, serialHome, []string{"daemon", "run", "--workers", "1", "--scheduler", "barrier"})
+	if w := mootSerializationWarning(config.PathsForHome(serialHome), "owner/repo", 3); w == "" {
+		t.Fatal("recorded 1/barrier daemon did not warn a 3-seat moot")
+	}
+}
+
+// TestMootSerializationWarningWarmReloadOverridesArgs proves a config.toml [daemon]
+// key warm-reloads OVER the daemon's recorded start args (SIGHUP semantics): a pool/6
+// start with a config.toml `scheduler = "barrier"` serializes (barrier ignores the
+// worker count) and must WARN, naming the effective workers=6/scheduler=barrier.
+func TestMootSerializationWarningWarmReloadOverridesArgs(t *testing.T) {
+	_, home := mootFixtureHome(t, "\n[daemon]\nscheduler = \"barrier\"\n")
+	writeMootDaemonRunMeta(t, home, []string{"daemon", "run", "--workers", "6", "--scheduler", "pool"})
+	w := mootSerializationWarning(config.PathsForHome(home), "owner/repo", 3)
+	if !strings.Contains(w, "workers=6") || !strings.Contains(w, "scheduler=barrier") {
+		t.Fatalf("warm-reload-override warning = %q, want workers=6/scheduler=barrier", w)
+	}
+}
+
 // TestLoadChatSettingsMootDefaults proves the [chat] moot knobs resolve to their
 // documented defaults and reject out-of-range values.
 func TestLoadChatSettingsMootDefaults(t *testing.T) {

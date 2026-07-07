@@ -355,49 +355,22 @@ func chatMootOverrunMessage(messageCap int) string {
 
 // ---- serialization preflight (#534 review #6) ------------------------------
 
-// mootSerializationWarning reads the EFFECTIVE daemon scheduler/worker config for
-// this home + repo — the SAME warm-reloadable [daemon] section (LoadDaemonRuntime-
-// Config, defaults 1 worker / barrier) and per-repo [repos."owner/repo"] override
-// (#576) the daemon re-reads each tick — and returns a human warning when that
-// config cannot run >=2 same-repo read-only seats concurrently. It returns "" (say
-// nothing) when the config supports concurrency, when fewer than 2 seats are
-// convening (a solo seat never needs to converse), or on any load error (a
-// best-effort advisory must never break a dispatch).
+// mootSerializationWarning resolves the EFFECTIVE daemon scheduler/worker config that
+// will actually run these seats for this home + repo, and returns a human warning when
+// that config cannot run >=2 same-repo read-only seats concurrently. It returns "" (say
+// nothing) when the config supports concurrency, when fewer than 2 seats are convening
+// (a solo seat never needs to converse), or on any read error (a best-effort advisory
+// must never break a dispatch).
 //
 // It is a PURE read: no live auth probe and no mutation, mirroring the off-hot-path
 // contract of the daemon's #444 serialization preflight. It reuses the daemon's own
 // parseSchedulerMode + serializingConfig predicates so the moot's verdict is exactly
-// the daemon's. NOTE: it deliberately does NOT apply the start-time autoSelect (a
-// bare `workers = 4` in [daemon] warm-reloads WITHOUT flipping to pool — the daemon
-// keeps barrier and still serializes same-repo jobs), so the warning tracks the
-// warm-reload semantics faithfully.
+// the daemon's.
 func mootSerializationWarning(paths config.Paths, repo string, seats int) string {
 	if seats < 2 {
 		return ""
 	}
-	// Documented defaults with no [daemon] section: one worker, barrier scheduler.
-	workers := 1
-	scheduler := "barrier"
-	if cfg, err := config.LoadDaemonRuntimeConfig(paths); err == nil {
-		if cfg.WorkersSet {
-			workers = cfg.Workers
-		}
-		if cfg.SchedulerSet {
-			scheduler = cfg.Scheduler
-		}
-	}
-	// Honor a per-repo [repos."owner/repo"] override (#576): a max_parallel cap and/
-	// or a scheduler flip apply to THIS repo only.
-	if list, err := config.LoadRepoConcurrency(paths); err == nil {
-		if entry, ok := config.RepoConcurrencyFor(list, repo); ok {
-			if entry.MaxParallel > 0 {
-				workers = entry.MaxParallel
-			}
-			if entry.Scheduler != "" {
-				scheduler = entry.Scheduler
-			}
-		}
-	}
+	workers, scheduler := mootEffectiveScheduler(paths, repo)
 	usePool, err := parseSchedulerMode(scheduler)
 	if err != nil {
 		// An invalid scheduler mode is the daemon's error to report at start, not
@@ -409,6 +382,62 @@ func mootSerializationWarning(paths config.Paths, repo string, seats int) string
 	}
 	return fmt.Sprintf("warning: this daemon runs seats sequentially (workers=%d, scheduler=%s); a %d-seat moot will exchange turns slowly and each 'chat wait' may time out. Enable the pool scheduler with >=2 workers ([daemon] parallel = %d, or start the daemon with --parallel %d) so seats converse concurrently.",
 		workers, scheduler, seats, seats, seats)
+}
+
+// mootEffectiveScheduler resolves the worker count + scheduler mode the daemon that
+// will run these seats is actually using, applying the daemon's OWN precedence order
+// so the verdict matches what the daemon does — NOT just the config file:
+//
+//  1. Documented defaults (a not-yet-started default daemon): 1 worker, barrier.
+//  2. The running/registered daemon's recorded START ARGS. Both `daemon start` and a
+//     systemd-managed `daemon run` self-register their argv in daemon.json (#505), and
+//     the live deployment is configured entirely by flags there (e.g. `daemon run
+//     --workers 6 --scheduler pool`) with NO [daemon] section in config.toml. Reading
+//     only config.toml would therefore FALSE-WARN on the real pool/6 daemon — so parse
+//     the recorded args with the daemon's own flag parser, which resolves --parallel
+//     and the start-time autoSelect (`--workers N` without an explicit --scheduler
+//     flips to pool) exactly as the daemon did at start.
+//  3. Warm-reloadable [daemon] keys PRESENT in config.toml (LoadDaemonRuntimeConfig).
+//     A running daemon re-reads these on SIGHUP (#577), overriding its start value for
+//     any key actually written; keys absent from the file leave the start value intact.
+//  4. A per-repo [repos."owner/repo"] override (#576) for THIS repo.
+//
+// Every step is a pure file read; any read/parse error just leaves the running value,
+// so the advisory degrades to the documented defaults rather than breaking a dispatch.
+func mootEffectiveScheduler(paths config.Paths, repo string) (int, string) {
+	// (1) Documented defaults with no daemon record and no [daemon] section.
+	workers := 1
+	scheduler := "barrier"
+	// (2) The actually-running (or last-registered) daemon's start args are the real
+	// effective config for a flag/systemd-configured daemon.
+	if meta, err := readDaemonMeta(daemonProcessState(paths)); err == nil {
+		startArgs := daemonStartArgsFromRunArgs(meta.Args)
+		if cfg, code := parseDaemonStartConfig("daemon", startArgs, io.Discard); code == 0 {
+			workers = cfg.Workers
+			scheduler = cfg.Scheduler
+		}
+	}
+	// (3) Warm-reloadable [daemon] keys override the start value on SIGHUP.
+	if cfg, err := config.LoadDaemonRuntimeConfig(paths); err == nil {
+		if cfg.WorkersSet {
+			workers = cfg.Workers
+		}
+		if cfg.SchedulerSet {
+			scheduler = cfg.Scheduler
+		}
+	}
+	// (4) A per-repo [repos."owner/repo"] override (#576) applies to THIS repo only.
+	if list, err := config.LoadRepoConcurrency(paths); err == nil {
+		if entry, ok := config.RepoConcurrencyFor(list, repo); ok {
+			if entry.MaxParallel > 0 {
+				workers = entry.MaxParallel
+			}
+			if entry.Scheduler != "" {
+				scheduler = entry.Scheduler
+			}
+		}
+	}
+	return workers, scheduler
 }
 
 // ---- helpers ---------------------------------------------------------------
