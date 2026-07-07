@@ -5403,6 +5403,23 @@ pending or skipped stage (no job yet) shows a minimal card with its id, state,
 command, and dependencies. An in-flight run's stages flip live as the dashboard
 polls (every 12s).
 
+The detail view also fetches `/api/pipelines/<name>` for the pipeline's full
+history and declared shape. It shows a **run-history table** — one row per run
+(newest-first, capped at the last 100), with started time (absolute and
+relative), trigger, state chip, duration, and halt stage — where selecting a row
+drives the strip, matrix, and DAG together. A **stage×run matrix** places the
+stages down the rows (declared order first, any history-only ids appended) and
+the most recent runs across the columns oldest→newest, each cell a
+state-colored dot, so a stage that keeps failing reads as a streak across a row;
+clicking a cell selects that run. When the pipeline has a schedule, an
+**upcoming card** projects the next few fire times from `next due + k × interval`
+(with the jitter suffixed when set); a disabled schedule shows *paused* and a
+manual-only pipeline shows the copyable `gitmoot pipeline run <name>`. A pipeline
+that has **never run** renders its **declared DAG** (every stage pending, from
+the current spec) as a preview instead of a run. This detail feed is strictly
+read-only and deterministic; the list rows additionally summarize each pipeline's
+recent success rate and average duration.
+
 ## Learning
 
 Route: `/learning` (opens `/learning/skills`; second tab `/learning/knowledge`)
