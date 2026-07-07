@@ -35,13 +35,27 @@ func seedAttentionHome(t *testing.T, home string) {
 	mustCreateJob(t, store, db.Job{ID: "blocked-job", Agent: "integrator", Type: "implement", State: "blocked", Payload: mustJSON(t, blockedPayload)}, "", "")
 	cleanPayload := workflow.JobPayload{Repo: "jerryfane/noted", TaskTitle: "clean job"}
 	mustCreateJob(t, store, db.Job{ID: "clean-job", Agent: "integrator", Type: "implement", State: "running", Payload: mustJSON(t, cleanPayload)}, "", "")
+	// A job that recorded an open gate while blocked, then was cancelled (or retried
+	// back to queued): its gate row is retained (CancelJob/RetryJob never clear gates),
+	// but it is no longer parked on a human so it must NOT surface (#528 review fix).
+	cancelledPayload := workflow.JobPayload{Repo: "jerryfane/noted", TaskTitle: "abandoned job"}
+	mustCreateJob(t, store, db.Job{ID: "cancelled-job", Agent: "integrator", Type: "implement", State: "cancelled", Payload: mustJSON(t, cancelledPayload)}, "", "")
+	queuedPayload := workflow.JobPayload{Repo: "jerryfane/noted", TaskTitle: "requeued job"}
+	mustCreateJob(t, store, db.Job{ID: "queued-job", Agent: "integrator", Type: "implement", State: "queued", Payload: mustJSON(t, queuedPayload)}, "", "")
 
-	// blocked-job has one OPEN gate; clean-job has a gate that is then satisfied.
+	// blocked-job has one OPEN gate; clean-job has a gate that is then satisfied;
+	// cancelled-job and queued-job each keep an OPEN gate on a non-blocked job.
 	if _, err := store.RecordJobGates(ctx, "blocked-job", []string{"human:confirm-pr-target"}); err != nil {
 		t.Fatalf("RecordJobGates blocked: %v", err)
 	}
 	if _, err := store.RecordJobGates(ctx, "clean-job", []string{"human:already-cleared"}); err != nil {
 		t.Fatalf("RecordJobGates clean: %v", err)
+	}
+	if _, err := store.RecordJobGates(ctx, "cancelled-job", []string{"human:confirm-pr-target"}); err != nil {
+		t.Fatalf("RecordJobGates cancelled: %v", err)
+	}
+	if _, err := store.RecordJobGates(ctx, "queued-job", []string{"human:confirm-pr-target"}); err != nil {
+		t.Fatalf("RecordJobGates queued: %v", err)
 	}
 	if ok, err := store.SatisfyJobGate(ctx, "clean-job", "human:already-cleared"); err != nil || !ok {
 		t.Fatalf("SatisfyJobGate clean: ok=%v err=%v", ok, err)
@@ -105,9 +119,12 @@ func TestWebDataSourceAttention(t *testing.T) {
 		t.Fatalf("Attention: %v", err)
 	}
 
-	// Gates: only the open one, enriched with job context.
+	// Gates: only the open gate on a still-blocked job, enriched with job context.
+	// The satisfied gate (clean-job) and the open gates on the cancelled/queued jobs
+	// must all be excluded — a job that left blocked without clearing its gates is no
+	// longer "Needs a human" (#528 review fix).
 	if len(att.Gates) != 1 {
-		t.Fatalf("gates = %d, want 1 (open only): %+v", len(att.Gates), att.Gates)
+		t.Fatalf("gates = %d, want 1 (open + still blocked only): %+v", len(att.Gates), att.Gates)
 	}
 	g := att.Gates[0]
 	if g.JobID != "blocked-job" || g.Need != "human:confirm-pr-target" {

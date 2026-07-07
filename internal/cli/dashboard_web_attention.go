@@ -41,8 +41,7 @@ func (d *webDataSource) Attention(ctx context.Context) (dashboard.Attention, err
 			return err
 		}
 		// Enrich each gate with its job's title/agent/repo/PR/state via one ListJobs
-		// pass (fail-open: a gate whose job row is missing still lists, just with less
-		// context).
+		// pass.
 		var jobByID map[string]db.Job
 		if len(gates) > 0 {
 			jobs, jerr := store.ListJobs(ctx)
@@ -55,20 +54,28 @@ func (d *webDataSource) Attention(ctx context.Context) (dashboard.Attention, err
 			}
 		}
 		for _, g := range gates {
-			ag := dashboard.AttentionGate{
+			// Only surface a gate whose job is actually parked on a human decision
+			// (#528 review): ListOpenJobGates returns every unsatisfied gate row, but
+			// CancelJob (job_recovery.go) and the blocked-TTL sweep move a job out of
+			// blocked WITHOUT clearing its gates, so an abandoned (cancelled) — or
+			// retried, now queued/running — job would otherwise keep showing up as
+			// "Needs a human" forever. A gate whose job row is missing is likewise not
+			// actionable, so skip it too.
+			job, ok := jobByID[g.JobID]
+			if !ok || strings.TrimSpace(job.State) != string(workflow.JobBlocked) {
+				continue
+			}
+			payload, _ := workflow.ParseJobPayload(job.Payload)
+			out.Gates = append(out.Gates, dashboard.AttentionGate{
 				JobID:     g.JobID,
 				Need:      g.Need,
 				CreatedAt: parseJobTimeMillis(g.CreatedAt),
-			}
-			if job, ok := jobByID[g.JobID]; ok {
-				payload, _ := workflow.ParseJobPayload(job.Payload)
-				ag.Title = jobTitle(payload, job)
-				ag.Agent = strings.TrimSpace(job.Agent)
-				ag.Repo = strings.TrimSpace(payload.Repo)
-				ag.PR = payload.PullRequest
-				ag.State = mapNodeState(job.State)
-			}
-			out.Gates = append(out.Gates, ag)
+				Title:     jobTitle(payload, job),
+				Agent:     strings.TrimSpace(job.Agent),
+				Repo:      strings.TrimSpace(payload.Repo),
+				PR:        payload.PullRequest,
+				State:     mapNodeState(job.State),
+			})
 		}
 
 		// --- pending synth approvals ---
