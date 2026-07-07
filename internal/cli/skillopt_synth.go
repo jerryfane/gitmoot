@@ -550,6 +550,29 @@ func synthAttemptPrompt(item synthGeneratedItem) string {
 	return b.String()
 }
 
+// synthMaxAnswerBytes caps each weak/strong answer embedded in a judge prompt.
+// The judge scores answer quality against the rubric — it does not need a full
+// runtime transcript — so a verbose or un-unwrapped answer (codex banner, kimi
+// blob, etc.) is truncated to keep the judge prompt small regardless of runtime
+// verbosity. This is the second half of #724: even after Start() unwraps the
+// assistant's final message, a genuinely long answer combined with both halves
+// embedded verbatim can blow ARG_MAX on the judge exec, so cap defensively.
+const synthMaxAnswerBytes = 12 * 1024
+
+// capSynthAnswer truncates s to at most synthMaxAnswerBytes bytes, appending a
+// clear "[truncated N bytes]" marker naming how many bytes were dropped. Answers
+// at or under the limit are returned byte-identical (no marker), so short,
+// well-behaved answers reach the judge unchanged. Truncation is on a byte
+// boundary (the marker records the exact dropped-byte count); the judge reads
+// prose, so a split multibyte rune at the boundary is harmless.
+func capSynthAnswer(s string) string {
+	if len(s) <= synthMaxAnswerBytes {
+		return s
+	}
+	dropped := len(s) - synthMaxAnswerBytes
+	return s[:synthMaxAnswerBytes] + fmt.Sprintf("\n[truncated %d bytes]", dropped)
+}
+
 func synthJudgePrompt(item synthGeneratedItem, weakAnswer, strongAnswer string) string {
 	var b strings.Builder
 	b.WriteString("Score two answers against a rubric and judge the item's quality.\n\n")
@@ -560,9 +583,9 @@ func synthJudgePrompt(item synthGeneratedItem, weakAnswer, strongAnswer string) 
 	b.WriteString("\n\nRubric:\n")
 	b.WriteString(item.Rubric)
 	b.WriteString("\n\nAnswer A (weak):\n")
-	b.WriteString(weakAnswer)
+	b.WriteString(capSynthAnswer(weakAnswer))
 	b.WriteString("\n\nAnswer B (strong):\n")
-	b.WriteString(strongAnswer)
+	b.WriteString(capSynthAnswer(strongAnswer))
 	b.WriteString("\n\nScore each answer 0.0-1.0 against the rubric. Set well_formed to false if the ")
 	b.WriteString("item is ill-posed, and diagnostic to \"context_leak\" if the context gives the answer away.\n")
 	b.WriteString("Respond with STRICT JSON only: ")

@@ -386,7 +386,19 @@ func (a CodexAdapter) Start(ctx context.Context, request StartRequest) (StartRes
 	if err != nil {
 		return StartResult{Raw: result.Stdout}, err
 	}
-	return StartResult{RuntimeRef: threadID, Raw: result.Stdout}, nil
+	// Unwrap the `codex exec --json` JSONL stream so forked-session consumers
+	// (skillopt synth/ab) that parse Raw as the assistant's answer see the
+	// agent_message text, not the whole transcript (banner, thread.started,
+	// turn events) — the codex flavor of #722. Reuses the same parser the
+	// Deliver path uses to build Summary. Fail-open: fall back to the raw stdout
+	// when the stream carries no agent_message (older CLI, plain-text fallback,
+	// or an unexpected shape), so Raw always surfaces the underlying text and
+	// unwrap never errors. RuntimeRef is untouched.
+	raw := result.Stdout
+	if msg, _, _, ok := parseCodexJSONResult(result.Stdout); ok {
+		raw = msg
+	}
+	return StartResult{RuntimeRef: threadID, Raw: raw}, nil
 }
 
 func (a CodexAdapter) Validate(_ context.Context, agent Agent) error {
