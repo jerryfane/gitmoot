@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mrand "math/rand/v2"
 	"strconv"
 	"strings"
 	"time"
@@ -309,10 +310,28 @@ func (s *Store) SetChatThreadState(ctx context.Context, id, state string) error 
 }
 
 // maxSeqAssignRetries bounds the AddChatMessage seq-assignment retry loop (see
-// below). A handful of retries is ample: a per-thread seq collision only occurs
-// when two SEPARATE processes (e.g. the daemon back-link + a human `chat send`)
-// race to append to the same thread, which is rare and self-limiting.
-const maxSeqAssignRetries = 8
+// below). A per-thread seq collision occurs when SEPARATE processes (e.g. the
+// daemon back-link + a human `chat send`, or several moot seat subprocesses)
+// race to append to the same thread. Raised from 8 to 16 to cover a wide moot
+// (many seats sending near-simultaneously) alongside the jittered backoff below.
+const maxSeqAssignRetries = 16
+
+// seqConflictBackoff sleeps a short JITTERED interval between AddChatMessage retry
+// attempts. Without it, a cross-process read->write upgrade deadlock
+// (SQLITE_BUSY / SQLITE_BUSY_SNAPSHOT — which busy_timeout returns immediately
+// rather than waiting out) livelocks: two symmetric processes both re-run their
+// MAX(seq) read and collide again on the very next tick. The randomized backoff
+// breaks that symmetry so contending writers drain instead of exhausting the
+// retry budget in lockstep. Growth is capped so the worst case stays bounded.
+func seqConflictBackoff(attempt int) {
+	const capMs = 40
+	ms := 1 << attempt // 1,2,4,8,16,32,...
+	if ms > capMs {
+		ms = capMs
+	}
+	// Full jitter in [0, ms] milliseconds.
+	time.Sleep(time.Duration(mrand.IntN(ms+1)) * time.Millisecond)
+}
 
 // AddChatMessage appends a message to a thread. It assigns the per-thread seq as
 // SELECT COALESCE(MAX(seq),0)+1 inside the insert transaction and inserts against
@@ -444,6 +463,12 @@ func (s *Store) AddChatMessage(ctx context.Context, msg ChatMessage) (ChatMessag
 		}
 		if isRetryableSeqConflict(commitErr) {
 			lastConflict = commitErr
+			// Jittered backoff breaks the cross-process upgrade-deadlock symmetry so
+			// the retry actually resolves instead of colliding again immediately. Skip
+			// the sleep after the final attempt (about to return the error).
+			if attempt < maxSeqAssignRetries-1 {
+				seqConflictBackoff(attempt)
+			}
 			continue
 		}
 		return ChatMessage{}, commitErr
@@ -862,14 +887,22 @@ func (s *Store) ListChatAutoRespondCandidates(ctx context.Context) ([]ChatAutoRe
 	if err != nil {
 		return nil, err
 	}
+	// A MOOT thread is excluded: its seats already carry the conversation as
+	// dedicated jobs, and #534's "compose, not double-drive" decision means a seat's
+	// @mention of a peer must NOT also spawn a separate auto-respond ask on top of
+	// that peer's seat job. The NOT EXISTS check on the moot marker keeps moot and
+	// auto-respond structurally mutually exclusive.
 	const query = `SELECT t.id, t.slug, t.repo, mn.agent, m.id, m.ts_ms
 		FROM chat_mentions mn
 		JOIN chat_messages m ON m.id = mn.message_id
 		JOIN chat_threads t ON t.id = mn.thread_id
 		WHERE mn.agent_origin = ? AND mn.resolved = 1 AND mn.unread = 1
 			AND m.kind = ? AND t.state = ?
+			AND NOT EXISTS (
+				SELECT 1 FROM chat_thread_meta cm
+				WHERE cm.thread_id = t.id AND cm.key = ? AND cm.value = '1')
 		ORDER BY t.id, mn.agent, m.ts_ms DESC, m.id DESC`
-	rows, err := s.db.QueryContext(ctx, query, origin, ChatKindChat, ChatThreadStateOpen)
+	rows, err := s.db.QueryContext(ctx, query, origin, ChatKindChat, ChatThreadStateOpen, chatThreadMetaMoot)
 	if err != nil {
 		return nil, err
 	}
@@ -912,6 +945,40 @@ func (s *Store) CountChatAgentAutoResponses(ctx context.Context, threadID, agent
 		return 0, 0, err
 	}
 	return count, lastTs.Int64, nil
+}
+
+// CountInFlightChatThreadJobs counts the agent's not-yet-terminal jobs (state
+// 'queued' or 'running') whose serialized payload links them to the given chat
+// thread — the REAL-TIME in-flight gate the auto-respond sweep uses so the cap
+// counts asks still executing, not only completed job_result rows (#534 V1.5).
+//
+// Why it is needed: CountChatAgentAutoResponses only sees COMPLETED replies (an
+// auto-respond becomes a job_result only when the ask DELIVERS, which can take a
+// minute+). Under a burst of @mentions arriving before the first reply lands, the
+// completed count stays 0 and neither the cap nor the cooldown would throttle. By
+// refusing to dispatch a new auto-respond while any prior ask for this (thread,
+// agent) is still in flight, the sweep bounds total auto-responses to the cap and
+// makes a failed mark-read non-duplicating (the in-flight job blocks a re-fire).
+//
+// Matching the JobPayload's "thread_id" JSON field via a LIKE fragment is exact
+// enough: thread ids are opaque, collision-free tokens. Folding in a human-promoted
+// `chat task` ask on the same thread only makes the gate MORE conservative — it can
+// never let an agent exceed the cap.
+func (s *Store) CountInFlightChatThreadJobs(ctx context.Context, threadID, agent string) (int, error) {
+	threadID = strings.TrimSpace(threadID)
+	agent = strings.TrimSpace(agent)
+	if threadID == "" || agent == "" {
+		return 0, nil
+	}
+	fragment := `%"thread_id":"` + threadID + `"%`
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM jobs
+			WHERE agent = ? AND state IN ('queued', 'running') AND payload LIKE ?`,
+		agent, fragment).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // ChatSystemMessageExists reports whether a system message with the exact body

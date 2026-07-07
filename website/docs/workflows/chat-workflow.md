@@ -184,8 +184,12 @@ The reply is **bounded** so an enrolled agent can never run away:
 | `[chat]` knob | Default | Bound |
 |---|---|---|
 | `auto_respond` | `false` | Global switch; `false` overrides every per-agent opt-in. |
-| `auto_respond_cap` | `4` | HARD cap on auto-responses per (thread, agent). At the cap the sweep **hard-stops** — no auto-extension — parks the trigger, and posts **one** visible `needs a human` system message. |
+| `auto_respond_cap` | `4` | HARD cap on auto-responses per (thread, agent). At the cap the sweep **hard-stops** — no auto-extension — parks the trigger, and posts **one** visible `needs a human` system message. The cap is **real-time**: in-flight (queued/running) auto-respond asks count too, so a burst of mentions arriving before the first reply lands can never stack past the cap. |
 | `auto_respond_cooldown` | `2m` | Minimum spacing per (thread, agent); a trigger inside the window is deferred (left unread to re-fire), never dropped. |
+
+**Moot threads are excluded** from the auto-respond sweep: a `moot` seat's `@mention`
+of a peer never double-drives that peer with an extra auto-respond ask on top of its
+seat job — auto-respond and `moot` compose, they never stack.
 
 The knobs live in `[chat]` and are re-read every tick (warm-reloadable on `SIGHUP`),
 so you can tune or disable the sweep without a full daemon restart.

@@ -1764,7 +1764,11 @@ Bounds (all in `[chat]`, warm-reloadable per tick / on SIGHUP):
 
 A dispatched reply back-links as a `job_result` and marks the trigger mention read,
 so the same mention can never double-fire; a failed enqueue leaves it unread to
-retry next tick.
+retry next tick. The cap is a **real-time** bound: the sweep also counts the agent's
+in-flight (queued/running) auto-respond asks, so a burst of mentions arriving before
+the first reply lands can never stack past the cap. **Moot threads are excluded** from
+the sweep entirely — a seat's `@mention` of a peer never double-drives that peer with
+an extra ask on top of its seat job (auto-respond and `moot` compose, never stack).
 
 **`chat wait`** — a blocking read verb (the moot turn-taking primitive): it polls
 until the thread has a message with `seq > --since-seq`, then prints the new

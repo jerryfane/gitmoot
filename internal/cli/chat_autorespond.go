@@ -112,6 +112,21 @@ func runOneChatAutoRespond(ctx context.Context, store *db.Store, dispatch chatAu
 	if count >= settings.AutoRespondCap {
 		return parkChatAutoRespondCapReached(ctx, store, candidate)
 	}
+	// REAL-TIME in-flight gate: never stack a second auto-respond while a prior ask
+	// for this (thread, agent) is still queued/running. CountChatAgentAutoResponses
+	// above only sees COMPLETED replies, so without this a burst of @mentions landing
+	// before the first reply delivers would sail past the cap (count stays 0) and the
+	// cooldown (lastTs stays 0). Skipping WITHOUT marking read leaves the mention to
+	// re-fire once the in-flight ask completes; combined with the completed-count cap
+	// this bounds total auto-responses to the cap and makes a failed mark-read
+	// non-duplicating (the still-in-flight job blocks the re-dispatch).
+	inflight, err := store.CountInFlightChatThreadJobs(ctx, candidate.ThreadID, candidate.Agent)
+	if err != nil {
+		return err
+	}
+	if inflight > 0 {
+		return nil
+	}
 	if settings.AutoRespondCooldown > 0 && lastTs > 0 {
 		if now.UnixMilli()-lastTs < settings.AutoRespondCooldown.Milliseconds() {
 			// Within cooldown: skip, leave unread to re-fire after the window.

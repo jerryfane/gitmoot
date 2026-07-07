@@ -70,6 +70,9 @@ func printMootUsage(w io.Writer) {
 	fmt.Fprintln(w, "  Seats converse via `gitmoot chat send`/`gitmoot chat wait`; at the cap the moot")
 	fmt.Fprintln(w, "  hard-stops and each seat returns its conclusions. Bounds live in [chat] config:")
 	fmt.Fprintln(w, "  moot_max_seats (default 6), moot_message_cap (default 30, overridable with --max-messages).")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  --repo owner/repo must be a REGISTERED, checked-out repo (like any dispatch);")
+	fmt.Fprintln(w, "  run `gitmoot repo add owner/repo` first if the seats fail with a checkout-origin error.")
 }
 
 func runMoot(args []string, stdout, stderr io.Writer) int {

@@ -360,6 +360,49 @@ func TestChatAutoRespondFailedEnqueueLeavesMentionUnread(t *testing.T) {
 	}
 }
 
+// TestChatAutoRespondInFlightGate proves the real-time in-flight gate: while a prior
+// auto-respond ask for the same (thread, agent) is still queued/running (no
+// job_result yet, so the completed-count cap and cooldown both read 0), a fresh
+// @mention does NOT stack a second ask. The trigger is left UNREAD so it re-fires
+// once the in-flight ask completes. This is the burst-overshoot fix (#534 review).
+func TestChatAutoRespondInFlightGate(t *testing.T) {
+	paths, store := chatAutoRespondFixture(t, enrolledResponderBody)
+	thread := seedChatThread(t, store, "room", "owner/repo")
+	seedChatMention(t, store, thread, db.ChatKindChat, db.ChatAuthorKindHuman, "human", "@responder ping", "responder")
+
+	// A prior auto-respond ask for this (thread, agent) is still running — its
+	// payload links it to the thread, exactly as the real dispatch enqueues it.
+	if err := store.CreateJob(context.Background(), db.Job{
+		ID: "job-inflight", Agent: "responder", Type: "ask", State: "running",
+		Payload: `{"thread_id":"` + thread.ID + `"}`,
+	}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	dispatch, seen := recordingChatDispatcher()
+	if err := runChatAutoRespondScanOnce(context.Background(), paths, paths.Home, store, dispatch, time.Now().UTC()); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("in-flight gate dispatched %d jobs, want 0", len(*seen))
+	}
+	if unreadInThread(t, store, thread.ID) != 1 {
+		t.Fatalf("in-flight gate must leave the mention unread to re-fire, got %d unread", unreadInThread(t, store, thread.ID))
+	}
+
+	// Once the in-flight ask reaches a terminal state, the gate opens and the sweep
+	// dispatches.
+	if _, err := store.TransitionJobState(context.Background(), "job-inflight", "running", "succeeded"); err != nil {
+		t.Fatalf("TransitionJobState: %v", err)
+	}
+	if err := runChatAutoRespondScanOnce(context.Background(), paths, paths.Home, store, dispatch, time.Now().UTC()); err != nil {
+		t.Fatalf("scan after completion: %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("gate did not open after the in-flight ask completed: %d dispatches", len(*seen))
+	}
+}
+
 // countChatKindBody counts messages of a kind with an exact body in a thread.
 func countChatKindBody(t *testing.T, store *db.Store, threadID, kind, body string) int {
 	t.Helper()
