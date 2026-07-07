@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -13,12 +14,31 @@ import (
 	"github.com/jerryfane/gitmoot/internal/db"
 )
 
+// routerPathsForHome resolves the config paths for a home the SAME dual-mode way
+// the other home-scoped daemon seams do (via resolveConfigFile), so it works both
+// when handed the RAW --home and when handed the already-RESOLVED <home>/.gitmoot
+// root. The daemon wiring path (daemonWorkflowEngine at daemon.go passes
+// w.workflowHome(), which is config.Paths.Home — i.e. <home>/.gitmoot — so a naive
+// pathsFromFlag/config.PathsForHome here re-appended ".gitmoot" a SECOND time and
+// read a phantom <home>/.gitmoot/.gitmoot/config.toml with no [router] section,
+// so a user who set [router] context_enabled = true would get the feature
+// silently disabled forever on the daemon path (the same #446/#459 double
+// resolution memoryPathsForHome was created to fix for [memory]). Only
+// LoadRouterSettings reads the returned Paths, and it uses only ConfigFile, so
+// resolving that one field is sufficient.
+func routerPathsForHome(home string) (config.Paths, error) {
+	if strings.TrimSpace(home) == "" {
+		return config.DefaultPaths()
+	}
+	return config.Paths{ConfigFile: resolveConfigFile(home)}, nil
+}
+
 // routerContextEnabled reports whether the off-by-default #530 coordinator
 // routing-context injection is on for this home. It fails safe to disabled: any
 // path/config-load error returns false, so a broken or absent config never turns
 // the feature on. Mirrors canaryRoutingEnabled's off-by-default gate.
 func routerContextEnabled(home string) bool {
-	paths, err := pathsFromFlag(home)
+	paths, err := routerPathsForHome(home)
 	if err != nil {
 		return false
 	}

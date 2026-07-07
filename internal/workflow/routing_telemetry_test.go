@@ -2,12 +2,82 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 )
+
+// TestRoutingTelemetryRecordsRuntimeDefaultModel proves the recorded model matches
+// the model delivery ACTUALLY ran on: a job with no --model and an agent with no
+// Model, but a configured runtime registry default_model (#652), records that
+// default rather than an empty bucket. Mirrors deliver()'s job.Model > agent.Model
+// > RuntimeDefaultModel precedence.
+func TestRoutingTelemetryRecordsRuntimeDefaultModel(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "impl", []string{"implement"}, "jerryfane/gitmoot")
+	agent := runtime.Agent{Name: "impl", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	adapter := &fakeDelivery{outputs: []string{
+		`{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
+	}}
+	m := Mailbox{Store: store, RuntimeDefaultModel: func(rt string) string {
+		if rt == runtime.ShellRuntime {
+			return "gpt-5.5"
+		}
+		return ""
+	}}
+	if _, err := m.Enqueue(ctx, JobRequest{ID: "impl-job", Agent: "impl", Action: "implement", Repo: "jerryfane/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Impl"}); err != nil {
+		t.Fatalf("Enqueue error: %v", err)
+	}
+	if _, err := m.Run(ctx, "impl-job", agent, adapter); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	rows, err := store.ListRoutingTelemetry(ctx, db.RoutingTelemetryFilter{})
+	if err != nil {
+		t.Fatalf("ListRoutingTelemetry error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].Model != "gpt-5.5" {
+		t.Fatalf("recorded model = %q, want the runtime default_model %q", rows[0].Model, "gpt-5.5")
+	}
+}
+
+// TestRoutingTelemetryRecordsAdapterFailure proves a hard adapter-delivery error
+// (never reaching a parsed decision) still records one advisory observation with
+// JobState failed, so a runtime/model that repeatedly crashes at the adapter level
+// lowers its recorded success rate instead of contributing zero rows.
+func TestRoutingTelemetryRecordsAdapterFailure(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "flaky", []string{"implement"}, "jerryfane/gitmoot")
+	agent := runtime.Agent{Name: "flaky", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	adapter := &fakeDelivery{err: errors.New("adapter boom")}
+	m := Mailbox{Store: store}
+	if _, err := m.Enqueue(ctx, JobRequest{ID: "flaky-job", Agent: "flaky", Action: "implement", Repo: "jerryfane/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Flaky"}); err != nil {
+		t.Fatalf("Enqueue error: %v", err)
+	}
+	if _, err := m.Run(ctx, "flaky-job", agent, adapter); err == nil {
+		t.Fatalf("Run expected a delivery error, got nil")
+	}
+	rows, err := store.ListRoutingTelemetry(ctx, db.RoutingTelemetryFilter{})
+	if err != nil {
+		t.Fatalf("ListRoutingTelemetry error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 failure observation", len(rows))
+	}
+	if rows[0].JobState != string(JobFailed) {
+		t.Fatalf("recorded JobState = %q, want %q", rows[0].JobState, JobFailed)
+	}
+	if rows[0].Runtime != runtime.ShellRuntime || rows[0].Action != "implement" || rows[0].Approved {
+		t.Fatalf("failure row mismatch: %+v", rows[0])
+	}
+}
 
 // TestRunJobRecordsRoutingTelemetry proves the #530 capture hook: a job that runs
 // to a terminal decision leaves exactly one routing_telemetry row carrying the

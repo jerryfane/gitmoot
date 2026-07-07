@@ -158,3 +158,30 @@ func TestRouterContextEnabledResolves(t *testing.T) {
 		t.Fatalf("LoadRouterSettings did not read context_enabled")
 	}
 }
+
+// TestRouterContextEnabledResolvesFromDaemonHome pins the daemon wiring path: the
+// daemon calls routerContextEnabled(w.workflowHome()), and workflowHome() returns
+// the ALREADY-RESOLVED <home>/.gitmoot root (config.Paths.Home), NOT the raw
+// --home. A naive pathsFromFlag/PathsForHome resolver would re-append ".gitmoot"
+// a second time, read a phantom <home>/.gitmoot/.gitmoot/config.toml, and return
+// false forever even when [router] context_enabled = true is set — silently
+// disabling the feature on every live daemon. This asserts the resolved-root input
+// (what the daemon actually passes) reads true.
+func TestRouterContextEnabledResolvesFromDaemonHome(t *testing.T) {
+	home, _ := routerTestHome(t)
+	paths := config.PathsForHome(home)
+	// paths.Home is the resolved <home>/.gitmoot root the daemon passes.
+	if routerContextEnabled(paths.Home) {
+		t.Fatalf("expected context injection off by default via resolved home")
+	}
+	existing, err := os.ReadFile(paths.ConfigFile)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, append(existing, []byte("\n[router]\ncontext_enabled = true\n")...), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if !routerContextEnabled(paths.Home) {
+		t.Fatalf("expected context injection ON via resolved <home>/.gitmoot root (daemon wiring path)")
+	}
+}
