@@ -157,6 +157,11 @@ type JobRequest struct {
 	// coordinator continuation enqueued by the `answer` resume verb. Empty for
 	// every other job, so the stored payload is byte-identical by default.
 	HumanAnswer string
+	// RiskTier is the resolved risk-tier of the change (#650), stamped on a
+	// high-risk review coordinator and inherited by its lens children so reports
+	// and the dashboard can explain an escalation. Empty (the default) for every
+	// job outside the opt-in risk-tiered path.
+	RiskTier string
 }
 
 type JobPayload struct {
@@ -208,8 +213,13 @@ type JobPayload struct {
 	SkipNativeReviewFanout bool           `json:"skip_native_review_fanout,omitempty"`
 	Ephemeral              *EphemeralSpec `json:"ephemeral,omitempty"`
 	HumanAnswer            string         `json:"human_answer,omitempty"`
-	RawOutputs             []string       `json:"raw_outputs,omitempty"`
-	Result                 *AgentResult   `json:"result,omitempty"`
+	// RiskTier is the resolved risk-tier of the change (#650), additive/omitempty
+	// so a payload outside the opt-in risk-tiered review path serializes
+	// byte-identically. It is stamped on a high-risk review coordinator and
+	// inherited by its lens children for explainable escalation.
+	RiskTier   string       `json:"risk_tier,omitempty"`
+	RawOutputs []string     `json:"raw_outputs,omitempty"`
+	Result     *AgentResult `json:"result,omitempty"`
 	// Operational-blocker deferral context (#532, additive — all omitempty, so a
 	// job that never hit a classified blocker serializes byte-identically).
 	// BlockerClass is the last classified blocker (e.g. "runtime_auth",
@@ -308,6 +318,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		SkipNativeReviewFanout: request.SkipNativeReviewFanout,
 		Ephemeral:              request.Ephemeral,
 		HumanAnswer:            request.HumanAnswer,
+		RiskTier:               strings.TrimSpace(request.RiskTier),
 	})
 	if err != nil {
 		return db.Job{}, err

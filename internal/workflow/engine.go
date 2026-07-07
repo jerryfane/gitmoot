@@ -308,6 +308,35 @@ type Engine struct {
 	// agent/job pin always wins. Nil (the default) forces nothing, so delivery is
 	// byte-identical to before #652.
 	RuntimeDefaultModel func(runtimeName string) string
+	// RiskTiersEnabled gates the opt-in risk-tiered adaptive review (#650). When
+	// false (the default), HandlePullRequestOpened NEVER classifies a PR and runs
+	// the single-review fan-out byte-identically. When true, a PR opened event is
+	// classified (label > path > default); a `high` tier replaces the single
+	// fan-out with a refutation-lens delegation batch synthesized by the EXISTING
+	// quorum synthesis_rule engine, while a `routine` tier stays on the unchanged
+	// single-review path. It is sourced from the host [review].risk_tiers_enabled
+	// config at daemon startup.
+	RiskTiersEnabled bool
+	// HighRiskPaths is the changed-path glob list a PR is matched against to
+	// resolve the `high` tier when RiskTiersEnabled. Empty falls back to
+	// DefaultHighRiskPaths. Sourced from [review].high_risk_paths.
+	HighRiskPaths []string
+	// RiskLabelHigh / RiskLabelRoutine are the PR label names that force a tier,
+	// winning over path heuristics. Empty falls back to DefaultRiskLabelHigh /
+	// DefaultRiskLabelRoutine. Sourced from [review].risk_label_high /
+	// [review].risk_label_routine.
+	RiskLabelHigh    string
+	RiskLabelRoutine string
+	// PullRequestSignals resolves the risk classifier's inputs (PR labels +
+	// changed file paths) for a PR whose event does not already carry them (#650).
+	// It is the seam HandlePullRequestOpened uses on the IN-PROCESS implement->PR
+	// trigger, which has no GitHub file data. It is nil-safe and best-effort: when
+	// nil (every non-daemon construction) or when risk tiers are off, it is never
+	// consulted and classification falls back to the event's own signals; a lookup
+	// error yields no signals (the change classifies routine). The concrete impl is
+	// wired only in cli (a GitHub read), keeping the engine free of the github
+	// client coupling.
+	PullRequestSignals func(ctx context.Context, repo string, number int) (labels []string, changedPaths []string, err error)
 }
 
 // DelegationTimeoutDefaults are optional fallback timeouts for child delegation
@@ -496,6 +525,17 @@ type PullRequestEvent struct {
 	// orchestrators use this to make their own gate the only merge authority.
 	// Defaults false => full native fanout/advancement.
 	SkipReviewFanout bool
+	// Labels carries the PR's GitHub label names, used only by the opt-in risk
+	// classifier (#650) when RiskTiersEnabled. Additive: empty (the default) means
+	// the classifier falls back to path/default signals, and with risk tiers off
+	// it is never read. The daemon PR-watcher populates it best-effort.
+	Labels []string
+	// ChangedPaths carries the PR's changed file paths (repo-relative), used only
+	// by the opt-in risk classifier (#650) when RiskTiersEnabled. Additive: empty
+	// (the default) means the classifier falls back to label/default signals, and
+	// with risk tiers off it is never read. The daemon populates it best-effort
+	// (a lookup failure leaves it empty rather than blocking the review).
+	ChangedPaths []string
 }
 
 // RevertEvent locates the ORIGINAL PR that a (now-merged) revert PR undid (#467).
@@ -874,6 +914,28 @@ func (e Engine) HandlePullRequestOpened(ctx context.Context, event PullRequestEv
 		}
 		return e.recordPullRequestBaseline(ctx, event)
 	}
+	// Opt-in risk-tiered adaptive review (#650). When RiskTiersEnabled, classify
+	// the PR (label > path > default). A `high` tier replaces the single native
+	// fan-out with a refutation-lens delegation batch synthesized by the EXISTING
+	// quorum synthesis_rule engine. The whole block is gated on the flag, so with
+	// risk tiers off (the default) the classifier is never called and the
+	// single-review path below is byte-identical.
+	if e.RiskTiersEnabled {
+		labels, changedPaths := event.Labels, event.ChangedPaths
+		// The in-process implement->PR trigger carries no GitHub file data. Resolve
+		// the classifier's signals through the best-effort seam when the event has
+		// none and the seam is wired. A lookup error leaves the signals empty, so the
+		// change classifies routine rather than blocking the review.
+		if len(labels) == 0 && len(changedPaths) == 0 && e.PullRequestSignals != nil && event.PullRequest > 0 {
+			if l, p, err := e.PullRequestSignals(ctx, event.Repo, event.PullRequest); err == nil {
+				labels, changedPaths = l, p
+			}
+		}
+		classification := ClassifyRisk(e.HighRiskPaths, e.RiskLabelHigh, e.RiskLabelRoutine, labels, changedPaths)
+		if classification.Tier == RiskTierHigh {
+			return e.dispatchHighRiskReview(ctx, event, reviewers, classification, ref)
+		}
+	}
 	reviewRound, err := e.nextReviewRound(ctx, event)
 	if err != nil {
 		return err
@@ -911,6 +973,93 @@ func (e Engine) HandlePullRequestOpened(ctx context.Context, event PullRequestEv
 		if err := e.enqueue(ctx, request); err != nil {
 			return err
 		}
+	}
+	if err := e.setTaskState(ctx, ref, TaskReviewing); err != nil {
+		return err
+	}
+	return e.recordPullRequestBaseline(ctx, event)
+}
+
+// dispatchHighRiskReview replaces the single native review fan-out with a
+// refutation-lens delegation batch for a PR classified `high` (#650). It seeds a
+// synthetic, already-completed review COORDINATOR job whose result carries the
+// lens delegations (each tagged synthesis_rule "quorum") and then invokes the
+// EXISTING delegation dispatcher — so the fan-out, the deps machinery, and the
+// cross-lens synthesis are all the same engine the coordinator-returns-delegations
+// path uses, never a bespoke synthesis. When every lens approves, the quorum is
+// satisfied and the coordinator continuation is enqueued; when ANY lens reports a
+// critical refutation (a `blocked` decision, a NON-approving quorum outcome) the
+// quorum fails and the shared task is blocked — the explicit "blocks on a critical
+// refutation or a failed quorum" acceptance behavior.
+//
+// It is idempotent against the daemon's re-poll: the coordinator id is derived
+// from the stable review round for this head SHA, and the lens children are
+// review jobs the daemon's PR-watcher routing already recognizes, so a re-poll at
+// the same head never re-dispatches.
+func (e Engine) dispatchHighRiskReview(ctx context.Context, event PullRequestEvent, reviewers []string, classification RiskClassification, ref taskRef) error {
+	round, err := e.nextReviewRound(ctx, event)
+	if err != nil {
+		return err
+	}
+	coordID := "review-coordinator/" + event.Branch + "/" + round
+	if _, err := e.Store.GetJob(ctx, coordID); err == nil {
+		// Already dispatched for this head SHA/round: idempotent no-op.
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	delegations := highRiskLensDelegations(reviewers, event)
+	if len(delegations) < 2 {
+		// Defensive: no reviewers to fan out to. Fall back to recording the baseline
+		// rather than silently dropping the PR (should not happen — callers guarantee
+		// len(reviewers) >= 1, which yields >= 2 lenses).
+		return e.recordPullRequestBaseline(ctx, event)
+	}
+
+	coordPayload := JobPayload{
+		Repo:        event.Repo,
+		Branch:      event.Branch,
+		PullRequest: event.PullRequest,
+		HeadSHA:     event.HeadSHA,
+		GoalID:      event.GoalID,
+		TaskID:      event.TaskID,
+		TaskTitle:   event.TaskTitle,
+		LeadAgent:   event.LeadAgent,
+		Reviewers:   reviewers,
+		ReviewRound: round,
+		Sender:      event.Sender,
+		Instructions: fmt.Sprintf(
+			"Synthesize the high-risk adversarial review of pull request #%d for task %s from the lens findings below.",
+			event.PullRequest, taskLabel(event.TaskID, event.TaskTitle),
+		),
+		RiskTier: classification.Tier,
+		Result: &AgentResult{
+			Decision:    "approved",
+			Summary:     "high-risk adversarial lens fan-out",
+			Delegations: delegations,
+		},
+	}
+	encoded, err := marshalPayload(coordPayload)
+	if err != nil {
+		return err
+	}
+	coordJob := db.Job{
+		ID:      coordID,
+		Agent:   event.LeadAgent,
+		Type:    "review_coordinator",
+		State:   string(JobSucceeded),
+		Payload: encoded,
+	}
+	if err := e.Store.CreateJobWithEvent(ctx, coordJob, db.JobEvent{
+		JobID:   coordID,
+		Kind:    "risk_tier_resolved",
+		Message: fmt.Sprintf("risk tier %q (%s): %s", classification.Tier, classification.Source, classification.Reason),
+	}); err != nil {
+		return err
+	}
+	if err := e.dispatchDelegations(ctx, coordJob, coordPayload, ref); err != nil {
+		return err
 	}
 	if err := e.setTaskState(ctx, ref, TaskReviewing); err != nil {
 		return err
@@ -1709,6 +1858,9 @@ func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) 
 		SynthesisRule:   strings.TrimSpace(d.SynthesisRule),
 		Model:           strings.TrimSpace(d.Model),
 		Phase:           strings.TrimSpace(d.Phase),
+		// Inherit the coordinator's resolved risk tier (#650) so a high-risk lens
+		// child carries it for explainable escalation. Empty for every non-risk tree.
+		RiskTier: strings.TrimSpace(payload.RiskTier),
 		// Cockpit settings are inherited from the coordinator so every delegation
 		// subagent in one tree renders a pane under the same workspace/session.
 		Cockpit:        payload.Cockpit,
