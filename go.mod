@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/creachadair/tomledit v0.0.29
-	github.com/jerryfane/gitmoot-dashboard v0.0.0-20260707054513-bd25d33910ee
+	github.com/jerryfane/gitmoot-dashboard v0.0.0-20260707072949-ebe655a3b2c4
 	github.com/muesli/termenv v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.1
@@ -42,10 +42,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-// TEMPORARY dev wiring for the v1.6 Pipelines bridge (#708): point at the local
-// dashboard v16 worktree (feat/39-pipelines-v16), which defines PipelineDetail /
-// PipelineRunHistoryEntry / PipelineStageMark / ErrPipelineNotFound and the new
-// PipelineStage.Retry field. The lead swaps this to the merged pseudo-version
-// before the PR opens.
-replace github.com/jerryfane/gitmoot-dashboard => /root/gitmoot-dashboard-wt/v16
