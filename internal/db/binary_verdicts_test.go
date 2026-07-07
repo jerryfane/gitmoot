@@ -107,6 +107,34 @@ func TestBinaryVerdictValidation(t *testing.T) {
 	}
 }
 
+func TestBinaryVerdictWeightsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := openBinaryTestStore(t)
+
+	// Explicit weights persist; an unweighted (zero) caller defaults to 1 so the
+	// re-read reproduces the run's weighted aggregation.
+	if err := store.UpsertBinaryVerdict(ctx, BinaryVerdict{RunID: "r", QuestionID: "q1", Dimension: "correctness", Verdict: "yes", QuestionWeight: 3, DimensionWeight: 2}); err != nil {
+		t.Fatalf("upsert weighted: %v", err)
+	}
+	if err := store.UpsertBinaryVerdict(ctx, BinaryVerdict{RunID: "r", QuestionID: "q2", Dimension: "style", Verdict: "no"}); err != nil {
+		t.Fatalf("upsert unweighted: %v", err)
+	}
+	got, err := store.ListBinaryVerdicts(ctx, "r")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("verdicts = %d, want 2", len(got))
+	}
+	// Ordered correctness/q1 then style/q2.
+	if got[0].QuestionWeight != 3 || got[0].DimensionWeight != 2 {
+		t.Fatalf("q1 weights = (%v,%v), want (3,2)", got[0].QuestionWeight, got[0].DimensionWeight)
+	}
+	if got[1].QuestionWeight != 1 || got[1].DimensionWeight != 1 {
+		t.Fatalf("q2 weights = (%v,%v), want defaulted (1,1)", got[1].QuestionWeight, got[1].DimensionWeight)
+	}
+}
+
 func TestListBinaryVerdictsEmpty(t *testing.T) {
 	ctx := context.Background()
 	store := openBinaryTestStore(t)

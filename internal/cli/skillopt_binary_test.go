@@ -93,12 +93,35 @@ func TestSkillOptBinaryDeterministicE2E(t *testing.T) {
 	var showResult struct {
 		Verdicts        []skillopt.BinaryVerdict `json:"verdicts"`
 		DimensionScores map[string]float64       `json:"dimension_scores"`
+		Overall         float64                  `json:"overall"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &showResult); err != nil {
 		t.Fatalf("decode show json: %v (%s)", err, out.String())
 	}
 	if len(showResult.Verdicts) != 3 {
 		t.Fatalf("persisted verdicts = %d, want 3", len(showResult.Verdicts))
+	}
+	// Regression guard (#525 review): `show` must reproduce the SAME weighted
+	// scores `run` emitted for this run — not an unweighted mean. The fixture's
+	// correctness dimension carries weight 2, so an unweighted `show` would have
+	// reported overall 0.75 (=(0.5+1.0)/2) instead of 0.667 (=(2*0.5+1*1.0)/3).
+	if showResult.Overall != runResult.Overall {
+		t.Fatalf("show overall = %v, want run overall %v (weighted scores must match)", showResult.Overall, runResult.Overall)
+	}
+	if showResult.DimensionScores["correctness"] != runResult.DimensionScores["correctness"] {
+		t.Fatalf("show correctness = %v, want %v", showResult.DimensionScores["correctness"], runResult.DimensionScores["correctness"])
+	}
+	if showResult.DimensionScores["style"] != runResult.DimensionScores["style"] {
+		t.Fatalf("show style = %v, want %v", showResult.DimensionScores["style"], runResult.DimensionScores["style"])
+	}
+	// Weights round-trip through persistence so the re-read is self-describing.
+	for _, v := range showResult.Verdicts {
+		if v.Dimension == "correctness" && v.DimensionWeight != 2 {
+			t.Fatalf("correctness verdict dimension_weight = %v, want 2 (persisted)", v.DimensionWeight)
+		}
+		if v.QuestionWeight != 1 {
+			t.Fatalf("question %s question_weight = %v, want 1 (persisted default)", v.QuestionID, v.QuestionWeight)
+		}
 	}
 	// Verify the specific failing verdict persisted with an explanation.
 	var noTodo *skillopt.BinaryVerdict

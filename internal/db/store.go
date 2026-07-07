@@ -4863,12 +4863,14 @@ func (s *Store) UpsertFeedbackEvent(ctx context.Context, event FeedbackEvent) er
 // BinaryVerdict is one persisted BINEVAL binary-evaluation verdict (#525): a
 // yes/no answer + explanation for a single question of an eval run.
 type BinaryVerdict struct {
-	RunID       string
-	QuestionID  string
-	Dimension   string
-	Verdict     string
-	Explanation string
-	CreatedAt   string
+	RunID           string
+	QuestionID      string
+	Dimension       string
+	Verdict         string
+	Explanation     string
+	QuestionWeight  float64
+	DimensionWeight float64
+	CreatedAt       string
 }
 
 // UpsertBinaryVerdict inserts or replaces one binary verdict keyed by
@@ -4884,24 +4886,34 @@ func (s *Store) UpsertBinaryVerdict(ctx context.Context, v BinaryVerdict) error 
 	if strings.TrimSpace(v.Verdict) == "" {
 		v.Verdict = "no"
 	}
+	// Weights default to 1 so an unweighted caller (and the DB DEFAULT) agree,
+	// and so aggregation over the persisted rows reproduces the run's scores.
+	if v.QuestionWeight <= 0 {
+		v.QuestionWeight = 1
+	}
+	if v.DimensionWeight <= 0 {
+		v.DimensionWeight = 1
+	}
 	if strings.TrimSpace(v.CreatedAt) == "" {
 		v.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO skillopt_binary_verdicts(run_id, question_id, dimension, verdict, explanation, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO skillopt_binary_verdicts(run_id, question_id, dimension, verdict, explanation, question_weight, dimension_weight, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(run_id, question_id) DO UPDATE SET
 			dimension = excluded.dimension,
 			verdict = excluded.verdict,
 			explanation = excluded.explanation,
+			question_weight = excluded.question_weight,
+			dimension_weight = excluded.dimension_weight,
 			created_at = excluded.created_at`,
-		v.RunID, v.QuestionID, v.Dimension, v.Verdict, v.Explanation, v.CreatedAt)
+		v.RunID, v.QuestionID, v.Dimension, v.Verdict, v.Explanation, v.QuestionWeight, v.DimensionWeight, v.CreatedAt)
 	return err
 }
 
 // ListBinaryVerdicts returns every binary verdict for a run, ordered by
 // (dimension, question_id) for a deterministic read.
 func (s *Store) ListBinaryVerdicts(ctx context.Context, runID string) ([]BinaryVerdict, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT run_id, question_id, dimension, verdict, explanation, created_at
+	rows, err := s.db.QueryContext(ctx, `SELECT run_id, question_id, dimension, verdict, explanation, question_weight, dimension_weight, created_at
 		FROM skillopt_binary_verdicts WHERE run_id = ? ORDER BY dimension, question_id`, strings.TrimSpace(runID))
 	if err != nil {
 		return nil, err
@@ -4910,7 +4922,7 @@ func (s *Store) ListBinaryVerdicts(ctx context.Context, runID string) ([]BinaryV
 	var verdicts []BinaryVerdict
 	for rows.Next() {
 		var v BinaryVerdict
-		if err := rows.Scan(&v.RunID, &v.QuestionID, &v.Dimension, &v.Verdict, &v.Explanation, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.RunID, &v.QuestionID, &v.Dimension, &v.Verdict, &v.Explanation, &v.QuestionWeight, &v.DimensionWeight, &v.CreatedAt); err != nil {
 			return nil, err
 		}
 		verdicts = append(verdicts, v)
@@ -7902,6 +7914,8 @@ CREATE TABLE skillopt_binary_verdicts (
 	dimension TEXT NOT NULL DEFAULT '',
 	verdict TEXT NOT NULL DEFAULT 'no',
 	explanation TEXT NOT NULL DEFAULT '',
+	question_weight REAL NOT NULL DEFAULT 1,
+	dimension_weight REAL NOT NULL DEFAULT 1,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (run_id, question_id)
 );

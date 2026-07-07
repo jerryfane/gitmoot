@@ -200,6 +200,72 @@ func TestRunBinaryEvaluationWeightedQuestions(t *testing.T) {
 	}
 }
 
+// TestAggregateBinaryVerdictsMatchesRun proves the re-read aggregation (used by
+// `skillopt binary show`) reproduces the SAME weighted scores RunBinaryEvaluation
+// emits — for BOTH non-uniform dimension weights and non-uniform question weights
+// — so the two commands never disagree on the same run (#525 review finding).
+func TestAggregateBinaryVerdictsMatchesRun(t *testing.T) {
+	set := BinaryQuestionSet{
+		Version: 1,
+		Dimensions: []BinaryDimension{
+			{
+				Name:   "correctness",
+				Weight: 2,
+				Questions: []BinaryQuestion{
+					{ID: "q1", Text: "t", Weight: 3, Contains: "yes"}, // yes (w3)
+					{ID: "q2", Text: "t", Weight: 1, Contains: "no"},  // no  (w1)
+				},
+			},
+			{
+				Name:   "style",
+				Weight: 1,
+				Questions: []BinaryQuestion{
+					{ID: "q3", Text: "t", Contains: "yes"}, // yes (default w1)
+				},
+			},
+		},
+	}
+	res, err := RunBinaryEvaluation(context.Background(), set, "yes only", RuleBasedBinaryEvaluator{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// The verdicts carry the weights RunBinaryEvaluation used; re-aggregating them
+	// must yield identical per-dimension and overall scores.
+	dims, overall := AggregateBinaryVerdicts(res.Verdicts)
+	for name, want := range res.DimensionScores {
+		if math.Abs(dims[name]-want) > 1e-9 {
+			t.Fatalf("re-read dim %s = %v, want %v", name, dims[name], want)
+		}
+	}
+	if math.Abs(overall-res.Overall) > 1e-9 {
+		t.Fatalf("re-read overall = %v, want %v", overall, res.Overall)
+	}
+	// Sanity: correctness = 3/4 (weighted), style = 1, overall = (2*0.75 + 1*1)/3.
+	if math.Abs(dims["correctness"]-0.75) > 1e-9 {
+		t.Fatalf("correctness = %v, want 0.75", dims["correctness"])
+	}
+	if math.Abs(overall-(2.0*0.75+1.0*1.0)/3.0) > 1e-9 {
+		t.Fatalf("overall = %v, want %v", overall, (2.0*0.75+1.0*1.0)/3.0)
+	}
+}
+
+// TestAggregateBinaryVerdictsDefaultsZeroWeight proves rows written before
+// weights were persisted (zero weight) aggregate as equal-weight rather than
+// collapsing a dimension to a divide-by-zero.
+func TestAggregateBinaryVerdictsDefaultsZeroWeight(t *testing.T) {
+	verdicts := []BinaryVerdict{
+		{QuestionID: "q1", Dimension: "d", Verdict: "yes"}, // zero weights
+		{QuestionID: "q2", Dimension: "d", Verdict: "no"},
+	}
+	dims, overall := AggregateBinaryVerdicts(verdicts)
+	if math.Abs(dims["d"]-0.5) > 1e-9 {
+		t.Fatalf("dim d = %v, want 0.5 (equal-weight fallback)", dims["d"])
+	}
+	if math.Abs(overall-0.5) > 1e-9 {
+		t.Fatalf("overall = %v, want 0.5", overall)
+	}
+}
+
 func TestToEvaluatorScoreShape(t *testing.T) {
 	res := BinaryEvaluationResult{
 		DimensionScores: map[string]float64{"a": 0.5, "b": 1.0},

@@ -1239,7 +1239,10 @@ an **opt-in LLM-backed runner** wired through the same cross-family judge plumbi
 as `skillopt ab --judge`, so each question is answered by a *different* family
 (never a self-preference), read-only. Verdicts persist to the additive
 `skillopt_binary_verdicts` table keyed by `(run_id, question_id)` and are re-read
-by `skillopt binary show --run <run-id>`; they also ride the training-package
+by `skillopt binary show --run <run-id>`. Each row also stores the
+`question_weight`/`dimension_weight` the run used (default `1`), so `show`
+re-aggregates with the same weighting and reports the **identical** per-dimension
+and overall scores `run` emitted (even for non-uniform weights). They also ride the training-package
 export as an **optional** `binary_verdicts` section (omitempty — verdict-less
 packets are byte-identical). The per-dimension scores map onto the existing
 `EvaluatorScore.DimensionScores` shape with **no contract change**. Nothing here

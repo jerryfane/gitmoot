@@ -197,11 +197,13 @@ func runSkillOptBinaryRun(args []string, stdout, stderr io.Writer) int {
 	if err := withStore(*home, func(store *db.Store) error {
 		for _, v := range result.Verdicts {
 			if err := store.UpsertBinaryVerdict(context.Background(), db.BinaryVerdict{
-				RunID:       strings.TrimSpace(*runID),
-				QuestionID:  v.QuestionID,
-				Dimension:   v.Dimension,
-				Verdict:     v.Verdict,
-				Explanation: v.Explanation,
+				RunID:           strings.TrimSpace(*runID),
+				QuestionID:      v.QuestionID,
+				Dimension:       v.Dimension,
+				Verdict:         v.Verdict,
+				Explanation:     v.Explanation,
+				QuestionWeight:  v.QuestionWeight,
+				DimensionWeight: v.DimensionWeight,
 			}); err != nil {
 				return err
 			}
@@ -267,14 +269,19 @@ func runSkillOptBinaryShow(args []string, stdout, stderr io.Writer) int {
 	verdicts := make([]skillopt.BinaryVerdict, 0, len(stored))
 	for _, v := range stored {
 		verdicts = append(verdicts, skillopt.BinaryVerdict{
-			QuestionID:  v.QuestionID,
-			Dimension:   v.Dimension,
-			Verdict:     v.Verdict,
-			Explanation: v.Explanation,
-			CreatedAt:   v.CreatedAt,
+			QuestionID:      v.QuestionID,
+			Dimension:       v.Dimension,
+			Verdict:         v.Verdict,
+			Explanation:     v.Explanation,
+			QuestionWeight:  v.QuestionWeight,
+			DimensionWeight: v.DimensionWeight,
+			CreatedAt:       v.CreatedAt,
 		})
 	}
-	dimensionScores, overall := aggregateStoredBinaryVerdicts(stored)
+	// Aggregate with the SAME weighted logic (and the persisted weights) that
+	// RunBinaryEvaluation used, so `show` reproduces the score the `run` emitted
+	// for this exact run rather than an unweighted approximation.
+	dimensionScores, overall := skillopt.AggregateBinaryVerdicts(verdicts)
 
 	if *asJSON {
 		payload := map[string]any{
@@ -299,44 +306,6 @@ func runSkillOptBinaryShow(args []string, stdout, stderr io.Writer) int {
 		Overall:         overall,
 	})
 	return 0
-}
-
-// aggregateStoredBinaryVerdicts recomputes per-dimension yes-fractions and an
-// unweighted overall mean from PERSISTED verdicts (the stored rows do not carry
-// question weights, so `show` uses equal weights — `run` reports the weighted
-// scores from the question set directly).
-func aggregateStoredBinaryVerdicts(rows []db.BinaryVerdict) (map[string]float64, float64) {
-	type acc struct{ yes, total int }
-	perDim := map[string]*acc{}
-	order := []string{}
-	for _, r := range rows {
-		a, ok := perDim[r.Dimension]
-		if !ok {
-			a = &acc{}
-			perDim[r.Dimension] = a
-			order = append(order, r.Dimension)
-		}
-		a.total++
-		if strings.EqualFold(strings.TrimSpace(r.Verdict), skillopt.BinaryVerdictYes) {
-			a.yes++
-		}
-	}
-	scores := map[string]float64{}
-	var sum float64
-	for _, dim := range order {
-		a := perDim[dim]
-		s := 0.0
-		if a.total > 0 {
-			s = float64(a.yes) / float64(a.total)
-		}
-		scores[dim] = s
-		sum += s
-	}
-	overall := 0.0
-	if len(order) > 0 {
-		overall = sum / float64(len(order))
-	}
-	return scores, overall
 }
 
 func writeBinaryHuman(w io.Writer, runID string, result skillopt.BinaryEvaluationResult) {

@@ -75,12 +75,20 @@ type BinaryAnswer struct {
 // BinaryVerdict is a persisted/exported per-question result. It is the row shape
 // of skillopt_binary_verdicts and the element type of the optional export packet
 // section, so its JSON tags are stable wire.
+//
+// QuestionWeight and DimensionWeight carry the exact weights RunBinaryEvaluation
+// used to aggregate (both default to 1), so a re-read of the persisted rows —
+// via `skillopt binary show` or an exported packet — can reproduce the SAME
+// weighted per-dimension/overall scores the run emitted. They are additive
+// (omitempty) and only populated for BINEVAL rows.
 type BinaryVerdict struct {
-	QuestionID  string `json:"question_id"`
-	Dimension   string `json:"dimension"`
-	Verdict     string `json:"verdict"`
-	Explanation string `json:"explanation,omitempty"`
-	CreatedAt   string `json:"created_at,omitempty"`
+	QuestionID      string  `json:"question_id"`
+	Dimension       string  `json:"dimension"`
+	Verdict         string  `json:"verdict"`
+	Explanation     string  `json:"explanation,omitempty"`
+	QuestionWeight  float64 `json:"question_weight,omitempty"`
+	DimensionWeight float64 `json:"dimension_weight,omitempty"`
+	CreatedAt       string  `json:"created_at,omitempty"`
 }
 
 // BinaryEvaluationResult is the aggregated outcome of a run: every verdict, the
@@ -227,10 +235,12 @@ func RunBinaryEvaluation(ctx context.Context, set BinaryQuestionSet, source stri
 			}
 			verdict := normalizeVerdict(answer.Verdict)
 			result.Verdicts = append(result.Verdicts, BinaryVerdict{
-				QuestionID:  q.ID,
-				Dimension:   d.Name,
-				Verdict:     verdict,
-				Explanation: strings.TrimSpace(answer.Explanation),
+				QuestionID:      q.ID,
+				Dimension:       d.Name,
+				Verdict:         verdict,
+				Explanation:     strings.TrimSpace(answer.Explanation),
+				QuestionWeight:  q.Weight,
+				DimensionWeight: d.Weight,
 			})
 			dimDen += q.Weight
 			if verdict == BinaryVerdictYes {
@@ -344,6 +354,58 @@ func (RuleBasedBinaryEvaluator) Answer(_ context.Context, _ string, q BinaryQues
 		verdict = BinaryVerdictYes
 	}
 	return BinaryAnswer{Verdict: verdict, Explanation: strings.Join(checks, "; ")}, nil
+}
+
+// AggregateBinaryVerdicts recomputes the per-dimension weighted yes-fractions
+// and the weighted-mean overall score from a slice of verdicts, applying each
+// verdict's persisted QuestionWeight/DimensionWeight EXACTLY as
+// RunBinaryEvaluation does. A zero/absent weight is treated as 1 so rows written
+// before weights were persisted still aggregate as equal-weight. This is the
+// canonical re-read aggregation used by `skillopt binary show`, so `show`
+// reproduces the same scores the `run` that produced the rows emitted.
+func AggregateBinaryVerdicts(verdicts []BinaryVerdict) (map[string]float64, float64) {
+	type acc struct {
+		num, den float64
+		dimW     float64
+	}
+	perDim := map[string]*acc{}
+	order := []string{}
+	for _, v := range verdicts {
+		a, ok := perDim[v.Dimension]
+		if !ok {
+			a = &acc{dimW: 1}
+			perDim[v.Dimension] = a
+			order = append(order, v.Dimension)
+		}
+		if v.DimensionWeight > 0 {
+			a.dimW = v.DimensionWeight
+		}
+		qw := v.QuestionWeight
+		if qw <= 0 {
+			qw = 1
+		}
+		a.den += qw
+		if strings.EqualFold(strings.TrimSpace(v.Verdict), BinaryVerdictYes) {
+			a.num += qw
+		}
+	}
+	scores := map[string]float64{}
+	var overallNum, overallDen float64
+	for _, dim := range order {
+		a := perDim[dim]
+		s := 0.0
+		if a.den > 0 {
+			s = a.num / a.den
+		}
+		scores[dim] = s
+		overallNum += a.dimW * s
+		overallDen += a.dimW
+	}
+	overall := 0.0
+	if overallDen > 0 {
+		overall = overallNum / overallDen
+	}
+	return scores, overall
 }
 
 // SortBinaryVerdicts orders verdicts by (dimension, question_id) so persisted

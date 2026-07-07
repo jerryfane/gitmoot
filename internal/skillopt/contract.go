@@ -801,11 +801,13 @@ func loadBinaryVerdicts(ctx context.Context, store *db.Store, runID string) ([]B
 	out := make([]BinaryVerdict, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, BinaryVerdict{
-			QuestionID:  r.QuestionID,
-			Dimension:   r.Dimension,
-			Verdict:     r.Verdict,
-			Explanation: r.Explanation,
-			CreatedAt:   r.CreatedAt,
+			QuestionID:      r.QuestionID,
+			Dimension:       r.Dimension,
+			Verdict:         r.Verdict,
+			Explanation:     r.Explanation,
+			QuestionWeight:  r.QuestionWeight,
+			DimensionWeight: r.DimensionWeight,
+			CreatedAt:       r.CreatedAt,
 		})
 	}
 	return out, nil

@@ -462,7 +462,11 @@ default to `1`. Two runners are provided:
 
 Verdicts persist to the additive `skillopt_binary_verdicts` table keyed by
 `(run_id, question_id)` (a re-run upserts in place) and are re-read by
-`gitmoot skillopt binary show --run <run-id>`. The per-dimension scores map onto
+`gitmoot skillopt binary show --run <run-id>`. Each persisted row carries the
+`question_weight` and `dimension_weight` the run used (both default to `1`), so
+`show` re-aggregates with the **same weighted logic** and reports the identical
+per-dimension/overall scores the `run` emitted — even when weights are
+non-uniform — and exported packets can reproduce them too. The per-dimension scores map onto
 the existing `EvaluatorScore.DimensionScores` shape with **no contract change**,
 and the verdicts ride the training-package export as the optional
 `binary_verdicts` section described above. The whole surface is inert unless a
