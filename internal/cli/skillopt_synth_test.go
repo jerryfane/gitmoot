@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -229,6 +230,115 @@ func TestRealSkillOptABDeliverUnwrapsClaudeEnvelopeForSynth(t *testing.T) {
 	if item.Context == "" || item.Question == "" || item.Rubric == "" {
 		t.Fatalf("parsed synth item missing fields: %+v", item)
 	}
+}
+
+// transcriptCodexRunner is a subprocess.Runner that returns a fixed `codex exec
+// --json` JSONL transcript for every invocation, mirroring the real codex CLI's
+// Start output (banner + thread.started + turn events + agent_message) so a real
+// CodexAdapter runs end-to-end with no LLM.
+type transcriptCodexRunner struct{ stdout string }
+
+func (r transcriptCodexRunner) Run(context.Context, string, string, ...string) (subprocess.Result, error) {
+	return subprocess.Result{Stdout: r.stdout}, nil
+}
+
+func (r transcriptCodexRunner) LookPath(file string) (string, error) { return "/usr/bin/" + file, nil }
+
+// TestRealSkillOptABDeliverUnwrapsCodexTranscriptForSynth is the #724 consumer
+// regression, the codex flavor of TestRealSkillOptABDeliverUnwrapsClaudeEnvelope-
+// ForSynth. It drives the REAL delivery seam (realSkillOptABDeliver) with a
+// forked-session codex agent (empty RuntimeRef → adapter.Start, the synth
+// challenger path) wired to a real CodexAdapter over a fake runner that returns a
+// codex exec --json transcript. The delivered answer must be the agent_message
+// text — NOT the whole transcript (banner/thread.started/reasoning/turn events) —
+// so parseSynthGeneratedItem finds the context/question/rubric. Before the fix
+// Start leaked the whole transcript as Raw and this parse returned the wrong
+// object (the thread.started event, not the challenger item).
+func TestRealSkillOptABDeliverUnwrapsCodexTranscriptForSynth(t *testing.T) {
+	inner := `{"context":"A legacy monolith with no tests.","question":"Outline a safe migration.","rubric":"Rewards incremental strangler-fig steps."}`
+	transcript := `{"type":"thread.started","thread_id":"019f3041-cfed-7e82-8766-b5ca75cf92da"}` + "\n" +
+		`{"type":"turn.started"}` + "\n" +
+		`{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"designing a discriminating item"}}` + "\n" +
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":` + strconv.Quote(inner) + `}}` + "\n" +
+		`{"type":"turn.completed","usage":{"input_tokens":16504,"output_tokens":20}}`
+
+	restore := replaceRuntimeFactory(runtime.Factory{Runner: transcriptCodexRunner{stdout: transcript}})
+	t.Cleanup(restore)
+
+	// Empty RuntimeRef routes realSkillOptABDeliver through adapter.Start (a fresh
+	// throwaway session) — the exact skillopt synth challenger delivery path.
+	answer, err := realSkillOptABDeliver(context.Background(), runtime.Agent{
+		Name:       "challenger-bot",
+		Role:       "reviewer",
+		Runtime:    runtime.CodexRuntime,
+		RepoScope:  "acme/widgets",
+		RuntimeRef: "",
+	}, synthChallengerPrompt("", ""))
+	if err != nil {
+		t.Fatalf("realSkillOptABDeliver: %v", err)
+	}
+	if answer != inner {
+		t.Fatalf("delivered answer = %q, want the unwrapped agent_message %q", answer, inner)
+	}
+	item, err := parseSynthGeneratedItem(answer)
+	if err != nil {
+		t.Fatalf("parseSynthGeneratedItem on the delivered answer failed (the #724 codex-bloat bug): %v (answer=%q)", err, answer)
+	}
+	if item.Context == "" || item.Question == "" || item.Rubric == "" {
+		t.Fatalf("parsed synth item missing fields: %+v", item)
+	}
+}
+
+// TestSynthJudgePromptCapsAnswers pins the second half of #724: synthJudgePrompt
+// caps each embedded weak/strong answer so a verbose runtime answer cannot bloat
+// (or, combined, blow ARG_MAX on) the judge exec, while under-limit answers are
+// embedded byte-identical with no marker.
+func TestSynthJudgePromptCapsAnswers(t *testing.T) {
+	item := synthGeneratedItem{Context: "ctx", Question: "q?", Rubric: "rewards X"}
+
+	t.Run("short answers embedded verbatim, no marker", func(t *testing.T) {
+		weak, strong := "a short weak answer", "a short strong answer"
+		got := synthJudgePrompt(item, weak, strong)
+		if !strings.Contains(got, weak) || !strings.Contains(got, strong) {
+			t.Fatalf("short answers must be embedded verbatim; prompt=%q", got)
+		}
+		if strings.Contains(got, "[truncated") {
+			t.Fatalf("short answers must not carry a truncation marker; prompt=%q", got)
+		}
+	})
+
+	t.Run("oversized answers capped with byte-accurate marker", func(t *testing.T) {
+		oversize := 5000
+		weak := strings.Repeat("W", synthMaxAnswerBytes+oversize)
+		strong := strings.Repeat("S", synthMaxAnswerBytes+oversize)
+		got := synthJudgePrompt(item, weak, strong)
+
+		if strings.Contains(got, weak) {
+			t.Fatal("oversized weak answer must not be embedded verbatim")
+		}
+		wantMarker := fmt.Sprintf("[truncated %d bytes]", oversize)
+		if strings.Count(got, wantMarker) != 2 {
+			t.Fatalf("want the byte-accurate marker %q for both answers; prompt tail=%q", wantMarker, got[len(got)-200:])
+		}
+		// The retained prefix is exactly the cap; nothing beyond it survives.
+		if !strings.Contains(got, strings.Repeat("W", synthMaxAnswerBytes)) {
+			t.Fatal("capped weak answer must keep the first synthMaxAnswerBytes bytes")
+		}
+		if strings.Contains(got, strings.Repeat("W", synthMaxAnswerBytes+1)) {
+			t.Fatal("capped weak answer kept more than synthMaxAnswerBytes bytes")
+		}
+	})
+
+	t.Run("answer exactly at the limit is not truncated", func(t *testing.T) {
+		exact := strings.Repeat("E", synthMaxAnswerBytes)
+		got := synthJudgePrompt(item, exact, "short")
+		if strings.Contains(got, "[truncated") {
+			t.Fatalf("answer exactly at the limit must not be truncated; prompt=%q", got[len(got)-120:])
+		}
+		if !strings.Contains(got, exact) {
+			t.Fatal("at-limit answer must be embedded verbatim")
+		}
+	})
 }
 
 // TestRunSkillOptSynthAcceptAndApprove is the deterministic no-LLM E2E: a
