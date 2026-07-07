@@ -774,10 +774,25 @@ func renderThreadContext(ctx context.Context, store *db.Store, thread db.ChatThr
 // chatAnswerResolveEscalation is the seam `chat answer` resumes through. It calls
 // the SAME Engine.ResolveEscalation the daemon's PR-comment `answer` verb uses,
 // with the local store (a bare Store engine is sufficient — the ask-gate answer
-// path only enqueues a continuation). Tests override it to assert routing without
-// a full engine.
-var chatAnswerResolveEscalation = func(ctx context.Context, store *db.Store, jobID, instructions string) error {
-	return workflow.Engine{Store: store}.ResolveEscalation(ctx, jobID, workflow.ResumeAnswer, instructions)
+// path only enqueues a continuation). It returns routed=false when there was no
+// pending escalation to answer (already resolved, or none) so the caller does not
+// report a false success or record a duplicate answer. Tests override it to assert
+// routing without a full engine.
+var chatAnswerResolveEscalation = func(ctx context.Context, store *db.Store, jobID, instructions string) (routed bool, err error) {
+	engine := workflow.Engine{Store: store}
+	pending, err := engine.EscalationPending(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	if !pending {
+		// No OPEN round: ResolveEscalation would be a silent idempotent no-op, so
+		// report it did not route rather than claim success.
+		return false, nil
+	}
+	if err := engine.ResolveEscalation(ctx, jobID, workflow.ResumeAnswer, instructions); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func runChatAnswer(args []string, stdout, stderr io.Writer) int {
@@ -835,8 +850,14 @@ func runChatAnswer(args []string, stdout, stderr io.Writer) int {
 		// "<id>: text" body via parseHumanAnswers and enqueues the coordinator
 		// continuation carrying the answer; the daemon then runs that continuation and
 		// its result back-links into this thread (the continuation inherits ThreadID).
-		if err := chatAnswerResolveEscalation(ctx, store, jobID, body); err != nil {
+		routed, err := chatAnswerResolveEscalation(ctx, store, jobID, body)
+		if err != nil {
 			return err
+		}
+		if !routed {
+			// The escalation was already resolved (a prior answer or a TTL finalize).
+			// Do NOT record a duplicate answer or claim a false success.
+			return fmt.Errorf("job %s has no pending question to answer (it was already answered or finalized)", jobID)
 		}
 		// Record the human's answer as a durable chat message.
 		if _, err := store.AddChatMessage(ctx, db.ChatMessage{

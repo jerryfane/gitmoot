@@ -7852,11 +7852,14 @@ CREATE INDEX idx_pipeline_run_stages_run_id ON pipeline_run_stages(run_id);
 	//     future bridge hashes/signs into opaque wire content. Additive-only.
 	//   * topic-path-safe thread slugs ([a-z0-9-], no '+'/'#'), unique per repo, so
 	//     a slug always derives a valid MQTT topic later.
-	//   * an explicit (ts_ms, author, id) ordering key (ts_ms is unix-millis); the
-	//     per-thread `seq` is a LOCAL rendering convenience only, never a gapless
+	//   * an explicit (ts_ms, seq) ordering key (ts_ms is unix-millis); seq is the
+	//     per-thread gapless LOCAL insertion order used as the deterministic
+	//     same-timestamp tiebreak — a local rendering key, never a cross-origin
 	//     federation assumption.
 	//   * reserved NULLABLE content_hash/signature/signer_pubkey columns (content-
-	//     addressing + signing land in the bridge, not here).
+	//     addressing + signing land in the bridge, not here), with a partial UNIQUE
+	//     index on non-NULL content_hash so a bridged content-addressed id can be
+	//     stored verbatim and re-delivery is schema-enforced idempotent.
 	//   * a fixed kind vocabulary chat|system|job_result|promotion_request, with
 	//     promotion_request distinct and (per the interaction model) always locally
 	//     re-authorized; job_result messages are non-promotable.
@@ -7903,6 +7906,7 @@ CREATE TABLE chat_messages (
 );
 CREATE INDEX idx_chat_messages_thread_seq ON chat_messages(thread_id, seq);
 CREATE INDEX idx_chat_messages_promoted_job ON chat_messages(promoted_job_id);
+CREATE UNIQUE INDEX idx_chat_messages_content_hash ON chat_messages(content_hash) WHERE content_hash IS NOT NULL;
 
 CREATE TABLE chat_mentions (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,

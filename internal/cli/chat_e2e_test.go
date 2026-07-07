@@ -216,7 +216,11 @@ func TestChatPromotionLoopE2E(t *testing.T) {
 
 	// --- idempotency: re-run the terminal back-link, no second job_result -----
 	w2 := jobWorker{Store: store}
-	if err := w2.postChatThreadResult(ctx, promoted.JobID, runtime.Agent{Name: "codex-b", Runtime: runtime.ShellRuntime}, nil); err != nil {
+	readvanceJob, readvancePayload, err := daemonWorkerJobPayload(ctx, store, promoted.JobID)
+	if err != nil {
+		t.Fatalf("daemonWorkerJobPayload (re-advance): %v", err)
+	}
+	if err := w2.postChatThreadResult(ctx, readvanceJob, readvancePayload, runtime.Agent{Name: "codex-b", Runtime: runtime.ShellRuntime}, nil); err != nil {
 		t.Fatalf("postChatThreadResult (re-advance) returned error: %v", err)
 	}
 	if got := chatE2ECountKind(t, store, thread.ID, db.ChatKindJobResult); got != 1 {

@@ -162,11 +162,11 @@ func TestAddChatMessageRejectsBadKind(t *testing.T) {
 	}
 }
 
-// TestListChatMessagesOrdering proves ListChatMessages honors the authoritative
-// ordering key (ts_ms, author_name, id) — NOT the local seq. When several
-// messages share a millisecond (the tight-loop case), the key falls back to
-// author_name then id, which is exactly the federation-tolerant, dedupe-by-id
-// semantics §7 of the spec mandates (seq is only a rendering convenience).
+// TestListChatMessagesOrdering proves ListChatMessages orders by (ts_ms, seq):
+// same-millisecond messages render in INSERTION order via the gapless per-thread
+// seq, NOT by the random message id (which would scramble same-ms same-author
+// messages). It seeds several rows sharing one ts_ms with deliberately
+// out-of-order random ids and asserts the seq (insertion) order is what renders.
 func TestListChatMessagesOrdering(t *testing.T) {
 	ctx := context.Background()
 	store := openChatTestStore(t)
@@ -183,21 +183,47 @@ func TestListChatMessagesOrdering(t *testing.T) {
 	if len(all) != 5 {
 		t.Fatalf("ListChatMessages returned %d, want 5", len(all))
 	}
-	// Adjacent pairs are non-decreasing under (ts_ms, author_name, id).
-	less := func(a, b ChatMessage) bool {
-		if a.TsMs != b.TsMs {
-			return a.TsMs < b.TsMs
-		}
-		if a.AuthorName != b.AuthorName {
-			return a.AuthorName < b.AuthorName
-		}
-		return a.ID < b.ID
-	}
+	// Adjacent pairs are non-decreasing under (ts_ms, seq) AND seq is the insertion
+	// order (strictly increasing, gapless), so the transcript never scrambles.
 	for i := 1; i < len(all); i++ {
-		if less(all[i], all[i-1]) {
-			t.Fatalf("messages not ordered by (ts_ms, author_name, id): %v then %v", all[i-1].ID, all[i].ID)
+		prev, cur := all[i-1], all[i]
+		if cur.TsMs < prev.TsMs || (cur.TsMs == prev.TsMs && cur.Seq < prev.Seq) {
+			t.Fatalf("messages not ordered by (ts_ms, seq): #%d(seq=%d) then #%d(seq=%d)", i-1, prev.Seq, i, cur.Seq)
+		}
+		if cur.Seq != prev.Seq+1 {
+			t.Fatalf("seq not gapless insertion order: %d then %d", prev.Seq, cur.Seq)
 		}
 	}
+
+	// The hard case the fix targets: rows sharing ONE ts_ms with random ids inserted
+	// out of id-order must still render by seq (insertion), not by id.
+	same, _ := store.CreateChatThread(ctx, ChatThread{Slug: "same-ms", Repo: "o/r"})
+	seedSameTs := func(id string, seq int64) {
+		if _, err := store.db.ExecContext(ctx, `INSERT INTO chat_messages(
+				id, origin, thread_id, seq, ts_ms, author_kind, author_name, author_origin,
+				kind, body, envelope_json, refs_json, reply_to, promoted_job_id, created_at
+			) VALUES (?, '', ?, ?, 1000, 'human', 'human', '', 'chat', 'b', '', '', '', '', CURRENT_TIMESTAMP)`,
+			id, same.ID, seq); err != nil {
+			t.Fatalf("seed same-ms row: %v", err)
+		}
+	}
+	seedSameTs("msg-zzz", 1)
+	seedSameTs("msg-aaa", 2)
+	seedSameTs("msg-mmm", 3)
+	got, err := store.ListChatMessages(ctx, same.ID, 0)
+	if err != nil {
+		t.Fatalf("ListChatMessages(same-ms) returned error: %v", err)
+	}
+	wantOrder := []string{"msg-zzz", "msg-aaa", "msg-mmm"} // seq 1,2,3 — NOT id order
+	if len(got) != 3 {
+		t.Fatalf("same-ms list len = %d, want 3", len(got))
+	}
+	for i, w := range wantOrder {
+		if got[i].ID != w {
+			t.Fatalf("same-ms order[%d] = %s, want %s (must be by seq, not id)", i, got[i].ID, w)
+		}
+	}
+
 	// A positive limit returns the LAST N of the full ordered list (still ascending).
 	last2, err := store.ListChatMessages(ctx, thread.ID, 2)
 	if err != nil {
@@ -325,18 +351,26 @@ func TestSetChatMessagePromotedJob(t *testing.T) {
 }
 
 // TestRecentPromotionRequestExists proves the fingerprint dedupe: an identical
-// (thread, body) promotion_request is detected within the window and not across a
-// different body / thread / message kind (#534 anti-ping-pong).
+// (thread, body) promotion_request that ACTUALLY produced a job is detected within
+// the window and not across a different body / thread / message kind, and — the
+// review fix — a promotion whose dispatch FAILED (no promoted_job_id) does NOT
+// dedupe so a legitimate retry is never blocked (#534 anti-ping-pong).
 func TestRecentPromotionRequestExists(t *testing.T) {
 	ctx := context.Background()
 	store := openChatTestStore(t)
 	thread, _ := store.CreateChatThread(ctx, ChatThread{Slug: "room", Repo: "o/r"})
 	other, _ := store.CreateChatThread(ctx, ChatThread{Slug: "room2", Repo: "o/r"})
 
-	if _, err := store.AddChatMessage(ctx, ChatMessage{
+	// A promotion that produced a job: record the row then back-link it (the real
+	// `chat task` order — record before dispatch, set promoted_job_id after).
+	promo, err := store.AddChatMessage(ctx, ChatMessage{
 		ThreadID: thread.ID, AuthorName: "human", Kind: ChatKindPromotionRequest, Body: "@a ship it",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("AddChatMessage: %v", err)
+	}
+	if err := store.SetChatMessagePromotedJob(ctx, promo.ID, "job-1"); err != nil {
+		t.Fatalf("SetChatMessagePromotedJob: %v", err)
 	}
 	// A plain chat message with the same body must NOT count as a promotion.
 	if _, err := store.AddChatMessage(ctx, ChatMessage{
@@ -361,6 +395,18 @@ func TestRecentPromotionRequestExists(t *testing.T) {
 	// windowMs <= 0 disables the check.
 	if any, _ := store.RecentPromotionRequestExists(ctx, thread.ID, "@a ship it", 0); any {
 		t.Fatal("a zero window must disable dedupe")
+	}
+
+	// A FAILED dispatch leaves an orphan promotion_request (no promoted_job_id); an
+	// identical retry must NOT be refused.
+	orphanThread, _ := store.CreateChatThread(ctx, ChatThread{Slug: "orphan", Repo: "o/r"})
+	if _, err := store.AddChatMessage(ctx, ChatMessage{
+		ThreadID: orphanThread.ID, AuthorName: "human", Kind: ChatKindPromotionRequest, Body: "@a retry me",
+	}); err != nil {
+		t.Fatalf("AddChatMessage (orphan): %v", err)
+	}
+	if any, _ := store.RecentPromotionRequestExists(ctx, orphanThread.ID, "@a retry me", chatMinuteMs); any {
+		t.Fatal("a promotion whose dispatch failed (no promoted_job_id) must NOT poison the dedupe")
 	}
 }
 

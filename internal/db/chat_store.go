@@ -85,10 +85,12 @@ type ChatRef struct {
 	URL    string `json:"url"`
 }
 
-// ChatMessage is one durable message in a thread. The seq is a LOCAL rendering
-// convenience (per-thread gapless counter); the authoritative ordering key is
-// (TsMs, AuthorName, ID). Mentions/Refs/ReplyTo are the logical fields; they are
-// mirrored into the canonical EnvelopeJSON on write.
+// ChatMessage is one durable message in a thread. The seq is a per-thread gapless
+// LOCAL insertion counter; the rendering order key is (TsMs, Seq) — ts_ms is the
+// chronological key and seq is the deterministic same-timestamp tiebreak (never
+// the random ID). seq is a local ordering key, not a cross-origin federation
+// assumption. Mentions/Refs/ReplyTo are the logical fields; they are mirrored into
+// the canonical EnvelopeJSON on write.
 type ChatMessage struct {
 	ID            string
 	Origin        string
@@ -220,6 +222,11 @@ func (s *Store) CreateChatThread(ctx context.Context, thread ChatThread) (ChatTh
 			id, slug, name, repo, origin, state, created_by, created_at, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 		thread.ID, thread.Slug, thread.Name, thread.Repo, thread.Origin, thread.State, strings.TrimSpace(thread.CreatedBy)); err != nil {
+		// Translate the raw UNIQUE(repo, slug) driver error into a friendly message
+		// so re-creating an existing room reads clearly instead of leaking SQL.
+		if isUniqueConstraintErr(err) {
+			return ChatThread{}, fmt.Errorf("a chat thread %q already exists in %s", thread.Slug, thread.Repo)
+		}
 		return ChatThread{}, err
 	}
 	return s.GetChatThreadByID(ctx, thread.ID)
@@ -300,12 +307,25 @@ func (s *Store) SetChatThreadState(ctx context.Context, id, state string) error 
 	return chatRowsAffected(res, "chat thread")
 }
 
-// AddChatMessage appends a message to a thread. It assigns the per-thread seq
-// inside the insert transaction (SELECT COALESCE(MAX(seq),0)+1) so concurrent
-// appends never collide on UNIQUE(thread_id, seq); it stamps ts_ms with
-// unix-millis and origin/author_origin with this DB's home_id, and builds the
-// deterministic canonical envelope_json. The returned message carries the
-// assigned id/seq/ts_ms/origin/envelope.
+// maxSeqAssignRetries bounds the AddChatMessage seq-assignment retry loop (see
+// below). A handful of retries is ample: a per-thread seq collision only occurs
+// when two SEPARATE processes (e.g. the daemon back-link + a human `chat send`)
+// race to append to the same thread, which is rare and self-limiting.
+const maxSeqAssignRetries = 8
+
+// AddChatMessage appends a message to a thread. It assigns the per-thread seq as
+// SELECT COALESCE(MAX(seq),0)+1 inside the insert transaction and inserts against
+// UNIQUE(thread_id, seq). SetMaxOpenConns(1) serializes appends within ONE Store,
+// but the DB is shared across processes (the daemon and a human `chat send` hold
+// independent WAL connections), so two processes can compute the same seq: the
+// loser's INSERT fails the UNIQUE constraint (or trips SQLITE_BUSY_SNAPSHOT when
+// its read snapshot went stale before the write — which busy_timeout does NOT
+// retry). We wrap the whole read-modify-write tx in a bounded retry that recomputes
+// the seq on such a conflict, so a cross-process race is resolved transparently
+// instead of dropping the daemon's back-link or spuriously failing a human send.
+// It also stamps ts_ms with unix-millis and origin/author_origin with this DB's
+// home_id, and builds the deterministic canonical envelope_json. The returned
+// message carries the assigned id/seq/ts_ms/origin/envelope.
 func (s *Store) AddChatMessage(ctx context.Context, msg ChatMessage) (ChatMessage, error) {
 	msg.ThreadID = strings.TrimSpace(msg.ThreadID)
 	if msg.ThreadID == "" {
@@ -376,57 +396,101 @@ func (s *Store) AddChatMessage(ctx context.Context, msg ChatMessage) (ChatMessag
 		return ChatMessage{}, fmt.Errorf("encode chat refs: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return ChatMessage{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
+	// A sentinel a retryable seq-collision wraps so the outer loop can distinguish it
+	// from a genuine (non-retryable) failure returned by the tx body.
+	var lastConflict error
+	for attempt := 0; attempt < maxSeqAssignRetries; attempt++ {
+		commitErr := func() error {
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
 
-	// The thread must exist (also gives a clear error rather than an orphan row).
-	var threadState string
-	if err := tx.QueryRowContext(ctx, `SELECT state FROM chat_threads WHERE id = ?`, msg.ThreadID).Scan(&threadState); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ChatMessage{}, fmt.Errorf("chat thread %q not found", msg.ThreadID)
+			// The thread must exist (also gives a clear error rather than an orphan row).
+			var threadState string
+			if err := tx.QueryRowContext(ctx, `SELECT state FROM chat_threads WHERE id = ?`, msg.ThreadID).Scan(&threadState); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("chat thread %q not found", msg.ThreadID)
+				}
+				return err
+			}
+
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COALESCE(MAX(seq), 0) + 1 FROM chat_messages WHERE thread_id = ?`, msg.ThreadID).Scan(&msg.Seq); err != nil {
+				return err
+			}
+
+			if _, err := tx.ExecContext(ctx, `INSERT INTO chat_messages(
+					id, origin, thread_id, seq, ts_ms, author_kind, author_name, author_origin,
+					kind, body, envelope_json, refs_json, reply_to, promoted_job_id, created_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+				msg.ID, msg.Origin, msg.ThreadID, msg.Seq, msg.TsMs, msg.AuthorKind, msg.AuthorName, msg.AuthorOrigin,
+				msg.Kind, msg.Body, msg.EnvelopeJSON, string(refsJSON), strings.TrimSpace(msg.ReplyTo), strings.TrimSpace(msg.PromotedJobID)); err != nil {
+				return err
+			}
+
+			// Bump the thread's activity clock so ListChatThreads orders by recency.
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE chat_threads SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, msg.ThreadID); err != nil {
+				return err
+			}
+
+			return tx.Commit()
+		}()
+		if commitErr == nil {
+			return msg, nil
 		}
-		return ChatMessage{}, err
+		if isRetryableSeqConflict(commitErr) {
+			lastConflict = commitErr
+			continue
+		}
+		return ChatMessage{}, commitErr
 	}
-
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(seq), 0) + 1 FROM chat_messages WHERE thread_id = ?`, msg.ThreadID).Scan(&msg.Seq); err != nil {
-		return ChatMessage{}, err
-	}
-
-	if _, err := tx.ExecContext(ctx, `INSERT INTO chat_messages(
-			id, origin, thread_id, seq, ts_ms, author_kind, author_name, author_origin,
-			kind, body, envelope_json, refs_json, reply_to, promoted_job_id, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		msg.ID, msg.Origin, msg.ThreadID, msg.Seq, msg.TsMs, msg.AuthorKind, msg.AuthorName, msg.AuthorOrigin,
-		msg.Kind, msg.Body, msg.EnvelopeJSON, string(refsJSON), strings.TrimSpace(msg.ReplyTo), strings.TrimSpace(msg.PromotedJobID)); err != nil {
-		return ChatMessage{}, err
-	}
-
-	// Bump the thread's activity clock so ListChatThreads orders by recency.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE chat_threads SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, msg.ThreadID); err != nil {
-		return ChatMessage{}, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return ChatMessage{}, err
-	}
-	return msg, nil
+	return ChatMessage{}, fmt.Errorf("assign chat message seq after %d attempts: %w", maxSeqAssignRetries, lastConflict)
 }
 
-// ListChatMessages returns a thread's messages in the authoritative ordering key
-// (ts_ms, author_name, id) — NOT by the local seq, which is only a rendering
-// convenience. limit <= 0 returns all messages; a positive limit returns the
-// most recent `limit` messages (still in ascending order).
+// isRetryableSeqConflict reports whether err is a transient per-thread seq
+// collision that a fresh MAX(seq)+1 retry can resolve: a cross-process
+// UNIQUE(thread_id, seq) race, or a WAL snapshot/busy conflict (a write against a
+// read snapshot that went stale — SQLITE_BUSY_SNAPSHOT, which busy_timeout does
+// not retry). It is deliberately narrow (the UNIQUE match requires the seq column)
+// so it never masks a genuine uniqueness bug on some other column.
+func isRetryableSeqConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "UNIQUE constraint failed") && strings.Contains(msg, "seq") {
+		return true
+	}
+	// WAL snapshot / busy conflicts that a retry (re-reading MAX(seq)) resolves.
+	return strings.Contains(msg, "SQLITE_BUSY_SNAPSHOT") ||
+		strings.Contains(msg, "(517)") ||
+		strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked")
+}
+
+// isUniqueConstraintErr reports whether err is any SQLite UNIQUE-constraint
+// violation, used to translate a raw driver error into a friendly message.
+func isUniqueConstraintErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// ListChatMessages returns a thread's messages ordered by (ts_ms, seq): ts_ms
+// (unix-millis) is the chronological key, and the per-thread gapless `seq` is the
+// deterministic same-timestamp tiebreak. seq is assigned locally on insert for
+// EVERY message in the thread (so it is a total local insertion order), which is
+// why it is the correct tiebreak — ordering by the random message id instead would
+// render same-millisecond same-author messages out of insertion order. limit <= 0
+// returns all messages; a positive limit returns the most recent `limit` messages
+// (still in ascending order).
 func (s *Store) ListChatMessages(ctx context.Context, threadID string, limit int) ([]ChatMessage, error) {
 	threadID = strings.TrimSpace(threadID)
 	if limit > 0 {
 		// Take the newest `limit` by the ordering key, then re-sort ascending.
 		rows, err := s.db.QueryContext(ctx, chatMessageSelect+`
-			WHERE thread_id = ? ORDER BY ts_ms DESC, author_name DESC, id DESC LIMIT ?`, threadID, limit)
+			WHERE thread_id = ? ORDER BY ts_ms DESC, seq DESC LIMIT ?`, threadID, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -441,7 +505,7 @@ func (s *Store) ListChatMessages(ctx context.Context, threadID string, limit int
 		return msgs, nil
 	}
 	rows, err := s.db.QueryContext(ctx, chatMessageSelect+`
-		WHERE thread_id = ? ORDER BY ts_ms ASC, author_name ASC, id ASC`, threadID)
+		WHERE thread_id = ? ORDER BY ts_ms ASC, seq ASC`, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -486,15 +550,23 @@ func (s *Store) AddChatMentions(ctx context.Context, mentions []ChatMention) err
 }
 
 // InboxForAgent returns an agent's inbox: resolved mentions joined with their
-// message + thread, newest first. unreadOnly restricts to unread mentions.
+// message + thread, newest first. unreadOnly restricts to unread mentions. The
+// query is scoped to this DB's home_id (agent_origin) so a mention delivered for
+// `agent@other-home` (once the #705 bridge lands) never surfaces in the LOCAL
+// agent's inbox — the "no code path may assume origin == self" constraint. In V1
+// every local mention carries agent_origin == home_id, so this is a no-op filter.
 func (s *Store) InboxForAgent(ctx context.Context, agent string, unreadOnly bool) ([]ChatInboxEntry, error) {
+	origin, err := s.HomeID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	query := `SELECT t.id, t.slug, t.name, t.repo, m.id, m.seq, m.ts_ms,
 			m.author_kind, m.author_name, m.kind, m.body, mn.unread, mn.created_at
 		FROM chat_mentions mn
 		JOIN chat_messages m ON m.id = mn.message_id
 		JOIN chat_threads t ON t.id = mn.thread_id
-		WHERE mn.agent = ? AND mn.resolved = 1`
-	args := []any{strings.TrimSpace(agent)}
+		WHERE mn.agent = ? AND mn.agent_origin = ? AND mn.resolved = 1`
+	args := []any{strings.TrimSpace(agent), origin}
 	if unreadOnly {
 		query += " AND mn.unread = 1"
 	}
@@ -532,10 +604,18 @@ func (s *Store) SetChatMessagePromotedJob(ctx context.Context, messageID, jobID 
 }
 
 // RecentPromotionRequestExists reports whether an identical promotion_request
-// (same thread, same body) was recorded within the last windowMs milliseconds —
-// the structural anti-ping-pong fingerprint dedupe (#534). A promotion body
-// carries the "@agent message" verbatim, so an identical (thread, body) is an
-// identical (thread, agent, body) promotion. windowMs <= 0 disables the check.
+// (same thread, same body) that ACTUALLY produced a job was recorded within the
+// last windowMs milliseconds — the structural anti-ping-pong fingerprint dedupe
+// (#534). A promotion body carries the "@agent message" verbatim, so an identical
+// (thread, body) is an identical (thread, agent, body) promotion. windowMs <= 0
+// disables the check.
+//
+// Only rows with a non-empty promoted_job_id count: `chat task` records the
+// promotion_request BEFORE dispatch (so the intent is durable even if dispatch
+// fails) and back-links promoted_job_id only AFTER dispatch succeeds. Counting a
+// row whose dispatch failed (promoted_job_id still empty) would let one failed
+// attempt poison the window and block a legitimate retry of an identical task even
+// though no job was ever created.
 func (s *Store) RecentPromotionRequestExists(ctx context.Context, threadID, body string, windowMs int64) (bool, error) {
 	if windowMs <= 0 {
 		return false, nil
@@ -543,7 +623,7 @@ func (s *Store) RecentPromotionRequestExists(ctx context.Context, threadID, body
 	cutoff := time.Now().UTC().UnixMilli() - windowMs
 	var count int
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM chat_messages WHERE thread_id = ? AND kind = ? AND body = ? AND ts_ms >= ?`,
+		`SELECT COUNT(1) FROM chat_messages WHERE thread_id = ? AND kind = ? AND body = ? AND ts_ms >= ? AND promoted_job_id != ''`,
 		strings.TrimSpace(threadID), ChatKindPromotionRequest, body, cutoff).Scan(&count); err != nil {
 		return false, err
 	}
@@ -552,11 +632,17 @@ func (s *Store) RecentPromotionRequestExists(ctx context.Context, threadID, body
 
 // MarkThreadRead clears the unread flag on all of an agent's mentions in a
 // thread (the "I've seen this conversation" action). Returns the number of
-// mentions cleared.
+// mentions cleared. Scoped to this DB's home_id (agent_origin) so a local agent
+// never marks read a mention addressed to `agent@other-home` (the origin != self
+// constraint); in V1 every local mention carries agent_origin == home_id.
 func (s *Store) MarkThreadRead(ctx context.Context, agent, threadID string) (int64, error) {
+	origin, err := s.HomeID(ctx)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE chat_mentions SET unread = 0 WHERE agent = ? AND thread_id = ? AND unread = 1`,
-		strings.TrimSpace(agent), strings.TrimSpace(threadID))
+		`UPDATE chat_mentions SET unread = 0 WHERE agent = ? AND agent_origin = ? AND thread_id = ? AND unread = 1`,
+		strings.TrimSpace(agent), origin, strings.TrimSpace(threadID))
 	if err != nil {
 		return 0, err
 	}

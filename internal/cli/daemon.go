@@ -7752,17 +7752,18 @@ func (w jobWorker) recordPostDeliveryWorkflowError(ctx context.Context, job db.J
 }
 
 func (w jobWorker) postJobResultComment(ctx context.Context, jobID string, agent runtime.Agent, _ string, cause error) error {
+	job, payload, err := daemonWorkerJobPayload(ctx, w.Store, jobID)
+	if err != nil {
+		return err
+	}
 	// Chat back-link (#534): a chat-promoted (or ask-gate auto-linked) job posts
 	// its result into the originating thread at the SAME terminal call sites as
 	// the PR comment. It runs BEFORE the PR-scope guard below because a chat job
 	// often has no PR; it is best-effort (a chat failure never fails the worker)
 	// and idempotent (a chat_result_posted job event, mirroring comment_posted).
-	// Gated on payload.ThreadID, so a non-chat job is byte-identical.
-	_ = w.postChatThreadResult(ctx, jobID, agent, cause)
-	job, payload, err := daemonWorkerJobPayload(ctx, w.Store, jobID)
-	if err != nil {
-		return err
-	}
+	// Gated on payload.ThreadID, so a non-chat job is byte-identical. We pass the
+	// already-fetched (job, payload) so it does not re-read + re-parse the payload.
+	_ = w.postChatThreadResult(ctx, job, payload, agent, cause)
 	if job.State == string(workflow.JobCancelled) {
 		return nil
 	}
@@ -7812,10 +7813,18 @@ func (w jobWorker) postJobResultComment(ctx context.Context, jobID string, agent
 // that mirrors the comment_posted bookkeeping EXACTLY (a retry_queued clears it),
 // so a retried/re-advanced job posts at most once. Every step is best-effort: a
 // chat write failure is recorded and swallowed, never failing the worker.
-func (w jobWorker) postChatThreadResult(ctx context.Context, jobID string, agent runtime.Agent, cause error) error {
-	job, payload, err := daemonWorkerJobPayload(ctx, w.Store, jobID)
-	if err != nil {
-		return err
+//
+// It takes the already-fetched (job, payload) from the caller so the terminal
+// path parses the payload once, not twice.
+func (w jobWorker) postChatThreadResult(ctx context.Context, job db.Job, payload workflow.JobPayload, agent runtime.Agent, cause error) error {
+	// A job PAUSING at awaiting_human is NOT terminal: it returned an
+	// AwaitingHumanError and its answer-driven *continuation* (a separate job that
+	// inherits ThreadID) posts the real result once the human answers. Posting here
+	// would drop a misleading, out-of-order "job result" into the answer thread
+	// BEFORE the human has even answered — corrupting the keystone answer channel.
+	var awaiting workflow.AwaitingHumanError
+	if errors.As(cause, &awaiting) {
+		return nil
 	}
 	threadID := strings.TrimSpace(payload.ThreadID)
 	if threadID == "" {
@@ -7824,7 +7833,7 @@ func (w jobWorker) postChatThreadResult(ctx context.Context, jobID string, agent
 	if job.State == string(workflow.JobCancelled) {
 		return nil
 	}
-	posted, err := w.chatThreadResultPosted(ctx, jobID)
+	posted, err := w.chatThreadResultPosted(ctx, job.ID)
 	if err != nil {
 		return err
 	}

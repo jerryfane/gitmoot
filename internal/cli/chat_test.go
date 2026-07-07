@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -317,6 +318,58 @@ func TestChatTaskDedupes(t *testing.T) {
 	}
 }
 
+// TestChatTaskFailedDispatchDoesNotPoisonDedupe proves a `chat task` whose
+// dispatch FAILS leaves the promotion_request with no promoted_job_id, so an
+// identical retry within the 60s window is NOT refused (finding #534 review): the
+// dedupe counts only promotions that actually produced a job.
+func TestChatTaskFailedDispatchDoesNotPoisonDedupe(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	seedChatAgent(t, store, "codex-b")
+	if code := Run([]string{"chat", "create", "room", "--repo", "owner/repo", "--home", home}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("chat create failed")
+	}
+
+	calls := 0
+	orig := chatTaskDispatch
+	chatTaskDispatch = func(ctx context.Context, store *db.Store, request localAgentDispatchRequest) (localAgentJobOutput, error) {
+		calls++
+		if calls == 1 {
+			return localAgentJobOutput{}, errors.New("checkout origin not ready")
+		}
+		return localAgentJobOutput{JobID: "job-1", State: "queued", Agent: request.Agent, Action: request.Action}, nil
+	}
+	defer func() { chatTaskDispatch = orig }()
+
+	// First attempt: dispatch fails -> exit 1, promotion_request left orphan.
+	var stderr bytes.Buffer
+	if code := Run([]string{"chat", "task", "room", "@codex-b ship it", "--home", home}, &bytes.Buffer{}, &stderr); code != 1 {
+		t.Fatalf("first chat task should fail on dispatch, exit=%d (stderr=%s)", code, stderr.String())
+	}
+	// Identical retry within the window MUST be allowed (the failed attempt did not
+	// produce a job, so it must not poison the dedupe).
+	stderr.Reset()
+	if code := Run([]string{"chat", "task", "room", "@codex-b ship it", "--home", home}, &bytes.Buffer{}, &stderr); code != 0 {
+		t.Fatalf("identical retry after a FAILED dispatch should succeed, exit=%d (stderr=%s)", code, stderr.String())
+	}
+	if calls != 2 {
+		t.Fatalf("dispatch ran %d times, want 2 (retry was allowed)", calls)
+	}
+	// Exactly the retried job is back-linked.
+	thread, _ := store.GetChatThreadBySlug(context.Background(), "owner/repo", "room")
+	msgs, _ := store.ListChatMessages(context.Background(), thread.ID, 0)
+	linked := 0
+	for _, m := range msgs {
+		if m.Kind == db.ChatKindPromotionRequest && m.PromotedJobID == "job-1" {
+			linked++
+		}
+	}
+	if linked != 1 {
+		t.Fatalf("want exactly one promotion_request back-linked to job-1, got %d (msgs=%+v)", linked, msgs)
+	}
+}
+
 func TestChatAnswerRoutesToResume(t *testing.T) {
 	home := t.TempDir()
 	store := openCLIJobStore(t, home)
@@ -336,9 +389,9 @@ func TestChatAnswerRoutesToResume(t *testing.T) {
 
 	var gotJob, gotInstr string
 	orig := chatAnswerResolveEscalation
-	chatAnswerResolveEscalation = func(ctx context.Context, store *db.Store, jobID, instructions string) error {
+	chatAnswerResolveEscalation = func(ctx context.Context, store *db.Store, jobID, instructions string) (bool, error) {
 		gotJob, gotInstr = jobID, instructions
-		return nil
+		return true, nil
 	}
 	defer func() { chatAnswerResolveEscalation = orig }()
 
@@ -359,6 +412,45 @@ func TestChatAnswerRoutesToResume(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("human answer message not recorded, got %+v", msgs)
+	}
+}
+
+// TestChatAnswerAlreadyResolvedRefusesDuplicate proves a second `chat answer` on
+// an already-resolved escalation (the seam reports routed=false) does NOT claim
+// success or append a duplicate human-answer message (finding #534 review).
+func TestChatAnswerAlreadyResolvedRefusesDuplicate(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if code := Run([]string{"chat", "create", "job-thread", "--repo", "owner/repo", "--home", home}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("chat create failed")
+	}
+	thread, _ := store.GetChatThreadBySlug(context.Background(), "owner/repo", "job-thread")
+	if _, err := store.AddChatMessage(context.Background(), db.ChatMessage{
+		ThreadID: thread.ID, AuthorKind: db.ChatAuthorKindSystem, AuthorName: "system",
+		Kind: db.ChatKindSystem, Body: "- q1: which port?",
+		Refs: []db.ChatRef{{Kind: "job", Repo: "owner/repo", ID: "coord-1"}},
+	}); err != nil {
+		t.Fatalf("seed system message: %v", err)
+	}
+
+	orig := chatAnswerResolveEscalation
+	chatAnswerResolveEscalation = func(ctx context.Context, store *db.Store, jobID, instructions string) (bool, error) {
+		return false, nil // already resolved: no pending round to answer
+	}
+	defer func() { chatAnswerResolveEscalation = orig }()
+
+	before, _ := store.ListChatMessages(context.Background(), thread.ID, 0)
+	var stderr bytes.Buffer
+	if code := Run([]string{"chat", "answer", "job-thread", "q1: 8080", "--home", home}, &bytes.Buffer{}, &stderr); code != 1 {
+		t.Fatalf("chat answer on a resolved escalation exit = %d, want 1 (stderr=%s)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no pending question") {
+		t.Fatalf("expected a 'no pending question' error, got: %s", stderr.String())
+	}
+	after, _ := store.ListChatMessages(context.Background(), thread.ID, 0)
+	if len(after) != len(before) {
+		t.Fatalf("a duplicate answer message was recorded: %d -> %d (must be a no-op)", len(before), len(after))
 	}
 }
 
@@ -409,7 +501,11 @@ func TestPostChatThreadResultBackLinksAndIsIdempotent(t *testing.T) {
 	}
 
 	w := jobWorker{Store: store}
-	if err := w.postChatThreadResult(ctx, "job-1", runtime.Agent{Name: "codex-b", Runtime: "shell"}, nil); err != nil {
+	job, jobPayload, err := daemonWorkerJobPayload(ctx, store, "job-1")
+	if err != nil {
+		t.Fatalf("daemonWorkerJobPayload: %v", err)
+	}
+	if err := w.postChatThreadResult(ctx, job, jobPayload, runtime.Agent{Name: "codex-b", Runtime: "shell"}, nil); err != nil {
 		t.Fatalf("postChatThreadResult: %v", err)
 	}
 	msgs, _ := store.ListChatMessages(ctx, thread.ID, 0)
@@ -433,11 +529,69 @@ func TestPostChatThreadResultBackLinksAndIsIdempotent(t *testing.T) {
 	}
 
 	// Idempotent: a second call (retry/re-advance) posts nothing new.
-	if err := w.postChatThreadResult(ctx, "job-1", runtime.Agent{Name: "codex-b", Runtime: "shell"}, nil); err != nil {
+	if err := w.postChatThreadResult(ctx, job, jobPayload, runtime.Agent{Name: "codex-b", Runtime: "shell"}, nil); err != nil {
 		t.Fatalf("postChatThreadResult (2nd): %v", err)
 	}
 	msgs2, _ := store.ListChatMessages(ctx, thread.ID, 0)
 	if len(msgs2) != len(msgs) {
 		t.Fatalf("second post added messages: %d -> %d (must be idempotent)", len(msgs), len(msgs2))
+	}
+}
+
+// TestPostChatThreadResultSkipsAwaitingHumanPause proves a job PAUSING at
+// awaiting_human (cause is an AwaitingHumanError) does NOT post a spurious
+// job_result into its auto-linked answer thread before the human has answered —
+// the answer-driven continuation posts the real result later (finding #534 review).
+func TestPostChatThreadResultSkipsAwaitingHumanPause(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	thread, err := store.CreateChatThread(ctx, db.ChatThread{Slug: "job-thread", Repo: "owner/repo"})
+	if err != nil {
+		t.Fatalf("CreateChatThread: %v", err)
+	}
+	// The ask-gate auto-link posted the questions as a system message and stamped
+	// ThreadID onto the paused coordinator's payload.
+	if _, err := store.AddChatMessage(ctx, db.ChatMessage{
+		ThreadID: thread.ID, AuthorKind: db.ChatAuthorKindSystem, AuthorName: "system",
+		Kind: db.ChatKindSystem, Body: "- q1: which port?",
+		Refs: []db.ChatRef{{Kind: "job", Repo: "owner/repo", ID: "coord-1"}},
+	}); err != nil {
+		t.Fatalf("seed system message: %v", err)
+	}
+	payload := workflow.JobPayload{
+		Repo:     "owner/repo",
+		ThreadID: thread.ID,
+		Result:   &workflow.AgentResult{Decision: "escalated", Summary: "needs a human decision"},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := store.CreateJob(ctx, db.Job{ID: "coord-1", Agent: "planner", Type: "ask", State: "succeeded", Payload: string(encoded)}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	before, _ := store.ListChatMessages(ctx, thread.ID, 0)
+	w := jobWorker{Store: store}
+	job, jobPayload, err := daemonWorkerJobPayload(ctx, store, "coord-1")
+	if err != nil {
+		t.Fatalf("daemonWorkerJobPayload: %v", err)
+	}
+	// The pause propagates an AwaitingHumanError as the cause into the terminal
+	// comment/back-link path; postChatThreadResult must treat it as non-terminal.
+	if err := w.postChatThreadResult(ctx, job, jobPayload, runtime.Agent{Name: "planner", Runtime: "shell"},
+		workflow.AwaitingHumanError{Reason: "1 human question(s) awaiting an answer"}); err != nil {
+		t.Fatalf("postChatThreadResult: %v", err)
+	}
+	after, _ := store.ListChatMessages(ctx, thread.ID, 0)
+	if len(after) != len(before) {
+		t.Fatalf("awaiting_human pause posted a message: %d -> %d (must skip)", len(before), len(after))
+	}
+	for _, m := range after {
+		if m.Kind == db.ChatKindJobResult {
+			t.Fatalf("a job_result was posted on the awaiting_human pause: %+v", m)
+		}
 	}
 }

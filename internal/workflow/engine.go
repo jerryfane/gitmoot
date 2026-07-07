@@ -5819,6 +5819,31 @@ func (e Engine) escalationResolved(ctx context.Context, coordinatorJobID string)
 	return !open, nil
 }
 
+// EscalationPending reports whether coordinatorJobID has an UNRESOLVED human
+// escalation round right now: a round was requested and not yet
+// answered/aborted/TTL-finalized. It is the read-side companion to
+// ResolveEscalation, whose already-resolved branch is a silent idempotent no-op.
+// A caller like `chat answer` checks this first so it does not report a false
+// success (and record a duplicate answer message) when the round was already
+// resolved. Returns false when the job never had an escalation at all.
+func (e Engine) EscalationPending(ctx context.Context, coordinatorJobID string) (bool, error) {
+	if err := e.validate(); err != nil {
+		return false, err
+	}
+	_, exists, err := e.loadEscalation(ctx, coordinatorJobID)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	resolved, err := e.escalationResolved(ctx, coordinatorJobID)
+	if err != nil {
+		return false, err
+	}
+	return !resolved, nil
+}
+
 // ResumeDecision is one of the three human resume verbs for a paused tree (#340).
 type ResumeDecision string
 
