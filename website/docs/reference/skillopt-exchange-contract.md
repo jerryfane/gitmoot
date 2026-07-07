@@ -494,8 +494,13 @@ supplies the question set so a lesson recovers the question's own wording (the
 verdicts table stores only ids); `--run <id>` (repeatable) restricts to specific
 runs; `--no-passes` drops the stable-pass traits. There is **no daemon or
 automatic path** — writes are CLI-explicit only, mirroring the `skillopt synth`
-approval gate, and re-applying is idempotent (a deterministic per-template
-synthetic run, upserted in place).
+approval gate, and re-applying is idempotent: `--apply` is a **full replace** of
+a deterministic per-template synthetic run (its prior events are cleared and
+rewritten), so a shrinking lesson set — re-running with `--no-passes`, a narrower
+`--run` filter, or no lessons at all — removes the stale events rather than
+leaving them to feed the optimizer. The synthetic events carry no fabricated
+pairwise preference (neutral tie group, no winner): the lesson lives entirely in
+`required_improvements`/`useful_traits`.
 
 ### Promotion policy + notifications (off by default)
 

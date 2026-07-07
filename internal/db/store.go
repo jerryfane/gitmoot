@@ -5044,6 +5044,35 @@ func (s *Store) UpsertRankedFeedbackEvent(ctx context.Context, event RankedFeedb
 	return err
 }
 
+// ClearEvalRunFeedback deletes all review items, review options, feedback
+// events, and ranked feedback events attached to a run, leaving the eval_runs
+// row itself intact. It exists so a synthetic/derived run (e.g. the #527
+// binary-lessons run) can be rewritten as an atomic FULL REPLACE rather than an
+// accumulating upsert: without it, shrinking the derived lesson set would leave
+// stale rows behind and break the documented idempotency guarantee.
+func (s *Store) ClearEvalRunFeedback(ctx context.Context, runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return errors.New("run id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`DELETE FROM ranked_feedback_events WHERE run_id = ?`,
+		`DELETE FROM feedback_events WHERE run_id = ?`,
+		`DELETE FROM eval_review_options WHERE run_id = ?`,
+		`DELETE FROM eval_review_items WHERE run_id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt, runID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) validateRankedFeedbackEventOptions(ctx context.Context, event RankedFeedbackEvent) error {
 	run, err := s.GetEvalRun(ctx, event.RunID)
 	if err != nil {

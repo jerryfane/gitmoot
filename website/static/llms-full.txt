@@ -9293,8 +9293,13 @@ contract change**. `--set <file>` supplies the question set so lessons recover t
 question wording (the verdicts table stores only ids); `--run <id>` (repeatable)
 restricts to specific runs; `--no-passes` drops the stable-pass traits. There is
 **no daemon or automatic path** — writes are CLI-explicit only, mirroring the
-`skillopt synth` approval gate, and re-applying is idempotent (a deterministic
-per-template synthetic run, upserted in place).
+`skillopt synth` approval gate, and re-applying is idempotent: `--apply` is a
+**full replace** of a deterministic per-template synthetic run (its prior events
+are cleared and rewritten), so a shrinking lesson set — e.g. re-running with
+`--no-passes`, a narrower `--run` filter, or no lessons at all — removes the
+stale events rather than leaving them to feed the optimizer. The synthetic
+events carry no fabricated pairwise preference (neutral tie group, no winner):
+the lesson lives entirely in `required_improvements`/`useful_traits`.
 
 `skillopt pairwise import <packet-dir>` ingests a **blinded paired-review
 packet** produced by the gitmoot-skillopt fork (the `pairwise-review.json`

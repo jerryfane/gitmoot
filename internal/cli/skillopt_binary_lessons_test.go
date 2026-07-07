@@ -206,6 +206,135 @@ func TestSkillOptBinaryLessonsApplyWritesConsumableEvents(t *testing.T) {
 	}
 }
 
+// TestSkillOptBinaryLessonsApplyIsFullReplace proves --apply is a full replace,
+// not an accumulating upsert: re-applying with --no-passes drops the stable-pass
+// event, and re-applying when the derived set is empty clears every prior event.
+// Without the fix, stale events would keep feeding the optimizer (findings #1/#4).
+func TestSkillOptBinaryLessonsApplyIsFullReplace(t *testing.T) {
+	home := t.TempDir()
+	seedBinaryLessonsHome(t, home)
+	setPath := writeBinaryFixture(t, home, "set.yaml", binaryLessonsSetYAML)
+
+	// First apply: full set = 5 events (1 flip + 3 stable-fail + 1 stable-pass).
+	var out, errBuf bytes.Buffer
+	code := Run([]string{"skillopt", "binary", "lessons", "--home", home, "--template", "planner", "--set", setPath, "--apply", "--json"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("apply exit=%d stderr=%s", code, errBuf.String())
+	}
+	if events := readRankedFeedbackAcrossRuns(t, home, "planner"); len(events) != 5 {
+		t.Fatalf("first apply events = %d, want 5", len(events))
+	}
+
+	// Re-apply with --no-passes: the stable-pass q_pkg trait must be REMOVED, not
+	// left behind. Expect 4 events and no q:q_pkg item id.
+	out.Reset()
+	errBuf.Reset()
+	code = Run([]string{"skillopt", "binary", "lessons", "--home", home, "--template", "planner", "--set", setPath, "--no-passes", "--apply", "--json"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("no-passes apply exit=%d stderr=%s", code, errBuf.String())
+	}
+	events := readRankedFeedbackAcrossRuns(t, home, "planner")
+	if len(events) != 4 {
+		t.Fatalf("no-passes apply events = %d, want 4 (stale stable-pass must be removed)", len(events))
+	}
+	for _, e := range events {
+		if e.ItemID == "q:q_pkg" {
+			t.Fatalf("stale stable-pass event q:q_pkg survived a --no-passes re-apply: %+v", e)
+		}
+	}
+
+	// Re-apply restricted to a run set that yields NO lessons: everything clears.
+	out.Reset()
+	errBuf.Reset()
+	code = Run([]string{"skillopt", "binary", "lessons", "--home", home, "--template", "planner", "--set", setPath, "--run", "does-not-exist", "--apply", "--json"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("empty apply exit=%d stderr=%s", code, errBuf.String())
+	}
+	if again := readRankedFeedbackAcrossRuns(t, home, "planner"); len(again) != 0 {
+		t.Fatalf("empty-set apply left %d events, want 0 (must clear stale events)", len(again))
+	}
+}
+
+// TestSkillOptBinaryLessonsApplyDerivesNoPairwisePreference proves the synthetic
+// events carry no fabricated candidate>champion pairwise win: candidate/champion
+// are placeholder labels, so a derived preference would be meaningless (finding #3).
+func TestSkillOptBinaryLessonsApplyDerivesNoPairwisePreference(t *testing.T) {
+	home := t.TempDir()
+	seedBinaryLessonsHome(t, home)
+	setPath := writeBinaryFixture(t, home, "set.yaml", binaryLessonsSetYAML)
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{"skillopt", "binary", "lessons", "--home", home, "--template", "planner", "--set", setPath, "--apply", "--json"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("apply exit=%d stderr=%s", code, errBuf.String())
+	}
+
+	paths := config.PathsForHome(home)
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	prefs, err := store.ListPairwisePreferences(context.Background(), "binary-lessons:planner")
+	if err != nil {
+		t.Fatalf("ListPairwisePreferences: %v", err)
+	}
+	if len(prefs) != 0 {
+		t.Fatalf("synthetic run derived %d pairwise preferences, want 0: %+v", len(prefs), prefs)
+	}
+}
+
+// TestSkillOptBinaryLessonsApplyExportsCleanly proves the documented optimizer
+// path `skillopt export --run binary-lessons:<template>` succeeds: the synthetic
+// options carry no phantom artifact ids that would fail artifact loading (finding #2).
+func TestSkillOptBinaryLessonsApplyExportsCleanly(t *testing.T) {
+	home := t.TempDir()
+	seedBinaryLessonsHome(t, home)
+	setPath := writeBinaryFixture(t, home, "set.yaml", binaryLessonsSetYAML)
+
+	// Export resolves the template by reference, so the planner template must exist.
+	paths := config.PathsForHome(home)
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.UpsertAgentTemplate(context.Background(), db.AgentTemplate{
+		ID:             "planner",
+		Name:           "Planner",
+		SourceRepo:     "jerryfane/gitmoot",
+		SourceRef:      "main",
+		SourcePath:     "skills/gitmoot/agent-templates/planner.md",
+		ResolvedCommit: "deadbeef",
+		Content:        "Plan carefully.\n",
+	}); err != nil {
+		store.Close()
+		t.Fatalf("UpsertAgentTemplate: %v", err)
+	}
+	store.Close()
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{"skillopt", "binary", "lessons", "--home", home, "--template", "planner", "--set", setPath, "--apply", "--json"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("apply exit=%d stderr=%s", code, errBuf.String())
+	}
+
+	store, err = db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open (export): %v", err)
+	}
+	defer store.Close()
+	pkg, err := skillopt.ExportTrainingPackage(context.Background(), store, "binary-lessons:planner")
+	if err != nil {
+		t.Fatalf("ExportTrainingPackage over synthetic run failed (phantom artifacts?): %v", err)
+	}
+	if len(pkg.RankedFeedbackEvents) != 5 {
+		t.Fatalf("exported ranked feedback events = %d, want 5", len(pkg.RankedFeedbackEvents))
+	}
+	if len(pkg.PairwisePreferences) != 0 {
+		t.Fatalf("exported pairwise preferences = %d, want 0", len(pkg.PairwisePreferences))
+	}
+}
+
 func assertNoBinaryLessonEvents(t *testing.T, home, template string) {
 	t.Helper()
 	if events := readRankedFeedbackAcrossRuns(t, home, template); len(events) != 0 {

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -313,7 +315,8 @@ func runSkillOptBinaryShow(args []string, stdout, stderr io.Writer) int {
 
 // binaryLessonsRunID is the deterministic id of the synthetic eval run that
 // --apply writes the derived lessons into. It is namespaced per template so
-// re-applying overwrites the same run's events in place (idempotent).
+// re-applying replaces the same run's events wholesale (idempotent full replace,
+// so a shrinking lesson set removes stale events).
 func binaryLessonsRunID(templateID string) string {
 	return "binary-lessons:" + strings.TrimSpace(templateID)
 }
@@ -434,9 +437,14 @@ func runSkillOptBinaryLessons(args []string, stdout, stderr io.Writer) int {
 		}
 		lessons = skillopt.DeriveBinaryLessons(groups, questionText, opts)
 
-		if !*apply || len(lessons) == 0 {
+		if !*apply {
 			return nil
 		}
+		// --apply is a FULL REPLACE, not an accumulating upsert: writeBinaryLessonEvents
+		// clears the synthetic run's prior events before rewriting the current set, so a
+		// shrinking lesson set (e.g. re-running with --no-passes or a narrower --run
+		// filter) removes stale events. We therefore run it even when the current set is
+		// empty — an early return there would strand previously-written events.
 		appliedRunID = binaryLessonsRunID(*template)
 		if err := writeBinaryLessonEvents(ctx, store, strings.TrimSpace(*template), appliedRunID, lessons); err != nil {
 			return err
@@ -473,13 +481,24 @@ func runSkillOptBinaryLessons(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// writeBinaryLessonEvents registers a synthetic per-template lessons run (once)
-// and, for each lesson, a two-option review item plus a RankedFeedbackEvent
-// carrying the lesson text. Negative lessons (flips, stable failures) go into
-// required_improvements (a flat list the rubric inducer grounds as negative
-// aspects); stable-pass traits go into useful_traits keyed by a known option
-// label. Everything is upserted with deterministic ids so re-applying is
-// idempotent.
+// writeBinaryLessonEvents rewrites a synthetic per-template lessons run as a
+// FULL REPLACE: it (re)registers the run, clears any events from a prior apply,
+// and then for each lesson writes a two-option review item plus a
+// RankedFeedbackEvent carrying the lesson text. Negative lessons (flips, stable
+// failures) go into required_improvements (a flat list the rubric inducer grounds
+// as negative aspects); stable-pass traits go into useful_traits keyed by a known
+// option label. Clearing first (rather than upserting in place) means a shrinking
+// lesson set removes stale events, so re-applying is genuinely idempotent for the
+// derived set — including the empty-set case, which leaves the run with no events.
+//
+// The `candidate`/`champion` option labels are fixed placeholders, not real
+// versions: the lesson lives entirely in useful_traits/required_improvements.
+// So each event is written as a NEUTRAL single tie group with no winner, which
+// derives ZERO pairwise preference (a fabricated `candidate > champion` win would
+// be meaningless — neither placeholder actually won). Each option is backed by a
+// real (if empty) eval_artifacts row so `skillopt export --run
+// binary-lessons:<template>` resolves every artifact ref instead of erroring on a
+// phantom id (the store requires a non-empty option artifact id).
 func writeBinaryLessonEvents(ctx context.Context, store *db.Store, templateID, runID string, lessons []skillopt.BinaryLesson) error {
 	if err := store.UpsertEvalRun(ctx, db.EvalRun{
 		ID:           runID,
@@ -491,31 +510,50 @@ func writeBinaryLessonEvents(ctx context.Context, store *db.Store, templateID, r
 	}); err != nil {
 		return err
 	}
+	// Full replace: drop the previous apply's items/options/events before rewriting.
+	if err := store.ClearEvalRunFeedback(ctx, runID); err != nil {
+		return err
+	}
 	for _, lesson := range lessons {
 		itemID := "q:" + lesson.QuestionID
 		if err := store.UpsertEvalReviewItem(ctx, db.EvalReviewItem{RunID: runID, ItemID: itemID, Title: lesson.QuestionID}); err != nil {
 			return err
 		}
 		for _, label := range []string{"candidate", "champion"} {
+			artifactID := "binary-lessons/" + itemID + "/" + label
+			// Persist a deterministic, empty synthetic artifact row so export's
+			// GetEvalArtifact resolves the option's artifact id. The row is metadata
+			// only (no blob is fetched during export); the hash is a stable digest of
+			// the id so re-applying is idempotent.
+			digest := sha256.Sum256([]byte(artifactID))
+			if err := store.UpsertEvalArtifact(ctx, db.EvalArtifact{
+				ID:        artifactID,
+				Hash:      hex.EncodeToString(digest[:]),
+				MediaType: "text/plain",
+				SizeBytes: 0,
+				Driver:    "text",
+			}); err != nil {
+				return err
+			}
 			if err := store.UpsertEvalReviewOption(ctx, db.EvalReviewOption{
 				RunID:      runID,
 				ItemID:     itemID,
 				Label:      label,
 				Role:       "option",
-				ArtifactID: "binary-lessons/" + itemID + "/" + label,
+				ArtifactID: artifactID,
 			}); err != nil {
 				return err
 			}
 		}
 		event := db.RankedFeedbackEvent{
-			ID:          runID + ":" + itemID,
-			RunID:       runID,
-			ItemID:      itemID,
-			RankingJSON: `["candidate","champion"]`,
-			Winner:      "candidate",
-			Reviewer:    binaryLessonsReviewer,
-			Source:      binaryLessonsSource,
-			Reasoning:   lesson.Text,
+			ID:            runID + ":" + itemID,
+			RunID:         runID,
+			ItemID:        itemID,
+			RankingJSON:   `["candidate","champion"]`,
+			TieGroupsJSON: `[["candidate","champion"]]`,
+			Reviewer:      binaryLessonsReviewer,
+			Source:        binaryLessonsSource,
+			Reasoning:     lesson.Text,
 		}
 		if lesson.Sign == skillopt.AspectSignPositive {
 			encoded, err := json.Marshal(map[string][]string{"candidate": {lesson.Trait}})
