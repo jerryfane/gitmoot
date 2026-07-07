@@ -170,6 +170,234 @@ func TestHighRiskAllLensesApproveSatisfiesQuorum(t *testing.T) {
 	}
 }
 
+// TestHighRiskChangesRequestedLensFailsQuorum pins the #650 review fix: a lens
+// that returns `changes_requested` (a valid "real issue, not fatal" reviewer
+// decision that maps to a SUCCEEDED job state) must NOT count as an approving
+// quorum vote. The quorum stays unmet and the shared task blocks — a
+// changes-requested lens can never clear the high-risk gate on a succeeded-state
+// short-circuit.
+func TestHighRiskChangesRequestedLensFailsQuorum(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	engine.RiskTiersEnabled = true
+
+	if err := engine.HandlePullRequestOpened(ctx, highRiskEvent()); err != nil {
+		t.Fatalf("HandlePullRequestOpened returned error: %v", err)
+	}
+	coordID := "review-coordinator/task-7/review-1"
+	correctnessID := coordID + "/delegation/" + LensCorrectness
+	securityID := coordID + "/delegation/" + LensSecurity
+
+	// Correctness approves.
+	completeDelegationChild(t, store, correctnessID, JobSucceeded, AgentResult{Decision: "approved", Summary: "ok"})
+	if err := engine.AdvanceJob(ctx, correctnessID); err != nil {
+		t.Fatalf("AdvanceJob(correctness) returned error: %v", err)
+	}
+	// Security asks for changes (a SUCCEEDED job state per stateForDecision).
+	completeDelegationChild(t, store, securityID, stateForDecision("changes_requested"), AgentResult{
+		Decision: "changes_requested",
+		Summary:  "please add input validation",
+	})
+	err := engine.AdvanceJob(ctx, securityID)
+
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("AdvanceJob(security) error = %v, want BlockedError (quorum unmet)", err)
+	}
+	if !strings.Contains(blocked.Reason, "quorum") {
+		t.Fatalf("block reason = %q, want quorum-failure reason", blocked.Reason)
+	}
+	assertTaskState(t, store, "task-7", TaskBlocked)
+	if jobExists(t, store, delegationContinuationID(coordID)) {
+		t.Fatal("an unmet quorum must NOT enqueue a coordinator continuation")
+	}
+}
+
+// TestHighRiskCriticalFindingNotPreNormalizedBlocks pins that a lens which reports
+// a CRITICAL refutation in AgentResult.Findings but leaves its OWN decision at
+// `approved` still fails the quorum: the engine wires SynthesizeLensDecision into
+// the lens completion path and normalizes the approving decision to `blocked`, so
+// a critical finding can never be rubber-stamped by a reviewer that forgot to
+// self-normalize.
+func TestHighRiskCriticalFindingNotPreNormalizedBlocks(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	engine.RiskTiersEnabled = true
+
+	if err := engine.HandlePullRequestOpened(ctx, highRiskEvent()); err != nil {
+		t.Fatalf("HandlePullRequestOpened returned error: %v", err)
+	}
+	coordID := "review-coordinator/task-7/review-1"
+	correctnessID := coordID + "/delegation/" + LensCorrectness
+	securityID := coordID + "/delegation/" + LensSecurity
+
+	completeDelegationChild(t, store, correctnessID, JobSucceeded, AgentResult{Decision: "approved", Summary: "ok"})
+	if err := engine.AdvanceJob(ctx, correctnessID); err != nil {
+		t.Fatalf("AdvanceJob(correctness) returned error: %v", err)
+	}
+	// Security leaves its decision at APPROVED but reports a critical refutation.
+	critical, _ := json.Marshal(LensFinding{
+		Lens: LensSecurity, Refuted: true, Severity: SeverityCritical, Confidence: 0.9, Evidence: "auth bypass at session.go:41",
+	})
+	completeDelegationChild(t, store, securityID, JobSucceeded, AgentResult{
+		Decision: "approved",
+		Summary:  "looks fine",
+		Findings: []json.RawMessage{critical},
+	})
+	err := engine.AdvanceJob(ctx, securityID)
+
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("AdvanceJob(security) error = %v, want BlockedError (critical refutation normalized)", err)
+	}
+	assertTaskState(t, store, "task-7", TaskBlocked)
+	// The lens decision was normalized to blocked and recorded as an explainable event.
+	normalized := mustJob(t, store, securityID)
+	np, err := unmarshalPayload(normalized.Payload)
+	if err != nil {
+		t.Fatalf("unmarshal security payload: %v", err)
+	}
+	if np.Result == nil || np.Result.Decision != "blocked" {
+		t.Fatalf("normalized security decision = %v, want blocked", np.Result)
+	}
+	if got := countJobEvents(t, store, securityID, "lens_critical_refutation"); got != 1 {
+		t.Fatalf("lens_critical_refutation events = %d, want 1", got)
+	}
+	if jobExists(t, store, delegationContinuationID(coordID)) {
+		t.Fatal("a critical refutation must NOT enqueue a coordinator continuation")
+	}
+}
+
+// TestHighRiskAllApproveReachesMergeWithoutAskCapability pins the #650 review fix
+// for the synthesis continuation: an all-approved high-risk review must reach
+// TaskReadyToMerge even when the LEAD agent carries NO `ask` capability, and the
+// synthesis-only coordinator continuation must be allowed at dispatch instead of
+// blocking the already-approved task. A high-risk review must not impose a
+// non-additive `ask` grant on a normal lead.
+func TestHighRiskAllApproveReachesMergeWithoutAskCapability(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	// Lead has implement + review but deliberately NOT `ask`.
+	seedAgent(t, store, "lead", []string{"implement", "review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	engine.RiskTiersEnabled = true
+
+	if err := engine.HandlePullRequestOpened(ctx, highRiskEvent()); err != nil {
+		t.Fatalf("HandlePullRequestOpened returned error: %v", err)
+	}
+	coordID := "review-coordinator/task-7/review-1"
+	for _, lens := range []string{LensCorrectness, LensSecurity} {
+		id := coordID + "/delegation/" + lens
+		completeDelegationChild(t, store, id, JobSucceeded, AgentResult{Decision: "approved", Summary: "clean"})
+		if err := engine.AdvanceJob(ctx, id); err != nil {
+			t.Fatalf("AdvanceJob(%s) returned error: %v", lens, err)
+		}
+	}
+	// The native merge gate (MergeGate nil) advances the fully-approved review.
+	assertTaskState(t, store, "task-7", TaskReadyToMerge)
+
+	// The synthesis continuation was enqueued on the lead; its dispatch preflight
+	// must NOT block despite the lead lacking `ask`.
+	contID := delegationContinuationID(coordID)
+	cont := mustJob(t, store, contID)
+	if cont.Type != "ask" || cont.Agent != "lead" {
+		t.Fatalf("continuation = type %q agent %q, want ask/lead", cont.Type, cont.Agent)
+	}
+	cp, err := unmarshalPayload(cont.Payload)
+	if err != nil {
+		t.Fatalf("unmarshal continuation payload: %v", err)
+	}
+	if cp.RiskTier != RiskTierHigh {
+		t.Fatalf("continuation risk_tier = %q, want high", cp.RiskTier)
+	}
+	if err := engine.ensureJobExecutorAllowed(ctx, cont, cp, taskRefFromPayload(cp)); err != nil {
+		t.Fatalf("risk-tier synthesis continuation must not block on missing ask capability: %v", err)
+	}
+	assertTaskState(t, store, "task-7", TaskReadyToMerge)
+
+	// Control: a plain `ask` job on the same lead (no risk tier) DOES block, proving
+	// the exemption is what unblocks the synthesis continuation.
+	plainPayload := cp
+	plainPayload.RiskTier = ""
+	plainJob := cont
+	plainJob.ID = "plain-ask/task-7"
+	err = engine.ensureJobExecutorAllowed(ctx, plainJob, plainPayload, taskRefFromPayload(plainPayload))
+	var plainBlocked BlockedError
+	if !errors.As(err, &plainBlocked) {
+		t.Fatalf("a non-risk ask on a lead lacking ask must block; got %v", err)
+	}
+}
+
+// TestHighRiskSeamErrorDefersInsteadOfRoutine pins the #650 review fix for a
+// transient classification failure: when risk tiers are enabled and the
+// PullRequestSignals seam ERRORS (signals unknown), the engine must NOT fall
+// through to the routine single-review fan-out (which a later high classification
+// could no longer supersede) — it defers to the next poll. A subsequent poll whose
+// seam resolves `high` then dispatches the lens quorum cleanly, with no stray
+// routine review job coexisting on the round.
+func TestHighRiskSeamErrorDefersInsteadOfRoutine(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	engine.RiskTiersEnabled = true
+
+	fail := true
+	engine.PullRequestSignals = func(context.Context, string, int) ([]string, []string, error) {
+		if fail {
+			return nil, nil, errors.New("transient GitHub error")
+		}
+		return nil, []string{"internal/auth/session.go"}, nil
+	}
+	event := PullRequestEvent{
+		Repo:              "jerryfane/gitmoot",
+		Branch:            "task-7",
+		PullRequest:       7,
+		TaskID:            "task-7",
+		TaskTitle:         "Auth change",
+		LeadAgent:         "lead",
+		Sender:            "lead",
+		RequiredReviewers: []string{"audit", "sec"},
+		// No event signals -> the seam is consulted (and errors on poll #1).
+	}
+
+	// Poll #1: seam errors -> defer. Neither a routine single review job nor a
+	// high-risk coordinator may exist.
+	if err := engine.HandlePullRequestOpened(ctx, event); err != nil {
+		t.Fatalf("HandlePullRequestOpened (poll 1) returned error: %v", err)
+	}
+	if jobExists(t, store, "review-audit-task-7-review-1") || jobExists(t, store, "review-sec-task-7-review-1") {
+		t.Fatal("a deferred classification must NOT enqueue the routine single review job")
+	}
+	if jobExists(t, store, "review-coordinator/task-7/review-1") {
+		t.Fatal("a deferred classification must NOT dispatch the high-risk coordinator")
+	}
+
+	// Poll #2: seam recovers and resolves high -> clean lens fan-out on review-1.
+	fail = false
+	if err := engine.HandlePullRequestOpened(ctx, event); err != nil {
+		t.Fatalf("HandlePullRequestOpened (poll 2) returned error: %v", err)
+	}
+	if !jobExists(t, store, "review-coordinator/task-7/review-1") {
+		t.Fatal("the recovered high classification must dispatch the coordinator")
+	}
+	if jobExists(t, store, "review-audit-task-7-review-1") || jobExists(t, store, "review-sec-task-7-review-1") {
+		t.Fatal("no routine single review job may coexist with the lens quorum")
+	}
+}
+
 // TestPullRequestSignalsSeamClassifiesInProcess pins the in-process trigger path:
 // when an event carries no risk signals, the engine resolves them through the
 // best-effort PullRequestSignals seam and classifies from those.
