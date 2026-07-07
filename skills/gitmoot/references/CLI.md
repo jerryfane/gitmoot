@@ -1803,6 +1803,16 @@ gitmoot moot <name> "topic" --agents a,b,c --repo owner/repo [--max-messages N] 
   (what it knows / is unsure of / would ask next) as its `gitmoot_result`, which
   arrives via the `job_result` back-link path (the cap never blocks those). Human
   sends and seat conclusions are never gated by the cap.
+- **Daemon relay (sandboxed runtimes)**: a seat runs inside the runtime sandbox, which
+  makes the gitmoot home **read-only**, so a seat's `chat send` cannot write the store
+  directly. The daemon serves a local **unix-socket chat relay** and injects
+  `GITMOOT_CHAT_RELAY` (socket path) + `GITMOOT_CHAT_RELAY_AUTH` (a per-seat token,
+  bound to the seat's agent + thread) into the seat's runtime subprocess; `chat send` /
+  `chat wait` route to the (unsandboxed) daemon, which does the actual store write/read.
+  The home stays read-only — only the daemon writes. A human/CLI without those env vars
+  set takes the byte-identical direct-store path. Codex seats are additionally dispatched
+  `--sandbox workspace-write` with `network_access=true` (the only substrate that can
+  reach the socket; the home is still outside workspace-write's writable roots).
 - **Concurrency requirement**: seats are top-level read-only same-repo jobs, so they
   converse concurrently **only** under the **pool scheduler with ≥2 workers** (start
   the daemon with `--parallel N`, or set `[daemon] parallel = N`; a per-repo

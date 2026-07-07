@@ -203,6 +203,20 @@ the thread by running `chat send` / `chat wait` as subprocesses. Because message
 are rows (free), the compute cost is exactly **one job per seat**, no matter how many
 messages they exchange.
 
+:::note Seats write through the daemon relay (sandboxed runtimes)
+A seat runs inside the runtime sandbox, which makes the gitmoot home **read-only**,
+so a seat's `chat send` cannot write the chat store directly. The daemon therefore
+serves a local **unix-socket chat relay**: for a moot seat it injects
+`GITMOOT_CHAT_RELAY` (the socket path) + `GITMOOT_CHAT_RELAY_AUTH` (a per-seat token)
+into the seat's runtime subprocess, and `chat send` / `chat wait` route the operation
+to the (unsandboxed) daemon, which performs the actual store write/read and returns
+the result. The home stays read-only — only the daemon writes. A human or CLI without
+those env vars set takes the byte-identical direct-store path. Codex seats are
+additionally dispatched `--sandbox workspace-write` with `network_access=true` (the
+only substrate that can reach the socket); the gitmoot home is still outside
+workspace-write's writable roots, so the read-only-home invariant holds.
+:::
+
 ```sh
 gitmoot moot paper-review "compare protocol options" \
   --agents alice,bob,researcher --repo owner/repo
