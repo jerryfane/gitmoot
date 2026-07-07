@@ -381,6 +381,27 @@ subscribe`, and at implement-job dispatch with an actionable message. Set
 `go`/`git`/`gh`), or `--policy workspace-write` for edits-only (Bash stays
 blocked). `read-only`/`ask`/`review` agents are unaffected.
 
+`agent subscribe` accepts `--preset-delivery full|referenced|auto` (default
+`full`), and `agent update <name> --preset-delivery <mode>` flips it in place on
+an already-registered agent. The mode is a sticky per-agent preference:
+re-running `agent subscribe` on an existing agent WITHOUT `--preset-delivery`
+(e.g. to refresh its session/repo) preserves the stored mode; only brand-new
+agents default to `full`. It controls how the agent's installed preset
+(template) prompt is delivered on each job:
+
+| mode | behavior |
+|---|---|
+| `full` (default) | always inline the full preset prompt every job — the pre-existing behavior, byte-identical |
+| `referenced` | send a short "use your installed `<preset>` preset (commit `<c>`)" reference instead of the whole body, but only when Gitmoot has recorded that the exact resumed session already loaded the same preset at the same commit; any doubt (a new / `last` / fresh session, an unknown session, or a changed commit) falls back to full |
+| `auto` | like `referenced`, and additionally only when the runtime persists sessions (`codex`/`claude`); `shell`/`kimi`/custom always send full |
+
+The optimization is correctness-first and additive: the job payload **always**
+snapshots the exact preset id, resolved commit, and content regardless of mode,
+so auditability and retry determinism are unchanged, and a preset commit change
+invalidates the recorded loaded-state so the next job re-sends the full preset.
+Leave it at `full` unless you repeatedly resume a stable persisted session and
+want to save preset tokens.
+
 `--runtime` accepts `codex`, `claude`, `kimi`, or `kimi-cli`. Kimi Code is a
 first-class runtime adapter alongside Codex and Claude Code; `kimi` targets the
 current Kimi Code CLI (stream-json output) while `kimi-cli` is the opt-in

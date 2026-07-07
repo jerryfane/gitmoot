@@ -431,6 +431,27 @@ subscribe`, and at implement-job dispatch with an actionable message. Set
 `go`/`git`/`gh`), or `--policy workspace-write` for edits-only (Bash stays
 blocked). See `references/SAFETY.md` for the full mapping and rationale.
 
+`agent subscribe` accepts `--preset-delivery full|referenced|auto` (default
+`full`) and `agent update <name> --preset-delivery <mode>` flips it in place on
+an already-registered agent. The mode is a sticky per-agent preference:
+re-running `agent subscribe` on an existing agent WITHOUT `--preset-delivery`
+(e.g. to refresh its session/repo) preserves the stored mode; only brand-new
+agents default to `full`. It controls how the agent's installed preset
+(template) prompt is delivered on each job:
+
+| mode | behavior |
+|---|---|
+| `full` (default) | always inline the full preset prompt every job — the pre-existing behavior, byte-identical |
+| `referenced` | send a short "use your installed `<preset>` preset (commit `<c>`)" reference INSTEAD of the whole body, but only when Gitmoot has recorded that the exact resumed session already loaded the same preset at the same commit; any doubt (new/`last`/fresh session, unknown session, changed commit) falls back to full |
+| `auto` | like `referenced`, and ADDITIONALLY only when the runtime persists sessions (`codex`/`claude`); `shell`/`kimi`/custom always send full |
+
+The optimization is correctness-first and additive: the job payload **always**
+snapshots the exact preset id, resolved commit, and content regardless of mode
+(so auditability and retry determinism are unchanged), and a preset commit change
+invalidates the recorded loaded-state so the next job re-sends the full preset.
+Leave it at `full` unless you are resuming a stable persisted session repeatedly
+and want to save preset tokens.
+
 Subscribe an existing runtime session:
 
 ```sh
