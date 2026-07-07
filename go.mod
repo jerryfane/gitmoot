@@ -42,3 +42,10 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+// TEMPORARY dev wiring for the v1.6 Pipelines bridge (#708): point at the local
+// dashboard v16 worktree (feat/39-pipelines-v16), which defines PipelineDetail /
+// PipelineRunHistoryEntry / PipelineStageMark / ErrPipelineNotFound and the new
+// PipelineStage.Retry field. The lead swaps this to the merged pseudo-version
+// before the PR opens.
+replace github.com/jerryfane/gitmoot-dashboard => /root/gitmoot-dashboard-wt/v16

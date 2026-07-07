@@ -396,3 +396,293 @@ func TestWebDataSourcePipelineRunDeterministic(t *testing.T) {
 		t.Fatalf("PipelineRun not deterministic:\n first=%+v\nsecond=%+v", first, second)
 	}
 }
+
+// retrySpecYAML declares a linear pipeline whose second stage carries a retry
+// budget, so the spec's Retry field is provably surfaced onto both the declared
+// DAG (PipelineDetail) and a run's merged stage (PipelineRun).
+const retrySpecYAML = `name: bench-suite
+repo: acme/bench
+stages:
+  - id: build
+    cmd: ./build.sh
+  - id: test
+    cmd: ./test.sh
+    needs: [build]
+    retry: 2
+`
+
+// diamondStageRows returns the four diamond stage rows all in one state, in a
+// deliberately non-spec, non-alphabetical order (so a passing spec-order assertion
+// is not an accident of insertion order). RunID is filled in by seedTestRun.
+func diamondStageRows(state string) []db.PipelineRunStage {
+	return []db.PipelineRunStage{
+		{StageID: "publish", State: state},
+		{StageID: "zfetch", State: state},
+		{StageID: "bdedupe", State: state},
+		{StageID: "ascore", State: state},
+	}
+}
+
+// TestWebDataSourcePipelineDetailNeverRun pins the declared-DAG preview for a
+// pipeline that has never run: Declared is the spec DAG in spec order (every stage
+// pending, with cmd/deps merged) and Runs is a non-nil empty slice.
+func TestWebDataSourcePipelineDetailNeverRun(t *testing.T) {
+	home := dashboardTestHome(t)
+	store := openPipelineTestStore(t, home)
+	seedTestPipeline(t, store, db.Pipeline{
+		Name: "listing-refresh", Repo: "jerryfane/noted", SpecYAML: diamondSpecYAML, Enabled: true, Interval: "24h",
+	})
+	store.Close()
+
+	ds := &webDataSource{home: home}
+	detail, err := ds.PipelineDetail(context.Background(), "listing-refresh")
+	if err != nil {
+		t.Fatalf("PipelineDetail: %v", err)
+	}
+	if detail.Name != "listing-refresh" {
+		t.Fatalf("detail.Name = %q, want listing-refresh", detail.Name)
+	}
+	if detail.Runs == nil || len(detail.Runs) != 0 {
+		t.Fatalf("detail.Runs = %+v, want non-nil empty slice (never run)", detail.Runs)
+	}
+	if detail.Declared == nil || len(detail.Declared) != 4 {
+		t.Fatalf("detail.Declared len = %d, want 4 non-nil: %+v", len(detail.Declared), detail.Declared)
+	}
+	// Declared is the spec (topological) order, NOT alphabetical stage_id order.
+	wantOrder := []string{"zfetch", "ascore", "bdedupe", "publish"}
+	for i, want := range wantOrder {
+		if detail.Declared[i].ID != want {
+			t.Fatalf("declared order = %v, want spec order %v",
+				[]string{detail.Declared[0].ID, detail.Declared[1].ID, detail.Declared[2].ID, detail.Declared[3].ID}, wantOrder)
+		}
+		if detail.Declared[i].State != pipeline.StagePending {
+			t.Fatalf("declared %s state = %q, want pending", want, detail.Declared[i].State)
+		}
+	}
+	byID := map[string]dashboard.PipelineStage{}
+	for _, s := range detail.Declared {
+		byID[s.ID] = s
+	}
+	if byID["zfetch"].Cmd != "./scripts/fetch.sh" || len(byID["zfetch"].Deps) != 0 {
+		t.Fatalf("declared zfetch = %+v, want fetch cmd + no deps", byID["zfetch"])
+	}
+	if byID["ascore"].Cmd != `./scripts/score.sh --filter "p<95> && q>1"` {
+		t.Fatalf("declared ascore Cmd = %q, want the verbatim filter cmd", byID["ascore"].Cmd)
+	}
+	if len(byID["ascore"].Deps) != 1 || byID["ascore"].Deps[0] != "zfetch" {
+		t.Fatalf("declared ascore Deps = %+v, want [zfetch]", byID["ascore"].Deps)
+	}
+	if len(byID["publish"].Deps) != 2 || byID["publish"].Deps[0] != "ascore" || byID["publish"].Deps[1] != "bdedupe" {
+		t.Fatalf("declared publish Deps = %+v, want [ascore bdedupe]", byID["publish"].Deps)
+	}
+}
+
+// TestWebDataSourcePipelineDetailHistory pins the run-history projection: runs come
+// back newest-first, each carrying non-nil per-stage marks in spec order, with
+// run-level state/trigger/duration mapped.
+func TestWebDataSourcePipelineDetailHistory(t *testing.T) {
+	home := dashboardTestHome(t)
+	store := openPipelineTestStore(t, home)
+	realHash := pipeline.Hash([]byte(diamondSpecYAML))
+	seedTestPipeline(t, store, db.Pipeline{
+		Name: "listing-refresh", Repo: "jerryfane/noted", SpecYAML: diamondSpecYAML, SpecHash: realHash, Enabled: true,
+	})
+	base := time.UnixMilli(1_751_300_000_000).UTC()
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("prun-hist-%02d", i)
+		started := base.Add(time.Duration(i) * time.Minute)
+		seedTestRun(t, store, db.PipelineRun{
+			ID: id, Pipeline: "listing-refresh", Trigger: "schedule", SpecHash: realHash,
+			State: pipeline.RunSucceeded, StartedAt: started, FinishedAt: started.Add(30 * time.Second),
+		}, diamondStageRows(pipeline.StageSucceeded))
+	}
+	store.Close()
+
+	ds := &webDataSource{home: home}
+	detail, err := ds.PipelineDetail(context.Background(), "listing-refresh")
+	if err != nil {
+		t.Fatalf("PipelineDetail: %v", err)
+	}
+	if len(detail.Runs) != 3 {
+		t.Fatalf("len(Runs) = %d, want 3: %+v", len(detail.Runs), detail.Runs)
+	}
+	// Newest-first (started_at DESC): hist-02, hist-01, hist-00.
+	wantRunOrder := []string{"prun-hist-02", "prun-hist-01", "prun-hist-00"}
+	for i, want := range wantRunOrder {
+		if detail.Runs[i].ID != want {
+			t.Fatalf("run order = %v, want newest-first %v",
+				[]string{detail.Runs[0].ID, detail.Runs[1].ID, detail.Runs[2].ID}, wantRunOrder)
+		}
+	}
+	newest := detail.Runs[0]
+	if newest.Trigger != "schedule" || newest.State != pipeline.RunSucceeded || newest.Duration != 30_000 {
+		t.Fatalf("newest run = %+v, want schedule/succeeded/30000ms", newest)
+	}
+	// Marks are non-nil and in spec order (NOT alphabetical stage_id order).
+	if newest.Stages == nil || len(newest.Stages) != 4 {
+		t.Fatalf("newest run marks = %+v, want 4 non-nil marks", newest.Stages)
+	}
+	wantMarkOrder := []string{"zfetch", "ascore", "bdedupe", "publish"}
+	for i, want := range wantMarkOrder {
+		if newest.Stages[i].ID != want {
+			t.Fatalf("mark order = %v, want spec order %v",
+				[]string{newest.Stages[0].ID, newest.Stages[1].ID, newest.Stages[2].ID, newest.Stages[3].ID}, wantMarkOrder)
+		}
+		if newest.Stages[i].State != pipeline.StageSucceeded {
+			t.Fatalf("mark %s state = %q, want succeeded", want, newest.Stages[i].State)
+		}
+	}
+}
+
+// TestWebDataSourcePipelineDetailMarksOrdering pins the mark-ordering semantics
+// shared with the run-detail path: spec order when the run's SpecHash matches the
+// current spec, and the store's stage_id fallback order on a hash mismatch.
+func TestWebDataSourcePipelineDetailMarksOrdering(t *testing.T) {
+	t.Run("spec order on hash match", func(t *testing.T) {
+		home := dashboardTestHome(t)
+		seedDiamondBlockedRun(t, home, "prun-detail-match", "")
+
+		ds := &webDataSource{home: home}
+		detail, err := ds.PipelineDetail(context.Background(), "listing-refresh")
+		if err != nil {
+			t.Fatalf("PipelineDetail: %v", err)
+		}
+		if len(detail.Runs) != 1 {
+			t.Fatalf("len(Runs) = %d, want 1", len(detail.Runs))
+		}
+		marks := detail.Runs[0].Stages
+		want := []string{"zfetch", "ascore", "bdedupe", "publish"}
+		for i, w := range want {
+			if marks[i].ID != w {
+				t.Fatalf("match marks order = %+v, want spec order %v", marks, want)
+			}
+		}
+		// The blocked stage's outcome comes through on its mark.
+		byID := map[string]string{}
+		for _, m := range marks {
+			byID[m.ID] = m.State
+		}
+		if byID["ascore"] != pipeline.StageBlocked || byID["publish"] != pipeline.StageSkipped {
+			t.Fatalf("mark states = %+v, want ascore blocked + publish skipped", byID)
+		}
+	})
+
+	t.Run("stage_id fallback on hash mismatch", func(t *testing.T) {
+		home := dashboardTestHome(t)
+		seedDiamondBlockedRun(t, home, "prun-detail-stale", "sha256-stale-mismatch")
+
+		ds := &webDataSource{home: home}
+		detail, err := ds.PipelineDetail(context.Background(), "listing-refresh")
+		if err != nil {
+			t.Fatalf("PipelineDetail: %v", err)
+		}
+		if len(detail.Runs) != 1 {
+			t.Fatalf("len(Runs) = %d, want 1", len(detail.Runs))
+		}
+		marks := detail.Runs[0].Stages
+		// stage_id (alphabetical) order: ascore, bdedupe, publish, zfetch.
+		want := []string{"ascore", "bdedupe", "publish", "zfetch"}
+		for i, w := range want {
+			if marks[i].ID != w {
+				t.Fatalf("fallback marks order = %+v, want stage_id order %v", marks, want)
+			}
+		}
+	})
+}
+
+// TestWebDataSourcePipelineDetailRetry pins that the spec's per-stage retry budget
+// propagates to both the declared DAG (PipelineDetail) and a run's merged stage
+// (PipelineRun) under the hash gate, and is absent on a hash mismatch.
+func TestWebDataSourcePipelineDetailRetry(t *testing.T) {
+	home := dashboardTestHome(t)
+	store := openPipelineTestStore(t, home)
+	realHash := pipeline.Hash([]byte(retrySpecYAML))
+	seedTestPipeline(t, store, db.Pipeline{
+		Name: "bench-suite", Repo: "acme/bench", SpecYAML: retrySpecYAML, SpecHash: realHash, Enabled: false,
+	})
+	started := time.UnixMilli(1_751_400_000_000).UTC()
+	seedTestRun(t, store, db.PipelineRun{
+		ID: "prun-bench-0001", Pipeline: "bench-suite", Trigger: "manual", SpecHash: realHash,
+		State: pipeline.RunSucceeded, StartedAt: started, FinishedAt: started.Add(time.Minute),
+	}, []db.PipelineRunStage{
+		{StageID: "build", State: pipeline.StageSucceeded, JobID: "job-build"},
+		{StageID: "test", State: pipeline.StageSucceeded, JobID: "job-test", Attempt: 2},
+	})
+	store.Close()
+
+	ds := &webDataSource{home: home}
+
+	// Declared DAG carries the retry budget.
+	detail, err := ds.PipelineDetail(context.Background(), "bench-suite")
+	if err != nil {
+		t.Fatalf("PipelineDetail: %v", err)
+	}
+	declaredByID := map[string]dashboard.PipelineStage{}
+	for _, s := range detail.Declared {
+		declaredByID[s.ID] = s
+	}
+	if declaredByID["test"].Retry != 2 {
+		t.Fatalf("declared test Retry = %d, want 2", declaredByID["test"].Retry)
+	}
+	if declaredByID["build"].Retry != 0 {
+		t.Fatalf("declared build Retry = %d, want 0 (no retry set)", declaredByID["build"].Retry)
+	}
+
+	// Run detail merges the same retry budget (hash matches).
+	run, err := ds.PipelineRun(context.Background(), "prun-bench-0001")
+	if err != nil {
+		t.Fatalf("PipelineRun: %v", err)
+	}
+	runByID := map[string]dashboard.PipelineStage{}
+	for _, s := range run.Stages {
+		runByID[s.ID] = s
+	}
+	if runByID["test"].Retry != 2 || runByID["test"].Attempt != 2 {
+		t.Fatalf("run test = %+v, want retry 2 / attempt 2", runByID["test"])
+	}
+}
+
+// TestWebDataSourcePipelineDetailNotFound pins the unknown-name sentinel: a missing
+// pipeline maps to dashboard.ErrPipelineNotFound (the API layer serves 404), not an
+// empty 200.
+func TestWebDataSourcePipelineDetailNotFound(t *testing.T) {
+	home := dashboardTestHome(t)
+	ds := &webDataSource{home: home}
+
+	_, err := ds.PipelineDetail(context.Background(), "no-such-pipeline")
+	if err != dashboard.ErrPipelineNotFound {
+		t.Fatalf("PipelineDetail(unknown) err = %v, want dashboard.ErrPipelineNotFound", err)
+	}
+}
+
+// TestWebDataSourcePipelineDetailDeterministic pins byte-stable detail output across
+// calls (the UI polls with a change-signature skip).
+func TestWebDataSourcePipelineDetailDeterministic(t *testing.T) {
+	home := dashboardTestHome(t)
+	store := openPipelineTestStore(t, home)
+	seedTestPipeline(t, store, db.Pipeline{
+		Name: "listing-refresh", Repo: "jerryfane/noted", SpecYAML: diamondSpecYAML, Enabled: true,
+	})
+	base := time.UnixMilli(1_751_500_000_000).UTC()
+	for i := 0; i < 3; i++ {
+		started := base.Add(time.Duration(i) * time.Minute)
+		seedTestRun(t, store, db.PipelineRun{
+			ID: fmt.Sprintf("prun-det-%02d", i), Pipeline: "listing-refresh", Trigger: "schedule",
+			State: pipeline.RunSucceeded, StartedAt: started, FinishedAt: started.Add(30 * time.Second),
+		}, diamondStageRows(pipeline.StageSucceeded))
+	}
+	store.Close()
+
+	ds := &webDataSource{home: home}
+	first, err := ds.PipelineDetail(context.Background(), "listing-refresh")
+	if err != nil {
+		t.Fatalf("PipelineDetail first: %v", err)
+	}
+	second, err := ds.PipelineDetail(context.Background(), "listing-refresh")
+	if err != nil {
+		t.Fatalf("PipelineDetail second: %v", err)
+	}
+	if fmt.Sprintf("%+v", first) != fmt.Sprintf("%+v", second) {
+		t.Fatalf("PipelineDetail not deterministic:\n first=%+v\nsecond=%+v", first, second)
+	}
+}
