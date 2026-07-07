@@ -207,7 +207,12 @@ continuing. For optimizer-phase recovery, use
 `gitmoot skillopt train recover --session <id> [--out-root path] [--json]`,
 which re-imports or repairs the optimizer candidate package and classifies the
 iteration; it does not release the generation lock or rebuild generation
-options.
+options. To generate Autodata-style synthetic review items, use the explicit,
+off-by-default `gitmoot skillopt synth --template <id> --repo owner/repo --weak
+<agent> --strong <agent> [--judge <agent>]`: it keeps only items a strong agent
+beats a weak agent on and a judge deems well-formed, stores them
+`pending_human_approval`, and requires `gitmoot skillopt synth approve <item-id>`
+before an item may be used — nothing runs it automatically.
 
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).

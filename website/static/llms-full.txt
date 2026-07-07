@@ -7635,7 +7635,12 @@ continuing. For optimizer-phase recovery, use
 `gitmoot skillopt train recover --session <id> [--out-root path] [--json]`,
 which re-imports or repairs the optimizer candidate package and classifies the
 iteration; it does not release the generation lock or rebuild generation
-options.
+options. To generate Autodata-style synthetic review items, use the explicit,
+off-by-default `gitmoot skillopt synth --template <id> --repo owner/repo --weak
+<agent> --strong <agent> [--judge <agent>]`: it keeps only items a strong agent
+beats a weak agent on and a judge deems well-formed, stores them
+`pending_human_approval`, and requires `gitmoot skillopt synth approve <item-id>`
+before an item may be used — nothing runs it automatically.
 
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).
@@ -8912,6 +8917,10 @@ gitmoot skillopt candidate promote <version-id>
 gitmoot skillopt candidate reject <version-id> [--reason text]
 gitmoot skillopt gate run --candidate <version-id> [--corpus path] [--replay-command cmd] [--config path] [--json]
 gitmoot skillopt gate history --candidate <version-id> [--json]
+gitmoot skillopt synth --template <id> --repo owner/repo --weak <agent> --strong <agent> [--judge <agent>] [--challenger <agent>] [--max-items N] [--max-rounds-per-item M] [--gap F] [--out dir] [--json]
+gitmoot skillopt synth list [--status pending_human_approval|approved|rejected] [--json]
+gitmoot skillopt synth approve <item-id>
+gitmoot skillopt synth reject <item-id>
 gitmoot skillopt ab <agent> "<prompt>" [--challenger <versionId>] [--pick a|b] [--seed N] [--judge] [--judge-only] [--home path]
 gitmoot skillopt pairwise import <packet-dir> [--packet path] [--secret-map path] [--picks path] [--reviewer name] [--json]
 gitmoot skillopt feedback markdown export --run <run-id> --output .gitmoot/evals/<run-id>
@@ -9051,6 +9060,29 @@ packet plus its secret map and the reviewer's picks), de-blinds it, and stores
 the pairwise-preference feedback events — the import path for Mode B's
 paired-review evidence. The daemon can also import review-issue feedback
 automatically when started with `--watch-skillopt-reviews`.
+
+`skillopt synth --template <id> --repo owner/repo --weak <agent> --strong
+<agent>` is the off-by-default, **explicit opt-in** Autodata-style synthetic
+review-item generator (`#535`). There is NO daemon/auto integration — nothing
+runs it but you. For each of up to `--max-items` (default 3) items it runs a
+loop through the SAME runtime-adapter path the A/B path uses: a **Challenger**
+(the `--challenger` agent, default the strong agent) writes a `{context,
+question, rubric}`; the `--weak` and `--strong` agents each attempt it; a
+`--judge` (default the strong agent) scores both answers against the rubric and
+flags well-formedness. An item is **accepted** only when the strong agent
+meaningfully beats the weak agent (score gap ≥ `--gap`, default 0.20) AND the
+judge confirms the item is well-formed; otherwise the round records a
+diagnostic (`too_easy`, `too_hard`, `strong_failed`, `bad_rubric`, or
+`context_leak`) and the Challenger regenerates with targeted feedback until
+accepted or `--max-rounds-per-item` (default 3) is exhausted. Accepted items are
+written to `--out` (default `<home>/evals/synth`) and stored in the DB with
+status `pending_human_approval`. They are **structurally isolated**: nothing in
+the promotion/training path reads the synth table, so a pending item can never
+affect a promotion. `skillopt synth list [--status ...]` shows them; `skillopt
+synth approve <item-id>` / `skillopt synth reject <item-id>` is the load-bearing
+human gate — only an approved item is cleared for later manual inclusion in a
+review pool. Skipped/rejected candidates are logged with their diagnostic and
+never persisted.
 
 At the manual promote/reject gate, Gitmoot records every judge↔human outcome
 into a local store — all four directions: `agree_accept`, `agree_reject`,
