@@ -44,6 +44,12 @@ type Agent struct {
 	AutonomyPolicy string
 	HealthStatus   string
 	Model          string
+	// PresetDelivery is the agent's prompt preset delivery mode (#33): full
+	// (default), referenced, or auto. Carried in-memory from the stored agents row
+	// so the delivery seam can decide whether to inline the whole preset or send a
+	// short reference. Empty (the default and every construction site that does not
+	// set it) is treated as full, so delivery is byte-identical.
+	PresetDelivery string
 	// SingleUseSession marks an agent whose runtime session exists solely for
 	// the current job (ephemeral delegation workers and per-job temp workers:
 	// the session is started for the job and disposed after it). Adapters whose

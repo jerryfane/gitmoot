@@ -44,6 +44,12 @@ type Agent struct {
 	Capabilities   []string
 	AutonomyPolicy string
 	HealthStatus   string
+	// PresetDelivery is the per-agent prompt preset delivery mode (#33): one of
+	// full (the default and pre-#33 behavior — always inline the whole preset),
+	// referenced, or auto. Backed by the additive agents.preset_delivery column
+	// (DEFAULT 'full'), so every existing row and every agent that never sets it
+	// reads 'full' and behaves byte-identically.
+	PresetDelivery string
 }
 
 type AgentTemplate struct {
@@ -830,8 +836,8 @@ func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, preset_delivery, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			ON CONFLICT(name) DO UPDATE SET
 				role = excluded.role,
 				runtime = excluded.runtime,
@@ -842,8 +848,9 @@ func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
 				capabilities_json = excluded.capabilities_json,
 				autonomy_policy = excluded.autonomy_policy,
 				health_status = excluded.health_status,
+				preset_delivery = excluded.preset_delivery,
 				updated_at = CURRENT_TIMESTAMP`,
-		agent.Name, agent.Role, agent.Runtime, agent.RuntimeRef, agent.RepoScope, agent.TemplateID, agent.Model, string(capabilities), agent.AutonomyPolicy, agent.HealthStatus); err != nil {
+		agent.Name, agent.Role, agent.Runtime, agent.RuntimeRef, agent.RepoScope, agent.TemplateID, agent.Model, string(capabilities), agent.AutonomyPolicy, agent.HealthStatus, normalizePresetDeliveryStored(agent.PresetDelivery)); err != nil {
 		return err
 	}
 	if strings.TrimSpace(agent.RepoScope) != "" {
@@ -865,7 +872,7 @@ func (s *Store) UpdateAgentRuntime(ctx context.Context, name, runtime string) er
 	if runtime != "codex" && runtime != "claude" && runtime != "kimi" {
 		return fmt.Errorf("unknown runtime %q (want codex, claude, or kimi)", runtime)
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status
+	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, preset_delivery
 		FROM agents WHERE name = ?`, name)
 	agent, err := scanAgent(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -902,7 +909,7 @@ func (s *Store) UpdateAgentRuntimeRef(ctx context.Context, name, ref string) err
 }
 
 func (s *Store) GetAgent(ctx context.Context, name string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status
+	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, preset_delivery
 		FROM agents WHERE name = ?`, name)
 	agent, err := scanAgent(row)
 	if err == nil {
@@ -930,11 +937,14 @@ func (s *Store) GetAgent(ctx context.Context, name string) (Agent, error) {
 		Capabilities:   instance.Capabilities,
 		AutonomyPolicy: policy,
 		HealthStatus:   instance.State,
+		// Ephemeral/temp-worker instances have no preset_delivery column; they
+		// always deliver the full preset (#33), matching the 'full' default.
+		PresetDelivery: PresetDeliveryFull,
 	}, nil
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status
+	rows, err := s.db.QueryContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, preset_delivery
 		FROM agents ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -6253,7 +6263,7 @@ type agentScanner interface {
 func scanAgent(scanner agentScanner) (Agent, error) {
 	var agent Agent
 	var capabilities string
-	if err := scanner.Scan(&agent.Name, &agent.Role, &agent.Runtime, &agent.RuntimeRef, &agent.RepoScope, &agent.TemplateID, &agent.Model, &capabilities, &agent.AutonomyPolicy, &agent.HealthStatus); err != nil {
+	if err := scanner.Scan(&agent.Name, &agent.Role, &agent.Runtime, &agent.RuntimeRef, &agent.RepoScope, &agent.TemplateID, &agent.Model, &capabilities, &agent.AutonomyPolicy, &agent.HealthStatus, &agent.PresetDelivery); err != nil {
 		return Agent{}, err
 	}
 	if err := json.Unmarshal([]byte(capabilities), &agent.Capabilities); err != nil {
@@ -7828,5 +7838,26 @@ CREATE TABLE pipeline_run_stages (
 );
 
 CREATE INDEX idx_pipeline_run_stages_run_id ON pipeline_run_stages(run_id);
+	`,
+	// #33 preset prompt delivery modes. Additive-only: the agents column carries a
+	// 'full' DEFAULT so every existing row (and every agent that never opts in)
+	// keeps delivering the whole preset exactly as before. preset_session_state
+	// records, per (runtime, session_id, preset_id, preset_commit), that a resumed
+	// session already received a preset at a specific commit; it stays EMPTY until
+	// an agent set to referenced/auto completes a full delivery, so every existing
+	// DB reads identically. The composite PK is the exact-match key the delivery
+	// decision queries; a preset commit change simply fails to match (and
+	// RecordPresetSessionState overwrites the prior commit row for the tuple).
+	`
+ALTER TABLE agents ADD COLUMN preset_delivery TEXT NOT NULL DEFAULT 'full';
+
+CREATE TABLE preset_session_state (
+	runtime TEXT NOT NULL,
+	session_id TEXT NOT NULL,
+	preset_id TEXT NOT NULL,
+	preset_commit TEXT NOT NULL DEFAULT '',
+	delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (runtime, session_id, preset_id, preset_commit)
+);
 	`,
 }
