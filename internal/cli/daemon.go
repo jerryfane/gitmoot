@@ -421,6 +421,10 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 		// delegation token budget) on this single-repo engine too; fail-safe to the
 		// defaults if the policy cannot load.
 		defaultJobWorker(store, stdout, *home).applyOrchestratePolicy(&engine)
+		// Opt-in risk-tiered adaptive review (#650); off by default so this is a
+		// no-op unless the home config enables it.
+		applyReviewPolicy(&engine, *home)
+		wireReviewRiskSignals(&engine, gh)
 		fmt.Fprintf(stdout, "watching %s every %s\n", repo.FullName(), poll.String())
 		return runSingleRepoSupervisor(ctx, *home, daemon.Daemon{
 			Repo:                   repo,
@@ -6643,6 +6647,11 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, ho
 		// byte-identical. Capture (routing_telemetry rows) is always on and additive.
 		RouterContextEnabled: routerContextEnabled(home),
 	}
+	// Opt-in risk-tiered adaptive review (#650): copy the [review] policy onto the
+	// engine. Off by default (RiskTiersEnabled false), so the review fan-out is
+	// byte-identical unless a home config turns it on.
+	applyReviewPolicy(&engine, home)
+	wireReviewRiskSignals(&engine, gh)
 	if strings.TrimSpace(home) != "" {
 		// Root delegation artifacts under GITMOOT_HOME (alongside worktrees)
 		// rather than inside the repo checkout, so generated briefs stay out of
