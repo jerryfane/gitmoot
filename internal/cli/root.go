@@ -45,6 +45,7 @@ var rootCommands = []command{
 	{name: "skillopt", summary: "export and import SkillOpt packages", run: runSkillOpt},
 	{name: "memory", summary: "inspect and measure agent persistent memory", run: runMemory},
 	{name: "pipeline", summary: "define, run, and manage declarative pipelines", run: runPipeline},
+	{name: "chat", summary: "durable agent chat threads (create, send, inbox)", run: runChat},
 	{name: "router", summary: "inspect execution-grounded routing telemetry (advisory)", run: runRouter},
 }
 

@@ -95,22 +95,27 @@ func (d *webDataSource) PipelineRun(ctx context.Context, id string) (dashboard.P
 			return err
 		}
 
-		// Replicate orderPipelineRunStages: only reorder into spec order and merge
-		// spec-derived cmd/deps when the pipeline still exists, its spec parses, and
-		// its hash matches the run's snapshot. Any weaker condition falls back to the
-		// store's stage_id order with no spec fields (matching the CLI funnel).
-		ordered := stageRows
-		var specByID map[string]pipeline.Stage
+		// Load the pipeline's current spec (repo is a pipeline-level attribute, so it
+		// resolves even on a spec-hash mismatch) then order the stage rows with the
+		// shared spec-order-or-stage_id fallback. specByID is populated only when the
+		// spec applies (parsed + hash match), so spec-derived cmd/deps/retry are merged
+		// under exactly the same gate as the ordering (matching the CLI funnel).
 		var repo string
+		spec, specParsed := pipeline.Spec{}, false
+		var specHash string
 		if rec, found, gerr := store.GetPipeline(ctx, run.Pipeline); gerr == nil && found {
 			repo = rec.Repo
-			spec, lerr := pipeline.Load([]byte(rec.SpecYAML))
-			if lerr == nil && strings.TrimSpace(rec.SpecHash) == strings.TrimSpace(run.SpecHash) {
-				ordered = orderPipelineStagesBySpec(spec, stageRows)
-				specByID = make(map[string]pipeline.Stage, len(spec.Stages))
-				for _, s := range spec.Stages {
-					specByID[s.ID] = s
-				}
+			specHash = rec.SpecHash
+			if loaded, lerr := pipeline.Load([]byte(rec.SpecYAML)); lerr == nil {
+				spec, specParsed = loaded, true
+			}
+		}
+		ordered, specOK := orderRunStages(spec, specParsed, specHash, run.SpecHash, stageRows)
+		var specByID map[string]pipeline.Stage
+		if specOK {
+			specByID = make(map[string]pipeline.Stage, len(spec.Stages))
+			for _, s := range spec.Stages {
+				specByID[s.ID] = s
 			}
 		}
 
@@ -141,6 +146,7 @@ func (d *webDataSource) PipelineRun(ctx context.Context, id string) (dashboard.P
 			}
 			if spec, ok := specByID[row.StageID]; ok {
 				stage.Cmd = spec.Cmd
+				stage.Retry = spec.Retry
 				if len(spec.Needs) > 0 {
 					stage.Deps = append([]string(nil), spec.Needs...)
 				}
@@ -155,16 +161,101 @@ func (d *webDataSource) PipelineRun(ctx context.Context, id string) (dashboard.P
 	return out, nil
 }
 
+// PipelineDetail returns one pipeline's currently declared stage DAG plus its run
+// history (newest-first, capped at 100), each history row carrying its per-stage
+// marks. An unknown name maps to dashboard.ErrPipelineNotFound (the API layer
+// serves that as a 404). The declared DAG is read fail-open from the stored spec
+// (a broken spec yields an empty, non-nil declared list rather than failing the
+// endpoint) with every stage in spec order and state StagePending. Each run's
+// marks are ordered with the SAME spec-order-or-stage_id-fallback semantics as
+// PipelineRun (via orderRunStages), so a run whose snapshot still matches the
+// current spec reads in spec order and a stale/mismatched one falls back to the
+// store's stage_id order. Every slice is non-nil.
+func (d *webDataSource) PipelineDetail(ctx context.Context, name string) (dashboard.PipelineDetail, error) {
+	out := dashboard.PipelineDetail{
+		Name:     name,
+		Declared: []dashboard.PipelineStage{},
+		Runs:     []dashboard.PipelineRunHistoryEntry{},
+	}
+	err := withStore(d.home, func(store *db.Store) error {
+		rec, ok, err := store.GetPipeline(ctx, name)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return dashboard.ErrPipelineNotFound
+		}
+
+		// Declared DAG from the current spec (fail-open: a parse failure leaves the
+		// non-nil empty Declared in place). Every declared stage is StagePending with
+		// its spec-derived cmd/deps/retry — the shape the UI previews for a pipeline
+		// that has never run.
+		spec, specParsed := pipeline.Spec{}, false
+		if loaded, lerr := pipeline.Load([]byte(rec.SpecYAML)); lerr == nil {
+			spec, specParsed = loaded, true
+			out.Declared = make([]dashboard.PipelineStage, 0, len(spec.Stages))
+			for _, s := range spec.Stages {
+				stage := dashboard.PipelineStage{
+					ID:    s.ID,
+					State: pipeline.StagePending,
+					Cmd:   s.Cmd,
+					Retry: s.Retry,
+				}
+				if len(s.Needs) > 0 {
+					stage.Deps = append([]string(nil), s.Needs...)
+				}
+				out.Declared = append(out.Declared, stage)
+			}
+		}
+
+		// Run history: ListPipelineRuns is already newest-first (started_at DESC, id
+		// DESC); cap at 100. Per run, order its stage rows with the shared fallback and
+		// project each to a minimal mark (id + state) for the history matrix.
+		runs, err := store.ListPipelineRuns(ctx, name)
+		if err != nil {
+			return err
+		}
+		if len(runs) > 100 {
+			runs = runs[:100]
+		}
+		out.Runs = make([]dashboard.PipelineRunHistoryEntry, 0, len(runs))
+		for _, run := range runs {
+			stageRows, err := store.ListPipelineRunStages(ctx, run.ID)
+			if err != nil {
+				return err
+			}
+			ordered, _ := orderRunStages(spec, specParsed, rec.SpecHash, run.SpecHash, stageRows)
+			marks := make([]dashboard.PipelineStageMark, 0, len(ordered))
+			for _, row := range ordered {
+				marks = append(marks, dashboard.PipelineStageMark{ID: row.StageID, State: row.State})
+			}
+			started := pipelineTimeMillis(run.StartedAt)
+			finished := pipelineTimeMillis(run.FinishedAt)
+			out.Runs = append(out.Runs, dashboard.PipelineRunHistoryEntry{
+				ID:         run.ID,
+				Trigger:    run.Trigger,
+				State:      run.State,
+				HaltStage:  run.HaltStage,
+				StartedAt:  started,
+				FinishedAt: finished,
+				Duration:   pipelineRunDurationMillis(started, finished),
+				Stages:     marks,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return dashboard.PipelineDetail{}, err
+	}
+	return out, nil
+}
+
 // pipelineRunSummary maps one store run row into its lightweight listing entry.
 // Duration is finished-started in milliseconds, only when both bounds are set (0
 // while a run is still in flight).
 func pipelineRunSummary(run db.PipelineRun) dashboard.PipelineRunSummary {
 	started := pipelineTimeMillis(run.StartedAt)
 	finished := pipelineTimeMillis(run.FinishedAt)
-	var duration int64
-	if started > 0 && finished > started {
-		duration = finished - started
-	}
 	return dashboard.PipelineRunSummary{
 		ID:         run.ID,
 		Trigger:    run.Trigger,
@@ -172,8 +263,19 @@ func pipelineRunSummary(run db.PipelineRun) dashboard.PipelineRunSummary {
 		HaltStage:  run.HaltStage,
 		StartedAt:  started,
 		FinishedAt: finished,
-		Duration:   duration,
+		Duration:   pipelineRunDurationMillis(started, finished),
 	}
+}
+
+// pipelineRunDurationMillis is the v1.5 run-duration rule: finished-started in
+// milliseconds only when both bounds are set and finished is after started (0
+// while a run is still in flight or has no timestamps). Shared by the run-listing
+// summary and the run-history entry so both agree.
+func pipelineRunDurationMillis(started, finished int64) int64 {
+	if started > 0 && finished > started {
+		return finished - started
+	}
+	return 0
 }
 
 // pipelineStageCount returns the number of declared stages in a stored spec,
@@ -185,6 +287,20 @@ func pipelineStageCount(specYAML string) int {
 		return 0
 	}
 	return len(spec.Stages)
+}
+
+// orderRunStages applies the run-detail ordering decision in one place so the
+// full run view (PipelineRun) and the history matrix (PipelineDetail) never
+// diverge. When the current spec parsed and its hash matches the run's snapshot,
+// the rows are reordered into spec (topological) order and specOK is true (the
+// caller may then merge spec-derived cmd/deps/retry). Any weaker condition — no
+// spec, parse failure, or a spec-hash mismatch — keeps the store's stage_id order
+// with specOK false, mirroring orderPipelineRunStages' fallback (the CLI funnel).
+func orderRunStages(spec pipeline.Spec, specParsed bool, specHash, runSpecHash string, rows []db.PipelineRunStage) (ordered []db.PipelineRunStage, specOK bool) {
+	if specParsed && strings.TrimSpace(specHash) == strings.TrimSpace(runSpecHash) {
+		return orderPipelineStagesBySpec(spec, rows), true
+	}
+	return rows, false
 }
 
 // orderPipelineStagesBySpec reorders stage rows into the spec's declared

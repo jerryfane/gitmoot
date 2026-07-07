@@ -175,6 +175,12 @@ type JobRequest struct {
 	// and the dashboard can explain an escalation. Empty (the default) for every
 	// job outside the opt-in risk-tiered path.
 	RiskTier string
+	// ThreadID / ChatMessageID link a job back to the chat message it was
+	// promoted from (#534). Populated only by `chat task` promotion; empty for
+	// every non-chat job, so the stored payload is byte-identical by default. The
+	// daemon terminal back-link posts the result into ThreadID when it is set.
+	ThreadID      string
+	ChatMessageID string
 }
 
 type JobPayload struct {
@@ -226,8 +232,12 @@ type JobPayload struct {
 	SkipNativeReviewFanout bool           `json:"skip_native_review_fanout,omitempty"`
 	Ephemeral              *EphemeralSpec `json:"ephemeral,omitempty"`
 	HumanAnswer            string         `json:"human_answer,omitempty"`
-	RawOutputs             []string       `json:"raw_outputs,omitempty"`
-	Result                 *AgentResult   `json:"result,omitempty"`
+	// ThreadID / ChatMessageID back-link a chat-promoted job (#534) to its origin
+	// message. Additive/omitempty: a non-chat job serializes byte-identically.
+	ThreadID      string       `json:"thread_id,omitempty"`
+	ChatMessageID string       `json:"chat_message_id,omitempty"`
+	RawOutputs    []string     `json:"raw_outputs,omitempty"`
+	Result        *AgentResult `json:"result,omitempty"`
 	// ResultChecks, when non-empty, carries the deterministic binary-checklist
 	// audit FAILURES for this job's parsed result (#526). It is the job-detail
 	// surface the dashboard and `gitmoot job show --json` read. Fully additive
@@ -338,6 +348,8 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		Ephemeral:              request.Ephemeral,
 		HumanAnswer:            request.HumanAnswer,
 		RiskTier:               strings.TrimSpace(request.RiskTier),
+		ThreadID:               strings.TrimSpace(request.ThreadID),
+		ChatMessageID:          strings.TrimSpace(request.ChatMessageID),
 	})
 	if err != nil {
 		return db.Job{}, err
