@@ -489,10 +489,11 @@ func TestResolveSynthAgentNeverCarriesCheckout(t *testing.T) {
 func TestSandboxSynthAgentForcesScratchDir(t *testing.T) {
 	scratch := t.TempDir()
 	agent := runtime.Agent{
-		Name:       "weak-bot",
-		Runtime:    runtime.CodexRuntime,
-		RepoScope:  "acme/widgets",
-		WorkingDir: "/root/gitmoot", // a live checkout — must be overridden
+		Name:           "weak-bot",
+		Runtime:        runtime.CodexRuntime,
+		RepoScope:      "acme/widgets",
+		WorkingDir:     "/root/gitmoot",                        // a live checkout — must be overridden
+		AutonomyPolicy: runtime.AutonomyPolicyDangerFullAccess, // a write grant — must be downgraded
 	}
 	got := sandboxSynthAgent(agent, scratch)
 	if got.WorkingDir != scratch {
@@ -501,9 +502,18 @@ func TestSandboxSynthAgentForcesScratchDir(t *testing.T) {
 	if got.RepoScope != "acme/widgets" {
 		t.Fatalf("RepoScope = %q, want acme/widgets preserved", got.RepoScope)
 	}
+	// #725: the scratch cwd is not a hard guarantee unless the permission grant is
+	// also clamped — a write-permissioned agent could otherwise escape by absolute
+	// path. Every synth delivery must be forced to read-only.
+	if got.AutonomyPolicy != runtime.AutonomyPolicyReadOnly {
+		t.Fatalf("AutonomyPolicy = %q, want read-only downgrade", got.AutonomyPolicy)
+	}
 	// The original agent is not mutated (value copy).
 	if agent.WorkingDir != "/root/gitmoot" {
 		t.Fatalf("original agent mutated: WorkingDir = %q", agent.WorkingDir)
+	}
+	if agent.AutonomyPolicy != runtime.AutonomyPolicyDangerFullAccess {
+		t.Fatalf("original agent mutated: AutonomyPolicy = %q", agent.AutonomyPolicy)
 	}
 }
 

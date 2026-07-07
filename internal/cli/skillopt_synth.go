@@ -512,8 +512,19 @@ func resolveSynthAgent(ctx context.Context, store *db.Store, name, repo string) 
 // guarantees the delivery chdirs into the throwaway scratch and NEVER into a
 // registered repo checkout, no matter what the agent otherwise carries. RepoScope
 // is left intact so the adapter still resolves the correct runtime family.
+//
+// The stored AutonomyPolicy is ALSO forced to read-only. The scratch cwd alone is
+// not a hard guarantee: a synth agent registered with workspace-write or
+// danger-full-access would otherwise launch its adapter (codex --sandbox
+// danger-full-access / claude bypassPermissions) with a permission grant that is
+// not cwd-restricted, letting an agentic CLI that misreads the exercise write
+// files, start servers, and modify a live checkout by ABSOLUTE path — exactly the
+// #725 incident. Downgrading to read-only here (mirroring the hard-verifier
+// sandbox at skillopt_ab.go and cross_family_review.go) removes that escape hatch;
+// a synth delivery is answer-only and never needs write access.
 func sandboxSynthAgent(agent runtime.Agent, scratch string) runtime.Agent {
 	agent.WorkingDir = scratch
+	agent.AutonomyPolicy = runtime.AutonomyPolicyReadOnly
 	return agent
 }
 
