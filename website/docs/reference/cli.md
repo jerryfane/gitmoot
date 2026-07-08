@@ -1440,9 +1440,14 @@ stages:                     # the DAG, keyed by unique id and wired by needs
   - id: score
     cmd: "python score.py data.json"
     needs: [source]         # runs only after source SUCCEEDS
+  - id: triage              # #757: an AGENT stage (exactly one of cmd|agent)
+    agent: reply-triager    #   an existing managed agent, run as a read-only leaf
+    action: ask             #   ask (default) | review — no implement
+    prompt: "Triage the scored data; block if a human is needed."
+    needs: [score]          #   upstream results are prepended to the prompt
   - id: deploy
     cmd: "rclone copy out/ r2:bucket"
-    needs: [score]
+    needs: [triage]
     timeout: 30m            # optional per-stage job timeout
     retry: 2                # optional; re-attempt a FAILED stage up to N times
 ```
@@ -1463,7 +1468,12 @@ gitmoot pipeline remove nightly-sync
 **verbatim** plus a content hash; each run snapshots the hash and executes its
 snapshot, so editing the file later never mutates an in-flight run. It also
 auto-creates one hidden shell runner agent (`pipeline-<name>-runner`) that owns the
-stage jobs — hidden from `agent list` and disposed by `pipeline remove`.
+**shell** stage jobs — hidden from `agent list` and disposed by `pipeline remove`. A
+stage may instead set `agent` + `prompt` (#757) to run a named managed agent on its
+own runtime as a read-only leaf (`ask`/`review`, never `implement`); the agent must
+already exist, its `needs` stages' result summaries are prepended to its prompt, and
+a repo-bound agent stage runs in its own detached read-only worktree so same-repo
+agent stages parallelize without touching the live checkout.
 
 A stage signals its outcome by printing a `gitmoot_result` blob to stdout; the
 advancer folds by the **decision**, never the job's exit state (`changes_requested`

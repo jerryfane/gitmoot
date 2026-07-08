@@ -981,6 +981,35 @@ printf '%s' '{"gitmoot_result":{"decision":"approved","summary":"synced"}}'
 printf '%s' '{"gitmoot_result":{"decision":"blocked","summary":"secret missing","needs":["R2 token"]}}'
 ```
 
+### Agent stages (#757)
+
+A stage may run a **named managed agent** instead of a shell command — set `agent`
+(and a `prompt`) in place of `cmd`. Exactly one of `cmd` or `agent` is required per
+stage. An agent stage runs the agent on its **own** registered runtime (claude /
+codex), as a read-only **leaf**: `action` is `ask` (default) or `review` — never
+`implement` — and its `delegations[]` are stripped like any stage. Use it to put a
+model judgement inline in an otherwise-deterministic flow (e.g. an extract shell
+stage feeding a triage agent stage).
+
+```yaml
+stages:
+  - id: extract
+    cmd: "python extract.py > out.json"
+  - id: triage
+    agent: reply-triager        # create it before the pipeline runs: gitmoot agent create …
+    action: ask                 # ask (default) | review — read-only only
+    prompt: "Triage the extracted replies and flag anything urgent."
+    needs: [extract]
+```
+
+`pipeline add` warns (does not block) when an agent stage names an agent that does
+not exist yet; create it before the stage runs. The
+agent's stage prompt is **prepended with the results (summaries) of its `needs`
+stages** — a clearly-delimited, bounded "Upstream stage results" block — so a
+downstream agent stage acts on upstream output as real dataflow. A repo-bound
+ask/review agent stage runs in its own detached read-only worktree (#739), so
+same-repo agent stages parallelize and never touch the live checkout.
+
 ### Park and resume
 
 The core story is **park-then-resume**. When a stage returns `blocked`, the run

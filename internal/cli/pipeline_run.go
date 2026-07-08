@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jerryfane/gitmoot/internal/db"
+	gitutil "github.com/jerryfane/gitmoot/internal/git"
 	"github.com/jerryfane/gitmoot/internal/pipeline"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/workflow"
@@ -35,8 +37,129 @@ type pipelineStageEnqueuer func(ctx context.Context, request workflow.JobRequest
 func newPipelineStageEnqueuer(store *db.Store, home string) pipelineStageEnqueuer {
 	mailbox := workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(home)}
 	return func(ctx context.Context, request workflow.JobRequest) (db.Job, error) {
-		return mailbox.Enqueue(ctx, request)
+		// #757 read-only isolation: a repo-bound AGENT stage (ask/review) is born
+		// with its OWN detached committed-tip worktree (the #739 shape) so it keys
+		// worktree:<path> instead of the shared repo:<repo>. Same-repo agent stages
+		// then run CONCURRENTLY and never touch the live checkout. Pipeline stage
+		// jobs are enqueued straight through the mailbox (NOT dispatchLocalAgentJob),
+		// so they do not get the born-isolated #739 worktree that background asks do;
+		// the reactive pool-isolation would only kick in on contention and still
+		// leaves one seat on the live checkout. Allocating here closes that gap. The
+		// allocator is FAIL-OPEN (the #739 lesson): it waits at most
+		// ReadOnlyWorktreeDispatchLockWaitBudget for the checkout mutation lock, and
+		// any failure leaves the request unchanged (serialized on the shared checkout)
+		// rather than stalling the pipeline scan loop. Shell stages carry a
+		// RuntimeOverride and are excluded, so their request is byte-identical.
+		request, worktreePath, worktreeErr := allocatePipelineStageReadOnlyWorktree(ctx, store, home, request)
+		job, err := mailbox.Enqueue(ctx, request)
+		if err != nil {
+			// The worktree is created on disk BEFORE Enqueue; a failed Enqueue leaves
+			// no job row, so neither the terminal cleanup nor the daemon reclaim pass
+			// would ever dispose it. Roll it back here (detached from a possibly
+			// cancelled ctx) exactly as the #739 dispatch path does. Enqueue commonly
+			// fails with context.Canceled on daemon shutdown, so BOTH the checkout
+			// lookup AND the removal must run on a WithoutCancel ctx — otherwise the
+			// lookup itself returns context.Canceled -> empty checkout -> the removal
+			// is skipped and the just-created worktree leaks with no recovery path.
+			if worktreePath != "" {
+				rollbackCtx := context.WithoutCancel(ctx)
+				if checkout := pipelineStageCheckoutPath(rollbackCtx, store, request.Repo); checkout != "" {
+					_ = gitutil.Client{Dir: checkout}.RemoveWorktreeForce(rollbackCtx, worktreePath)
+				}
+			}
+			return db.Job{}, err
+		}
+		// Emit the isolation outcome now that the job row exists (events carry a JobID
+		// FK). Allocated → observable worktree:<path> key; a fail-open skip → a loud
+		// event so a lost-parallelism serialize is never silent (#739).
+		if worktreePath != "" {
+			_ = store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "readonly_worktree_allocated", Message: fmt.Sprintf("read-only worktree %s allocated for agent stage (#757/#739); job keyed worktree:<path> to run beside same-repo stages", worktreePath)})
+		} else if worktreeErr != nil {
+			_ = store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "readonly_worktree_skipped", Message: fmt.Sprintf("read-only worktree isolation skipped for agent stage (#757/#739); job runs serialized in the shared checkout: %v", worktreeErr)})
+		}
+		return job, nil
 	}
+}
+
+// pipelineStageReadOnlyWorktreeEligible reports whether a stage job request is a
+// repo-bound AGENT stage that should be born with its own detached read-only
+// worktree (#757). It is true only for a pipeline-sender ask/review job bound to a
+// named agent, running against a repo, that carries NO runtime override (the shell
+// runner sets one) and NO worktree yet. A pure-reasoning agent stage with no repo,
+// and every shell stage, are excluded — they never need a worktree.
+func pipelineStageReadOnlyWorktreeEligible(request workflow.JobRequest) bool {
+	if request.Sender != workflow.PipelineJobSender {
+		return false
+	}
+	if strings.TrimSpace(request.RuntimeOverride) != "" {
+		return false // the hidden shell runner, not an agent stage
+	}
+	if strings.TrimSpace(request.Agent) == "" {
+		return false
+	}
+	switch strings.TrimSpace(request.Action) {
+	case "ask", "review":
+	default:
+		return false
+	}
+	if strings.TrimSpace(request.Repo) == "" {
+		return false // pure-reasoning stage, nothing to isolate
+	}
+	return strings.TrimSpace(request.WorktreePath) == ""
+}
+
+// allocatePipelineStageReadOnlyWorktree allocates a detached committed-tip worktree
+// for an eligible repo-bound agent stage and returns the request with WorktreePath +
+// the ReadOnlyWorktree disposal marker set (so the existing terminal cleanup and
+// daemon reclaim dispose it) plus the #654 context note appended to Instructions. It
+// resolves the ref to the checkout HEAD (always resolvable) via the shared
+// workflow.AllocateReadOnlyWorktree primitive under the short
+// ReadOnlyWorktreeDispatchLockWaitBudget. It is FAIL-OPEN: an ineligible stage or an
+// unknown checkout returns the request UNCHANGED with a nil error and empty path; a
+// genuine allocation failure returns the request unchanged with the error so the
+// caller enqueues on the shared checkout and emits a loud skip event.
+func allocatePipelineStageReadOnlyWorktree(ctx context.Context, store *db.Store, home string, request workflow.JobRequest) (workflow.JobRequest, string, error) {
+	if !pipelineStageReadOnlyWorktreeEligible(request) {
+		return request, "", nil
+	}
+	checkout := pipelineStageCheckoutPath(ctx, store, request.Repo)
+	if checkout == "" {
+		return request, "", nil // repo not managed/checked out yet — serialize as before
+	}
+	paths, err := pathsFromFlag(home)
+	if err != nil {
+		return request, "", err
+	}
+	path, err := workflow.AllocateReadOnlyWorktree(ctx, store, paths.Home, request.Repo, checkout, request.ID, "pipeline-stage", 0, "", workflow.ReadOnlyWorktreeDispatchLockWaitBudget, gitutil.Client{Dir: checkout})
+	if err != nil {
+		return request, "", err
+	}
+	if strings.TrimSpace(path) == "" {
+		return request, "", nil
+	}
+	request.WorktreePath = path
+	request.ReadOnlyWorktree = true
+	// The detached worktree is the committed tip, so it omits gitignored paths
+	// (repos/**) and uncommitted changes; point the read-only stage at the canonical
+	// checkout for those (#654), exactly as the delegation/dispatch paths do.
+	if note := workflow.ReadOnlyWorktreeContextNote(checkout); note != "" {
+		request.Instructions += note
+	}
+	return request, path, nil
+}
+
+// pipelineStageCheckoutPath resolves a repo's on-disk checkout path, or "" when the
+// repo is unknown or not checked out. Used to allocate/roll back the agent-stage
+// read-only worktree.
+func pipelineStageCheckoutPath(ctx context.Context, store *db.Store, repo string) string {
+	if strings.TrimSpace(repo) == "" {
+		return ""
+	}
+	record, err := store.GetRepo(ctx, repo)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(record.CheckoutPath)
 }
 
 // pipelineRunID derives a deterministic-per-invocation run id: a recognizable
@@ -68,7 +191,33 @@ func pipelineStageFingerprint(pipelineName, runID, stageID string, attempt int) 
 // ParentJobID would enter delegation advancement, engine.go); RootJobID is the run
 // id so all of a run's stage jobs share a root. The per-stage timeout is plumbed
 // as JobTimeout.
-func pipelineStageJobRequest(rec db.Pipeline, stage pipeline.Stage, run db.PipelineRun, attempt int) workflow.JobRequest {
+func pipelineStageJobRequest(rec db.Pipeline, stage pipeline.Stage, run db.PipelineRun, attempt int, upstreamContext string) workflow.JobRequest {
+	// AGENT stage (#757): bind the job to the named managed agent and let IT run on
+	// its OWN registered runtime — no RuntimeOverride, so the agent's real
+	// claude/codex runtime and session are used. The runtime instruction is the
+	// upstream needs-context (the results of the stages this one needs) PREPENDED to
+	// stage.Prompt, carried in Instructions exactly as `agent ask`/`agent review`
+	// plumb their message; upstreamContext is "" for a root stage (no needs) so the
+	// prompt is byte-identical there. It stays a LEAF: Sender=PipelineJobSender (the
+	// mailbox strips its delegations), empty ParentJobID (never enters delegation
+	// advancement), RootJobID=run.ID. The action is the validated read-only
+	// ask/review. Everything else (fingerprint, timeout, root) matches the shell path
+	// so the advancer folds it identically.
+	if stage.Agent != "" {
+		return workflow.JobRequest{
+			ID:           pipelineStageJobID(run.ID, stage.ID, attempt),
+			Agent:        stage.Agent,
+			Action:       stage.Action,
+			Repo:         rec.Repo,
+			Sender:       workflow.PipelineJobSender,
+			Instructions: upstreamContext + stage.Prompt,
+			Fingerprint:  pipelineStageFingerprint(rec.Name, run.ID, stage.ID, attempt),
+			RootJobID:    run.ID,
+			JobTimeout:   stage.Timeout,
+		}
+	}
+	// SHELL stage: byte-identical to before — the runner agent runs stage.Cmd via a
+	// per-job shell runtime override.
 	return workflow.JobRequest{
 		ID:                 pipelineStageJobID(run.ID, stage.ID, attempt),
 		Agent:              pipelineRunnerAgentName(rec.Name),
@@ -411,7 +560,11 @@ func advancePipelineRun(ctx context.Context, store *db.Store, enqueue pipelineSt
 		if row.State != pipeline.StagePending || !pipelineStageDepsSucceeded(stage, byID) {
 			continue
 		}
-		job, err := enqueuePipelineStageJob(ctx, store, enqueue, pipelineStageJobRequest(rec, stage, run, row.Attempt))
+		// For an AGENT stage, inject the results of the stages it needs into its
+		// prompt (dataflow), so e.g. a triage stage can act on an upstream extract
+		// stage's output. Deterministic + bounded; "" for shell stages / root stages.
+		upstreamContext := buildPipelineAgentStageContext(stage, byID)
+		job, err := enqueuePipelineStageJob(ctx, store, enqueue, pipelineStageJobRequest(rec, stage, run, row.Attempt, upstreamContext))
 		if err != nil {
 			return run, err
 		}
@@ -654,6 +807,138 @@ func decodePipelineNeeds(value string) []string {
 		return nil
 	}
 	return compactPipelineNeeds(needs)
+}
+
+// Bounds for the upstream needs-context injected into an agent stage prompt
+// (#757). The total block is capped so a fan-in stage with many verbose upstream
+// summaries can never balloon the prompt, and each upstream summary is capped and
+// truncated with an explicit marker. Both are byte budgets over the (already
+// bounded) stage summaries.
+const (
+	maxPipelineUpstreamContextBytes      = 6000
+	maxPipelineUpstreamStageSummaryBytes = 1500
+)
+
+// buildPipelineAgentStageContext renders the results of the stages an AGENT stage
+// needs into a deterministic, clearly-delimited, BOUNDED context block that is
+// prepended to the stage prompt (#757 dataflow). One labeled block per upstream
+// stage id — in the stage's declared needs order, deduped — carrying the upstream
+// stage's fold state and its (truncated) result summary. Returns "" for a shell
+// stage, a stage with no needs (a root stage), or when no upstream row is present,
+// so those prompts are byte-identical to the bare Prompt. The output depends only
+// on the persisted, already-settled upstream stage rows (needs are all succeeded
+// before a stage enqueues), so a re-derivation is identical — required by the
+// idempotent-enqueue contract. It mirrors the #419 "Upstream dependency results"
+// idea for the pipeline (leaf) world, without the delegation artifact plumbing.
+func buildPipelineAgentStageContext(stage pipeline.Stage, byID map[string]db.PipelineRunStage) string {
+	if strings.TrimSpace(stage.Agent) == "" {
+		return ""
+	}
+	remaining := maxPipelineUpstreamContextBytes
+	var b strings.Builder
+	seen := make(map[string]struct{}, len(stage.Needs))
+	wrote := false
+	for _, dep := range stage.Needs {
+		dep = strings.TrimSpace(dep)
+		if dep == "" {
+			continue
+		}
+		if _, dup := seen[dep]; dup {
+			continue
+		}
+		seen[dep] = struct{}{}
+		row, ok := byID[dep]
+		if !ok {
+			continue
+		}
+		if !wrote {
+			b.WriteString("Upstream stage results (read-only context from the stages this stage needs):\n\n")
+			wrote = true
+		}
+		state := strings.TrimSpace(row.State)
+		if state == "" {
+			state = "unknown"
+		}
+		fmt.Fprintf(&b, "--- stage %q (%s) ---\n", dep, state)
+		summary := strings.TrimSpace(row.Summary)
+		if summary == "" {
+			summary = "(no summary reported)"
+		}
+		limit := maxPipelineUpstreamStageSummaryBytes
+		if remaining < limit {
+			limit = remaining
+		}
+		truncated, omitted := truncatePipelineContext(summary, limit)
+		if omitted {
+			truncated += " [truncated]"
+		}
+		// FENCE the (attacker-influenceable) upstream summary in a backtick block
+		// sized longer than any backtick run it contains, mirroring the #419
+		// artifactBodyFence. Without this an upstream summary carrying a forged
+		// delimiter (`--- stage "x" ---`) or the closing sentinel (`---\n\nYour
+		// task:`) would spoof this block's structure and inject instructions into
+		// the downstream agent. Inside the fence the summary is inert literal text
+		// that cannot break out.
+		fence := pipelineContextFence(truncated)
+		b.WriteString(fence)
+		b.WriteString("\n")
+		b.WriteString(truncated)
+		if !strings.HasSuffix(truncated, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(fence)
+		b.WriteString("\n\n")
+		if remaining -= len(truncated); remaining < 0 {
+			remaining = 0
+		}
+	}
+	if !wrote {
+		return ""
+	}
+	b.WriteString("---\n\nYour task:\n")
+	return b.String()
+}
+
+// truncatePipelineContext returns s truncated to at most max bytes on a rune
+// boundary, and whether anything was omitted. A non-positive max truncates
+// everything (omitted true iff s was non-empty).
+func truncatePipelineContext(s string, max int) (string, bool) {
+	if max <= 0 {
+		return "", s != ""
+	}
+	if len(s) <= max {
+		return s, false
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
+}
+
+// pipelineContextFence returns a backtick fence guaranteed longer than the
+// longest run of backticks in content, so an embedded delimiter or gitmoot_result
+// sentinel inside a fenced upstream summary cannot terminate the block early and
+// spoof the injected structure. It mirrors workflow.artifactBodyFence (#419),
+// duplicated here to keep the cli package free of a workflow-internal dependency.
+// Minimum three backticks.
+func pipelineContextFence(content string) string {
+	longest, run := 0, 0
+	for _, r := range content {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	n := longest + 1
+	if n < 3 {
+		n = 3
+	}
+	return strings.Repeat("`", n)
 }
 
 func compactPipelineNeeds(needs []string) []string {
