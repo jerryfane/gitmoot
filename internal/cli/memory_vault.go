@@ -52,6 +52,8 @@ func runMemoryVault(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "export":
 		return runMemoryVaultExport(args[1:], stdout, stderr)
+	case "import":
+		return runMemoryVaultImport(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown memory vault command %q\n\n", args[0])
 		printMemoryVaultUsage(stderr)
@@ -64,6 +66,7 @@ func printMemoryVaultUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot memory vault export [--out DIR] [--agent NAME] [--force] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory vault import <DIR> [--dry-run|--yes] [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  export  regenerate a deterministic vault (one note per confirmed memory,")
 	fmt.Fprintln(w, "          per-owner index notes, and a manifest). The vault is a DERIVED VIEW:")
@@ -74,6 +77,13 @@ func printMemoryVaultUsage(w io.Writer) {
 	fmt.Fprintln(w, "          export refuses to overwrite a non-empty --out that is not itself a")
 	fmt.Fprintln(w, "          gitmoot vault, so it can never delete your own notes; pass --force to")
 	fmt.Fprintln(w, "          override.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  import  the human curation gate: diff an edited vault DIR against a FRESH")
+	fmt.Fprintln(w, "          export and apply only on confirmation. Edited notes update the source")
+	fmt.Fprintln(w, "          memory (CAS on updated_at), deleted notes retire their memory, and new")
+	fmt.Fprintln(w, "          .md files stage as pending observations. --dry-run (DEFAULT) prints the")
+	fmt.Fprintln(w, "          diff and writes NOTHING; --yes applies everything in one transaction.")
+	fmt.Fprintln(w, "          Aborts if the store changed since the vault was exported (stale).")
 }
 
 // vaultNote is one rendered memory note held in memory before the atomic commit.

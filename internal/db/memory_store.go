@@ -73,6 +73,24 @@ func nowRFC3339() string {
 // is append-only by construction: repeated observations of the same key produce
 // distinct rows so witnesses accumulate.
 func (s *Store) InsertMemoryObservation(ctx context.Context, obs MemoryObservation) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	id, err := insertMemoryObservationTx(ctx, tx, obs)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// insertMemoryObservationTx is the transaction body shared by the single-op public
+// method and the atomic ApplyVaultImport batch.
+func insertMemoryObservationTx(ctx context.Context, tx *sql.Tx, obs MemoryObservation) (int64, error) {
 	if strings.TrimSpace(obs.Owner.Kind) == "" || strings.TrimSpace(obs.Owner.Ref) == "" {
 		return 0, fmt.Errorf("memory observation requires an owner kind and ref")
 	}
@@ -87,7 +105,7 @@ func (s *Store) InsertMemoryObservation(ctx context.Context, obs MemoryObservati
 	if strings.TrimSpace(created) == "" {
 		created = nowRFC3339()
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO memory_observations
 	(owner_kind, owner_ref, owner_version, repo, scope, key, content, provenance, trust_mark, source_job, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -118,7 +136,7 @@ WHERE owner_kind = ? AND owner_ref = ? AND owner_version = ?
 
 // CountConfirmedMemoriesForOwner returns how many confirmed_memories rows an
 // owner owns, across ALL owner versions and every repo/scope (owner_version is
-// deliberately not filtered — an agent owner always writes owner_version=''), so
+// deliberately not filtered — an agent owner always writes owner_version=”), so
 // it answers "how many injectable facts does this agent own". It backs the
 // dashboard's per-agent memory count and is a plain read (no FTS). Superseded
 // rows are excluded (superseded_by IS NULL) so the count matches the injectable
@@ -294,6 +312,178 @@ WHERE id = ?`,
 	return id, nil
 }
 
+// UpdateConfirmedMemoryByID applies an owner-curated content edit to ONE confirmed
+// row by primary key, guarded by an optimistic-concurrency CAS on updated_at, and
+// resyncs the FTS index in the same transaction. It backs `memory vault import`
+// (#737 P2): the importer diffs an edited note against a fresh export and, on a
+// difference, writes the human's new content back to the exact row it came from —
+// never key-based (which could clobber a different row), never touching owner/
+// scope/key. expectedUpdatedAt is the updated_at the fresh export observed; if the
+// row changed since (or was retired), the CAS matches nothing and the update is
+// refused with an id-naming error so the caller can abort and re-export. Writes are
+// serialized by the store (MaxOpenConns=1), so this optimistic CAS is sufficient.
+func (s *Store) UpdateConfirmedMemoryByID(ctx context.Context, id int64, expectedUpdatedAt, content, provenance string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := updateConfirmedMemoryByIDTx(ctx, tx, id, expectedUpdatedAt, content, provenance); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// updateConfirmedMemoryByIDTx is the transaction body shared by the single-op
+// public method and the atomic ApplyVaultImport batch.
+func updateConfirmedMemoryByIDTx(ctx context.Context, tx *sql.Tx, id int64, expectedUpdatedAt, content, provenance string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("confirmed memory %d requires content", id)
+	}
+	now := nowRFC3339()
+	res, err := tx.ExecContext(ctx, `
+UPDATE confirmed_memories
+SET content = ?, provenance = ?, updated_at = ?
+WHERE id = ? AND updated_at = ? AND retired_at = ''`,
+		content, provenance, now, id, expectedUpdatedAt)
+	if err != nil {
+		return fmt.Errorf("update confirmed memory by id: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		// Disambiguate a missing row from a lost CAS race so the operator gets an
+		// actionable message naming the id.
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM confirmed_memories WHERE id = ?`, id).Scan(&count); err != nil {
+			return fmt.Errorf("inspect confirmed memory %d: %w", id, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("confirmed memory %d not found", id)
+		}
+		return fmt.Errorf("confirmed memory %d changed since export (expected updated_at %q); re-export and retry", id, expectedUpdatedAt)
+	}
+
+	// Keep the FTS index in sync with the new content inside the same transaction.
+	var key string
+	if err := tx.QueryRowContext(ctx, `SELECT key FROM confirmed_memories WHERE id = ?`, id).Scan(&key); err != nil {
+		return fmt.Errorf("read confirmed memory key %d: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM confirmed_memories_fts WHERE rowid = ?`, id); err != nil {
+		return fmt.Errorf("sync confirmed memory fts (delete): %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO confirmed_memories_fts(rowid, content, key) VALUES (?, ?, ?)`, id, content, key); err != nil {
+		return fmt.Errorf("sync confirmed memory fts (insert): %w", err)
+	}
+	return nil
+}
+
+// RetireConfirmedMemory marks ONE confirmed row retired (the owner deleted its note
+// from an exported vault) and removes it from the FTS index in the same transaction
+// so it stops being injected into prompts and stops appearing in future exports. It
+// is additive and NON-destructive: the row is preserved for audit with retired_at/
+// retired_reason set; it deliberately does NOT write superseded_by (which carries
+// distinct replacement semantics and has no writers today — see #737 P2). Backs
+// `memory vault import` deletions ⇒ retirements. A row that does not exist (or is
+// already retired) yields an id-naming error rather than a silent no-op.
+func (s *Store) RetireConfirmedMemory(ctx context.Context, id int64, reason string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := retireConfirmedMemoryTx(ctx, tx, id, reason); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// retireConfirmedMemoryTx is the transaction body shared by the single-op public
+// method and the atomic ApplyVaultImport batch.
+func retireConfirmedMemoryTx(ctx context.Context, tx *sql.Tx, id int64, reason string) error {
+	now := nowRFC3339()
+	res, err := tx.ExecContext(ctx, `
+UPDATE confirmed_memories
+SET retired_at = ?, retired_reason = ?
+WHERE id = ? AND retired_at = ''`,
+		now, reason, id)
+	if err != nil {
+		return fmt.Errorf("retire confirmed memory: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM confirmed_memories WHERE id = ?`, id).Scan(&count); err != nil {
+			return fmt.Errorf("inspect confirmed memory %d: %w", id, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("confirmed memory %d not found", id)
+		}
+		return fmt.Errorf("confirmed memory %d already retired", id)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM confirmed_memories_fts WHERE rowid = ?`, id); err != nil {
+		return fmt.Errorf("sync confirmed memory fts (delete): %w", err)
+	}
+	return nil
+}
+
+// VaultImportUpdate is one owner-edited note applied to its source row (CAS on
+// ExpectedUpdatedAt).
+type VaultImportUpdate struct {
+	ID                int64
+	ExpectedUpdatedAt string
+	Content           string
+	Provenance        string
+}
+
+// VaultImportRetire is one confirmed row the owner deleted from the vault.
+type VaultImportRetire struct {
+	ID     int64
+	Reason string
+}
+
+// VaultImportPlan is the full set of mutations `memory vault import --yes` applies
+// ATOMICALLY: content edits (CAS), retirements, and new owner-authored notes staged
+// as pending observations. All-or-nothing — any failure rolls the whole batch back.
+type VaultImportPlan struct {
+	Updates      []VaultImportUpdate
+	Retirements  []VaultImportRetire
+	Observations []MemoryObservation
+}
+
+// ApplyVaultImport applies a whole import plan in ONE transaction so a partial
+// curation can never land: edits, retirements, and new-note observations either all
+// commit or none do. Edits and retirements resync/clear the FTS index in the same
+// transaction (via the shared tx helpers); observations are append-only.
+func (s *Store) ApplyVaultImport(ctx context.Context, plan VaultImportPlan) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, u := range plan.Updates {
+		if err := updateConfirmedMemoryByIDTx(ctx, tx, u.ID, u.ExpectedUpdatedAt, u.Content, u.Provenance); err != nil {
+			return err
+		}
+	}
+	for _, r := range plan.Retirements {
+		if err := retireConfirmedMemoryTx(ctx, tx, r.ID, r.Reason); err != nil {
+			return err
+		}
+	}
+	for _, obs := range plan.Observations {
+		if _, err := insertMemoryObservationTx(ctx, tx, obs); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // QueryConfirmedMemories is the READ path for job-prompt assembly. It runs one
 // FTS5/BM25 query over confirmed content, filtered by the retrieval default
 // (owner match AND (repo = current OR scope = general)), confirmed tier only,
@@ -317,6 +507,7 @@ WHERE f.confirmed_memories_fts MATCH ?
 	AND c.owner_kind = ? AND c.owner_ref = ? AND c.owner_version = ?
 	AND (c.scope = 'general' OR c.repo = ?)
 	AND c.superseded_by IS NULL
+	AND c.retired_at = ''
 ORDER BY bm25(f.confirmed_memories_fts), c.updated_at DESC
 LIMIT ?`,
 		matchQuery, owner.Kind, owner.Ref, owner.Version, repo, limit)
@@ -339,7 +530,7 @@ func (s *Store) ListConfirmedMemoriesForVault(ctx context.Context, agentRef stri
 SELECT id, owner_kind, owner_ref, owner_version, repo, scope, key, content,
 	provenance, source_job, first_confirmed_at, updated_at, COALESCE(superseded_by, 0)
 FROM confirmed_memories
-WHERE superseded_by IS NULL`
+WHERE superseded_by IS NULL AND retired_at = ''`
 	var args []any
 	if strings.TrimSpace(agentRef) != "" {
 		query += "\n\tAND owner_kind = 'agent' AND owner_ref = ?"
