@@ -162,3 +162,38 @@ func TestVaultIndexFilenameDisambiguatesOwners(t *testing.T) {
 		t.Fatalf("index filename should sort ahead of notes: %q", agent)
 	}
 }
+
+// Slugging is lossy: separator-only and case-only differences in a ref collapse
+// to the same slug. The raw-tuple hash suffix must keep such owners' index files
+// distinct so one index can never silently overwrite another.
+func TestVaultIndexFilenameNoSlugCollision(t *testing.T) {
+	cases := []struct{ a, b VaultOwnerKey }{
+		// '_' and '-' both slug to '-'.
+		{
+			VaultOwnerKey{Kind: OwnerKindAgent, Ref: "build_bot"},
+			VaultOwnerKey{Kind: OwnerKindAgent, Ref: "build-bot"},
+		},
+		// Case-only difference (collides on case-insensitive filesystems).
+		{
+			VaultOwnerKey{Kind: OwnerKindAgent, Ref: "Builder"},
+			VaultOwnerKey{Kind: OwnerKindAgent, Ref: "builder"},
+		},
+		// Version differing only by separator/case.
+		{
+			VaultOwnerKey{Kind: OwnerKindRole, Ref: "rev", Version: "v_1"},
+			VaultOwnerKey{Kind: OwnerKindRole, Ref: "rev", Version: "v-1"},
+		},
+	}
+	for _, c := range cases {
+		fa := VaultIndexFilename(c.a)
+		fb := VaultIndexFilename(c.b)
+		if fa == fb {
+			t.Fatalf("owner index filenames collide: %+v and %+v both -> %q", c.a, c.b, fa)
+		}
+	}
+	// The filename stays deterministic for a fixed owner.
+	o := VaultOwnerKey{Kind: OwnerKindAgent, Ref: "builder", Version: "v2"}
+	if VaultIndexFilename(o) != VaultIndexFilename(o) {
+		t.Fatal("VaultIndexFilename is not deterministic")
+	}
+}

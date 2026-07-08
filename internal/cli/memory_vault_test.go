@@ -286,6 +286,66 @@ func TestVaultExportReExportOverwritesCleanly(t *testing.T) {
 	}
 }
 
+func TestVaultExportRefusesToClobberNonVaultDir(t *testing.T) {
+	home, store := memoryTestHome(t)
+	seedConfirmed(t, store, db.MemoryOwner{Kind: "agent", Ref: "builder"}, "acme/widget", "repo", "keep", "content about arm64")
+
+	// A directory that looks like the user's own Obsidian vault: notes + config,
+	// no gitmoot manifest.
+	out := filepath.Join(t.TempDir(), "my-obsidian-vault")
+	if err := os.MkdirAll(filepath.Join(out, ".obsidian"), 0o755); err != nil {
+		t.Fatalf("seed dir: %v", err)
+	}
+	precious := filepath.Join(out, "important-note.md")
+	if err := os.WriteFile(precious, []byte("do not delete me"), 0o644); err != nil {
+		t.Fatalf("seed note: %v", err)
+	}
+
+	// Without --force the export must refuse and leave the user's files intact.
+	var stdout, stderr bytes.Buffer
+	code := runMemory([]string{"vault", "export", "--home", home, "--out", out, "--json"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("export into populated non-vault dir should fail, got exit 0 (stdout=%s)", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing to overwrite") {
+		t.Fatalf("expected refusal message, got: %s", stderr.String())
+	}
+	if b, err := os.ReadFile(precious); err != nil || string(b) != "do not delete me" {
+		t.Fatalf("user's note was clobbered: err=%v content=%q", err, string(b))
+	}
+
+	// With --force the export proceeds and replaces the directory.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"vault", "export", "--home", home, "--out", out, "--force", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("forced export exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(out, "manifest.json")); err != nil {
+		t.Fatalf("forced export did not write a vault: %v", err)
+	}
+	if _, err := os.Stat(precious); !os.IsNotExist(err) {
+		t.Fatalf("forced export should have replaced the dir, note still present: err=%v", err)
+	}
+}
+
+func TestVaultExportIntoEmptyDirAllowed(t *testing.T) {
+	home, store := memoryTestHome(t)
+	seedConfirmed(t, store, db.MemoryOwner{Kind: "agent", Ref: "builder"}, "acme/widget", "repo", "keep", "content about arm64")
+
+	// A pre-existing but EMPTY directory is a safe target (no --force needed).
+	out := filepath.Join(t.TempDir(), "empty-target")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runMemory([]string{"vault", "export", "--home", home, "--out", out, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("export into empty dir should succeed, exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(out, "manifest.json")); err != nil {
+		t.Fatalf("vault not written into empty dir: %v", err)
+	}
+}
+
 func vaultKeysOf(m map[string][]byte) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

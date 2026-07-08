@@ -1338,7 +1338,7 @@ CLI is read-only:
 gitmoot memory list [--pending|--confirmed] [--agent NAME] [--repo owner/repo] [--json]
 gitmoot memory replay [--agent NAME] [--repo owner/repo] [--limit N] [--json]
 gitmoot memory eval --fixtures fixtures.json [--k N] [--json]
-gitmoot memory vault export [--out DIR] [--agent NAME] [--json]
+gitmoot memory vault export [--out DIR] [--agent NAME] [--force] [--json]
 ```
 
 `memory list` shows confirmed memories and/or pending observations. `memory
@@ -1356,7 +1356,10 @@ regenerated from scratch on every export, safe to delete, and **deterministic**:
 same store yields byte-identical files (no `exported_at`; stable id-derived
 filenames). The export is read-only and atomic (temp dir then rename over `--out`,
 default a `vault/` directory under the home's evals area); `--agent` narrows it to a
-single agent owner.
+single agent owner. Because the export **replaces `--out` wholesale**, it refuses to
+overwrite a non-empty directory that is not itself a prior gitmoot vault (one with a
+`manifest.json`), so an accidental `--out ~/my-obsidian-vault` can never delete your
+own notes; pass `--force` to override.
 
 ## Pipelines
 

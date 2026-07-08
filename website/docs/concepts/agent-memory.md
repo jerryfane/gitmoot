@@ -91,7 +91,7 @@ recall/precision@K of retrieval over a labeled fixtures file.
 ## Vault view (a derived, disposable Obsidian view)
 
 ```sh
-gitmoot memory vault export [--out DIR] [--agent NAME] [--json]
+gitmoot memory vault export [--out DIR] [--agent NAME] [--force] [--json]
 ```
 
 `memory vault export` renders confirmed memory as an Obsidian-compatible vault:
@@ -107,7 +107,11 @@ the same store produces byte-identical files (there is deliberately no
 memory id). That determinism is what lets a later `vault import` diff hand-edits
 against a fresh export. The export is read-only (zero writes to any table) and
 atomic (it writes a temp directory and renames it over `--out`, which defaults to
-a `vault/` directory under the home's evals area).
+a `vault/` directory under the home's evals area). Since the export **replaces
+`--out` wholesale**, it refuses to overwrite a non-empty directory that is not
+itself a prior gitmoot vault (one carrying a `manifest.json`), so pointing it at
+an existing Obsidian vault such as `--out ~/my-vault` can never silently delete
+your own notes; pass `--force` to override.
 
 ## Phases
 

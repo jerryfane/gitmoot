@@ -174,16 +174,29 @@ func (m VaultMemory) OwnerKey() VaultOwnerKey {
 	return VaultOwnerKey{Kind: m.OwnerKind, Ref: m.OwnerRef, Version: m.OwnerVersion}
 }
 
-// VaultIndexFilename is the deterministic filename for an owner's index note. The
-// leading underscore sorts index notes ahead of memory notes (which start with a
-// digit) and makes them easy to spot. The kind+ref+version components keep two
-// owners that share a ref (e.g. an agent and a role) from colliding.
+// VaultIndexFilename is the deterministic, collision-proof filename for an
+// owner's index note. The leading underscore sorts index notes ahead of memory
+// notes (which start with a digit) and makes them easy to spot. The slugged
+// kind/ref/version stay human-readable, but slugging is lossy — two owners whose
+// components slug identically (e.g. refs "build_bot" and "build-bot", both
+// collapsing separators to '-', or refs differing only in case) would otherwise
+// map to the same file, silently overwriting one index. A short stable hash of
+// the RAW {Kind,Ref,Version} tuple is appended to guarantee distinct owners
+// always get distinct files, mirroring how VaultFilename uses the id prefix.
 func VaultIndexFilename(o VaultOwnerKey) string {
 	name := "_index-" + Slug(o.Kind) + "-" + Slug(o.Ref)
 	if strings.TrimSpace(o.Version) != "" {
 		name += "-" + Slug(o.Version)
 	}
-	return name + ".md"
+	return name + "-" + vaultOwnerHash(o) + ".md"
+}
+
+// vaultOwnerHash is the first 8 hex chars of a sha256 over the raw owner tuple,
+// NUL-separated so distinct component boundaries can't alias. It makes the index
+// filename lossless: any change to Kind, Ref, or Version flips the suffix.
+func vaultOwnerHash(o VaultOwnerKey) string {
+	sum := sha256.Sum256([]byte(o.Kind + "\x00" + o.Ref + "\x00" + o.Version))
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 // RenderVaultIndex renders an owner's index note: memories grouped by repo (with

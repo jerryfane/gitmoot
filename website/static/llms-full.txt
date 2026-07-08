@@ -9542,7 +9542,7 @@ Inspect and measure the store (all read-only):
 gitmoot memory list [--pending|--confirmed] [--agent NAME] [--repo owner/repo] [--json]
 gitmoot memory replay [--agent NAME] [--repo owner/repo] [--limit N] [--json]
 gitmoot memory eval --fixtures fixtures.json [--k N] [--json]
-gitmoot memory vault export [--out DIR] [--agent NAME] [--json]
+gitmoot memory vault export [--out DIR] [--agent NAME] [--force] [--json]
 ```
 
 `memory list` shows confirmed memories and/or pending observations. `memory
@@ -9563,8 +9563,12 @@ is **deterministic** — the same store produces byte-identical files (there is 
 `exported_at`; filenames are stable `NNNNNNNNN-<slug>.md` from the memory id). The
 export is **read-only** (zero writes to any table) and writes to a temp dir then
 atomically renames over `--out` (default: a `vault/` directory under the home's
-evals area). `--agent NAME` narrows the export to one agent owner. This is P1 of
-the two-way memory bridge; `vault import` / `memory ingest` land in later phases.
+evals area). `--agent NAME` narrows the export to one agent owner. Because the
+export **replaces `--out` wholesale**, it refuses to overwrite a non-empty directory
+that is not itself a prior gitmoot vault (one carrying a `manifest.json`) so an
+accidental `--out ~/my-obsidian-vault` can never delete your own notes; pass
+`--force` to override. This is P1 of the two-way memory bridge; `vault import` /
+`memory ingest` land in later phases.
 
 ## Pipelines
 
