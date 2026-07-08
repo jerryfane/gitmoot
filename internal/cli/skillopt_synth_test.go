@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jerryfane/gitmoot/internal/agenttemplate"
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/runtime"
@@ -668,7 +669,7 @@ func TestResolveSynthWeakAgentDefaultsToChampion(t *testing.T) {
 		t.Fatalf("champion version = %q, want planner@v1 (v2 is only pending)", template.VersionID)
 	}
 
-	agent, frame, label, err := resolveSynthWeakAgent(ctx, store, synthOptions{repo: "acme/widgets"}, template)
+	agent, frame, label, err := resolveSynthWeakAgent(ctx, store, synthOptions{template: "planner", repo: "acme/widgets"})
 	if err != nil {
 		t.Fatalf("resolveSynthWeakAgent: %v", err)
 	}
@@ -707,11 +708,7 @@ func TestResolveSynthWeakAgentExplicitUnchanged(t *testing.T) {
 	home, store := synthTestHome(t, "weak-bot")
 	_ = home
 	ctx := context.Background()
-	template, err := loadInstalledTemplate(ctx, store, "planner")
-	if err != nil {
-		t.Fatalf("loadInstalledTemplate: %v", err)
-	}
-	agent, frame, label, err := resolveSynthWeakAgent(ctx, store, synthOptions{weak: "weak-bot", repo: "acme/widgets"}, template)
+	agent, frame, label, err := resolveSynthWeakAgent(ctx, store, synthOptions{template: "planner", weak: "weak-bot", repo: "acme/widgets"})
 	if err != nil {
 		t.Fatalf("resolveSynthWeakAgent: %v", err)
 	}
@@ -728,6 +725,132 @@ func TestResolveSynthWeakAgentExplicitUnchanged(t *testing.T) {
 	if agent.RuntimeRef != "" || agent.WorkingDir != "" {
 		t.Fatalf("explicit weak agent should carry no live session/checkout: RuntimeRef=%q WorkingDir=%q", agent.RuntimeRef, agent.WorkingDir)
 	}
+}
+
+// TestResolveSynthWeakAgentIgnoresVersionRefLatest proves the champion default
+// resolves the CURRENT champion off the logical id even when --template carries an
+// @latest ref that points at a newer, non-champion (pending) version. Before the
+// #741 review fix the version-pinned ref would have made the pending v2 get labeled
+// and run as the "champion".
+func TestResolveSynthWeakAgentIgnoresVersionRefLatest(t *testing.T) {
+	_, store := synthTestHome(t)
+	ctx := context.Background()
+	// v2 is pending → it is `@latest`, but NOT the champion (which stays v1).
+	if _, err := store.AddPendingAgentTemplateVersion(ctx, cliSkillOptTemplate("planner", "REVISED v2 guidance that must not leak.")); err != nil {
+		t.Fatalf("AddPendingAgentTemplateVersion: %v", err)
+	}
+	// Sanity: @latest really does resolve to the pending v2.
+	latest, err := loadInstalledTemplate(ctx, store, "planner@latest")
+	if err != nil {
+		t.Fatalf("loadInstalledTemplate @latest: %v", err)
+	}
+	if latest.VersionID != "planner@v2" {
+		t.Fatalf("@latest VersionID = %q, want planner@v2 (the pending version)", latest.VersionID)
+	}
+
+	agent, frame, label, err := resolveSynthWeakAgent(ctx, store, synthOptions{template: "planner@latest", repo: "acme/widgets"})
+	if err != nil {
+		t.Fatalf("resolveSynthWeakAgent: %v", err)
+	}
+	if agent.TemplateID != "planner@v1" {
+		t.Fatalf("weak agent TemplateID = %q, want the CHAMPION planner@v1 despite @latest ref", agent.TemplateID)
+	}
+	if label != "planner@v1 (champion)" {
+		t.Fatalf("weak label = %q, want \"planner@v1 (champion)\"", label)
+	}
+	if !strings.Contains(frame, "Plan software migrations well.") {
+		t.Fatalf("champion frame missing the champion (v1) instructions: %q", frame)
+	}
+	if strings.Contains(frame, "REVISED v2") {
+		t.Fatalf("champion frame leaked the non-champion (@latest/v2) content: %q", frame)
+	}
+}
+
+// TestResolveSynthWeakAgentIgnoresActiveCanary proves an active canary version
+// referenced explicitly via --template planner@v2 does NOT become the weak
+// "champion": the incumbent champion (v1) is resolved off the logical id.
+func TestResolveSynthWeakAgentIgnoresActiveCanary(t *testing.T) {
+	_, store := synthTestHome(t)
+	ctx := context.Background()
+	v2, err := store.AddPendingAgentTemplateVersion(ctx, cliSkillOptTemplate("planner", "REVISED v2 guidance that must not leak."))
+	if err != nil {
+		t.Fatalf("AddPendingAgentTemplateVersion: %v", err)
+	}
+	// Promote v2 to an active canary sitting BEHIND the v1 champion.
+	if _, err := store.CanaryPromoteAgentTemplateVersion(ctx, v2.ID, 0.5); err != nil {
+		t.Fatalf("CanaryPromoteAgentTemplateVersion: %v", err)
+	}
+	canary, ok, err := store.GetActiveCanaryVersion(ctx, "planner")
+	if err != nil || !ok || canary.ID != "planner@v2" {
+		t.Fatalf("active canary = (%+v, ok=%v, err=%v), want planner@v2", canary, ok, err)
+	}
+
+	// --template pins the canary version explicitly.
+	agent, frame, label, err := resolveSynthWeakAgent(ctx, store, synthOptions{template: "planner@v2", repo: "acme/widgets"})
+	if err != nil {
+		t.Fatalf("resolveSynthWeakAgent: %v", err)
+	}
+	if agent.TemplateID != "planner@v1" {
+		t.Fatalf("weak agent TemplateID = %q, want the incumbent CHAMPION planner@v1, not the canary v2", agent.TemplateID)
+	}
+	if label != "planner@v1 (champion)" {
+		t.Fatalf("weak label = %q, want \"planner@v1 (champion)\"", label)
+	}
+	if strings.Contains(frame, "REVISED v2") {
+		t.Fatalf("champion frame leaked the canary (v2) content: %q", frame)
+	}
+}
+
+// TestSynthChampionRuntimeSkipsShell proves synthChampionRuntime skips a
+// non-START-capable `shell` first entry and selects the first agentic CLI runtime,
+// so the ephemeral weak agent can actually launch a forked session. A `shell`-only
+// template falls back to codex.
+func TestSynthChampionRuntimeSkipsShell(t *testing.T) {
+	shellFirst := synthTemplateWithRuntimes(t, "shell", "codex")
+	if got := synthChampionRuntime(shellFirst); got != runtime.CodexRuntime {
+		t.Fatalf("shell-first template runtime = %q, want codex (shell is not START-capable)", got)
+	}
+	claudeAfterShell := synthTemplateWithRuntimes(t, "shell", "claude")
+	if got := synthChampionRuntime(claudeAfterShell); got != runtime.ClaudeRuntime {
+		t.Fatalf("shell,claude template runtime = %q, want claude", got)
+	}
+	shellOnly := synthTemplateWithRuntimes(t, "shell")
+	if got := synthChampionRuntime(shellOnly); got != runtime.CodexRuntime {
+		t.Fatalf("shell-only template runtime = %q, want codex fallback", got)
+	}
+	none := synthTemplateWithRuntimes(t)
+	if got := synthChampionRuntime(none); got != runtime.CodexRuntime {
+		t.Fatalf("no-runtime template = %q, want codex fallback", got)
+	}
+}
+
+// synthTemplateWithRuntimes builds a db.AgentTemplate whose metadata declares the
+// given runtime_compatibility list (in order), for synthChampionRuntime tests.
+func synthTemplateWithRuntimes(t *testing.T, runtimes ...string) db.AgentTemplate {
+	t.Helper()
+	if len(runtimes) == 0 {
+		// MarshalMetadata requires a non-empty runtime_compatibility, so represent a
+		// template that declares none as empty metadata (UnmarshalMetadata yields no
+		// entries → codex fallback).
+		return db.AgentTemplate{ID: "planner"}
+	}
+	md := agenttemplate.Metadata{
+		ID:                   "planner",
+		Name:                 "Planner",
+		Description:          "Plans implementation work.",
+		Kind:                 agenttemplate.TemplateKind,
+		Version:              agenttemplate.TemplateVersion,
+		Capabilities:         []string{"ask"},
+		RuntimeCompatibility: runtimes,
+		Tags:                 []string{"planning"},
+		Inputs:               []string{"task"},
+		Outputs:              []string{"plan"},
+	}
+	metadataJSON, err := agenttemplate.MarshalMetadata(md)
+	if err != nil {
+		t.Fatalf("MarshalMetadata: %v", err)
+	}
+	return db.AgentTemplate{ID: "planner", MetadataJSON: metadataJSON}
 }
 
 // TestSynthWeakAttemptPromptFrame proves synthWeakAttemptPrompt is byte-identical

@@ -297,7 +297,7 @@ func runSkillOptSynthWithStore(ctx context.Context, store *db.Store, opts synthO
 		fmt.Fprintf(stderr, "skillopt synth: %v\n", err)
 		return 1
 	}
-	weakAgent, weakFrame, weakLabel, err := resolveSynthWeakAgent(ctx, store, opts, template)
+	weakAgent, weakFrame, weakLabel, err := resolveSynthWeakAgent(ctx, store, opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "skillopt synth: weak %v\n", err)
 		return 1
@@ -523,29 +523,41 @@ func resolveSynthAgent(ctx context.Context, store *db.Store, name, repo string) 
 //     weakness — the whole point of #741 (the loop must target the champion's own
 //     failures, not, e.g., a cross-family weak agent's failures).
 //
+// The champion is resolved off the LOGICAL template id ONLY (db.SplitAgentTemplate‐
+// Reference + store.GetAgentTemplate → current_version_id), NEVER off any version
+// ref a caller may have pinned in --template (planner@v2, @latest, a canary @vN).
+// loadInstalledTemplate honors such a ref, so a version-pinned --template would
+// otherwise make a pending/candidate/canary version get labeled and run as the
+// "champion" — violating the documented current-champion guarantee. Resolving the
+// current champion independently here forecloses that.
+//
 // The returned frame (empty for explicit --weak) is the champion template
 // instructions to inject into the weak delivery via synthWeakAttemptPrompt. The
 // label is recorded as the persisted item's weak_agent. The ephemeral agent
 // carries an empty RuntimeRef (forked throwaway session) and empty WorkingDir, so
 // it still flows through the #725 per-item scratch-dir sandbox like every other
 // synth delivery.
-func resolveSynthWeakAgent(ctx context.Context, store *db.Store, opts synthOptions, template db.AgentTemplate) (runtime.Agent, string, string, error) {
+func resolveSynthWeakAgent(ctx context.Context, store *db.Store, opts synthOptions) (runtime.Agent, string, string, error) {
 	if strings.TrimSpace(opts.weak) != "" {
 		agent, err := resolveSynthAgent(ctx, store, opts.weak, opts.repo)
 		return agent, "", opts.weak, err
 	}
-	// Champion-default weak (#741): pin an ephemeral agent to the template's current
-	// champion version. loadInstalledTemplate(opts.template) already resolved the
-	// CURRENT (champion) version — the same resolution dispatch uses for a bare
-	// template id — so template.VersionID/Content are the champion's.
-	pinned := strings.TrimSpace(template.VersionID)
+	// Champion-default weak (#741): resolve the CURRENT champion off the LOGICAL id,
+	// discarding any @version ref on --template so a pending/candidate/canary version
+	// can never be mislabeled and run as the champion.
+	logicalID, _ := db.SplitAgentTemplateReference(opts.template)
+	champion, err := store.GetAgentTemplate(ctx, logicalID)
+	if err != nil {
+		return runtime.Agent{}, "", "", fmt.Errorf("load champion template %q: %w", logicalID, err)
+	}
+	pinned := strings.TrimSpace(champion.VersionID)
 	if pinned == "" {
-		pinned = strings.TrimSpace(template.ID)
+		pinned = strings.TrimSpace(champion.ID)
 	}
 	agent := runtime.Agent{
 		Name:           "synth-weak-champion",
 		Role:           "ask",
-		Runtime:        synthChampionRuntime(template),
+		Runtime:        synthChampionRuntime(champion),
 		TemplateID:     pinned,
 		RepoScope:      opts.repo,
 		AutonomyPolicy: runtime.AutonomyPolicyReadOnly,
@@ -553,24 +565,46 @@ func resolveSynthWeakAgent(ctx context.Context, store *db.Store, opts synthOptio
 	// Reuse the SAME template-content injection seam ephemeral/temp workers use
 	// (agentStartupPrompt → agenttemplate.InstructionsForContent): render the
 	// champion's body and hand it to synthWeakAttemptPrompt as the weak role frame.
-	frame := strings.TrimRight(agenttemplate.InstructionsForContent(template.Content), "\n")
+	frame := strings.TrimRight(agenttemplate.InstructionsForContent(champion.Content), "\n")
 	label := pinned + " (champion)"
 	return agent, frame, label, nil
 }
 
 // synthChampionRuntime picks the runtime for a champion-default weak attempt: the
-// template's first declared runtime_compatibility entry, falling back to codex
-// when the template declares none. Documented choice per #741 — the champion is
-// most faithfully reproduced on a runtime it declares itself compatible with.
+// template's first declared runtime_compatibility entry that can actually START a
+// forked throwaway session, falling back to codex when the template declares none
+// that qualify. Documented choice per #741 — the champion is most faithfully
+// reproduced on a runtime it declares itself compatible with.
+//
+// Non-START-capable runtimes (shell) are SKIPPED: `shell` is an accepted
+// runtime_compatibility value, but the ephemeral weak agent carries an empty
+// RuntimeRef and so is delivered via adapter.Start; ShellAdapter.Start
+// unconditionally errors ("shell runtime does not support agent start"), which
+// would fail the very first weak delivery and abort the whole synth run before any
+// item is generated. Selecting the first codex/claude/kimi entry (or codex) keeps
+// the weak attempt runnable even for a `shell`-first template.
 func synthChampionRuntime(template db.AgentTemplate) string {
 	if md, err := agenttemplate.UnmarshalMetadata(template.MetadataJSON); err == nil {
 		for _, rt := range md.RuntimeCompatibility {
-			if strings.TrimSpace(rt) != "" {
-				return strings.TrimSpace(rt)
+			rt = strings.TrimSpace(rt)
+			if synthRuntimeCanStart(rt) {
+				return rt
 			}
 		}
 	}
 	return runtime.CodexRuntime
+}
+
+// synthRuntimeCanStart reports whether an ephemeral (empty-RuntimeRef) agent on the
+// given runtime can open a forked throwaway session via adapter.Start. Only the
+// agentic CLIs qualify; `shell` (and any unknown value) cannot.
+func synthRuntimeCanStart(rt string) bool {
+	switch rt {
+	case runtime.CodexRuntime, runtime.ClaudeRuntime, runtime.KimiRuntime, runtime.KimiCLIRuntime:
+		return true
+	default:
+		return false
+	}
 }
 
 // sandboxSynthAgent returns a copy of agent whose adapter working dir is forced
