@@ -647,6 +647,208 @@ func TestSynthPromptsCarryEvalOnlyPreamble(t *testing.T) {
 	}
 }
 
+// TestResolveSynthWeakAgentDefaultsToChampion proves the #741 default: with --weak
+// omitted, the weak attempt resolves to the target template's CURRENT CHAMPION
+// version — an ephemeral agent pinned to exactly that version, delivered with the
+// champion's own template instructions as its role frame, and NOT a later
+// (pending, non-champion) version's content.
+func TestResolveSynthWeakAgentDefaultsToChampion(t *testing.T) {
+	home, store := synthTestHome(t, "weak-bot")
+	_ = home
+	ctx := context.Background()
+	// Add a pending v2 (becomes latest, but NOT champion). The champion stays v1.
+	if _, err := store.AddPendingAgentTemplateVersion(ctx, cliSkillOptTemplate("planner", "REVISED v2 guidance that must not leak.")); err != nil {
+		t.Fatalf("AddPendingAgentTemplateVersion: %v", err)
+	}
+	template, err := loadInstalledTemplate(ctx, store, "planner")
+	if err != nil {
+		t.Fatalf("loadInstalledTemplate: %v", err)
+	}
+	if template.VersionID != "planner@v1" {
+		t.Fatalf("champion version = %q, want planner@v1 (v2 is only pending)", template.VersionID)
+	}
+
+	agent, frame, label, err := resolveSynthWeakAgent(ctx, store, synthOptions{repo: "acme/widgets"}, template)
+	if err != nil {
+		t.Fatalf("resolveSynthWeakAgent: %v", err)
+	}
+	if agent.TemplateID != "planner@v1" {
+		t.Fatalf("weak agent TemplateID = %q, want it pinned to the champion version planner@v1", agent.TemplateID)
+	}
+	if agent.Runtime != runtime.CodexRuntime {
+		t.Fatalf("weak agent Runtime = %q, want codex (template runtime_compatibility[0])", agent.Runtime)
+	}
+	if agent.AutonomyPolicy != runtime.AutonomyPolicyReadOnly {
+		t.Fatalf("weak agent AutonomyPolicy = %q, want read-only", agent.AutonomyPolicy)
+	}
+	if agent.RepoScope != "acme/widgets" {
+		t.Fatalf("weak agent RepoScope = %q, want acme/widgets", agent.RepoScope)
+	}
+	// Ephemeral: no live session, and no live checkout (the #725 sandbox forces the
+	// scratch dir later).
+	if agent.RuntimeRef != "" || agent.WorkingDir != "" {
+		t.Fatalf("weak agent must be ephemeral: RuntimeRef=%q WorkingDir=%q", agent.RuntimeRef, agent.WorkingDir)
+	}
+	if !strings.Contains(frame, "Plan software migrations well.") {
+		t.Fatalf("champion frame missing the champion (v1) instructions: %q", frame)
+	}
+	if strings.Contains(frame, "REVISED v2") {
+		t.Fatalf("champion frame leaked the non-champion (v2) content: %q", frame)
+	}
+	if label != "planner@v1 (champion)" {
+		t.Fatalf("weak label = %q, want \"planner@v1 (champion)\"", label)
+	}
+}
+
+// TestResolveSynthWeakAgentExplicitUnchanged is the regression guard: an explicit
+// --weak still resolves the named agent from the store, returns NO champion frame,
+// and records the agent name as the label — byte-identical to pre-#741.
+func TestResolveSynthWeakAgentExplicitUnchanged(t *testing.T) {
+	home, store := synthTestHome(t, "weak-bot")
+	_ = home
+	ctx := context.Background()
+	template, err := loadInstalledTemplate(ctx, store, "planner")
+	if err != nil {
+		t.Fatalf("loadInstalledTemplate: %v", err)
+	}
+	agent, frame, label, err := resolveSynthWeakAgent(ctx, store, synthOptions{weak: "weak-bot", repo: "acme/widgets"}, template)
+	if err != nil {
+		t.Fatalf("resolveSynthWeakAgent: %v", err)
+	}
+	if agent.Name != "weak-bot" {
+		t.Fatalf("explicit weak agent Name = %q, want weak-bot (resolved from store)", agent.Name)
+	}
+	if frame != "" {
+		t.Fatalf("explicit --weak must carry NO champion frame, got %q", frame)
+	}
+	if label != "weak-bot" {
+		t.Fatalf("explicit weak label = %q, want the agent name weak-bot", label)
+	}
+	// resolveSynthAgent clears the live session/checkout, same as the strong path.
+	if agent.RuntimeRef != "" || agent.WorkingDir != "" {
+		t.Fatalf("explicit weak agent should carry no live session/checkout: RuntimeRef=%q WorkingDir=%q", agent.RuntimeRef, agent.WorkingDir)
+	}
+}
+
+// TestSynthWeakAttemptPromptFrame proves synthWeakAttemptPrompt is byte-identical
+// to synthAttemptPrompt with an empty frame (explicit --weak) and injects the
+// champion instructions between the eval-only preamble and the question with a
+// non-empty frame (#741 champion default).
+func TestSynthWeakAttemptPromptFrame(t *testing.T) {
+	item := synthGeneratedItem{Context: "ctx", Question: "q?", Rubric: "r"}
+	if got, base := synthWeakAttemptPrompt(item, ""), synthAttemptPrompt(item); got != base {
+		t.Fatalf("empty frame must be byte-identical to synthAttemptPrompt:\n got=%q\nwant=%q", got, base)
+	}
+	framed := synthWeakAttemptPrompt(item, "# Champion\n\nDo the champion thing.")
+	if !strings.HasPrefix(framed, synthEvalOnlyPreamble) {
+		t.Fatalf("framed weak prompt must still lead with the eval-only preamble: %q", framed)
+	}
+	if !strings.Contains(framed, "Do the champion thing.") {
+		t.Fatalf("framed weak prompt must inject the champion instructions: %q", framed)
+	}
+	if !strings.Contains(framed, "Answer the following question") {
+		t.Fatalf("framed weak prompt must still carry the attempt body: %q", framed)
+	}
+	// The champion frame precedes the attempt body.
+	if strings.Index(framed, "Do the champion thing.") > strings.Index(framed, "Answer the following question") {
+		t.Fatalf("champion frame must precede the attempt body: %q", framed)
+	}
+}
+
+// TestRunSkillOptSynthChampionDefaultE2E is the deterministic no-LLM E2E for the
+// full accept path with the DEFAULTED weak: --weak is omitted, so the weak attempt
+// runs as the champion (planner@v1) with the champion's instructions injected, the
+// strong agent beats it, the judge confirms, and the item is persisted
+// pending_human_approval with weak_agent recorded as the champion version.
+func TestRunSkillOptSynthChampionDefaultE2E(t *testing.T) {
+	home, store := synthTestHome(t, "strong-bot", "judge-bot")
+	ctx := context.Background()
+	// A pending v2 exists but must NOT reach the weak delivery (champion is v1).
+	if _, err := store.AddPendingAgentTemplateVersion(ctx, cliSkillOptTemplate("planner", "REVISED v2 guidance that must not leak.")); err != nil {
+		t.Fatalf("AddPendingAgentTemplateVersion: %v", err)
+	}
+
+	prev := skillOptSynthDeliver
+	t.Cleanup(func() { skillOptSynthDeliver = prev })
+	var weakName, weakTemplateID, weakPrompt string
+	var weakPolicy string
+	skillOptSynthDeliver = func(_ context.Context, agent runtime.Agent, prompt string) (string, error) {
+		switch {
+		case strings.Contains(prompt, "generating a synthetic review item"):
+			return `{"context":"A legacy monolith.","question":"Outline a safe migration.","rubric":"Rewards incremental steps."}`, nil
+		case strings.Contains(prompt, "Score two answers against a rubric"):
+			return `{"weak_score":0.2,"strong_score":0.9,"well_formed":true,"diagnostic":""}`, nil
+		case strings.Contains(prompt, "Answer the following question"):
+			if agent.Name == "synth-weak-champion" {
+				weakName = agent.Name
+				weakTemplateID = agent.TemplateID
+				weakPolicy = agent.AutonomyPolicy
+				weakPrompt = prompt
+				return "rewrite it all at once", nil
+			}
+			return "wrap and migrate incrementally behind a facade", nil
+		default:
+			return "", nil
+		}
+	}
+
+	outDir := filepath.Join(t.TempDir(), "synth-out")
+	var stdout, stderr bytes.Buffer
+	// NOTE: no --weak flag — the champion default is exercised.
+	code := runSkillOptSynth([]string{
+		"--template", "planner", "--repo", "acme/widgets",
+		"--strong", "strong-bot", "--judge", "judge-bot",
+		"--max-items", "1", "--out", outDir, "--home", home,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("synth exit = %d, stderr: %s", code, stderr.String())
+	}
+	if weakName != "synth-weak-champion" {
+		t.Fatalf("weak delivery agent name = %q, want the ephemeral synth-weak-champion", weakName)
+	}
+	if weakTemplateID != "planner@v1" {
+		t.Fatalf("weak agent not pinned to the champion version: TemplateID = %q, want planner@v1", weakTemplateID)
+	}
+	if weakPolicy != runtime.AutonomyPolicyReadOnly {
+		t.Fatalf("weak delivery policy = %q, want read-only (sandboxed)", weakPolicy)
+	}
+	if !strings.Contains(weakPrompt, "Plan software migrations well.") {
+		t.Fatalf("champion (v1) instructions did not reach the weak delivery: %q", weakPrompt)
+	}
+	if strings.Contains(weakPrompt, "REVISED v2") {
+		t.Fatalf("non-champion (v2) content leaked into the weak delivery: %q", weakPrompt)
+	}
+
+	pending, err := store.ListSynthReviewItems(ctx, db.SynthItemStatusPending)
+	if err != nil {
+		t.Fatalf("ListSynthReviewItems: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending items = %d, want 1", len(pending))
+	}
+	if pending[0].WeakAgent != "planner@v1 (champion)" {
+		t.Fatalf("persisted weak_agent = %q, want \"planner@v1 (champion)\"", pending[0].WeakAgent)
+	}
+}
+
+// TestRunSkillOptSynthChampionDefaultMissingTemplate proves the champion-default
+// path surfaces an actionable error when the target template is not installed
+// (the weak resolution can only default off a resolvable champion).
+func TestRunSkillOptSynthChampionDefaultMissingTemplate(t *testing.T) {
+	home, _ := synthTestHome(t, "strong-bot")
+	var stdout, stderr bytes.Buffer
+	code := runSkillOptSynth([]string{
+		"--template", "ghost", "--repo", "acme/widgets",
+		"--strong", "strong-bot", "--max-items", "1", "--home", home,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for a missing template; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not installed") {
+		t.Fatalf("want an actionable not-installed error, got: %s", stderr.String())
+	}
+}
+
 func TestRunSkillOptSynthMissingFlags(t *testing.T) {
 	home := t.TempDir()
 	var stdout, stderr bytes.Buffer
