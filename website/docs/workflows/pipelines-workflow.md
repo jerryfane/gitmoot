@@ -120,7 +120,7 @@ stages:
   - id: extract
     cmd: "python fetch_replies.py > replies.json"
   - id: triage
-    agent: reply-triager        # a managed agent that must already exist
+    agent: reply-triager        # managed agent — create it before the pipeline runs
     action: ask                 # ask (default) | review — read-only ONLY
     prompt: "Triage the fetched replies and flag anything that needs a human."
     needs: [extract]
@@ -132,9 +132,10 @@ codex — no per-job shell override), as a read-only **leaf**:
 - **read-only only** — `action` is `ask` (the default) or `review`; `implement` is
   rejected at add time. An agent stage may never write, and its `delegations[]` are
   stripped exactly as a shell stage's are (it never fans out).
-- **agent must exist** — `pipeline add` verifies every referenced agent exists (create
-  it first with `gitmoot agent …`), so a typo is a clear add-time error, not a stage
-  job the worker can never resolve.
+- **agent existence is warned, not blocked** — `pipeline add` warns for any referenced
+  agent that does not exist yet but still adds the pipeline (so a spec can be bundled
+  ahead of provisioning its agents); create the agent (`gitmoot agent …`) before the
+  stage runs, or it fails loudly at run time.
 - **upstream context is injected** — the stage prompt is prepended with a bounded,
   clearly-delimited **"Upstream stage results"** block carrying the result summary of
   each stage in its `needs`, so a downstream agent stage acts on upstream output as

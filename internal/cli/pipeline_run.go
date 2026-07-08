@@ -56,10 +56,15 @@ func newPipelineStageEnqueuer(store *db.Store, home string) pipelineStageEnqueue
 			// The worktree is created on disk BEFORE Enqueue; a failed Enqueue leaves
 			// no job row, so neither the terminal cleanup nor the daemon reclaim pass
 			// would ever dispose it. Roll it back here (detached from a possibly
-			// cancelled ctx) exactly as the #739 dispatch path does.
+			// cancelled ctx) exactly as the #739 dispatch path does. Enqueue commonly
+			// fails with context.Canceled on daemon shutdown, so BOTH the checkout
+			// lookup AND the removal must run on a WithoutCancel ctx — otherwise the
+			// lookup itself returns context.Canceled -> empty checkout -> the removal
+			// is skipped and the just-created worktree leaks with no recovery path.
 			if worktreePath != "" {
-				if checkout := pipelineStageCheckoutPath(ctx, store, request.Repo); checkout != "" {
-					_ = gitutil.Client{Dir: checkout}.RemoveWorktreeForce(context.WithoutCancel(ctx), worktreePath)
+				rollbackCtx := context.WithoutCancel(ctx)
+				if checkout := pipelineStageCheckoutPath(rollbackCtx, store, request.Repo); checkout != "" {
+					_ = gitutil.Client{Dir: checkout}.RemoveWorktreeForce(rollbackCtx, worktreePath)
 				}
 			}
 			return db.Job{}, err
@@ -864,10 +869,24 @@ func buildPipelineAgentStageContext(stage pipeline.Stage, byID map[string]db.Pip
 			limit = remaining
 		}
 		truncated, omitted := truncatePipelineContext(summary, limit)
-		b.WriteString(truncated)
 		if omitted {
-			b.WriteString(" [truncated]")
+			truncated += " [truncated]"
 		}
+		// FENCE the (attacker-influenceable) upstream summary in a backtick block
+		// sized longer than any backtick run it contains, mirroring the #419
+		// artifactBodyFence. Without this an upstream summary carrying a forged
+		// delimiter (`--- stage "x" ---`) or the closing sentinel (`---\n\nYour
+		// task:`) would spoof this block's structure and inject instructions into
+		// the downstream agent. Inside the fence the summary is inert literal text
+		// that cannot break out.
+		fence := pipelineContextFence(truncated)
+		b.WriteString(fence)
+		b.WriteString("\n")
+		b.WriteString(truncated)
+		if !strings.HasSuffix(truncated, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(fence)
 		b.WriteString("\n\n")
 		if remaining -= len(truncated); remaining < 0 {
 			remaining = 0
@@ -895,6 +914,31 @@ func truncatePipelineContext(s string, max int) (string, bool) {
 		cut--
 	}
 	return s[:cut], true
+}
+
+// pipelineContextFence returns a backtick fence guaranteed longer than the
+// longest run of backticks in content, so an embedded delimiter or gitmoot_result
+// sentinel inside a fenced upstream summary cannot terminate the block early and
+// spoof the injected structure. It mirrors workflow.artifactBodyFence (#419),
+// duplicated here to keep the cli package free of a workflow-internal dependency.
+// Minimum three backticks.
+func pipelineContextFence(content string) string {
+	longest, run := 0, 0
+	for _, r := range content {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	n := longest + 1
+	if n < 3 {
+		n = 3
+	}
+	return strings.Repeat("`", n)
 }
 
 func compactPipelineNeeds(needs []string) []string {

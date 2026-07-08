@@ -410,10 +410,12 @@ func TestPipelineReviewStagesConcurrentWorktreesE2E(t *testing.T) {
 	}
 }
 
-// TestPipelineAddRejectsMissingAgentStageAgent proves the #757 add-time guard: a
-// spec whose agent stage names an agent that does not exist is rejected at
-// `pipeline add`, not left as a stage job the worker can never resolve.
-func TestPipelineAddRejectsMissingAgentStageAgent(t *testing.T) {
+// TestPipelineAddWarnsMissingAgentStageAgent proves the #757 add-time behavior: a
+// spec whose agent stage names an agent that does not exist yet is WARNED about
+// but NOT blocked at `pipeline add` — a spec may legitimately be added before its
+// agents are provisioned (bundled/shareable pipelines, scripted setup). The
+// genuinely-missing agent still fails loudly when the stage runs.
+func TestPipelineAddWarnsMissingAgentStageAgent(t *testing.T) {
 	home, _, _ := heartbeatLoopE2EHome(t)
 
 	specYAML := "name: ghost-flow\nrepo: owner/repo\nstages:\n" +
@@ -421,10 +423,10 @@ func TestPipelineAddRejectsMissingAgentStageAgent(t *testing.T) {
 	specFile := writeSpec(t, specYAML)
 
 	var out, errBuf bytes.Buffer
-	if code := Run([]string{"pipeline", "add", specFile, "--home", home}, &out, &errBuf); code == 0 {
-		t.Fatalf("pipeline add succeeded, want rejection for missing agent")
+	if code := Run([]string{"pipeline", "add", specFile, "--home", home}, &out, &errBuf); code != 0 {
+		t.Fatalf("pipeline add failed (code %d), want success with a warning:\n%s", code, errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), `agent "nonexistent" which does not exist`) {
-		t.Fatalf("stderr missing missing-agent error:\n%s", errBuf.String())
+	if !strings.Contains(errBuf.String(), `agent "nonexistent" which does not exist yet`) {
+		t.Fatalf("stderr missing missing-agent warning:\n%s", errBuf.String())
 	}
 }

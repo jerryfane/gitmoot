@@ -73,6 +73,79 @@ func TestMailboxRunKeepsNonPipelineDelegations(t *testing.T) {
 	}
 }
 
+const askingResult = `{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[],"human_questions":[{"id":"q1","prompt":"v2 or v3?","choices":["v2","v3"]}]}}`
+
+// TestMailboxRunStripsPipelineStageHumanQuestions proves the leaf strip also
+// neutralizes human_questions[] (#757): a stage-sender job whose healthy result
+// carries human_questions[] has them stripped before storage, so AdvanceJob can
+// never drive the top-level ask-gate off a pipeline stage (empty ParentJobID) —
+// which would open an escalation/needs-attention round the pipeline can never
+// resolve while the advancer folds the stage on its decision and proceeds. The
+// stage folds purely on its decision instead.
+func TestMailboxRunStripsPipelineStageHumanQuestions(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "pipeline-runner"}
+	adapter := &fakeDelivery{outputs: []string{askingResult}}
+
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-q", Agent: "pipeline-x-runner", Action: "ask", Repo: "jerryfane/gitmoot", Sender: PipelineJobSender}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := mailbox.Run(ctx, "stage-q", agent, adapter); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	job, err := store.GetJob(ctx, "stage-q")
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	payload, err := ParseJobPayload(job.Payload)
+	if err != nil {
+		t.Fatalf("ParseJobPayload: %v", err)
+	}
+	if payload.Result == nil {
+		t.Fatalf("stage job has no result")
+	}
+	if len(payload.Result.HumanQuestions) != 0 {
+		t.Fatalf("pipeline stage human_questions = %+v, want stripped (leaf)", payload.Result.HumanQuestions)
+	}
+	// The stage still folds on its healthy decision: the job succeeded, not paused
+	// at awaiting_human.
+	if job.State != string(JobSucceeded) {
+		t.Fatalf("job state = %s, want succeeded (folds on decision, no ask-gate pause)", job.State)
+	}
+}
+
+// TestMailboxRunKeepsNonPipelineHumanQuestions is the control: a normal sender's
+// human_questions[] survive, so the strip is scoped strictly to pipeline stages.
+func TestMailboxRunKeepsNonPipelineHumanQuestions(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+	agent := runtime.Agent{Name: "coord", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "coordinator"}
+	adapter := &fakeDelivery{outputs: []string{askingResult}}
+
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-q", Agent: "coord", Action: "ask", Repo: "jerryfane/gitmoot", Sender: "user"}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := mailbox.Run(ctx, "job-q", agent, adapter); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	job, err := store.GetJob(ctx, "job-q")
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	payload, err := ParseJobPayload(job.Payload)
+	if err != nil {
+		t.Fatalf("ParseJobPayload: %v", err)
+	}
+	if payload.Result == nil || len(payload.Result.HumanQuestions) != 1 {
+		t.Fatalf("non-pipeline human_questions = %+v, want preserved (1)", payload.Result)
+	}
+}
+
 const blockedNeedsResult = `{"gitmoot_result":{"decision":"blocked","summary":"missing token","findings":[],"changes_made":[],"tests_run":[],"needs":["R2 token"],"delegations":[]}}`
 
 // TestMailboxRunSkipsJobGatesForPipelineStages proves a blocked #681 pipeline

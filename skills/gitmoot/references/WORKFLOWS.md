@@ -996,13 +996,14 @@ stages:
   - id: extract
     cmd: "python extract.py > out.json"
   - id: triage
-    agent: reply-triager        # must already exist: gitmoot agent create …
+    agent: reply-triager        # create it before the pipeline runs: gitmoot agent create …
     action: ask                 # ask (default) | review — read-only only
     prompt: "Triage the extracted replies and flag anything urgent."
     needs: [extract]
 ```
 
-`pipeline add` rejects an agent stage naming an agent that does not exist. The
+`pipeline add` warns (does not block) when an agent stage names an agent that does
+not exist yet; create it before the stage runs. The
 agent's stage prompt is **prepended with the results (summaries) of its `needs`
 stages** — a clearly-delimited, bounded "Upstream stage results" block — so a
 downstream agent stage acts on upstream output as real dataflow. A repo-bound

@@ -771,8 +771,19 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 	// for a pipeline-sender job so a stage can never spawn phantom children; the
 	// advancer already ignores stage delegations, and this makes stages-as-leaves
 	// hold at the engine seam too. Cheap and byte-identical for every other sender.
-	if payload.Sender == PipelineJobSender && len(result.Delegations) > 0 {
+	if payload.Sender == PipelineJobSender {
 		result.Delegations = nil
+		// Same leaf enforcement for human_questions[] (#757): a healthy agent-stage
+		// result with an empty ParentJobID would otherwise drive the TOP-LEVEL
+		// ask-gate (AdvanceJob, engine.go), opening an escalation / needs-attention
+		// round on a stage job that the pipeline can never resolve (job_recovery
+		// refuses to gate-resume a pipeline-sender job) while the advancer silently
+		// folds the stage on its decision and proceeds — the pause intent is
+		// dropped and a dangling round is left behind. A leaf stage can no more
+		// pause a human than it can spawn a child; strip it so the stage folds
+		// purely on its decision (a stage that must halt returns decision
+		// "blocked", which the advancer parks the whole run on with needs).
+		result.HumanQuestions = nil
 	}
 	payload.Result = &result
 	// #526 deterministic binary-checklist audit of the parsed result. Off (the

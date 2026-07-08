@@ -163,7 +163,11 @@ func runPipelineAdd(args []string, stdout, stderr io.Writer) int {
 			}
 			checkedAgents[stage.Agent] = struct{}{}
 			if _, err := store.GetAgent(context.Background(), stage.Agent); err != nil {
-				return fmt.Errorf("stage %q references agent %q which does not exist; create it first (gitmoot agent ...)", stage.ID, stage.Agent)
+				// Warn, don't block: a spec may legitimately be added before its
+				// agents are provisioned (bundled/shareable pipelines, scripted
+				// setup). A genuinely-missing agent still fails loudly when the
+				// stage runs, so this only forfeits an add-time typo signal.
+				fmt.Fprintf(stderr, "warning: stage %q references agent %q which does not exist yet; create it before the pipeline runs (gitmoot agent ...)\n", stage.ID, stage.Agent)
 			}
 		}
 		if err := store.CreateOrUpdatePipeline(context.Background(), record); err != nil {
