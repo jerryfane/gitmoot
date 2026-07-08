@@ -141,7 +141,7 @@ WHERE owner_kind = ? AND owner_ref = ? AND owner_version = ?
 // deliberately not filtered — an agent owner always writes owner_version=”), so
 // it answers "how many injectable facts does this agent own". It backs the
 // dashboard's per-agent memory count and is a plain read (no FTS). Superseded AND
-// retired rows are excluded (superseded_by IS NULL AND retired_at = '') so the
+// retired rows are excluded (superseded_by IS NULL AND retired_at = ”) so the
 // count stays exactly equal to the injectable set surfaced by
 // QueryConfirmedMemories (which applies the same two filters).
 func (s *Store) CountConfirmedMemoriesForOwner(ctx context.Context, ownerKind, ownerRef string) (int, error) {
@@ -178,7 +178,7 @@ WHERE owner_kind = ? AND owner_ref = ?`, ownerKind, ownerRef).Scan(&n)
 // injectable set, which drops superseded rows) and CountConfirmedMemoriesForOwner
 // (which counts only injectable rows), the graph deliberately shows superseded
 // "ghost" facts so it can draw supersede edges, so this MUST NOT filter them.
-// Retired rows (retired_at != '') ARE excluded, though: retirement carries no
+// Retired rows (retired_at != ”) ARE excluded, though: retirement carries no
 // supersede pointer and no edge, so a retired fact drawn as a live node would be a
 // phantom — and excluding it keeps the graph's fact set aligned with the injectable
 // set (QueryConfirmedMemories / CountConfirmedMemoriesForOwner both filter retired).
@@ -521,6 +521,67 @@ func (s *Store) ApplyVaultImport(ctx context.Context, plan VaultImportPlan) erro
 		}
 	}
 	return tx.Commit()
+}
+
+// GroomRetire is one row a groom plan proposes retiring: the memory id and the
+// full store reason ("groom:<detector>").
+type GroomRetire struct {
+	ID     int64
+	Reason string
+}
+
+// GroomRetireResult reports which ids were actually retired and which were skipped
+// (already retired or no longer present) by ApplyGroomRetirements.
+type GroomRetireResult struct {
+	Retired []int64
+	Skipped []int64
+}
+
+// ApplyGroomRetirements retires every planned row in ONE transaction (all-or-
+// nothing on error), removing each from the FTS index in the same transaction so
+// the retired facts stop being injected and stop appearing in future exports.
+// Unlike RetireConfirmedMemory, a planned id that is already retired or missing is
+// SKIPPED gracefully rather than aborting the batch: the groom plan may carry
+// duplicate ids (one memory flagged by two detectors), and re-applying is
+// idempotent. The caller's snapshot-hash staleness guard is what protects against
+// a concurrent vault edit landing between propose and apply; this method just
+// executes the vetted plan. It is additive and NON-destructive (the row is kept
+// for audit with retired_at/retired_reason set) and never writes superseded_by.
+func (s *Store) ApplyGroomRetirements(ctx context.Context, items []GroomRetire) (GroomRetireResult, error) {
+	var result GroomRetireResult
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := nowRFC3339()
+	for _, it := range items {
+		res, err := tx.ExecContext(ctx, `
+UPDATE confirmed_memories
+SET retired_at = ?, retired_reason = ?
+WHERE id = ? AND retired_at = ''`, now, it.Reason, it.ID)
+		if err != nil {
+			return GroomRetireResult{}, fmt.Errorf("groom retire %d: %w", it.ID, err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return GroomRetireResult{}, err
+		}
+		if affected == 0 {
+			// Already retired within this batch (a duplicate id), already retired by a
+			// prior apply, or the row is gone — skip gracefully.
+			result.Skipped = append(result.Skipped, it.ID)
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM confirmed_memories_fts WHERE rowid = ?`, it.ID); err != nil {
+			return GroomRetireResult{}, fmt.Errorf("groom retire fts %d: %w", it.ID, err)
+		}
+		result.Retired = append(result.Retired, it.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		return GroomRetireResult{}, err
+	}
+	return result, nil
 }
 
 // QueryConfirmedMemories is the READ path for job-prompt assembly. It runs one

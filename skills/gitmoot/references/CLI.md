@@ -1685,6 +1685,43 @@ Without `--yes` it prints the plan and writes nothing; with `--yes` it promotes
 > boundary. Trust-aware injection (having the read path weigh `trust_mark`) is
 > future work; nothing reads `trust_mark` for a decision yet.
 
+### Grooming: deterministic propose/apply (#737 P4.2)
+
+`memory groom` mechanizes the periodic curation pass that retires stale,
+low-signal confirmed memories, as an explicit **propose → review → apply**
+round-trip:
+
+```sh
+gitmoot memory groom --propose [--out PLAN.json] [--json]
+gitmoot memory groom --yes --plan PLAN.json [--json]
+```
+
+`--propose` reads every **active** confirmed memory (retired rows excluded),
+computes the current vault `snapshot_hash` (the same anchor `vault export`/`import`
+use), runs deterministic detectors, and writes a reviewable plan artifact
+(`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags, stats}`). It
+**touches nothing** in the store. The detectors are:
+
+- **status/changelog/ToC snapshots** — notes dominated (≥80% of non-blank lines) by
+  `STATUS:` markers, `SHIPPED`/`merged & deployed` changelog phrases, ISO-date-led
+  lines, or Markdown link-list (`- [ …]`) index entries;
+- **bare to-do lists** — content whose every non-blank line is a `- [ ]`/`- [x]`
+  checkbox;
+- **exact duplicates** — memories sharing identical content; the lowest id is kept
+  and the rest proposed for retirement;
+- **over-long "bricks"** (content > ~1200 chars) are **flagged for rewrite**, never
+  retired — P4.2 only lists them for the owner (LLM rewriting is the follow-up
+  P4.3).
+
+`--yes --plan` recomputes the `snapshot_hash` and **aborts as stale** if it differs
+from the plan's (a vault edit between propose and apply invalidates it), then
+retires exactly the planned ids in **one transaction** (reason `groom:<detector>`,
+FTS index cleared in the same tx). It is **retire-only** — no content is edited or
+rewritten — and idempotent: an already-retired or missing id in the plan is skipped
+gracefully rather than aborting the batch. See
+[`docs/examples/memory-groom-nightly`](../../../docs/examples/memory-groom-nightly/README.md)
+for a ready-to-register nightly proposal pipeline.
+
 ## Pipelines
 
 A pipeline (#681) runs a **declared DAG of shell stages** — a fixed, repeatable
