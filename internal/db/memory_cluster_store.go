@@ -3,8 +3,15 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
+
+// ErrClusterPlanStale is returned by RecomputeMemoryClustersFresh when the
+// active-fact anchor re-read inside the rewrite transaction no longer matches the
+// anchor the reviewed plan was built against — a fact was confirmed/edited/retired
+// in the window. The caller re-proposes rather than applying a stale plan.
+var ErrClusterPlanStale = errors.New("cluster plan is stale")
 
 // This file is the store layer for emergent memory clusters (#763 Track A). It
 // persists the deterministic community detection computed in internal/memory:
@@ -117,6 +124,49 @@ func (s *Store) RecomputeMemoryClusters(ctx context.Context, a MemoryClusterAssi
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := recomputeMemoryClustersTx(ctx, tx, a); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RecomputeMemoryClustersFresh performs the destructive clustering rewrite ONLY if
+// the active-fact anchor — re-read from the SAME transaction that performs the
+// delete/insert — still equals expected. This closes the TOCTOU window between the
+// CLI's staleness pre-check and the rewrite: a concurrent confirm/attach in that
+// window would otherwise be silently dropped by the DELETE. anchorFn computes the
+// anchor from the tx-scoped active vault rows using the SAME algorithm that
+// produced expected. Because the anchor read and the rewrite share one transaction,
+// a fact confirmed after the snapshot either changes the anchor (→ ErrClusterPlanStale)
+// or invalidates the write snapshot (→ SQLITE_BUSY_SNAPSHOT); the stale row can no
+// longer be dropped unnoticed. Returns ErrClusterPlanStale (wrapped) if the anchor
+// moved; the whole swap is atomic.
+func (s *Store) RecomputeMemoryClustersFresh(ctx context.Context, a MemoryClusterAssignment, expected string, anchorFn func([]ConfirmedMemory) string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := listConfirmedMemoriesForVault(ctx, tx, "")
+	if err != nil {
+		return err
+	}
+	if got := anchorFn(rows); got != expected {
+		return fmt.Errorf("%w (plan anchor %s, current %s)", ErrClusterPlanStale, expected, got)
+	}
+	if err := recomputeMemoryClustersTx(ctx, tx, a); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// recomputeMemoryClustersTx is the delete-all + reinsert core of a full clustering
+// rewrite, run inside the caller's transaction so it can be paired atomically with
+// a same-tx anchor re-read (RecomputeMemoryClustersFresh) or run standalone
+// (RecomputeMemoryClusters). Owner label overrides are carried forward by medoid
+// identity.
+func recomputeMemoryClustersTx(ctx context.Context, tx *sql.Tx, a MemoryClusterAssignment) error {
 	// Preserve overrides keyed by medoid id before wiping.
 	overrideByMedoid, err := overridesByMedoidTx(ctx, tx)
 	if err != nil {
@@ -150,7 +200,7 @@ INSERT INTO memory_cluster_members (memory_id, cluster_id) VALUES (?, ?)`,
 			return fmt.Errorf("insert cluster member %d: %w", m.MemoryID, err)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // overridesByMedoidTx reads the current (medoid_id -> non-empty override) map

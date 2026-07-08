@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -261,22 +262,22 @@ func runMemoryClustersApply(home, planPath string, jsonOut bool, stdout, stderr 
 		if err != nil {
 			return err
 		}
-		// Recompute the CURRENT anchor and abort if the store moved since the plan was
-		// proposed — a fact added/edited/retired in the window would make the plan
-		// target stale ids.
-		_, freshAnchor, err := buildClusterAssignment(ctx, store)
-		if err != nil {
-			return err
-		}
-		if freshAnchor != plan.Anchor {
-			return fmt.Errorf("plan is stale: the memory store changed since it was proposed (plan anchor %s, current %s); re-run `gitmoot memory clusters recompute --propose` and re-review", plan.Anchor, freshAnchor)
-		}
+		// Verify the CURRENT anchor and perform the destructive rewrite ATOMICALLY:
+		// RecomputeMemoryClustersFresh re-reads the active-fact anchor inside the same
+		// transaction as the delete/insert, so a fact confirmed/edited/retired in the
+		// window between propose and apply cannot slip through — it either changes the
+		// anchor (stale) or invalidates the write snapshot. A prior split (anchor read
+		// then a separate rewrite tx) left a TOCTOU window where a concurrent
+		// attachConfirmedFactToCluster member row was silently dropped by the DELETE.
 		assignment := planAssignment(plan)
-		if err := store.RecomputeMemoryClusters(ctx, assignment); err != nil {
+		if err := store.RecomputeMemoryClustersFresh(ctx, assignment, plan.Anchor, clusterAnchor); err != nil {
+			if errors.Is(err, db.ErrClusterPlanStale) {
+				return fmt.Errorf("plan is stale: the memory store changed since it was proposed (%v); re-run `gitmoot memory clusters recompute --propose` and re-review", err)
+			}
 			return err
 		}
 		real, unc := countPlanBuckets(plan)
-		result = applyResult{Anchor: freshAnchor, Applied: true, Clusters: real,
+		result = applyResult{Anchor: plan.Anchor, Applied: true, Clusters: real,
 			Unclustered: unc, Facts: len(plan.members())}
 		return nil
 	})
