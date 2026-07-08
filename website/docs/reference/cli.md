@@ -1346,6 +1346,8 @@ gitmoot memory vault import <DIR> [--dry-run|--yes] [--json]
 gitmoot memory ingest <path|dir> --agent NAME [--repo owner/repo] [--tier repo|general] [--dry-run] [--json]
 gitmoot memory observations [--agent NAME] [--provenance-prefix P] [--json]
 gitmoot memory confirm <obs-id>... | --provenance-prefix P [--agent NAME] [--yes] [--json]
+gitmoot memory groom --propose [--out PLAN.json] [--json]
+gitmoot memory groom --yes --plan PLAN.json [--json]
 ```
 
 `memory list` shows confirmed memories and/or pending observations. `memory
@@ -1400,6 +1402,19 @@ into confirmed memory (idempotently), and without `--yes` only prints the plan.
 Ingested Markdown is an indirect-prompt-injection vector, so it stays inert at
 `trust_mark = low` until a human confirms it; that confirm gate is the trust
 boundary and nothing reads `trust_mark` for a decision yet.
+
+`memory groom` retires stale, low-signal confirmed memories as a **propose →
+review → apply** round-trip. `--propose` reads active confirmed memory, computes
+the current vault `snapshot_hash`, runs deterministic detectors
+(status/changelog/ToC snapshots — short notes need a strong `STATUS:`/`… & deployed`
+marker; bare to-do lists; exact duplicates scoped to the same owner/repo/scope;
+over-long "bricks" are flagged for rewrite, not retired), and writes a reviewable plan
+artifact — it touches nothing in the store. `--yes --plan` recomputes the
+`snapshot_hash`, **aborts as stale** if the store changed since the proposal, then
+retires exactly the planned ids in one transaction (reason `groom:<detector>`). It
+is retire-only and idempotent (already-retired ids are skipped). A ready-to-register
+nightly proposal pipeline lives under
+[`docs/examples/memory-groom-nightly`](https://github.com/jerryfane/gitmoot/tree/main/docs/examples/memory-groom-nightly).
 
 ## Pipelines
 

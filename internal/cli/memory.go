@@ -40,6 +40,8 @@ func runMemory(args []string, stdout, stderr io.Writer) int {
 		return runMemoryObservations(args[1:], stdout, stderr)
 	case "confirm":
 		return runMemoryConfirm(args[1:], stdout, stderr)
+	case "groom":
+		return runMemoryGroom(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown memory command %q\n\n", args[0])
 		printMemoryUsage(stderr)
@@ -58,6 +60,7 @@ func printMemoryUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot memory ingest <path|dir> --agent NAME [--repo R] [--tier repo|general] [--dry-run] [--json]")
 	fmt.Fprintln(w, "  gitmoot memory observations [--agent NAME] [--provenance-prefix P] [--json]")
 	fmt.Fprintln(w, "  gitmoot memory confirm <obs-id>... | --provenance-prefix P [--agent NAME] [--yes] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory groom --propose [--out PLAN.json] [--json] | --yes --plan PLAN.json [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  list          show stored memories (confirmed and/or pending observations)")
 	fmt.Fprintln(w, "  replay        offline A/B: render recent real jobs' prompts with vs without the")
@@ -67,6 +70,7 @@ func printMemoryUsage(w io.Writer) {
 	fmt.Fprintln(w, "  ingest        stage markdown as trust_mark=low pending observations (PreFilter-gated)")
 	fmt.Fprintln(w, "  observations  list pending observations, flagging which keys are already confirmed")
 	fmt.Fprintln(w, "  confirm       human-gated promotion of pending observations into confirmed memory")
+	fmt.Fprintln(w, "  groom         deterministically propose stale-memory retirements, apply on confirmation")
 }
 
 // ---- memory list ----------------------------------------------------------

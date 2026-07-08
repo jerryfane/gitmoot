@@ -214,6 +214,44 @@ boundary. Trust-aware injection — having the read path weigh `trust_mark` — 
 future work; nothing reads `trust_mark` for a decision yet.
 :::
 
+## Grooming stale memory
+
+`memory groom` mechanizes the periodic pass that retires stale, low-signal
+confirmed memories, as an explicit **propose → review → apply** round-trip that
+never mutates memory without an owner `--yes`:
+
+```sh
+gitmoot memory groom --propose [--out PLAN.json] [--json]
+gitmoot memory groom --yes --plan PLAN.json [--json]
+```
+
+`--propose` reads every **active** confirmed memory (retired rows excluded),
+computes the current vault `snapshot_hash` (the same anchor `vault export`/`import`
+use), runs deterministic detectors, and writes a reviewable plan artifact
+(`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags, stats}`). It
+touches nothing in the store. The detectors flag:
+
+- **status/changelog/ToC snapshots** — notes dominated by `STATUS:` markers,
+  `SHIPPED`/`merged & deployed` phrases, ISO-date-led lines, or Markdown link-list
+  index entries (short notes under 3 lines also need a strong `STATUS:`/`… & deployed`
+  marker, so a lone date-led or `SHIPPED`-mentioning keeper is not retired);
+- **bare to-do lists** — content whose every non-blank line is a checkbox item;
+- **exact duplicates** — identical content **within the same owner/repo/scope**; the
+  lowest id is kept and the rest proposed. Copies across owners/repos/scopes are kept
+  (each is the only one its scope can see);
+- **over-long "bricks"** (> ~1200 chars) are **flagged for rewrite, not retired** —
+  P4.2 only lists them for the owner (LLM rewriting is the follow-up P4.3).
+
+`--yes --plan` recomputes the `snapshot_hash` and **aborts as stale** if it differs
+from the plan's (a vault edit between propose and apply invalidates it), then
+retires exactly the planned ids in one transaction (reason `groom:<detector>`,
+clearing each from the FTS index). It is retire-only and idempotent — an
+already-retired or missing id is skipped gracefully.
+
+A ready-to-register nightly proposal pipeline (propose + notify-on-nonempty, apply
+held behind the owner) lives in
+[`docs/examples/memory-groom-nightly`](https://github.com/jerryfane/gitmoot/tree/main/docs/examples/memory-groom-nightly).
+
 ## Phases
 
 - **Phase 0** — typed `learnings` in the result contract; the two-table schema
