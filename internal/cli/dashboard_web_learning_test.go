@@ -352,6 +352,22 @@ func TestWebDataSourceKnowledge(t *testing.T) {
 		t.Fatalf("supersede edge = %s->%s, want %s->%s (newer->older)", superEdge.Source, superEdge.Target, wantNew, wantOld)
 	}
 
+	// #763 detail fields with NO cluster recompute: the graceful pre-cluster
+	// fallback. The Clusters slice is empty and every fact's Cluster field is empty,
+	// so the client degrades to its scope/category view. seedKnowledge writes no
+	// provenance, so SourceJob/SourceFile are empty too.
+	if len(k.Clusters) != 0 {
+		t.Fatalf("clusters = %d, want 0 (no recompute ⇒ pre-cluster fallback): %+v", len(k.Clusters), k.Clusters)
+	}
+	for _, f := range k.Facts {
+		if f.Cluster != "" {
+			t.Fatalf("fact %s Cluster = %q, want empty (no recompute)", f.ID, f.Cluster)
+		}
+		if f.SourceJob != "" || f.SourceFile != "" {
+			t.Fatalf("fact %s provenance = job%q file%q, want empty (seed sets none)", f.ID, f.SourceJob, f.SourceFile)
+		}
+	}
+
 	// Determinism: a second call is byte-identical.
 	k2, err := ds.Knowledge(context.Background())
 	if err != nil {
@@ -422,6 +438,76 @@ func TestKnowledgeClusterHierarchy(t *testing.T) {
 	}
 	if repoOfCluster[dbHub] != "repo:acme/widget" {
 		t.Fatalf("db cluster repo hub = %q, want repo:acme/widget", repoOfCluster[dbHub])
+	}
+
+	// #763 cluster hubs + per-fact detail fields. seedClusterCorpus produced two
+	// communities (db / net), all owned by researcher in acme/widget, each seed
+	// carrying SourceJob "job-<key>" and no file provenance (seedConfirmed).
+	if len(k.Clusters) != 2 {
+		t.Fatalf("clusters = %d, want 2 (db + net communities): %+v", len(k.Clusters), k.Clusters)
+	}
+	factByID := map[string]dashboard.KnowledgeFact{}
+	for _, f := range k.Facts {
+		factByID[f.ID] = f
+	}
+	clusterIDs := map[string]bool{}
+	total := 0
+	for _, c := range k.Clusters {
+		if c.ID == "" || c.Label == "" {
+			t.Fatalf("cluster missing id/label: %+v", c)
+		}
+		if c.Count != 3 {
+			t.Fatalf("cluster %s count = %d, want 3", c.ID, c.Count)
+		}
+		if c.Repo != "acme/widget" {
+			t.Fatalf("cluster %s repo = %q, want acme/widget (dominant scope)", c.ID, c.Repo)
+		}
+		// Medoid, when set, is an emitted member fact of THIS cluster.
+		if c.Medoid != "" && factByID[c.Medoid].Cluster != c.ID {
+			t.Fatalf("cluster %s medoid %q is not one of its member facts", c.ID, c.Medoid)
+		}
+		clusterIDs[c.ID] = true
+		total += c.Count
+	}
+	if total != len(dbIDs)+len(netIDs) {
+		t.Fatalf("cluster member total = %d, want %d", total, len(dbIDs)+len(netIDs))
+	}
+	// Clusters sorted by id ascending (deterministic ordering for the sig-skip).
+	for i := 1; i < len(k.Clusters); i++ {
+		if k.Clusters[i-1].ID > k.Clusters[i].ID {
+			t.Fatalf("clusters not id-sorted: %+v", k.Clusters)
+		}
+	}
+	// Every fact is clustered and references a known hub (no dangling Cluster field).
+	for _, f := range k.Facts {
+		if f.Cluster == "" || !clusterIDs[f.Cluster] {
+			t.Fatalf("fact %s Cluster = %q, not a known cluster", f.ID, f.Cluster)
+		}
+	}
+	// Provenance: the source job comes from the confirmed row, with no file
+	// (seedConfirmed sets SourceJob "job-<key>" and Provenance "test").
+	first := factByID["fact:"+itoaTest(dbIDs[0])]
+	if first.SourceJob != "job-db-index" || first.SourceFile != "" {
+		t.Fatalf("fact %s provenance = job%q file%q, want job-db-index / empty", first.ID, first.SourceJob, first.SourceFile)
+	}
+	// Vault [[wikilinks]]: the similar db facts cross-reference one another, capped
+	// at five, and every link resolves to an emitted fact (no dangling reference).
+	linked := 0
+	for _, f := range k.Facts {
+		if len(f.Links) > vaultLinkK {
+			t.Fatalf("fact %s has %d links, want <= %d (cap)", f.ID, len(f.Links), vaultLinkK)
+		}
+		for _, id := range f.Links {
+			if _, ok := factByID[id]; !ok {
+				t.Fatalf("fact %s links to unknown fact %q", f.ID, id)
+			}
+		}
+		if len(f.Links) > 0 {
+			linked++
+		}
+	}
+	if linked == 0 {
+		t.Fatalf("expected at least one fact with vault [[wikilinks]], got none")
 	}
 
 	// Determinism: a second bridge call is byte-identical.

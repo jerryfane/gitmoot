@@ -206,9 +206,14 @@ type witnessKey struct {
 }
 
 // Knowledge returns the memory brain graph behind the Learning page's Knowledge
-// view: the memory-enrolled agents, their confirmed facts, and the owner/category/
-// supersede edges between them. It is a read-only pass over the enrolled config set
-// (config.LoadAgentTypes) plus the confirmed_memories / memory_observations tables.
+// view: the memory-enrolled agents, their confirmed facts (each carrying the #763
+// detail fields — owning cluster, source-job/source-file provenance and the vault
+// [[wikilink]] cross-references), the emergent clusters those facts belong to, and
+// the owner/cluster/repo/supersede edges between them. It is a read-only pass over
+// the enrolled config set (config.LoadAgentTypes) plus the confirmed_memories /
+// memory_observations / memory_clusters tables. Clusters are additive: an
+// un-recomputed store returns an empty Clusters slice and empty per-fact Cluster
+// fields, and the client falls back to its pre-cluster scope/category view.
 //
 // Deliberate count divergence: a KnowledgeAgent's Facts count is the INJECTABLE set
 // (CountConfirmedMemoriesForOwner, which excludes superseded rows), but the Facts
@@ -217,9 +222,10 @@ type witnessKey struct {
 // agent therefore differ by its superseded rows — this is intentional.
 func (d *webDataSource) Knowledge(ctx context.Context) (dashboard.Knowledge, error) {
 	out := dashboard.Knowledge{
-		Agents: []dashboard.KnowledgeAgent{},
-		Facts:  []dashboard.KnowledgeFact{},
-		Edges:  []dashboard.KnowledgeEdge{},
+		Agents:   []dashboard.KnowledgeAgent{},
+		Facts:    []dashboard.KnowledgeFact{},
+		Clusters: []dashboard.KnowledgeCluster{},
+		Edges:    []dashboard.KnowledgeEdge{},
 	}
 	err := withStoreAndPaths(d.home, func(paths config.Paths, store *db.Store) error {
 		// Confirmed facts (INCLUDING superseded ghosts) owned by any agent.
@@ -238,14 +244,40 @@ func (d *webDataSource) Knowledge(ctx context.Context) (dashboard.Knowledge, err
 			}
 		}
 
-		// Facts. rowid -> stable fact id, retained for supersede-edge resolution.
+		// rowid -> stable fact id, built up front so the per-fact [[wikilink]] set can
+		// filter to the emitted fact pool (no dangling cross-references) and the
+		// supersede edges can resolve.
 		idByRow := make(map[int64]string, len(rows))
+		for _, r := range rows {
+			idByRow[r.ID] = fmt.Sprintf("fact:%d", r.ID)
+		}
+
+		// Persisted emergent-cluster membership (rowid -> cluster id) and the cluster
+		// rows themselves (label/medoid), retiring the old key-prefix category hack
+		// (#763). Both are fail-open: a query error (or an un-recomputed store) leaves
+		// the maps empty, so per-fact Cluster fields and the Clusters slice stay empty
+		// and the client falls back to its pre-cluster scope/category view.
+		membByRow := map[int64]int64{}
+		if members, merr := store.ListMemoryClusterMembers(ctx); merr == nil {
+			for _, m := range members {
+				membByRow[m.MemoryID] = m.ClusterID
+			}
+		}
+		clusterByID := map[int64]db.MemoryCluster{}
+		if clusters, cerr := store.ListMemoryClusters(ctx); cerr == nil {
+			for _, c := range clusters {
+				clusterByID[c.ClusterID] = c
+			}
+		}
+
+		// Facts, with the Knowledge graph v2 detail fields (#763): the owning cluster
+		// hub, provenance (source job xor source file), and the vault [[wikilink]]
+		// cross-references. All are additive — an un-recomputed store leaves Cluster
+		// empty and file-less provenance leaves SourceFile empty.
 		out.Facts = make([]dashboard.KnowledgeFact, 0, len(rows))
 		for _, r := range rows {
-			id := fmt.Sprintf("fact:%d", r.ID)
-			idByRow[r.ID] = id
-			out.Facts = append(out.Facts, dashboard.KnowledgeFact{
-				ID:         id,
+			fact := dashboard.KnowledgeFact{
+				ID:         idByRow[r.ID],
 				Content:    r.Content,
 				Repo:       strings.TrimSpace(r.Repo),
 				Key:        strings.TrimSpace(r.Key),
@@ -254,7 +286,24 @@ func (d *webDataSource) Knowledge(ctx context.Context) (dashboard.Knowledge, err
 				FirstSeen:  parseJobTimeMillis(r.FirstConfirmedAt),
 				LastSeen:   parseJobTimeMillis(r.UpdatedAt),
 				Superseded: r.SupersededBy != 0,
-			})
+				Links:      knowledgeFactLinks(ctx, store, r, idByRow),
+			}
+			// Cluster: only when the membership resolves to a known cluster row, so a
+			// fact's Cluster never dangles past the emitted Clusters slice.
+			if cid, ok := membByRow[r.ID]; ok {
+				if _, known := clusterByID[cid]; known {
+					fact.Cluster = clusterHubID(cid)
+				}
+			}
+			// Provenance: the job id wins; a file-shaped provenance backs SourceFile
+			// only when there is no job, so a fact never carries both (the client's
+			// "one of source job / source file, never both" contract).
+			if job := strings.TrimSpace(r.SourceJob); job != "" {
+				fact.SourceJob = job
+			} else if file := factSourceFile(r.Provenance); file != "" {
+				fact.SourceFile = file
+			}
+			out.Facts = append(out.Facts, fact)
 		}
 		// Newest-first by FirstSeen, ID tie-break — mirrors the fake feed's stable order.
 		sort.SliceStable(out.Facts, func(i, j int) bool {
@@ -264,17 +313,7 @@ func (d *webDataSource) Knowledge(ctx context.Context) (dashboard.Knowledge, err
 			return out.Facts[i].ID < out.Facts[j].ID
 		})
 
-		// Persisted emergent-cluster membership (rowid -> cluster id), retiring the
-		// old key-prefix category hack (#763). Fail-open: a query error (or an
-		// un-recomputed store) leaves membership empty and the graph simply emits no
-		// cluster/repo-tier edges rather than failing the endpoint.
-		membByRow := map[int64]int64{}
-		if members, merr := store.ListMemoryClusterMembers(ctx); merr == nil {
-			for _, m := range members {
-				membByRow[m.MemoryID] = m.ClusterID
-			}
-		}
-
+		out.Clusters = knowledgeClusters(clusterByID, out.Facts, idByRow)
 		out.Agents = knowledgeAgents(ctx, store, paths, out.Facts)
 		out.Edges = knowledgeEdges(rows, out.Facts, idByRow, membByRow)
 		return nil
@@ -283,6 +322,126 @@ func (d *webDataSource) Knowledge(ctx context.Context) (dashboard.Knowledge, err
 		return dashboard.Knowledge{}, err
 	}
 	return out, nil
+}
+
+// factSourceFileMarkers are the Provenance prefixes the file-ingest write paths
+// stamp a source file behind: `memory ingest` writes "ingest:<relpath>" and the
+// vault import writes "vault-import:<file>" (internal/cli/memory_ingest.go,
+// memory_vault_import.go). A confirmed fact carries its source observation's
+// provenance verbatim, so these mirror those write sites. Job- or confirm-shaped
+// provenance ("distill:<job>", "confirm", …) carries no file.
+var factSourceFileMarkers = []string{"ingest:", "vault-import:"}
+
+// factSourceFile extracts a file-shaped provenance (the file a fact was ingested
+// from) from a confirmed row's Provenance column, or "" when the provenance is not
+// file-shaped. It backs KnowledgeFact.SourceFile; the caller only consults it when
+// SourceJob is empty so a fact never carries both.
+func factSourceFile(provenance string) string {
+	provenance = strings.TrimSpace(provenance)
+	for _, marker := range factSourceFileMarkers {
+		if strings.HasPrefix(provenance, marker) {
+			if f := strings.TrimSpace(strings.TrimPrefix(provenance, marker)); f != "" {
+				return f
+			}
+		}
+	}
+	return ""
+}
+
+// knowledgeFactLinks returns the vault [[wikilink]] fact ids for one confirmed
+// row, reusing the SAME deterministic top-K co-occurrence derivation the vault
+// export renders (vaultLinksFor, capped at vaultLinkK=5). Targets are mapped to
+// their stable "fact:<id>" ids and filtered to the emitted fact set (idByRow) so
+// the detail panel never renders a dangling cross-reference; the result is sorted
+// by target id for a stable, signature-skippable payload. Fail-open: a link-query
+// error (or an empty match) yields no links rather than failing the endpoint.
+func knowledgeFactLinks(ctx context.Context, store *db.Store, src db.ConfirmedMemory, idByRow map[int64]string) []string {
+	links, err := vaultLinksFor(ctx, store, src)
+	if err != nil || len(links) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(links))
+	for _, l := range links {
+		if _, ok := idByRow[l.TargetID]; ok {
+			ids = append(ids, l.TargetID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, fmt.Sprintf("fact:%d", id))
+	}
+	return out
+}
+
+// knowledgeClusters builds the emergent-cluster hubs behind the Knowledge view's
+// repo->cluster->fact hierarchy (#763): one dashboard.KnowledgeCluster per
+// persisted community that has at least one EMITTED member fact. Label is the
+// display label — an owner `memory cluster rename` override wins, resolved by the
+// store's DisplayLabel, so the client renders it verbatim. Count is the
+// emitted-member tally (so it matches the members the client can list), Repo is the
+// dominant repo scope among those members ("" = general/mixed) for the nesting, and
+// Medoid is the anchor fact but only when it is itself an emitted member of this
+// hub. Sorted by hub id for a stable, signature-skippable payload. Fail-open
+// upstream: an empty cluster set yields an empty slice and the client falls back to
+// its pre-cluster scope/category view.
+func knowledgeClusters(clusterByID map[int64]db.MemoryCluster, facts []dashboard.KnowledgeFact, idByRow map[int64]string) []dashboard.KnowledgeCluster {
+	// Roll up the emitted facts by their cluster hub: member count, per-repo tally,
+	// and the fact->hub index used to confirm a medoid is a member of its own hub.
+	countByHub := map[string]int{}
+	reposByHub := map[string]map[string]int{}
+	hubOfFact := map[string]string{}
+	for _, f := range facts {
+		if f.Cluster == "" {
+			continue
+		}
+		countByHub[f.Cluster]++
+		if reposByHub[f.Cluster] == nil {
+			reposByHub[f.Cluster] = map[string]int{}
+		}
+		reposByHub[f.Cluster][f.Repo]++
+		hubOfFact[f.ID] = f.Cluster
+	}
+
+	out := make([]dashboard.KnowledgeCluster, 0, len(clusterByID))
+	for cid, c := range clusterByID {
+		hub := clusterHubID(cid)
+		count := countByHub[hub]
+		if count == 0 {
+			continue // no emitted member facts -> not a hub the client can render
+		}
+		kc := dashboard.KnowledgeCluster{
+			ID:    hub,
+			Label: c.DisplayLabel(),
+			Count: count,
+			Repo:  dominantRepo(reposByHub[hub]),
+		}
+		if c.MedoidID != 0 {
+			if mid := fmt.Sprintf("fact:%d", c.MedoidID); hubOfFact[mid] == hub {
+				kc.Medoid = mid
+			}
+		}
+		out = append(out, kc)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// dominantRepo returns the most common repo scope among a cluster's member facts
+// for the repo->cluster nesting: the modal repo, ties broken by the
+// lexically-smallest repo for determinism. An empty result means general/mixed
+// scope (the modal member is general-scoped or a general-vs-repo tie).
+func dominantRepo(repos map[string]int) string {
+	best, bestN := "", -1
+	for repo, n := range repos {
+		if n > bestN || (n == bestN && repo < best) {
+			best, bestN = repo, n
+		}
+	}
+	return best
 }
 
 // knowledgeAgents returns the brain-graph's agent hubs: the memory-enrolled agents
