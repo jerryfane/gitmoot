@@ -135,7 +135,11 @@ never clobber newer facts. Then:
 Frontmatter identity edits (key/scope/owner) are out of scope — detected, warned,
 and skipped (only the content edit lands). `--dry-run` is the **default**: it prints
 the diff and writes nothing. `--yes` applies edits, retirements, and new
-observations in **one transaction** (all-or-nothing).
+observations in **one transaction** (all-or-nothing). If any note fails to parse
+(e.g. broken YAML frontmatter) `--yes` **refuses to apply** — a malformed note could
+otherwise be misread as a deletion and silently retire a live memory. A vault
+produced by `export --agent NAME` stays importable even when other owners have
+memories, because import rebuilds the fresh export with the manifest's recorded scope.
 
 ## Phases
 

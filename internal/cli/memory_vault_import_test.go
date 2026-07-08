@@ -237,6 +237,97 @@ func TestVaultImportUnknownFileStagesObservation(t *testing.T) {
 	}
 }
 
+// TestVaultImportMalformedNoteNoRetire proves an owner's broken YAML frontmatter is
+// NOT silently reclassified into a retirement: `import --yes` refuses to apply while
+// any note fails to parse, and the underlying confirmed fact survives intact.
+func TestVaultImportMalformedNoteNoRetire(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	owner := db.MemoryOwner{Kind: "agent", Ref: "builder"}
+	keepID := seedConfirmed(t, store, owner, "acme/widget", "repo", "keep", "keep content about arm64")
+
+	dir := filepath.Join(t.TempDir(), "vault")
+	exportVault(t, home, dir, "")
+
+	// Corrupt the note's frontmatter with an unclosed quote (a realistic hand-edit
+	// slip) so ParseVaultNote fails and the note drops out of the disk set.
+	notePath := filepath.Join(dir, noteFileFor(keepID, "keep"))
+	raw, err := os.ReadFile(notePath)
+	if err != nil {
+		t.Fatalf("read note: %v", err)
+	}
+	broken := strings.Replace(string(raw), "---\n", "---\nbroken: \"unclosed value\n", 1)
+	if broken == string(raw) {
+		t.Fatal("failed to inject a frontmatter break")
+	}
+	if err := os.WriteFile(notePath, []byte(broken), 0o644); err != nil {
+		t.Fatalf("write broken note: %v", err)
+	}
+
+	// --yes must refuse rather than retire the memory whose file is still on disk.
+	_, code, stderr := importVault(t, home, dir, true)
+	if code == 0 {
+		t.Fatal("import --yes must fail while a note failed to parse")
+	}
+	if !strings.Contains(stderr, "failed to parse") || !strings.Contains(stderr, "refusing to apply") {
+		t.Fatalf("want a parse-refusal error, got: %s", stderr)
+	}
+
+	// The fact is untouched: still confirmed, not retired.
+	rows, _ := store.ListConfirmedMemories(ctx, "builder", "")
+	if len(rows) != 1 || rows[0].ID != keepID {
+		t.Fatalf("malformed import must not touch the store, got %+v", rows)
+	}
+	if n, _ := store.CountConfirmedMemoriesForOwner(ctx, "agent", "builder"); n != 1 {
+		t.Fatalf("fact must remain injectable (count 1), got %d", n)
+	}
+}
+
+// TestVaultImportAgentScopedRoundTrip proves a vault produced by `export --agent NAME`
+// is importable even when OTHER owners have memories: import rebuilds the fresh export
+// with the manifest's recorded scope, so a filtered vault no longer aborts as stale.
+func TestVaultImportAgentScopedRoundTrip(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	alice := db.MemoryOwner{Kind: "agent", Ref: "alice"}
+	bob := db.MemoryOwner{Kind: "agent", Ref: "bob"}
+	aliceEdit := seedConfirmed(t, store, alice, "acme/widget", "repo", "edit", "alice content about arm64")
+	seedConfirmed(t, store, bob, "acme/widget", "repo", "bobkey", "bob content about arm64")
+
+	dir := filepath.Join(t.TempDir(), "vault")
+	exportVault(t, home, dir, "alice") // filtered export: only alice's note + alice-scoped hash
+
+	// Edit alice's note; bob's memories exist but are outside the export scope.
+	editNote := filepath.Join(dir, noteFileFor(aliceEdit, "edit"))
+	raw, _ := os.ReadFile(editNote)
+	edited := strings.Replace(string(raw), "alice content about arm64", "EDITED alice graviton content", 1)
+	if edited == string(raw) {
+		t.Fatal("edit substitution did not change the note")
+	}
+	if err := os.WriteFile(editNote, []byte(edited), 0o644); err != nil {
+		t.Fatalf("write edit note: %v", err)
+	}
+
+	// Must NOT abort as stale (pre-fix bug: alice-only hash vs all-owners rebuild).
+	res, code, stderr := importVault(t, home, dir, true)
+	if code != 0 {
+		t.Fatalf("agent-scoped import exit %d: %s", code, stderr)
+	}
+	if !res.Applied || len(res.Updates) != 1 || res.Updates[0].MemoryID != aliceEdit {
+		t.Fatalf("want alice edit applied, got %+v", res)
+	}
+
+	rows, _ := store.ListConfirmedMemories(ctx, "alice", "")
+	if len(rows) != 1 || rows[0].Content != "EDITED alice graviton content\n" {
+		t.Fatalf("alice edit not applied: %+v", rows)
+	}
+	// Bob's memory is untouched (never in scope).
+	bobRows, _ := store.ListConfirmedMemories(ctx, "bob", "")
+	if len(bobRows) != 1 || bobRows[0].Content != "bob content about arm64" {
+		t.Fatalf("bob must be untouched, got %+v", bobRows)
+	}
+}
+
 // TestVaultImportNotAVault rejects a directory without a manifest.
 func TestVaultImportNotAVault(t *testing.T) {
 	home, store := memoryTestHome(t)

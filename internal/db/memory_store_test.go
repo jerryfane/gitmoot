@@ -318,6 +318,122 @@ func TestRetireConfirmedMemory(t *testing.T) {
 	}
 }
 
+// TestRetiredExcludedFromCountAndGraph proves retirement stays consistent across
+// every read path: retiring one of two confirmed rows drops the injectable count to
+// 1 (CountConfirmedMemoriesForOwner) AND removes the row from the brain-graph lister
+// (ListConfirmedMemoriesByOwnerKind), so the documented "count == injectable set"
+// invariant holds and the graph never draws a retired fact as a live node.
+func TestRetiredExcludedFromCountAndGraph(t *testing.T) {
+	ctx := context.Background()
+	store := openMemTestStore(t)
+	owner := agentOwner("builder")
+	keepID, err := store.UpsertConfirmedMemory(ctx, ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "keep", Content: "keep me",
+	})
+	if err != nil {
+		t.Fatalf("upsert keep: %v", err)
+	}
+	dropID, err := store.UpsertConfirmedMemory(ctx, ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "drop", Content: "drop me",
+	})
+	if err != nil {
+		t.Fatalf("upsert drop: %v", err)
+	}
+
+	if n, err := store.CountConfirmedMemoriesForOwner(ctx, "agent", "builder"); err != nil || n != 2 {
+		t.Fatalf("pre-retire count = %d (err %v), want 2", n, err)
+	}
+
+	if err := store.RetireConfirmedMemory(ctx, dropID, "vault-import: deleted by owner"); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+
+	if n, err := store.CountConfirmedMemoriesForOwner(ctx, "agent", "builder"); err != nil || n != 1 {
+		t.Fatalf("post-retire count = %d (err %v), want 1 (must equal injectable set)", n, err)
+	}
+	graph, err := store.ListConfirmedMemoriesByOwnerKind(ctx, "agent")
+	if err != nil {
+		t.Fatalf("list by owner kind: %v", err)
+	}
+	if len(graph) != 1 || graph[0].ID != keepID {
+		t.Fatalf("brain-graph lister must exclude the retired row, got %+v", graph)
+	}
+	_ = dropID
+}
+
+// TestReconfirmRetiredKeyReactivates proves a fresh confirmation of a key that was
+// previously retired clears retired_at, so the re-admitted fact is injectable and
+// exportable again instead of staying permanently hidden behind the stale retirement.
+func TestReconfirmRetiredKeyReactivates(t *testing.T) {
+	ctx := context.Background()
+	store := openMemTestStore(t)
+	owner := agentOwner("builder")
+	id, err := store.UpsertConfirmedMemory(ctx, ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "ci-flake", Content: "arm64 CI is flaky",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := store.RetireConfirmedMemory(ctx, id, "vault-import: deleted by owner"); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+
+	// Re-confirm the same key (the confirmation gate re-admits the fact).
+	reID, err := store.UpsertConfirmedMemory(ctx, ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "ci-flake", Content: "arm64 CI flaky, rerun helps",
+	})
+	if err != nil {
+		t.Fatalf("re-confirm: %v", err)
+	}
+	if reID != id {
+		t.Fatalf("re-confirm must reuse the keyed row (%d), got %d", id, reID)
+	}
+
+	// It is injectable again (retired_at cleared) and re-exports.
+	got, err := store.QueryConfirmedMemories(ctx, owner, "acme/widget", `"arm64" OR "flaky"`, 15)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 1 || got[0].Content != "arm64 CI flaky, rerun helps" {
+		t.Fatalf("re-confirmed fact must be injectable with new content, got %+v", got)
+	}
+	vaultRows, err := store.ListConfirmedMemoriesForVault(ctx, "")
+	if err != nil {
+		t.Fatalf("vault list: %v", err)
+	}
+	if len(vaultRows) != 1 {
+		t.Fatalf("re-confirmed fact must re-export, got %d rows", len(vaultRows))
+	}
+}
+
+// TestRetireCASGuardsConcurrentWrite proves a retirement carrying an ExpectedUpdatedAt
+// aborts (rolling back the whole batch) when the row was rewritten since the fresh
+// export observed it, so a plan→apply-window write can never be buried by a retirement.
+func TestRetireCASGuardsConcurrentWrite(t *testing.T) {
+	ctx := context.Background()
+	store := openMemTestStore(t)
+	owner := agentOwner("builder")
+	id, err := store.UpsertConfirmedMemory(ctx, ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "drop", Content: "original",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// A retirement whose expected updated_at does not match the current row must fail
+	// wholesale (stale CAS), and the fact must remain live.
+	plan := VaultImportPlan{
+		Retirements: []VaultImportRetire{{ID: id, ExpectedUpdatedAt: "1999-01-01T00:00:00Z", Reason: "vault-import: deleted by owner"}},
+	}
+	if err := store.ApplyVaultImport(ctx, plan); err == nil || !strings.Contains(err.Error(), "changed since export") {
+		t.Fatalf("want changed-since-export CAS failure, got: %v", err)
+	}
+	vaultRows, _ := store.ListConfirmedMemoriesForVault(ctx, "")
+	if len(vaultRows) != 1 {
+		t.Fatalf("stale retirement must not land: want 1 live row, got %d", len(vaultRows))
+	}
+}
+
 // TestApplyVaultImportAtomic proves a whole import plan commits together and that a
 // failing element (a stale CAS) rolls the ENTIRE batch back — no partial curation.
 func TestApplyVaultImportAtomic(t *testing.T) {

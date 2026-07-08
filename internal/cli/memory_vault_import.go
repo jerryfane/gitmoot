@@ -129,7 +129,10 @@ func planAndApplyVaultImport(ctx context.Context, store *db.Store, dir string, a
 
 	// Regenerate a fresh export from the current store and abort if the store moved
 	// since the vault was written — a stale diff could silently clobber newer facts.
-	freshNotes, _, freshHash, _, err := buildVault(ctx, store, "")
+	// Rebuild with the SAME scope the export used (manifest.Agent, empty == all owners)
+	// so a filtered `export --agent NAME` vault compares like-for-like instead of always
+	// failing stale against an all-owners rebuild when other owners have memories.
+	freshNotes, _, freshHash, _, err := buildVault(ctx, store, manifest.Agent)
 	if err != nil {
 		return vaultImportResult{}, err
 	}
@@ -137,9 +140,18 @@ func planAndApplyVaultImport(ctx context.Context, store *db.Store, dir string, a
 		return vaultImportResult{}, fmt.Errorf("vault is stale: the memory store changed since it was exported (manifest snapshot %s, current %s); re-run `gitmoot memory vault export` and re-apply your edits", manifest.SnapshotHash, freshHash)
 	}
 
-	disk, warnings, err := readVaultDiskNotes(dir)
+	disk, warnings, parseFailed, err := readVaultDiskNotes(dir)
 	if err != nil {
 		return vaultImportResult{}, err
+	}
+	// A note that fails to parse is DROPPED from `disk`, so its memory_id can no longer
+	// be matched to a fresh-export row — the classify loop below would then read the
+	// missing counterpart as a deletion and RETIRE a fact whose file is still sitting on
+	// disk (an owner's YAML typo silently destroying a memory). Refuse to apply while any
+	// note failed to parse; dry-run still previews (writing nothing) so the operator can
+	// see the warning and fix the frontmatter before re-running.
+	if apply && len(parseFailed) > 0 {
+		return vaultImportResult{}, fmt.Errorf("%d vault note(s) failed to parse (%s); refusing to apply because a malformed note would be misread as a deletion — fix the frontmatter (or delete the file to intentionally retire it), then re-export and re-apply", len(parseFailed), strings.Join(parseFailed, ", "))
 	}
 
 	result := vaultImportResult{Dir: dir, DryRun: !apply, SnapshotHash: freshHash}
@@ -167,7 +179,7 @@ func planAndApplyVaultImport(ctx context.Context, store *db.Store, dir string, a
 		id := note.memRecord.ID
 		dn, ok := diskByID[id]
 		if !ok {
-			plan.Retirements = append(plan.Retirements, db.VaultImportRetire{ID: id, Reason: "vault-import: deleted by owner"})
+			plan.Retirements = append(plan.Retirements, db.VaultImportRetire{ID: id, ExpectedUpdatedAt: note.memRecord.UpdatedAt, Reason: "vault-import: deleted by owner"})
 			result.Retirements = append(result.Retirements, vaultImportItem{MemoryID: id, Key: note.memRecord.Key, Detail: "note deleted from vault"})
 			continue
 		}
@@ -249,14 +261,14 @@ func readVaultManifest(dir string) (vaultManifest, error) {
 
 // readVaultDiskNotes reads every top-level .md memory note from the vault dir,
 // skipping derived/index/manifest/.obsidian artifacts. Parse failures are reported
-// as warnings rather than aborting the whole import.
-func readVaultDiskNotes(dir string) ([]diskNote, []string, error) {
+// as warnings AND returned in parseFailed (the filenames) so the caller can refuse
+// to apply — a dropped note whose memory_id can no longer be matched would be
+// misread as a deletion and retire a live fact.
+func readVaultDiskNotes(dir string) (notes []diskNote, warnings []string, parseFailed []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read vault dir: %w", err)
+		return nil, nil, nil, fmt.Errorf("read vault dir: %w", err)
 	}
-	var notes []diskNote
-	var warnings []string
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() {
@@ -267,17 +279,18 @@ func readVaultDiskNotes(dir string) ([]diskNote, []string, error) {
 		}
 		raw, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
-			return nil, nil, fmt.Errorf("read note %s: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("read note %s: %w", name, err)
 		}
 		parsed, err := memory.ParseVaultNote(string(raw))
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: not a valid vault note (%v); skipping", name, err))
+			parseFailed = append(parseFailed, name)
 			continue
 		}
 		notes = append(notes, diskNote{file: name, raw: raw, parsed: parsed})
 	}
 	sort.Slice(notes, func(i, j int) bool { return notes[i].file < notes[j].file })
-	return notes, warnings, nil
+	return notes, warnings, parseFailed, nil
 }
 
 // vaultFrontmatterDrift reports whether the owner edited an identity/classification

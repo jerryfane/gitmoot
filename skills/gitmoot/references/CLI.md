@@ -1627,8 +1627,14 @@ trust `normal` — owner-authored) behind the existing confirmation gate. Frontm
 identity edits (key/scope/owner) are **out of scope**: they are detected, warned,
 and skipped (only the content edit applies). `--dry-run` is the **default** — it
 prints the full diff and writes **nothing**; `--yes` applies edits, retirements, and
-new observations in **one transaction** (all-or-nothing). The `<DIR>` positional may
-appear before or after the flags. `memory ingest` (P3) lands in a later phase.
+new observations in **one transaction** (all-or-nothing). If any note fails to parse
+(e.g. broken YAML frontmatter), `--yes` **refuses to apply** — a malformed note could
+otherwise be misread as a deletion and silently retire a live memory; fix the
+frontmatter (or delete the file to intentionally retire it) and re-export. A vault
+produced by `export --agent NAME` stays importable even when other owners have
+memories (import rebuilds the fresh export with the manifest's recorded scope). The
+`<DIR>` positional may appear before or after the flags. `memory ingest` (P3) lands in
+a later phase.
 
 ## Pipelines
 

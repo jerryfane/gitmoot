@@ -138,14 +138,15 @@ WHERE owner_kind = ? AND owner_ref = ? AND owner_version = ?
 // owner owns, across ALL owner versions and every repo/scope (owner_version is
 // deliberately not filtered — an agent owner always writes owner_version=”), so
 // it answers "how many injectable facts does this agent own". It backs the
-// dashboard's per-agent memory count and is a plain read (no FTS). Superseded
-// rows are excluded (superseded_by IS NULL) so the count matches the injectable
-// set surfaced by QueryConfirmedMemories.
+// dashboard's per-agent memory count and is a plain read (no FTS). Superseded AND
+// retired rows are excluded (superseded_by IS NULL AND retired_at = '') so the
+// count stays exactly equal to the injectable set surfaced by
+// QueryConfirmedMemories (which applies the same two filters).
 func (s *Store) CountConfirmedMemoriesForOwner(ctx context.Context, ownerKind, ownerRef string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM confirmed_memories
-WHERE owner_kind = ? AND owner_ref = ? AND superseded_by IS NULL`, ownerKind, ownerRef).Scan(&n)
+WHERE owner_kind = ? AND owner_ref = ? AND superseded_by IS NULL AND retired_at = ''`, ownerKind, ownerRef).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count confirmed memories for owner: %w", err)
 	}
@@ -174,14 +175,18 @@ WHERE owner_kind = ? AND owner_ref = ?`, ownerKind, ownerRef).Scan(&n)
 // the dashboard brain-graph read path: unlike QueryConfirmedMemories (the
 // injectable set, which drops superseded rows) and CountConfirmedMemoriesForOwner
 // (which counts only injectable rows), the graph deliberately shows superseded
-// "ghost" facts so it can draw supersede edges, so this MUST NOT filter them. Rows
-// come back ordered by id for a stable, deterministic traversal. Plain read, no FTS.
+// "ghost" facts so it can draw supersede edges, so this MUST NOT filter them.
+// Retired rows (retired_at != '') ARE excluded, though: retirement carries no
+// supersede pointer and no edge, so a retired fact drawn as a live node would be a
+// phantom — and excluding it keeps the graph's fact set aligned with the injectable
+// set (QueryConfirmedMemories / CountConfirmedMemoriesForOwner both filter retired).
+// Rows come back ordered by id for a stable, deterministic traversal. Plain read, no FTS.
 func (s *Store) ListConfirmedMemoriesByOwnerKind(ctx context.Context, ownerKind string) ([]ConfirmedMemory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, owner_kind, owner_ref, owner_version, repo, scope, key, content,
 	provenance, source_job, first_confirmed_at, updated_at, COALESCE(superseded_by, 0)
 FROM confirmed_memories
-WHERE owner_kind = ?
+WHERE owner_kind = ? AND retired_at = ''
 ORDER BY id`, ownerKind)
 	if err != nil {
 		return nil, fmt.Errorf("list confirmed memories by owner kind: %w", err)
@@ -290,9 +295,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	case err != nil:
 		return 0, fmt.Errorf("lookup confirmed memory: %w", err)
 	default:
+		// A fresh confirmation of an existing key re-activates it: clear any
+		// retirement so a previously-retired fact that the confirmation gate re-admits
+		// is injectable/exportable again (otherwise the newly confirmed content would
+		// stay permanently hidden behind the stale retired_at, since the lookup above
+		// matches by key regardless of retirement). Re-confirming an active row leaves
+		// the already-empty retirement columns untouched.
 		if _, upErr := tx.ExecContext(ctx, `
 UPDATE confirmed_memories
-SET content = ?, provenance = ?, source_job = ?, updated_at = ?
+SET content = ?, provenance = ?, source_job = ?, updated_at = ?, retired_at = '', retired_reason = ''
 WHERE id = ?`,
 			cm.Content, cm.Provenance, cm.SourceJob, now, id); upErr != nil {
 			return 0, fmt.Errorf("update confirmed memory: %w", upErr)
@@ -394,21 +405,32 @@ func (s *Store) RetireConfirmedMemory(ctx context.Context, id int64, reason stri
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := retireConfirmedMemoryTx(ctx, tx, id, reason); err != nil {
+	if err := retireConfirmedMemoryTx(ctx, tx, id, "", reason); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 // retireConfirmedMemoryTx is the transaction body shared by the single-op public
-// method and the atomic ApplyVaultImport batch.
-func retireConfirmedMemoryTx(ctx context.Context, tx *sql.Tx, id int64, reason string) error {
+// method and the atomic ApplyVaultImport batch. expectedUpdatedAt is an optional
+// optimistic-concurrency guard mirroring the edit CAS: when non-empty, the row is
+// retired only if its updated_at still matches what the fresh export observed, so a
+// concurrent write landing in the plan→apply window (e.g. the daemon confirming a
+// newer fact on the same row) makes the retirement match nothing and roll the whole
+// import batch back rather than burying the newer fact. An empty string means "no
+// version guard" (the single-op public path), preserving its prior behavior.
+func retireConfirmedMemoryTx(ctx context.Context, tx *sql.Tx, id int64, expectedUpdatedAt, reason string) error {
 	now := nowRFC3339()
-	res, err := tx.ExecContext(ctx, `
+	query := `
 UPDATE confirmed_memories
 SET retired_at = ?, retired_reason = ?
-WHERE id = ? AND retired_at = ''`,
-		now, reason, id)
+WHERE id = ? AND retired_at = ''`
+	args := []any{now, reason, id}
+	if expectedUpdatedAt != "" {
+		query += ` AND updated_at = ?`
+		args = append(args, expectedUpdatedAt)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("retire confirmed memory: %w", err)
 	}
@@ -423,6 +445,17 @@ WHERE id = ? AND retired_at = ''`,
 		}
 		if count == 0 {
 			return fmt.Errorf("confirmed memory %d not found", id)
+		}
+		// Distinguish an already-retired row from a lost CAS race (the row is still
+		// active but changed since export) so the operator gets an actionable message.
+		if expectedUpdatedAt != "" {
+			var retiredAt string
+			if err := tx.QueryRowContext(ctx, `SELECT retired_at FROM confirmed_memories WHERE id = ?`, id).Scan(&retiredAt); err != nil {
+				return fmt.Errorf("inspect confirmed memory %d: %w", id, err)
+			}
+			if retiredAt == "" {
+				return fmt.Errorf("confirmed memory %d changed since export (expected updated_at %q); re-export and retry", id, expectedUpdatedAt)
+			}
 		}
 		return fmt.Errorf("confirmed memory %d already retired", id)
 	}
@@ -442,9 +475,13 @@ type VaultImportUpdate struct {
 }
 
 // VaultImportRetire is one confirmed row the owner deleted from the vault.
+// ExpectedUpdatedAt is the updated_at the fresh export observed; it is an optimistic
+// CAS guard (empty == none) so a retirement never lands on top of a fact that was
+// rewritten in the plan→apply window, mirroring VaultImportUpdate.
 type VaultImportRetire struct {
-	ID     int64
-	Reason string
+	ID                int64
+	ExpectedUpdatedAt string
+	Reason            string
 }
 
 // VaultImportPlan is the full set of mutations `memory vault import --yes` applies
@@ -472,7 +509,7 @@ func (s *Store) ApplyVaultImport(ctx context.Context, plan VaultImportPlan) erro
 		}
 	}
 	for _, r := range plan.Retirements {
-		if err := retireConfirmedMemoryTx(ctx, tx, r.ID, r.Reason); err != nil {
+		if err := retireConfirmedMemoryTx(ctx, tx, r.ID, r.ExpectedUpdatedAt, r.Reason); err != nil {
 			return err
 		}
 	}

@@ -1374,8 +1374,11 @@ for audit, never hard-deleted, and excluded from injection and future exports); 
 (`provenance=vault-import:<file>`, trust `normal`) behind the confirmation gate.
 Frontmatter identity edits (key/scope/owner) are out of scope — detected, warned, and
 skipped. `--dry-run` is the **default** (prints the diff, writes nothing); `--yes`
-applies edits, retirements, and new observations in **one transaction**. The `<DIR>`
-positional may sit before or after the flags.
+applies edits, retirements, and new observations in **one transaction**. If any note
+fails to parse (e.g. broken YAML frontmatter), `--yes` **refuses to apply** so a
+malformed note is never misread as a deletion. A vault produced by `export --agent
+NAME` stays importable even when other owners have memories. The `<DIR>` positional
+may sit before or after the flags.
 
 ## Pipelines
 
