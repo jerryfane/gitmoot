@@ -54,10 +54,11 @@ gitmoot pipeline show "$RUN"
 ```
 
 `pipeline add` validates the whole spec at add time — unknown keys, a non-name-safe
-name/id, a duplicate stage id, a missing `cmd`, an unknown/self/cyclic `needs`, an
-invalid duration, a negative retry, or a `success_decisions` value outside
-`approved`/`implemented`/`changes_requested` — so a structural mistake is a clear
-error at registration, not a stuck run later. It stores the raw YAML **verbatim**
+name/id, a duplicate stage id, a stage that is not exactly one of `cmd` or `agent`
+(and, for an agent stage, a missing `prompt`, a non-existent agent, or a non-read-only
+`action`), an unknown/self/cyclic `needs`, an invalid duration, a negative retry, or a
+`success_decisions` value outside `approved`/`implemented`/`changes_requested` — so a
+structural mistake is a clear error at registration, not a stuck run later. It stores the raw YAML **verbatim**
 plus a content hash; each run snapshots the hash and executes its snapshot, so
 editing the file later never mutates an in-flight run.
 
@@ -107,6 +108,46 @@ printf '%s' '{"gitmoot_result":{"decision":"blocked","summary":"secret missing",
 `changes_requested` is a stage **failure by default** even though the underlying job
 succeeded — a stage folds on the decision, not the job state. List it in
 `success_decisions` (per-stage or top-level) to treat it as success instead.
+
+## Agent stages
+
+A stage can run a **named managed gitmoot agent** instead of a shell command. Set
+`agent` (and a `prompt`) in place of `cmd` — **exactly one** of `cmd` or `agent` is
+required per stage:
+
+```yaml
+stages:
+  - id: extract
+    cmd: "python fetch_replies.py > replies.json"
+  - id: triage
+    agent: reply-triager        # a managed agent that must already exist
+    action: ask                 # ask (default) | review — read-only ONLY
+    prompt: "Triage the fetched replies and flag anything that needs a human."
+    needs: [extract]
+```
+
+An agent stage runs the named agent on **its own registered runtime** (claude /
+codex — no per-job shell override), as a read-only **leaf**:
+
+- **read-only only** — `action` is `ask` (the default) or `review`; `implement` is
+  rejected at add time. An agent stage may never write, and its `delegations[]` are
+  stripped exactly as a shell stage's are (it never fans out).
+- **agent must exist** — `pipeline add` verifies every referenced agent exists (create
+  it first with `gitmoot agent …`), so a typo is a clear add-time error, not a stage
+  job the worker can never resolve.
+- **upstream context is injected** — the stage prompt is prepended with a bounded,
+  clearly-delimited **"Upstream stage results"** block carrying the result summary of
+  each stage in its `needs`, so a downstream agent stage acts on upstream output as
+  real dataflow (an over-long upstream summary is truncated with a `[truncated]`
+  marker). A root agent stage (no `needs`) gets the bare prompt.
+- **isolated read-only worktree** — a repo-bound ask/review agent stage runs in its
+  own detached, committed-tip read-only worktree (#739), so same-repo agent stages
+  parallelize and never touch the live checkout; the worktree is disposed when the
+  stage job settles.
+
+Agent stages fold by `gitmoot_result` `decision` and park/advance exactly like shell
+stages — an `approved`/`implemented` review advances dependents, a `blocked` result
+parks the run with its `needs`, `changes_requested` is a failure by default.
 
 ## Park and resume
 
@@ -175,7 +216,8 @@ the registered-repo and single-repo daemon loops:
 
 ## Stages are leaves
 
-A pipeline is **not** an orchestra. Each stage is a leaf: it runs a shell command and
+A pipeline is **not** an orchestra. Each stage is a leaf: it runs a shell command (or
+a read-only [agent](#agent-stages)) and
 returns a decision, full stop. A stage result that carries `delegations[]` does **not**
 spawn children — the advancer ignores them and the engine strips them for a pipeline
 stage job, so a pipeline can never fan out into a delegation tree. Use an orchestra

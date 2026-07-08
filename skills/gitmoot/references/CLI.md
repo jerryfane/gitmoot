@@ -1710,9 +1710,14 @@ stages:                     # the DAG, keyed by unique id and wired by needs
   - id: score
     cmd: "python score.py data.json"
     needs: [source]         # runs only after every listed stage SUCCEEDS
+  - id: triage              # #757: an AGENT stage instead of a shell cmd
+    agent: reply-triager    #   an existing managed agent (exactly one of cmd|agent)
+    action: ask             #   ask (default) | review — read-only ONLY (no implement)
+    prompt: "Triage the scored data; block if a human is needed."
+    needs: [score]          #   upstream results are prepended to the prompt
   - id: deploy
     cmd: "rclone copy out/ r2:bucket"
-    needs: [score]
+    needs: [triage]
     timeout: 30m            # optional per-stage job timeout
     retry: 2                # optional; re-attempt a FAILED stage up to N times
 ```
@@ -1730,13 +1735,19 @@ gitmoot pipeline remove nightly-sync
 ```
 
 `pipeline add` validates the whole spec at add time (unknown keys, duplicate/self/
-cyclic `needs`, missing `cmd`, invalid durations, a `success_decisions` outside
+cyclic `needs`, a stage that is not exactly one of `cmd` or `agent`, an agent stage
+missing a `prompt` / naming a non-existent agent / with a non-read-only `action`,
+invalid durations, a `success_decisions` outside
 `approved`/`implemented`/`changes_requested`) so a mistake is a clear error, not a
 stuck run. It stores the raw YAML **verbatim** plus a content hash; each run
 snapshots that hash and executes its snapshot, so editing the file later never
 mutates an in-flight run. `pipeline add` also auto-creates one hidden shell runner
-agent (`pipeline-<name>-runner`) that owns the stage jobs — filtered out of `agent
-list` and disposed by `pipeline remove`.
+agent (`pipeline-<name>-runner`) that owns the **shell** stage jobs — filtered out of
+`agent list` and disposed by `pipeline remove`. An **agent stage** (#757) instead
+runs a named managed agent on its own runtime as a read-only leaf (`ask`/`review`);
+its `needs` stages' result summaries are prepended to the prompt, and a repo-bound
+agent stage runs in its own detached read-only worktree so same-repo agent stages
+parallelize without touching the live checkout.
 
 A stage signals its outcome by printing a `gitmoot_result` blob to stdout; the
 advancer folds by the **decision**, never the job's exit state (`changes_requested`
