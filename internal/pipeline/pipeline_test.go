@@ -257,6 +257,11 @@ func TestLoadValidationErrors(t *testing.T) {
 			wantSub: "gate source cannot be the stage itself",
 		},
 		{
+			name:    "gate source is not an implement stage",
+			spec:    "name: p\nstages:\n  - {id: a, cmd: echo}\n  - {id: g, gate: pr_merged, source: a, needs: [a]}\n",
+			wantSub: `gate source "a" must be a mutating implement stage`,
+		},
+		{
 			name:    "gate with cmd rejected",
 			spec:    "name: p\nstages:\n  - {id: a, cmd: echo}\n  - {id: g, gate: pr_merged, source: a, needs: [a], cmd: echo}\n",
 			wantSub: `stage "g" sets both gate and cmd`,

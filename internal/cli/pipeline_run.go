@@ -732,12 +732,14 @@ func advancePipelineRun(ctx context.Context, store *db.Store, enqueue pipelineSt
 			continue
 		}
 		if !pipelineStageMintsJob(stage) {
-			// A JOBLESS kind (future gate #768 Phase 2) becomes in-flight WITHOUT a
-			// worker job; the settle seam (which owns the JobID guard) then drives it
-			// on its external predicate. No kind today is jobless, so this branch is
-			// never taken and the enqueue path below is byte-identical. Kept here so a
-			// gate is a pure append (`case StageKindGate: return false` in
-			// pipelineStageMintsJob), not an edit to this shared enqueue loop.
+			// A JOBLESS kind becomes in-flight WITHOUT a worker job; the settle seam
+			// (which owns the JobID guard) then drives it on its external predicate. The
+			// #768 Phase 2 gate stage is jobless (pipelineStageMintsJob returns false for
+			// StageKindGate), so it TAKES this branch: the row goes queued with StartedAt
+			// set here but no JobID — and that StartedAt is exactly what pipelineGateTimedOut
+			// measures the gate's wait from. This stays a pure append (`case StageKindGate:
+			// return false` in pipelineStageMintsJob), not an edit to the shared enqueue loop
+			// below, which remains byte-identical for job-minting kinds.
 			row.State = pipeline.StageQueued
 			row.StartedAt = now
 			if err := persistPipelineStage(ctx, store, byID[stage.ID], row); err != nil {
@@ -990,13 +992,49 @@ func implementStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDe
 			pr = payload.PullRequest
 		}
 		if pr <= 0 {
-			// The job settled successfully but the PR is not stamped on the payload yet:
-			// WAIT (fold-on-PR-opened). Stay in flight untouched; a later scan re-checks.
-			return false, "", "", nil, nil, nil
+			// The job settled successfully but no PR is stamped on the payload. Two cases,
+			// disambiguated by the engine's terminal "advance_skipped_no_pr" job event:
+			//   1. FINALIZER RACE (event absent): the implement job reached its terminal
+			//      success state a beat before the ImplementationFinalizer stamped the
+			//      opened PR — WAIT (fold-on-PR-opened); a later scan re-checks once it lands.
+			//   2. TERMINAL NO-OP (event present): the agent produced no diff
+			//      (idempotent/no-op change), so the engine finalized, found nothing pushed,
+			//      recorded "advance_skipped_no_pr" and settled the job for good
+			//      (engine.go). No PR will EVER land, so waiting would wedge the run
+			//      forever ([implement] -> [gate] -> [deploy] never advances). This is a
+			//      legitimate SUCCESS of the implement stage — fold it succeeded with no PR
+			//      marker (a downstream pr_merged gate then bounds its own wait via timeout).
+			skipped, eerr := implementJobSettledNoPR(ctx, deps.store, job.ID)
+			if eerr != nil {
+				return false, "", "", nil, nil, eerr
+			}
+			if !skipped {
+				return false, "", "", nil, nil, nil
+			}
+			return true, state, summary, needs, nil, nil
 		}
 		summary = appendPipelineImplementPR(summary, pr)
 	}
 	return true, state, summary, needs, nil, nil
+}
+
+// implementJobSettledNoPR reports whether the engine has recorded the terminal
+// "advance_skipped_no_pr" marker for an implement job — its definitive signal that the
+// job settled successfully, the finalizer ran (or was not needed), and NO pull request
+// was produced (a no-op/idempotent change with nothing pushed, engine.go). Its presence
+// distinguishes a permanent no-PR success (fold succeeded, never wedge the run) from the
+// transient finalizer race where a PR is a beat away from being stamped (keep waiting).
+func implementJobSettledNoPR(ctx context.Context, store *db.Store, jobID string) (bool, error) {
+	events, err := store.ListJobEvents(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	for _, ev := range events {
+		if ev.Kind == "advance_skipped_no_pr" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // appendPipelineImplementPR annotates a mutating implement stage's SUCCESS summary with
@@ -1051,6 +1089,7 @@ func gateStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, s
 	}
 
 	merged := false
+	closedUnmerged := false
 	if pr > 0 {
 		prRow, gerr := deps.store.GetPullRequest(ctx, deps.rec.Repo, int64(pr))
 		if gerr != nil {
@@ -1059,11 +1098,24 @@ func gateStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, s
 			}
 			// The PR is not recorded in the store yet — not merged; keep waiting (fail-open).
 		} else {
-			merged = strings.EqualFold(strings.TrimSpace(prRow.State), "merged")
+			switch strings.ToLower(strings.TrimSpace(prRow.State)) {
+			case "merged":
+				merged = true
+			case "closed":
+				closedUnmerged = true
+			}
 		}
 	}
 	if merged {
 		return true, pipeline.StageSucceeded, fmt.Sprintf("gate %s satisfied: PR #%d merged", stage.Gate, pr), nil, nil, nil
+	}
+	// The upstream PR was CLOSED without merging: pr_merged can NEVER hold now, so the
+	// gate is terminal — waiting would hang the run forever (esp. with no stage timeout).
+	// Park the run BLOCKED (a gate is a wait, not a mutation, so blocked — never failed —
+	// keeps the retry budget from re-arming the timer), naming the terminal reason.
+	if closedUnmerged {
+		want := fmt.Sprintf("PR #%d merged (it was closed without merging)", pr)
+		return true, pipeline.StageBlocked, fmt.Sprintf("gate %s cannot pass: PR #%d was closed without merging", stage.Gate, pr), []string{want}, nil, nil
 	}
 
 	// Not merged yet. Bound the wait against the stage timeout (measured from StartedAt),
@@ -1116,9 +1168,16 @@ func pipelineGateWaitDescription(predicate string, pr int) string {
 // marker is present or the number is not a positive int — the inverse of the stamping so
 // a gate can read the structured PR back out of the upstream stage row's summary (Phase 1
 // deliberately added no schema column). Deterministic and allocation-light.
+//
+// It matches the LAST occurrence of the marker, not the first: appendPipelineImplementPR
+// always APPENDS the trusted "(opened PR #<n>)" at the very END of the summary, while the
+// leading text is the agent's untrusted free-text decision summary — which could itself
+// contain a literal "(opened PR #<k>)" naming an unrelated PR. Reading the last match
+// binds the gate to the marker gitmoot stamped, never to a number the agent spoofed into
+// its prose.
 func parsePipelineImplementPR(summary string) int {
 	const prefix = "(opened PR #"
-	idx := strings.Index(summary, prefix)
+	idx := strings.LastIndex(summary, prefix)
 	if idx < 0 {
 		return 0
 	}

@@ -188,6 +188,61 @@ stages:
 	}
 }
 
+// TestPipelineImplementStageNoOpTerminalFoldsE2E proves the settle guard does NOT wedge
+// forever on the ROUTINE no-op path: an implement agent that produces no diff settles
+// with decision "implemented" but PullRequest=0, and the engine records the terminal
+// "advance_skipped_no_pr" job event (engine.go). That event is the definitive signal that
+// no PR will ever land, so the stage must fold SUCCEEDED (no PR marker) rather than hold
+// in flight indefinitely, letting the downstream stage advance.
+func TestPipelineImplementStageNoOpTerminalFoldsE2E(t *testing.T) {
+	ctx := context.Background()
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	const spec = `name: noop-flow
+repo: owner/repo
+stages:
+  - id: impl
+    agent: coder
+    prompt: Fix the bug.
+    action: implement
+    write: true
+  - id: notify
+    agent: rev
+    prompt: Announce.
+    needs: [impl]
+`
+	rec, parsed := newTestPipeline(t, store, "noop-flow", spec)
+	now := time.Date(2026, 7, 9, 9, 0, 0, 0, time.UTC)
+
+	run := startTestRun(t, store, rec, parsed, enqueue, now)
+	impl := stageRow(t, store, run.ID, "impl")
+
+	// The job settles SUCCESS with NO PR (a no-op change) — but BEFORE the engine's
+	// terminal marker exists, the stage still holds in flight (the finalizer-race path).
+	settleImplementStageJob(t, store, impl.JobID, "implemented", "no changes needed", 0)
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+	if got := stageRow(t, store, run.ID, "impl"); got.State != pipeline.StageQueued {
+		t.Fatalf("impl stage = %s, want still queued before the no-pr marker exists", got.State)
+	}
+
+	// The engine records the terminal "advance_skipped_no_pr" event: NOW the stage folds
+	// succeeded (no PR marker) and the downstream notify stage enqueues.
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: impl.JobID, Kind: "advance_skipped_no_pr", Message: "no pull request is attached"}); err != nil {
+		t.Fatalf("AddJobEvent: %v", err)
+	}
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+	implDone := stageRow(t, store, run.ID, "impl")
+	if implDone.State != pipeline.StageSucceeded {
+		t.Fatalf("impl stage = %s, want succeeded once the no-pr marker exists", implDone.State)
+	}
+	if strings.Contains(implDone.Summary, "opened PR") {
+		t.Fatalf("impl summary = %q, want no opened-PR marker for a no-op change", implDone.Summary)
+	}
+	if got := stageRow(t, store, run.ID, "notify"); got.State != pipeline.StageQueued || got.JobID == "" {
+		t.Fatalf("notify stage = %+v, want queued with a job after impl succeeded", got)
+	}
+}
+
 // TestPipelineImplementStageWritableWorktreeReuseE2E proves the WRITABLE-worktree
 // dispatch (#768): a mutating implement stage takes the real task-worktree path (not
 // the read-only committed-tip worktree), is born on its DETERMINISTIC run-scoped branch,

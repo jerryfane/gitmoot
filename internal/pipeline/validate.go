@@ -65,6 +65,7 @@ func (s Spec) Validate() error {
 	}
 
 	known := make(map[string]struct{}, len(s.Stages))
+	stageByID := make(map[string]Stage, len(s.Stages))
 	for _, stage := range s.Stages {
 		if stage.ID == "" {
 			return fmt.Errorf("pipeline %q has a stage with no id", s.Name)
@@ -76,6 +77,7 @@ func (s Spec) Validate() error {
 			return fmt.Errorf("pipeline %q stage id %q is not unique", s.Name, stage.ID)
 		}
 		known[stage.ID] = struct{}{}
+		stageByID[stage.ID] = stage
 	}
 	for _, stage := range s.Stages {
 		if err := validateStageExecutor(s.Name, stage); err != nil {
@@ -86,6 +88,16 @@ func (s Spec) Validate() error {
 		// schedule block); an APPEND that leaves every read-only kind's validator intact.
 		if err := s.validateMutatingStage(stage); err != nil {
 			return err
+		}
+		// A gate's source must be a mutating implement stage: the pr_merged predicate reads
+		// the "(opened PR #<n>)" marker only an implement stage stamps onto its summary, so
+		// a gate pointed at a shell/ask/review source would find no PR and wait/time out
+		// silently instead of failing fast. Checked here (not in validateGateStage) because
+		// it needs the SOURCE stage's kind — spec-level context the per-stage validator lacks.
+		if stage.Kind() == StageKindGate {
+			if src, ok := stageByID[stage.Source]; ok && src.Kind() != StageKindAgentImplement {
+				return fmt.Errorf("pipeline %q stage %q gate source %q must be a mutating implement stage (action: implement) so the gate has a PR to watch", s.Name, stage.ID, stage.Source)
+			}
 		}
 		if stage.Retry < 0 {
 			return fmt.Errorf("pipeline %q stage %q retry must be >= 0", s.Name, stage.ID)

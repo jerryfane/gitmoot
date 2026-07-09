@@ -188,6 +188,56 @@ stages:
 	}
 }
 
+// TestPipelineGateStageClosedUnmergedParksBlockedE2E proves a gate whose upstream PR is
+// CLOSED WITHOUT MERGING is TERMINAL: pr_merged can never hold, so the gate must park the
+// run BLOCKED (not hang forever, even with no stage timeout) rather than wait indefinitely
+// for a merge that will never come. The downstream stage is left skipped.
+func TestPipelineGateStageClosedUnmergedParksBlockedE2E(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	// No stage timeout on the gate: without the closed-PR terminal check this would hang.
+	const spec = `name: gate-closed
+repo: owner/repo
+stages:
+  - id: impl
+    agent: coder
+    prompt: Fix the bug.
+    action: implement
+    write: true
+  - id: wait
+    gate: pr_merged
+    source: impl
+    needs: [impl]
+  - id: deploy
+    cmd: echo deploying
+    needs: [wait]
+`
+	rec, parsed := newTestPipeline(t, store, "gate-closed", spec)
+	now := time.Date(2026, 7, 9, 9, 0, 0, 0, time.UTC)
+
+	run := startTestRun(t, store, rec, parsed, enqueue, now)
+	impl := stageRow(t, store, run.ID, "impl")
+	settleImplementStageJob(t, store, impl.JobID, "implemented", "landed the fix", 42)
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+
+	// A reviewer closes the PR WITHOUT merging: the gate's predicate is now terminal.
+	markPipelinePRMerged(t, store, "owner/repo", 42, "closed")
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+	gate := stageRow(t, store, run.ID, "wait")
+	if gate.State != pipeline.StageBlocked {
+		t.Fatalf("gate stage = %s, want blocked once the PR closed unmerged", gate.State)
+	}
+	if run.State != pipeline.RunBlocked {
+		t.Fatalf("run = %s, want blocked", run.State)
+	}
+	if run.HaltStage != "wait" {
+		t.Fatalf("run halt stage = %q, want wait", run.HaltStage)
+	}
+	if got := stageRow(t, store, run.ID, "deploy"); got.State != pipeline.StageSkipped {
+		t.Fatalf("deploy stage = %s, want skipped past the parked gate", got.State)
+	}
+}
+
 // TestParsePipelineImplementPR pins the summary<->PR round-trip the gate relies on to
 // recover the structured PR number from the upstream implement stage row's summary.
 func TestParsePipelineImplementPR(t *testing.T) {
@@ -203,6 +253,9 @@ func TestParsePipelineImplementPR(t *testing.T) {
 		{"(opened PR #)", 0},
 		{"(opened PR #0)", 0},
 		{"(opened PR #-3)", 0},
+		// Spoof guard: agent free-text names an unrelated PR, but the trusted marker is
+		// ALWAYS appended last — parse must read the LAST occurrence (999), not the first.
+		{appendPipelineImplementPR("done (opened PR #123) as noted", 999), 999},
 	}
 	for _, tc := range cases {
 		if got := parsePipelineImplementPR(tc.summary); got != tc.want {
