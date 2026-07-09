@@ -24,6 +24,8 @@ func (s *Spec) normalize() {
 		s.Stages[i].Agent = strings.TrimSpace(s.Stages[i].Agent)
 		s.Stages[i].Prompt = strings.TrimSpace(s.Stages[i].Prompt)
 		s.Stages[i].Action = strings.TrimSpace(s.Stages[i].Action)
+		s.Stages[i].Gate = strings.TrimSpace(s.Stages[i].Gate)
+		s.Stages[i].Source = strings.TrimSpace(s.Stages[i].Source)
 		s.Stages[i].Timeout = strings.TrimSpace(s.Stages[i].Timeout)
 		s.Stages[i].Needs = trimAll(s.Stages[i].Needs)
 		s.Stages[i].SuccessDecisions = trimAll(s.Stages[i].SuccessDecisions)
@@ -204,18 +206,25 @@ func (s Spec) detectCycle() error {
 func validateStageExecutor(pipelineName string, stage Stage) error {
 	hasCmd := stage.Cmd != ""
 	hasAgent := stage.Agent != ""
-	// The exactly-one-of cmd|agent guard is shared across kinds: it must run before
+	hasGate := stage.Gate != ""
+	// The exactly-one-of executor guard is shared across kinds: it must run before
 	// Stage.Kind() (which is only meaningful once exactly one executor is set). A
 	// future kind that lives on the EXISTING axes (e.g. implement = agent + an
-	// implement action) is a pure append below; a future kind that introduces a NEW
-	// executor field (a jobless gate: predicate) additionally widens this count to
-	// exactly-one-of {cmd, agent, gate}. That count widening is inherent to adding an
+	// implement action) is a pure append below; the jobless gate (#768 Phase 2)
+	// introduces a NEW executor field (gate: predicate), which is why this count widens
+	// to exactly-one-of {cmd, agent, gate}. That count widening is inherent to adding an
 	// executor axis, not a per-kind settle-logic edit — the seams the foundation
 	// guarantees (validateStageExecutor's dispatch, stageSettleOutcome) stay append-only.
+	// The cmd+agent and neither messages stay BYTE-IDENTICAL (the neither case only
+	// gains the && !hasGate term so a pure gate stage is not mis-rejected as "neither").
 	switch {
 	case hasCmd && hasAgent:
 		return fmt.Errorf("pipeline %q stage %q sets both cmd and agent; a stage is exactly one of a shell cmd or an agent", pipelineName, stage.ID)
-	case !hasCmd && !hasAgent:
+	case hasGate && hasCmd:
+		return fmt.Errorf("pipeline %q stage %q sets both gate and cmd; a stage is exactly one of a shell cmd, an agent, or a gate", pipelineName, stage.ID)
+	case hasGate && hasAgent:
+		return fmt.Errorf("pipeline %q stage %q sets both gate and agent; a stage is exactly one of a shell cmd, an agent, or a gate", pipelineName, stage.ID)
+	case !hasCmd && !hasAgent && !hasGate:
 		return fmt.Errorf("pipeline %q stage %q has neither cmd nor agent; a stage needs exactly one", pipelineName, stage.ID)
 	}
 	// Exactly one executor is set; dispatch the per-kind rules by Stage.Kind(). A
@@ -228,6 +237,8 @@ func validateStageExecutor(pipelineName string, stage Stage) error {
 		return validateAgentStage(pipelineName, stage)
 	case StageKindAgentImplement:
 		return validateImplementStage(pipelineName, stage)
+	case StageKindGate:
+		return validateGateStage(pipelineName, stage)
 	default:
 		// StageKindUnknown past the exactly-one-of guard = an agent stage (Agent
 		// set, Cmd empty) with an unrecognized action; validateAgentStage produces
@@ -281,6 +292,35 @@ func validateImplementStage(pipelineName string, stage Stage) error {
 	}
 	if stage.Prompt == "" {
 		return fmt.Errorf("pipeline %q stage %q agent stage requires a non-empty prompt", pipelineName, stage.ID)
+	}
+	return nil
+}
+
+// validateGateStage validates a JOBLESS GATE stage (#768 Phase 2): a recognized
+// predicate token (only pr_merged today) plus a Source that names an upstream stage
+// this gate depends on. Requiring Source to be one of the gate's own Needs is what
+// makes "an existing upstream needs stage" fall out for free — Validate separately
+// rejects any need that does not reference a known stage, so a source-in-needs also
+// references a known stage. A gate carries no prompt/action (those are agent-only), so
+// a stray one is a mis-declared stage (very likely a forgotten agent: key).
+func validateGateStage(pipelineName string, stage Stage) error {
+	if !containsToken(GatePredicateCandidates, stage.Gate) {
+		return fmt.Errorf("pipeline %q stage %q gate predicate %q is invalid; use one of: %s", pipelineName, stage.ID, stage.Gate, strings.Join(GatePredicateCandidates, ", "))
+	}
+	if stage.Prompt != "" {
+		return fmt.Errorf("pipeline %q stage %q sets prompt but is a gate stage; prompt is only for agent stages", pipelineName, stage.ID)
+	}
+	if stage.Action != "" {
+		return fmt.Errorf("pipeline %q stage %q sets action but is a gate stage; action is only for agent stages", pipelineName, stage.ID)
+	}
+	if stage.Source == "" {
+		return fmt.Errorf("pipeline %q stage %q gate stage requires a source (the upstream stage whose PR to watch)", pipelineName, stage.ID)
+	}
+	if stage.Source == stage.ID {
+		return fmt.Errorf("pipeline %q stage %q gate source cannot be the stage itself", pipelineName, stage.ID)
+	}
+	if !containsToken(stage.Needs, stage.Source) {
+		return fmt.Errorf("pipeline %q stage %q gate source %q must be one of the stage's needs (a gate watches an upstream stage it depends on)", pipelineName, stage.ID, stage.Source)
 	}
 	return nil
 }

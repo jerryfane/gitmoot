@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -326,6 +327,11 @@ func pipelineStageFingerprint(pipelineName, runID, stageID string, attempt int) 
 // builder: an implement kind #768 appends its writable-worktree/branch branch there).
 func pipelineStageMintsJob(stage pipeline.Stage) bool {
 	switch stage.Kind() {
+	case pipeline.StageKindGate:
+		// A JOBLESS gate (#768 Phase 2) has no worker/runtime session: the ENQUEUE pass
+		// marks it in-flight (queued) WITHOUT minting a job, and the settle seam folds it
+		// on its external predicate (pr_merged) instead of on a job's terminal state.
+		return false
 	default:
 		return true
 	}
@@ -905,9 +911,15 @@ func stageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, spec 
 		// payload carries an opened PR — closing the race where the implement job reaches
 		// terminal success a beat before the finalizer stamps the PR.
 		return implementStageSettleOutcome(ctx, deps, spec, stage, stageRow)
+	case pipeline.StageKindGate:
+		// #768 Phase 2 JOBLESS gate: it has no worker job, so it NEVER calls GetJob. It
+		// folds success once its external predicate (pr_merged on the upstream source
+		// stage's PR) holds, or parks the run on the stage timeout. The predicate reads
+		// only the store (upstream stage row + the polled PR state), is non-blocking and
+		// ctx-bounded, and fails OPEN (settled=false while the merge has not landed / the
+		// PR is not yet recorded); a genuine store error surfaces via err.
+		return gateStageSettleOutcome(ctx, deps, spec, stage, stageRow)
 	// A future kind adds its case here, e.g.:
-	//   case pipeline.StageKindGate:       // jobless: never calls GetJob
-	//       return gateStageSettleOutcome(ctx, deps, spec, stage, stageRow)
 	//   case pipeline.StageKindOrchestrate: // re-points nextRow.JobID, stays unsettled
 	//       return orchestrateStageSettleOutcome(ctx, deps, spec, stage, stageRow)
 	default:
@@ -1001,6 +1013,125 @@ func appendPipelineImplementPR(summary string, pr int) string {
 		return marker
 	}
 	return summary + " " + marker
+}
+
+// gateStageSettleOutcome is the #768 Phase 2 JOBLESS gate stage's per-kind settle
+// predicate. A gate mints no worker job (pipelineStageMintsJob is false), so it enters
+// the settle pass in the StageQueued state with no JobID and NEVER calls GetJob. It
+// evaluates its external predicate once per advance scan and folds when the predicate
+// holds:
+//
+//   - pr_merged: the PR opened by the upstream SOURCE (implement) stage has MERGED.
+//     The PR number is recovered from the source stage row's summary (where
+//     implementStageSettleOutcome stamped "(opened PR #<n>)"), and merge is read from
+//     the polled pull_requests state (deps.store) — the same store row the daemon's PR
+//     poller / merge-gate keeps current, so this needs no live GitHub call. On merged:
+//     settled=true, state=success. This is the STORE/state path the design prefers; a
+//     bounded GitHub poll would be threaded into pipelineStageSettleDeps as the fallback.
+//
+// It is non-blocking + ctx-bounded and FAILS OPEN: while the PR is not yet recorded or
+// not yet merged it stays in flight (settled=false), never a hung poll. A genuine store
+// error (not sql.ErrNoRows) surfaces via err so the advancer can retry the scan. The
+// wait is bounded by the stage timeout measured from the gate's StartedAt (set when the
+// ENQUEUE pass marked it in-flight): on expiry it parks the run BLOCKED (a gate is a
+// wait, not a mutation — parking blocked, never failed, keeps the retry budget from
+// re-arming the timer). A gate with no timeout waits indefinitely (cheaply — no job).
+// While in flight it reflects the one-time queued->running funnel transition via nextRow.
+func gateStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, spec pipeline.Spec, stage pipeline.Stage, stageRow db.PipelineRunStage) (settled bool, state, summary string, needs []string, nextRow *db.PipelineRunStage, err error) {
+	// Recover the PR the upstream source stage opened (parsed from its folded summary,
+	// where the implement stage stamped "(opened PR #<n>)"). A missing source row or an
+	// unparseable PR keeps the gate waiting (fail-open) until the timeout parks it.
+	pr := 0
+	if source := strings.TrimSpace(stage.Source); source != "" {
+		if srcRow, ok, gerr := deps.store.GetPipelineRunStage(ctx, deps.run.ID, source); gerr != nil {
+			return false, "", "", nil, nil, gerr
+		} else if ok {
+			pr = parsePipelineImplementPR(srcRow.Summary)
+		}
+	}
+
+	merged := false
+	if pr > 0 {
+		prRow, gerr := deps.store.GetPullRequest(ctx, deps.rec.Repo, int64(pr))
+		if gerr != nil {
+			if !errors.Is(gerr, sql.ErrNoRows) {
+				return false, "", "", nil, nil, gerr
+			}
+			// The PR is not recorded in the store yet — not merged; keep waiting (fail-open).
+		} else {
+			merged = strings.EqualFold(strings.TrimSpace(prRow.State), "merged")
+		}
+	}
+	if merged {
+		return true, pipeline.StageSucceeded, fmt.Sprintf("gate %s satisfied: PR #%d merged", stage.Gate, pr), nil, nil, nil
+	}
+
+	// Not merged yet. Bound the wait against the stage timeout (measured from StartedAt),
+	// parking the run BLOCKED on expiry with a needs entry naming what it waited on.
+	if timedOut, waited := pipelineGateTimedOut(stage, stageRow, deps.now); timedOut {
+		want := pipelineGateWaitDescription(stage.Gate, pr)
+		return true, pipeline.StageBlocked, fmt.Sprintf("gate %s timed out after %s waiting for %s", stage.Gate, waited, want), []string{want}, nil, nil
+	}
+
+	// Still waiting: reflect the one-time queued->running funnel transition so the gate
+	// shows as actively watching, then stay in flight (settled=false).
+	if stageRow.State == pipeline.StageQueued {
+		next := stageRow
+		next.State = pipeline.StageRunning
+		return false, "", "", nil, &next, nil
+	}
+	return false, "", "", nil, nil, nil
+}
+
+// pipelineGateTimedOut reports whether a gate stage's wait has exceeded its stage
+// timeout, measured from the row's StartedAt (set when the ENQUEUE pass marked the
+// jobless gate in-flight) to now. A gate with no timeout (or a not-yet-started row)
+// never times out — it waits indefinitely, cheaply. The elapsed duration is returned
+// for the park summary. Validation already guarantees a set timeout parses positive.
+func pipelineGateTimedOut(stage pipeline.Stage, stageRow db.PipelineRunStage, now time.Time) (bool, time.Duration) {
+	to := strings.TrimSpace(stage.Timeout)
+	if to == "" || stageRow.StartedAt.IsZero() {
+		return false, 0
+	}
+	limit, err := time.ParseDuration(to)
+	if err != nil || limit <= 0 {
+		return false, 0
+	}
+	elapsed := now.Sub(stageRow.StartedAt)
+	return elapsed >= limit, elapsed
+}
+
+// pipelineGateWaitDescription names, for a park summary / needs entry, the external
+// thing a gate is waiting on — the merge of a specific PR when one is known, else the
+// upstream PR generically (it has not been recorded yet).
+func pipelineGateWaitDescription(predicate string, pr int) string {
+	if pr > 0 {
+		return fmt.Sprintf("PR #%d merged", pr)
+	}
+	return fmt.Sprintf("the upstream %s predicate to hold", predicate)
+}
+
+// parsePipelineImplementPR recovers the PR number an implement stage stamped onto its
+// summary via appendPipelineImplementPR ("(opened PR #<n>)"). It returns 0 when no such
+// marker is present or the number is not a positive int — the inverse of the stamping so
+// a gate can read the structured PR back out of the upstream stage row's summary (Phase 1
+// deliberately added no schema column). Deterministic and allocation-light.
+func parsePipelineImplementPR(summary string) int {
+	const prefix = "(opened PR #"
+	idx := strings.Index(summary, prefix)
+	if idx < 0 {
+		return 0
+	}
+	rest := summary[idx+len(prefix):]
+	end := strings.IndexByte(rest, ')')
+	if end < 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(rest[:end]))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // foldPipelineStageOutcome maps a settled stage job to a stage outcome BY DECISION

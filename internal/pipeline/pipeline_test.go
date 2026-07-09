@@ -141,6 +141,40 @@ stages:
 	}
 }
 
+// TestLoadValidGateSpec proves a JOBLESS gate stage (#768 Phase 2) loads: a
+// pr_merged predicate watching an upstream implement stage it needs, classifying as
+// StageKindGate and expressing [implement] -> [gate] -> [deploy].
+func TestLoadValidGateSpec(t *testing.T) {
+	const spec = `name: gate-flow
+repo: owner/repo
+stages:
+  - id: impl
+    agent: coder
+    prompt: Fix the bug.
+    action: implement
+    write: true
+  - id: wait
+    gate: pr_merged
+    source: impl
+    needs: [impl]
+    timeout: 24h
+  - id: deploy
+    cmd: echo deploying
+    needs: [wait]
+`
+	loaded, err := Load([]byte(spec))
+	if err != nil {
+		t.Fatalf("Load valid gate spec: %v", err)
+	}
+	gate := loaded.Stages[1]
+	if gate.Gate != "pr_merged" || gate.Source != "impl" {
+		t.Fatalf("gate stage = %+v, want gate=pr_merged source=impl", gate)
+	}
+	if gate.Kind() != StageKindGate {
+		t.Fatalf("gate Kind() = %d, want StageKindGate", gate.Kind())
+	}
+}
+
 func TestLoadValidationErrors(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -201,6 +235,36 @@ func TestLoadValidationErrors(t *testing.T) {
 			name:    "agent bad action",
 			spec:    "name: p\nstages:\n  - {id: a, agent: rev, prompt: hi, action: deploy}\n",
 			wantSub: `action "deploy" is invalid`,
+		},
+		{
+			name:    "gate bad predicate",
+			spec:    "name: p\nstages:\n  - {id: a, cmd: echo}\n  - {id: g, gate: pr_reviewed, source: a, needs: [a]}\n",
+			wantSub: `gate predicate "pr_reviewed" is invalid`,
+		},
+		{
+			name:    "gate without source",
+			spec:    "name: p\nstages:\n  - {id: a, cmd: echo}\n  - {id: g, gate: pr_merged, needs: [a]}\n",
+			wantSub: "gate stage requires a source",
+		},
+		{
+			name:    "gate source not in needs",
+			spec:    "name: p\nstages:\n  - {id: a, cmd: echo}\n  - {id: b, cmd: echo}\n  - {id: g, gate: pr_merged, source: a, needs: [b]}\n",
+			wantSub: `gate source "a" must be one of the stage's needs`,
+		},
+		{
+			name:    "gate source is self",
+			spec:    "name: p\nstages:\n  - {id: g, gate: pr_merged, source: g, needs: [g]}\n",
+			wantSub: "gate source cannot be the stage itself",
+		},
+		{
+			name:    "gate with cmd rejected",
+			spec:    "name: p\nstages:\n  - {id: a, cmd: echo}\n  - {id: g, gate: pr_merged, source: a, needs: [a], cmd: echo}\n",
+			wantSub: `stage "g" sets both gate and cmd`,
+		},
+		{
+			name:    "gate with agent rejected",
+			spec:    "name: p\nstages:\n  - {id: a, cmd: echo}\n  - {id: g, gate: pr_merged, source: a, needs: [a], agent: rev, prompt: hi}\n",
+			wantSub: `stage "g" sets both gate and agent`,
 		},
 		{
 			name:    "shell stage with prompt",
@@ -292,6 +356,7 @@ func TestPipelineStageKind(t *testing.T) {
 		{"agent implement", Stage{ID: "a", Agent: "impl", Prompt: "q", Action: "implement", Write: true}, StageKindAgentImplement},
 		{"agent implement no write still a kind", Stage{ID: "a", Agent: "impl", Prompt: "q", Action: "implement"}, StageKindAgentImplement},
 		{"agent bad action", Stage{ID: "a", Agent: "x", Prompt: "q", Action: "deploy"}, StageKindUnknown},
+		{"gate pr_merged", Stage{ID: "g", Gate: "pr_merged", Source: "impl", Needs: []string{"impl"}}, StageKindGate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
