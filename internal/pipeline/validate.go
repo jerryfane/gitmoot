@@ -79,6 +79,12 @@ func (s Spec) Validate() error {
 		if err := validateStageExecutor(s.Name, stage); err != nil {
 			return err
 		}
+		// #768 mutating-implement safety model (spec double-key + scheduled-write gate).
+		// Kept out of validateStageExecutor because it spans stage AND spec context (the
+		// schedule block); an APPEND that leaves every read-only kind's validator intact.
+		if err := s.validateMutatingStage(stage); err != nil {
+			return err
+		}
 		if stage.Retry < 0 {
 			return fmt.Errorf("pipeline %q stage %q retry must be >= 0", s.Name, stage.ID)
 		}
@@ -220,6 +226,8 @@ func validateStageExecutor(pipelineName string, stage Stage) error {
 		return validateShellStage(pipelineName, stage)
 	case StageKindAgentAsk, StageKindAgentReview:
 		return validateAgentStage(pipelineName, stage)
+	case StageKindAgentImplement:
+		return validateImplementStage(pipelineName, stage)
 	default:
 		// StageKindUnknown past the exactly-one-of guard = an agent stage (Agent
 		// set, Cmd empty) with an unrecognized action; validateAgentStage produces
@@ -256,6 +264,50 @@ func validateAgentStage(pipelineName string, stage Stage) error {
 	}
 	if !containsToken(AgentStageActionCandidates, stage.Action) {
 		return fmt.Errorf("pipeline %q stage %q agent stage action %q is invalid; use one of: %s", pipelineName, stage.ID, stage.Action, strings.Join(AgentStageActionCandidates, ", "))
+	}
+	return nil
+}
+
+// validateImplementStage validates a MUTATING implement agent stage (#768): a
+// name-safe agent token and a non-empty prompt — exactly like a read-only agent
+// stage, but WITHOUT validateAgentStage's read-only-leaf rejection, since a validated
+// implement stage is allowed. The write: true acknowledgement and the scheduled-write
+// gate live in Spec.validateMutatingStage (they need spec-level context). The token /
+// prompt messages are byte-identical to validateAgentStage so a mis-typed implement
+// stage fails with the same wording an ask stage would.
+func validateImplementStage(pipelineName string, stage Stage) error {
+	if !validToken(stage.Agent) {
+		return fmt.Errorf("pipeline %q stage %q agent %q must be a name-safe token (letters, digits, '-', '_')", pipelineName, stage.ID, stage.Agent)
+	}
+	if stage.Prompt == "" {
+		return fmt.Errorf("pipeline %q stage %q agent stage requires a non-empty prompt", pipelineName, stage.ID)
+	}
+	return nil
+}
+
+// validateMutatingStage enforces the #768 mutating-implement SAFETY MODEL, which
+// spans stage-level AND spec-level context (so it is a Spec method, not part of the
+// per-kind executor dispatch):
+//   - Spec double-key: `action: implement` REQUIRES `write: true` and, conversely,
+//     `write: true` is valid ONLY on an implement stage — so neither a prompt injection
+//     nor a template typo can flip a read-only pipeline into a writing one.
+//   - Schedule gate: a MUTATING stage on a SCHEDULED pipeline (a schedule: block) is
+//     rejected unless the pipeline sets `allow_scheduled_writes: true`, so an unattended
+//     nightly writing code is always a deliberate, spelled-twice choice. A manual-only
+//     pipeline (no schedule) needs only the per-stage write: true.
+//
+// It reads stage.Action / stage.Write directly (not Stage.Kind()) so it also catches
+// write: true on a NON-implement stage, which Kind() classifies as its base kind.
+func (s Spec) validateMutatingStage(stage Stage) error {
+	isImplement := stage.Agent != "" && stage.Action == "implement"
+	if stage.Write && !isImplement {
+		return fmt.Errorf("pipeline %q stage %q sets write: true but is not a mutating implement stage; write: true is only valid with action: implement", s.Name, stage.ID)
+	}
+	if isImplement && !stage.Write {
+		return fmt.Errorf("pipeline %q stage %q sets action \"implement\" without write: true; a mutating implement stage must acknowledge writes with write: true", s.Name, stage.ID)
+	}
+	if isImplement && s.Schedule != nil && !s.AllowScheduledWrites {
+		return fmt.Errorf("pipeline %q stage %q is a mutating implement stage on a scheduled pipeline; set allow_scheduled_writes: true to permit unattended writes", s.Name, stage.ID)
 	}
 	return nil
 }

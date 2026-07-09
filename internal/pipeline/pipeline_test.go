@@ -90,6 +90,57 @@ stages:
 	}
 }
 
+// TestLoadValidImplementSpec exercises the #768 mutating implement schema: an
+// `action: implement` stage with `write: true` on a SCHEDULED pipeline that opts in
+// via `allow_scheduled_writes: true` loads, parses both new fields, and classifies as
+// StageKindAgentImplement.
+func TestLoadValidImplementSpec(t *testing.T) {
+	const spec = `name: build-flow
+repo: owner/repo
+schedule:
+  interval: 24h
+allow_scheduled_writes: true
+stages:
+  - id: fix
+    agent: coder
+    prompt: Fix the reported bug.
+    action: implement
+    write: true
+    retry: 1
+`
+	loaded, err := Load([]byte(spec))
+	if err != nil {
+		t.Fatalf("Load valid implement spec: %v", err)
+	}
+	if !loaded.AllowScheduledWrites {
+		t.Fatalf("allow_scheduled_writes did not parse: %+v", loaded)
+	}
+	st := loaded.Stages[0]
+	if st.Action != "implement" || !st.Write {
+		t.Fatalf("implement stage = %+v, want action=implement write=true", st)
+	}
+	if st.Kind() != StageKindAgentImplement {
+		t.Fatalf("Kind() = %d, want StageKindAgentImplement", st.Kind())
+	}
+}
+
+// TestLoadValidManualImplementSpec proves a MANUAL (no schedule) implement pipeline
+// needs only the per-stage write: true — the scheduled-write gate does not apply.
+func TestLoadValidManualImplementSpec(t *testing.T) {
+	const spec = `name: manual-flow
+repo: owner/repo
+stages:
+  - id: fix
+    agent: coder
+    prompt: Fix it.
+    action: implement
+    write: true
+`
+	if _, err := Load([]byte(spec)); err != nil {
+		t.Fatalf("manual implement spec should validate: %v", err)
+	}
+}
+
 func TestLoadValidationErrors(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -132,9 +183,19 @@ func TestLoadValidationErrors(t *testing.T) {
 			wantSub: `stage "a" agent stage requires a non-empty prompt`,
 		},
 		{
-			name:    "agent implement rejected",
+			name:    "implement without write rejected",
 			spec:    "name: p\nstages:\n  - {id: a, agent: rev, prompt: hi, action: implement}\n",
-			wantSub: `action "implement" is not allowed`,
+			wantSub: `sets action "implement" without write: true`,
+		},
+		{
+			name:    "write without implement rejected",
+			spec:    "name: p\nstages:\n  - {id: a, cmd: echo, write: true}\n",
+			wantSub: "write: true is only valid with action: implement",
+		},
+		{
+			name:    "scheduled implement without allow rejected",
+			spec:    "name: p\nschedule:\n  interval: 24h\nstages:\n  - {id: a, agent: rev, prompt: hi, action: implement, write: true}\n",
+			wantSub: "set allow_scheduled_writes: true",
 		},
 		{
 			name:    "agent bad action",
@@ -228,7 +289,8 @@ func TestPipelineStageKind(t *testing.T) {
 		{"agent review", Stage{ID: "a", Agent: "rev", Prompt: "q", Action: "review"}, StageKindAgentReview},
 		{"both executors", Stage{ID: "a", Cmd: "echo", Agent: "rev", Prompt: "q"}, StageKindUnknown},
 		{"neither executor", Stage{ID: "a"}, StageKindUnknown},
-		{"agent implement", Stage{ID: "a", Agent: "impl", Prompt: "q", Action: "implement"}, StageKindUnknown},
+		{"agent implement", Stage{ID: "a", Agent: "impl", Prompt: "q", Action: "implement", Write: true}, StageKindAgentImplement},
+		{"agent implement no write still a kind", Stage{ID: "a", Agent: "impl", Prompt: "q", Action: "implement"}, StageKindAgentImplement},
 		{"agent bad action", Stage{ID: "a", Agent: "x", Prompt: "q", Action: "deploy"}, StageKindUnknown},
 	}
 	for _, tc := range cases {

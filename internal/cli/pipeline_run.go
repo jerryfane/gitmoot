@@ -2,12 +2,15 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/jerryfane/gitmoot/internal/daemon"
 	"github.com/jerryfane/gitmoot/internal/db"
 	gitutil "github.com/jerryfane/gitmoot/internal/git"
 	"github.com/jerryfane/gitmoot/internal/pipeline"
@@ -51,6 +54,18 @@ func newPipelineStageEnqueuer(store *db.Store, home string) pipelineStageEnqueue
 		// rather than stalling the pipeline scan loop. Shell stages carry a
 		// RuntimeOverride and are excluded, so their request is byte-identical.
 		request, worktreePath, worktreeErr := allocatePipelineStageReadOnlyWorktree(ctx, store, home, request)
+		// #768: a MUTATING implement stage takes the WRITABLE task-worktree path
+		// instead of the read-only committed-tip worktree — it must commit + push. Unlike
+		// the read-only allocator (fail-OPEN), this one is fail-CLOSED: on an active
+		// implement job / live process / uncommitted changes it errors and the stage is
+		// NOT enqueued, so a retry can never duplicate or clobber a branch/PR (`gitmoot
+		// task recover` is the operator escape hatch). The two allocators are mutually
+		// exclusive — read-only eligibility excludes the implement action.
+		var writableErr error
+		request, writableErr = allocatePipelineStageWritableWorktree(ctx, store, home, request)
+		if writableErr != nil {
+			return db.Job{}, writableErr
+		}
 		job, err := mailbox.Enqueue(ctx, request)
 		if err != nil {
 			// The worktree is created on disk BEFORE Enqueue; a failed Enqueue leaves
@@ -162,6 +177,116 @@ func pipelineStageCheckoutPath(ctx context.Context, store *db.Store, repo string
 	return strings.TrimSpace(record.CheckoutPath)
 }
 
+// pipelineStageImplementWorktreeEligible reports whether a stage job request is a
+// repo-bound MUTATING implement stage (#768) that needs a WRITABLE task-worktree.
+// True only for a pipeline-sender implement job bound to a named agent, running
+// against a repo, that carries NO runtime override (the shell runner sets one) and NO
+// worktree yet. Every read-only agent stage (ask/review) and every shell stage is
+// excluded — the read-only allocator (which itself excludes non-ask/review) owns those.
+func pipelineStageImplementWorktreeEligible(request workflow.JobRequest) bool {
+	if request.Sender != workflow.PipelineJobSender {
+		return false
+	}
+	if strings.TrimSpace(request.RuntimeOverride) != "" {
+		return false
+	}
+	if strings.TrimSpace(request.Agent) == "" {
+		return false
+	}
+	if strings.TrimSpace(request.Action) != "implement" {
+		return false
+	}
+	if strings.TrimSpace(request.Repo) == "" {
+		return false
+	}
+	return strings.TrimSpace(request.WorktreePath) == ""
+}
+
+// allocatePipelineStageWritableWorktree gives a MUTATING implement stage (#768) a real
+// WRITABLE task-worktree on its DETERMINISTIC branch by REUSING the existing implement
+// dispatch preparation (prepareLocalImplementDispatchRequest): its GetTaskByRepoBranch
+// reuse lands a retry in the SAME branch/worktree (never a duplicate PR), and its
+// fail-closed guards (an active implement job, a live process still inside the
+// worktree, or uncommitted changes) reject a retry that would clobber or duplicate
+// work. Unlike the read-only allocator it is FAIL-CLOSED: any error propagates so the
+// stage is NOT enqueued. An ineligible request (every non-implement stage) returns
+// unchanged with a nil error. On success the request carries the task worktree path +
+// the resolved deterministic branch/task/head, so the enqueued job keys worktree:<path>
+// (mutating same-repo stages parallelize; the only serialization is the brief
+// checkout-mutation lock during allocation). ReadOnlyWorktree is deliberately left
+// false — the task worktree is durable (disposed by the task lifecycle, not the #739
+// read-only cleanup).
+func allocatePipelineStageWritableWorktree(ctx context.Context, store *db.Store, home string, request workflow.JobRequest) (workflow.JobRequest, error) {
+	if !pipelineStageImplementWorktreeEligible(request) {
+		return request, nil
+	}
+	record, err := store.GetRepo(ctx, request.Repo)
+	if err != nil {
+		return request, fmt.Errorf("resolve repo %q for implement stage: %w", request.Repo, err)
+	}
+	repo, err := daemon.ParseRepository(request.Repo)
+	if err != nil {
+		return request, err
+	}
+	// Ensure the DETERMINISTIC task row exists so prepareLocalImplementDispatchRequest's
+	// BRANCH-reuse path adopts THIS run+stage's task id — and, crucially, so its
+	// fail-closed guards (active job / live process / uncommitted changes) run on EVERY
+	// attempt. We therefore hand it an EMPTY TaskID (which routes through that guarded
+	// branch-reuse block) plus the deterministic Branch; passing a non-empty TaskID would
+	// skip the guards entirely. Idempotent: created once (Planned), reused thereafter.
+	if _, gerr := store.GetTask(ctx, request.TaskID); gerr != nil {
+		if !errors.Is(gerr, sql.ErrNoRows) {
+			return request, gerr
+		}
+		if uerr := store.UpsertTask(ctx, db.Task{
+			ID:           request.TaskID,
+			RepoFullName: request.Repo,
+			GoalID:       firstNonEmpty(request.GoalID, "pipeline"),
+			Title:        firstNonEmpty(request.TaskTitle, request.TaskID),
+			State:        string(workflow.TaskPlanned),
+			Branch:       request.Branch,
+		}); uerr != nil {
+			return request, uerr
+		}
+	}
+	dispatch := localAgentDispatchRequest{
+		Home:         home,
+		Agent:        request.Agent,
+		Action:       "implement",
+		Instructions: request.Instructions,
+		Branch:       request.Branch,
+		GoalID:       request.GoalID,
+		TaskTitle:    request.TaskTitle,
+		RepoFlag:     request.Repo,
+	}
+	task, dispatch, err := prepareLocalImplementDispatchRequest(ctx, store, record, repo, dispatch)
+	if err != nil {
+		return request, err
+	}
+	request.WorktreePath = task.WorktreePath
+	request.Branch = dispatch.Branch
+	request.TaskID = dispatch.TaskID
+	request.HeadSHA = dispatch.HeadSHA
+	request.GoalID = firstNonEmpty(request.GoalID, dispatch.GoalID)
+	request.TaskTitle = firstNonEmpty(request.TaskTitle, dispatch.TaskTitle)
+	request.LeadAgent = firstNonEmpty(request.LeadAgent, dispatch.LeadAgent)
+	return request, nil
+}
+
+// pipelineStageImplementTaskID / pipelineStageImplementBranch derive the DETERMINISTIC,
+// attempt-INDEPENDENT task id and branch a mutating implement stage (#768) reuses across
+// retries: `pipe-<runID>-<stageID>` and `gitmoot/pipe-<runID>-<stageID>`. Excluding the
+// attempt is what makes attempt N+1 land in the SAME branch/worktree (via
+// GetTaskByRepoBranch reuse) rather than opening a duplicate PR; branches are RUN-scoped,
+// so distinct runs of a scheduled pipeline are distinct logical changes.
+func pipelineStageImplementTaskID(runID, stageID string) string {
+	return fmt.Sprintf("pipe-%s-%s", runID, stageID)
+}
+
+func pipelineStageImplementBranch(runID, stageID string) string {
+	return "gitmoot/" + pipelineStageImplementTaskID(runID, stageID)
+}
+
 // pipelineRunID derives a deterministic-per-invocation run id: a recognizable
 // "prun-" marker, the pipeline name (a validated name-safe token), and the
 // nanosecond clock so distinct runs never collide. The marker also lets
@@ -218,6 +343,29 @@ func pipelineStageJobRequest(rec db.Pipeline, stage pipeline.Stage, run db.Pipel
 	// advancement), RootJobID=run.ID. The action is the validated read-only
 	// ask/review. Everything else (fingerprint, timeout, root) matches the shell path
 	// so the advancer folds it identically.
+	// #768 MUTATING implement stage: bind to the named agent running its OWN runtime,
+	// but — unlike a read-only agent stage — carry a DETERMINISTIC, attempt-INDEPENDENT
+	// Branch/TaskID so a retry lands in the SAME branch/worktree (never a duplicate PR).
+	// The writable task-worktree itself is allocated at the enqueue seam
+	// (allocatePipelineStageWritableWorktree), which reuses the existing implement
+	// dispatch's GetTaskByRepoBranch reuse + fail-closed guards. Still a LEAF
+	// (Sender=pipeline strips delegations/human_questions) and the pipeline never merges
+	// its PR. This is an APPEND above the read-only agent branch, which stays byte-identical.
+	if stage.Kind() == pipeline.StageKindAgentImplement {
+		return workflow.JobRequest{
+			ID:           pipelineStageJobID(run.ID, stage.ID, attempt),
+			Agent:        stage.Agent,
+			Action:       "implement",
+			Repo:         rec.Repo,
+			Branch:       pipelineStageImplementBranch(run.ID, stage.ID),
+			TaskID:       pipelineStageImplementTaskID(run.ID, stage.ID),
+			Sender:       workflow.PipelineJobSender,
+			Instructions: upstreamContext + stage.Prompt,
+			Fingerprint:  pipelineStageFingerprint(rec.Name, run.ID, stage.ID, attempt),
+			RootJobID:    run.ID,
+			JobTimeout:   stage.Timeout,
+		}
+	}
 	if stage.Agent != "" {
 		return workflow.JobRequest{
 			ID:           pipelineStageJobID(run.ID, stage.ID, attempt),
@@ -751,6 +899,12 @@ type pipelineStageSettleDeps struct {
 // terminal, all unchanged. Future kinds branch here on stage.Kind() using deps.
 func stageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, spec pipeline.Spec, stage pipeline.Stage, stageRow db.PipelineRunStage) (settled bool, state, summary string, needs []string, nextRow *db.PipelineRunStage, err error) {
 	switch stage.Kind() {
+	case pipeline.StageKindAgentImplement:
+		// #768 MUTATING implement stage (Model A: fold-on-PR-opened). It settles like
+		// the default job-decision path but holds a SUCCESS fold back until the job
+		// payload carries an opened PR — closing the race where the implement job reaches
+		// terminal success a beat before the finalizer stamps the PR.
+		return implementStageSettleOutcome(ctx, deps, spec, stage, stageRow)
 	// A future kind adds its case here, e.g.:
 	//   case pipeline.StageKindGate:       // jobless: never calls GetJob
 	//       return gateStageSettleOutcome(ctx, deps, spec, stage, stageRow)
@@ -785,6 +939,68 @@ func stageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, spec 
 		state, summary, needs = foldPipelineStageOutcome(spec.EffectiveSuccessDecisions(stage), job)
 		return true, state, summary, needs, nil, nil
 	}
+}
+
+// implementStageSettleOutcome is the #768 MUTATING implement stage's per-kind settle
+// predicate (Model A: fold-on-PR-opened). Like the default job-decision path it settles
+// only once the stage job is TERMINAL and folds by decision (implemented is already a
+// DefaultSuccessDecision) — with ONE added guard: a SUCCESS fold is held back until the
+// job payload carries an opened PullRequest (> 0). That closes the race where the
+// implement job reaches its terminal success state a beat before the
+// ImplementationFinalizer stamps the opened PR onto the payload; without it a downstream
+// stage could advance believing a PR exists when it does not yet. A blocked/failed
+// decision folds IMMEDIATELY (there is no PR to wait on), and a stage whose job times out
+// folds failed via the same decision path — so the PR guard can never wedge a run. On a
+// successful fold the opened PR number is appended to the stage summary so it flows to
+// downstream stages through the #757 upstream-context injection (which renders the stage
+// summary). It reproduces the default kind's JobID guard + queued->running funnel reflect
+// byte-for-byte for the not-terminal path.
+func implementStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, spec pipeline.Spec, stage pipeline.Stage, stageRow db.PipelineRunStage) (settled bool, state, summary string, needs []string, nextRow *db.PipelineRunStage, err error) {
+	if strings.TrimSpace(stageRow.JobID) == "" {
+		return false, "", "", nil, nil, nil
+	}
+	job, err := deps.store.GetJob(ctx, stageRow.JobID)
+	if err != nil {
+		return false, "", "", nil, nil, err
+	}
+	if !workflow.IsSettledJobState(job.State) {
+		if job.State == string(workflow.JobRunning) && stageRow.State == pipeline.StageQueued {
+			next := stageRow
+			next.State = pipeline.StageRunning
+			return false, "", "", nil, &next, nil
+		}
+		return false, "", "", nil, nil, nil
+	}
+	state, summary, needs = foldPipelineStageOutcome(spec.EffectiveSuccessDecisions(stage), job)
+	if state == pipeline.StageSucceeded {
+		pr := 0
+		if payload, perr := workflow.ParseJobPayload(job.Payload); perr == nil {
+			pr = payload.PullRequest
+		}
+		if pr <= 0 {
+			// The job settled successfully but the PR is not stamped on the payload yet:
+			// WAIT (fold-on-PR-opened). Stay in flight untouched; a later scan re-checks.
+			return false, "", "", nil, nil, nil
+		}
+		summary = appendPipelineImplementPR(summary, pr)
+	}
+	return true, state, summary, needs, nil, nil
+}
+
+// appendPipelineImplementPR annotates a mutating implement stage's SUCCESS summary with
+// the opened PR number so downstream stages see it via the #757 upstream-context
+// injection. Deterministic + idempotent: it appends the marker only when a positive PR
+// is present and not already referenced, so a re-derivation is byte-identical.
+func appendPipelineImplementPR(summary string, pr int) string {
+	summary = strings.TrimSpace(summary)
+	marker := fmt.Sprintf("(opened PR #%d)", pr)
+	if strings.Contains(summary, marker) {
+		return summary
+	}
+	if summary == "" {
+		return marker
+	}
+	return summary + " " + marker
 }
 
 // foldPipelineStageOutcome maps a settled stage job to a stage outcome BY DECISION
