@@ -596,14 +596,18 @@ stages:
 		}
 		stage := specByID[tc.stageID]
 
+		// The seam loads the job itself via deps.store, so a jobless future kind is
+		// never handed a fabricated job; today's kinds read only the store.
+		deps := pipelineStageSettleDeps{store: store, rec: rec, run: run, now: now}
+
 		// (1) Before settling, the job is queued/running: the seam reports unsettled,
 		// matching the inline IsSettledJobState guard the FOLD pass used to run.
 		pending, err := store.GetJob(ctx, row.JobID)
 		if err != nil {
 			t.Fatalf("GetJob(%s): %v", tc.stageID, err)
 		}
-		if settled, _, _, _ := stageSettleOutcome(ctx, pipelineStageSettleDeps{}, spec, stage, row, pending); settled {
-			t.Fatalf("%s: seam settled a non-terminal job (state=%q)", tc.stageID, pending.State)
+		if settled, _, _, _, _, err := stageSettleOutcome(ctx, deps, spec, stage, row); err != nil || settled {
+			t.Fatalf("%s: seam settled a non-terminal job (state=%q, err=%v)", tc.stageID, pending.State, err)
 		}
 
 		// (2) After settling, the seam must settle and return the identical fold.
@@ -613,7 +617,10 @@ stages:
 			t.Fatalf("GetJob(%s) after settle: %v", tc.stageID, err)
 		}
 		wantState, wantSummary, wantNeeds := foldPipelineStageOutcome(spec.EffectiveSuccessDecisions(stage), job)
-		settled, gotState, gotSummary, gotNeeds := stageSettleOutcome(ctx, pipelineStageSettleDeps{}, spec, stage, row, job)
+		settled, gotState, gotSummary, gotNeeds, _, err := stageSettleOutcome(ctx, deps, spec, stage, row)
+		if err != nil {
+			t.Fatalf("%s: seam returned err on terminal job: %v", tc.stageID, err)
+		}
 		if !settled {
 			t.Fatalf("%s: seam did not settle a terminal job (state=%q)", tc.stageID, job.State)
 		}

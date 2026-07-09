@@ -199,7 +199,13 @@ func validateStageExecutor(pipelineName string, stage Stage) error {
 	hasCmd := stage.Cmd != ""
 	hasAgent := stage.Agent != ""
 	// The exactly-one-of cmd|agent guard is shared across kinds: it must run before
-	// Stage.Kind() (which is only meaningful once exactly one executor is set).
+	// Stage.Kind() (which is only meaningful once exactly one executor is set). A
+	// future kind that lives on the EXISTING axes (e.g. implement = agent + an
+	// implement action) is a pure append below; a future kind that introduces a NEW
+	// executor field (a jobless gate: predicate) additionally widens this count to
+	// exactly-one-of {cmd, agent, gate}. That count widening is inherent to adding an
+	// executor axis, not a per-kind settle-logic edit — the seams the foundation
+	// guarantees (validateStageExecutor's dispatch, stageSettleOutcome) stay append-only.
 	switch {
 	case hasCmd && hasAgent:
 		return fmt.Errorf("pipeline %q stage %q sets both cmd and agent; a stage is exactly one of a shell cmd or an agent", pipelineName, stage.ID)

@@ -108,7 +108,10 @@ type Stage struct {
 // per-kind settle predicate on it (stageSettleOutcome). Adding a future kind —
 // mutating implement (#768), an external gate (#768 Phase 2), or an orchestrate
 // sub-tree (#758) — is an APPEND here plus a new case at each dispatch point,
-// never an edit to an existing case.
+// never an edit to an existing case. Kinds on the existing cmd|agent axes
+// (implement, orchestrate) are a pure classifier append; a jobless gate additionally
+// adds its own executor field and a `case s.Gate != ""` branch below (and widens the
+// exactly-one-of count in validateStageExecutor) — still no existing case is edited.
 type StageKind int
 
 const (
