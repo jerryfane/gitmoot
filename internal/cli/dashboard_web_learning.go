@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -211,9 +212,10 @@ type witnessKey struct {
 // view: the memory-enrolled agents, their confirmed facts (each carrying the #763
 // detail fields — owning cluster, source-job/source-file provenance and the vault
 // [[wikilink]] cross-references), the emergent clusters those facts belong to, and
-// the owner/cluster/repo/supersede edges between them. It is a read-only pass over
+// the owner/cluster/repo/supersede edges plus scored fact-to-fact links between
+// them. It is a read-only pass over
 // the enrolled config set (config.LoadAgentTypes) plus the confirmed_memories /
-// memory_observations / memory_clusters tables. Clusters are additive: an
+// memory_observations / memory_clusters / memory_links tables. Clusters are additive: an
 // un-recomputed store returns an empty Clusters slice and empty per-fact Cluster
 // fields, and the client falls back to its pre-cluster scope/category view.
 //
@@ -327,9 +329,18 @@ func (d *webDataSource) knowledgeWithShared(ctx context.Context) (dashboard.Know
 			return out.Facts[i].ID < out.Facts[j].ID
 		})
 
+		rowIDs := make([]int64, 0, len(rows))
+		for _, r := range rows {
+			rowIDs = append(rowIDs, r.ID)
+		}
+		memoryLinks, err := store.ListMemoryLinksAmong(ctx, rowIDs)
+		if err != nil {
+			return err
+		}
+
 		out.Clusters, parentByCluster = knowledgeClusters(clusterByID, out.Facts)
 		out.Agents = knowledgeAgents(ctx, store, paths, out.Facts)
-		out.Edges = knowledgeEdges(rows, out.Facts, idByRow, membByRow)
+		out.Edges = knowledgeEdges(rows, out.Facts, idByRow, membByRow, memoryLinks)
 		return nil
 	})
 	if err != nil {
@@ -577,7 +588,8 @@ func knowledgeAgents(ctx context.Context, store *db.Store, paths config.Paths, f
 
 // knowledgeEdges builds the brain graph's edges: owner (fact->agent), cluster
 // (fact->emergent-cluster hub), repo (cluster->repo hub, the top tier of the
-// repo->cluster->fact hierarchy), and supersede (newer->older). The final set is
+// repo->cluster->fact hierarchy), supersede (newer->older), and undirected
+// fact-to-fact links. The final set is
 // sorted by (kind, source, target) exactly like the fake feed, so a
 // signature-skip poll is stable.
 //
@@ -585,7 +597,7 @@ func knowledgeAgents(ctx context.Context, store *db.Store, paths config.Paths, f
 // -> cluster id) from `memory clusters recompute`. It REPLACES the retired
 // key-prefix category hack: hubs are now the deterministic communities over the
 // fact-similarity graph (#763), not the leading colon-delimited key dimension.
-func knowledgeEdges(rows []db.ConfirmedMemory, facts []dashboard.KnowledgeFact, idByRow map[int64]string, membByRow map[int64]int64) []dashboard.KnowledgeEdge {
+func knowledgeEdges(rows []db.ConfirmedMemory, facts []dashboard.KnowledgeFact, idByRow map[int64]string, membByRow map[int64]int64, memoryLinks []db.MemoryLink) []dashboard.KnowledgeEdge {
 	edges := make([]dashboard.KnowledgeEdge, 0, len(facts)*3+len(rows))
 
 	// owner: every fact -> its owning agent hub.
@@ -652,6 +664,8 @@ func knowledgeEdges(rows []db.ConfirmedMemory, facts []dashboard.KnowledgeFact, 
 		edges = append(edges, dashboard.KnowledgeEdge{Source: newer, Target: older, Kind: "supersede"})
 	}
 
+	edges = append(edges, knowledgeLinkEdges(memoryLinks, idByRow)...)
+
 	sort.SliceStable(edges, func(i, j int) bool {
 		if edges[i].Kind != edges[j].Kind {
 			return edges[i].Kind < edges[j].Kind
@@ -662,6 +676,70 @@ func knowledgeEdges(rows []db.ConfirmedMemory, facts []dashboard.KnowledgeFact, 
 		return edges[i].Target < edges[j].Target
 	})
 	return edges
+}
+
+// knowledgeLinkEdges maps directed memory_links rows into one undirected edge
+// per visible fact pair. Row ids are normalized before dedupe, invalid/non-
+// positive scores and self-links are skipped, scores above one are clamped, and
+// duplicate directions retain the highest valid score. The result is sorted by
+// payload source and target ids for stable client-side data signatures.
+func knowledgeLinkEdges(links []db.MemoryLink, idByRow map[int64]string) []dashboard.KnowledgeEdge {
+	type pair struct {
+		src int64
+		dst int64
+	}
+	scoreByPair := make(map[pair]float64, len(links))
+	for _, link := range links {
+		src, dst := link.SrcID, link.DstID
+		if src == dst {
+			continue
+		}
+		if _, ok := idByRow[src]; !ok {
+			continue
+		}
+		if _, ok := idByRow[dst]; !ok {
+			continue
+		}
+		score := link.Score
+		if score <= 0 || math.IsNaN(score) {
+			continue
+		}
+		if math.IsInf(score, 1) {
+			score = 1
+		} else if score > 1 {
+			// The live link generator writes RAW relatedness scores (~2..106 on
+			// this box), not normalized weights. Clamping them all to 1 would
+			// erase the visual-weight signal the UI's score ramp renders, so
+			// squash monotonically into (0,1): s/(s+20) maps 2->0.09, 24->0.55,
+			// 106->0.84. Scores already in (0,1] pass through untouched so a
+			// future normalized generator needs no change here.
+			score = score / (score + 20)
+		}
+		if src > dst {
+			src, dst = dst, src
+		}
+		key := pair{src: src, dst: dst}
+		if previous, seen := scoreByPair[key]; !seen || score > previous {
+			scoreByPair[key] = score
+		}
+	}
+
+	out := make([]dashboard.KnowledgeEdge, 0, len(scoreByPair))
+	for p, score := range scoreByPair {
+		out = append(out, dashboard.KnowledgeEdge{
+			Source: idByRow[p.src],
+			Target: idByRow[p.dst],
+			Kind:   "link",
+			Score:  score,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Source != out[j].Source {
+			return out[i].Source < out[j].Source
+		}
+		return out[i].Target < out[j].Target
+	})
+	return out
 }
 
 // clusterHubID is the stable hub node id for an emergent cluster. It is

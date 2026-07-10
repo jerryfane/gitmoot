@@ -161,6 +161,34 @@ func TestListMemoryLinksForSourcesBatchedOrderingAndActiveFilter(t *testing.T) {
 	}
 }
 
+func TestListMemoryLinksAmongIntersectsEndpointSet(t *testing.T) {
+	ctx := context.Background()
+	store := openMemTestStore(t)
+	owner := agentOwner("builder")
+	a := mustUpsert(t, store, ConfirmedMemory{Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "a", Content: "alpha"})
+	b := mustUpsert(t, store, ConfirmedMemory{Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "b", Content: "bravo"})
+	c := mustUpsert(t, store, ConfirmedMemory{Owner: owner, Repo: "acme/other", Scope: "repo", Key: "c", Content: "charlie"})
+
+	mustInsertMemoryLink(t, store, a, b, 0.8)
+	mustInsertMemoryLink(t, store, b, a, 0.6)
+	mustInsertMemoryLink(t, store, a, c, 0.9)
+	mustInsertMemoryLink(t, store, c, c, 0.5)
+
+	got, err := store.ListMemoryLinksAmong(ctx, []int64{b, a, a, -1})
+	if err != nil {
+		t.Fatalf("ListMemoryLinksAmong: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("links among {a,b} = %d, want both directed rows: %+v", len(got), got)
+	}
+	if got[0].SrcID != a || got[0].DstID != b || got[1].SrcID != b || got[1].DstID != a {
+		t.Fatalf("links not endpoint-intersected and deterministically ordered: %+v", got)
+	}
+	if empty, err := store.ListMemoryLinksAmong(ctx, []int64{0, -1}); err != nil || len(empty) != 0 {
+		t.Fatalf("empty id set = (%+v, %v), want empty nil-error result", empty, err)
+	}
+}
+
 func TestListMemoryLinksForSourcesVisibleToOwnerFiltersNeighbors(t *testing.T) {
 	ctx := context.Background()
 	store := openMemTestStore(t)
