@@ -997,7 +997,8 @@ exactly one of `cmd`, `agent`, or `gate`. An agent stage runs on its **own** reg
 runtime (claude / codex). Four kinds:
 
 - **ask / review** (#757) — read-only **leaf** (`action: ask|review`); `delegations[]`
-  and `human_questions[]` stripped. Model judgement inline in a deterministic flow.
+  and `human_questions[]` stripped. A review may add `source: <implement stage>`
+  (#813) to bind to that stage's PR and exact head SHA.
 - **implement** (#768) — `action: implement` + `write: true`. MUTATES the repo + opens a
   PR on a deterministic `gitmoot/pipe-<run>-<stage>` branch (retry reuses it, never
   duplicates), folds **on PR-opened**, **never auto-merges**. Scheduled pipelines also
@@ -1029,6 +1030,32 @@ stages:
     source: fix
     needs: [fix]
 ```
+
+To make review first-class between implementation and the human merge, insert a
+source-bound review before the gate:
+
+```yaml
+  - id: review
+    agent: reviewer
+    action: review
+    prompt: "Review the implementation PR."
+    source: fix
+    needs: [fix]
+    success_decisions: [approved]
+  - id: wait
+    gate: pr_merged
+    source: fix
+    needs: [fix, review]
+```
+
+The review job copies the structured PR/head/branch/task/lead stamp from the
+succeeded implement job and runs in a detached worktree pinned to that head. It is
+report-only: the verdict is posted to the PR and folded by the pipeline, but it does
+not dispatch a native fix job or run the native merge gate. The declared binding
+also sets `SkipNativeReviewFanout` on `fix`, preventing duplicate reviewer fan-out;
+pipelines without the declaration keep native behavior. A permanent no-PR source
+(no-op or `skipped`) blocks the review immediately with `source stage produced no
+PR; nothing to review` instead of dispatching an unbound job or waiting.
 
 `pipeline add` warns (does not block) when an agent stage names an agent that does
 not exist yet; create it before the stage runs. The

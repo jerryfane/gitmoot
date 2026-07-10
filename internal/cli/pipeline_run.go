@@ -57,6 +57,17 @@ func newPipelineStageEnqueuer(store *db.Store, home string) pipelineStageEnqueue
 		// rather than stalling the pipeline scan loop. Shell stages carry a
 		// RuntimeOverride and are excluded, so their request is byte-identical.
 		request, worktreePath, worktreeErr := allocatePipelineStageReadOnlyWorktree(ctx, store, home, request)
+		// A source-bound review is pinned to the implement job's immutable PR head.
+		// Unlike a generic read-only stage, it must never fail open onto the shared
+		// checkout: that checkout may be on the default branch, which would review the
+		// wrong tree. Keep generic #739 allocation fail-open, but fail this one binding
+		// closed unless the pinned detached worktree was allocated successfully.
+		if pipelineStageSourceBoundReviewRequest(request) && strings.TrimSpace(request.WorktreePath) == "" {
+			if worktreeErr != nil {
+				return db.Job{}, fmt.Errorf("allocate PR-bound pipeline review worktree at %s: %w", request.HeadSHA, worktreeErr)
+			}
+			return db.Job{}, fmt.Errorf("allocate PR-bound pipeline review worktree at %s: managed repo checkout is unavailable", request.HeadSHA)
+		}
 		// #768: a MUTATING implement stage takes the WRITABLE task-worktree path
 		// instead of the read-only committed-tip worktree — it must commit + push. Unlike
 		// the read-only allocator (fail-OPEN), this one is fail-CLOSED: on an active
@@ -97,6 +108,12 @@ func newPipelineStageEnqueuer(store *db.Store, home string) pipelineStageEnqueue
 		}
 		return job, nil
 	}
+}
+
+func pipelineStageSourceBoundReviewRequest(request workflow.JobRequest) bool {
+	return request.Sender == workflow.PipelineJobSender &&
+		strings.TrimSpace(request.Action) == "review" &&
+		request.PullRequest > 0
 }
 
 // pipelineStageReadOnlyWorktreeEligible reports whether a stage job request is a
@@ -148,7 +165,11 @@ func allocatePipelineStageReadOnlyWorktree(ctx context.Context, store *db.Store,
 	if err != nil {
 		return request, "", err
 	}
-	path, err := workflow.AllocateReadOnlyWorktree(ctx, store, paths.Home, request.Repo, checkout, request.ID, "pipeline-stage", 0, "", workflow.ReadOnlyWorktreeDispatchLockWaitBudget, gitutil.Client{Dir: checkout})
+	// A source-bound review carries HeadSHA; use it as the detached base ref so the
+	// existing review checkout validation proves HEAD == payload.HeadSHA. Other
+	// read-only stages keep the empty-ref behavior (the checkout's committed tip).
+	baseRef := strings.TrimSpace(request.HeadSHA)
+	path, err := workflow.AllocateReadOnlyWorktree(ctx, store, paths.Home, request.Repo, checkout, request.ID, "pipeline-stage", 0, baseRef, workflow.ReadOnlyWorktreeDispatchLockWaitBudget, gitutil.Client{Dir: checkout})
 	if err != nil {
 		return request, "", err
 	}
@@ -339,7 +360,19 @@ func pipelineStageMintsJob(stage pipeline.Stage) bool {
 	}
 }
 
-func pipelineStageJobRequest(rec db.Pipeline, stage pipeline.Stage, run db.PipelineRun, attempt int, upstreamContext string) workflow.JobRequest {
+// pipelineStagePRBinding is recovered from a source implement stage's immutable
+// job payload after that stage folds success. It is intentionally not derived from
+// the human-readable stage summary: the finalizer's structured payload stamp is the
+// authoritative and deterministic PR identity across advancer re-scans.
+type pipelineStagePRBinding struct {
+	PullRequest int
+	HeadSHA     string
+	Branch      string
+	TaskID      string
+	LeadAgent   string
+}
+
+func pipelineStageJobRequest(rec db.Pipeline, stage pipeline.Stage, run db.PipelineRun, attempt int, upstreamContext string, binding pipelineStagePRBinding, skipNativeReviewFanout bool) workflow.JobRequest {
 	// AGENT stage (#757): bind the job to the named managed agent and let IT run on
 	// its OWN registered runtime — no RuntimeOverride, so the agent's real
 	// claude/codex runtime and session are used. The runtime instruction is the
@@ -414,10 +447,13 @@ func pipelineStageJobRequest(rec db.Pipeline, stage pipeline.Stage, run db.Pipel
 			Fingerprint:  pipelineStageFingerprint(rec.Name, run.ID, stage.ID, attempt),
 			RootJobID:    run.ID,
 			JobTimeout:   stage.Timeout,
+			// A declared source-bound review owns this PR's review step. Suppress the
+			// native reviewer fan-out so the same implementation is not reviewed twice.
+			SkipNativeReviewFanout: skipNativeReviewFanout,
 		}
 	}
 	if stage.Agent != "" {
-		return workflow.JobRequest{
+		request := workflow.JobRequest{
 			ID:           pipelineStageJobID(run.ID, stage.ID, attempt),
 			Agent:        stage.Agent,
 			Action:       stage.Action,
@@ -428,6 +464,14 @@ func pipelineStageJobRequest(rec db.Pipeline, stage pipeline.Stage, run db.Pipel
 			RootJobID:    run.ID,
 			JobTimeout:   stage.Timeout,
 		}
+		if stage.Kind() == pipeline.StageKindAgentReview && strings.TrimSpace(stage.Source) != "" {
+			request.PullRequest = binding.PullRequest
+			request.HeadSHA = binding.HeadSHA
+			request.Branch = binding.Branch
+			request.TaskID = binding.TaskID
+			request.LeadAgent = binding.LeadAgent
+		}
+		return request
 	}
 	// SHELL stage: byte-identical to before — the runner agent runs stage.Cmd via a
 	// per-job shell runtime override.
@@ -446,11 +490,61 @@ func pipelineStageJobRequest(rec db.Pipeline, stage pipeline.Stage, run db.Pipel
 	}
 }
 
+func pipelineSourceBoundReview(stage pipeline.Stage) bool {
+	return stage.Kind() == pipeline.StageKindAgentReview && strings.TrimSpace(stage.Source) != ""
+}
+
+func pipelineImplementHasSourceBoundReview(spec pipeline.Spec, implementStageID string) bool {
+	for _, candidate := range spec.Stages {
+		if pipelineSourceBoundReview(candidate) && strings.TrimSpace(candidate.Source) == implementStageID {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvePipelineStagePRBinding(ctx context.Context, store *db.Store, sourceRow db.PipelineRunStage) (pipelineStagePRBinding, error) {
+	if strings.TrimSpace(sourceRow.JobID) == "" {
+		return pipelineStagePRBinding{}, fmt.Errorf("source stage %q has no job id", sourceRow.StageID)
+	}
+	job, err := store.GetJob(ctx, sourceRow.JobID)
+	if err != nil {
+		return pipelineStagePRBinding{}, fmt.Errorf("load source stage %q job %q: %w", sourceRow.StageID, sourceRow.JobID, err)
+	}
+	payload, err := workflow.ParseJobPayload(job.Payload)
+	if err != nil {
+		return pipelineStagePRBinding{}, fmt.Errorf("parse source stage %q job %q payload: %w", sourceRow.StageID, sourceRow.JobID, err)
+	}
+	return pipelineStagePRBinding{
+		PullRequest: payload.PullRequest,
+		HeadSHA:     strings.TrimSpace(payload.HeadSHA),
+		Branch:      strings.TrimSpace(payload.Branch),
+		TaskID:      strings.TrimSpace(payload.TaskID),
+		LeadAgent:   strings.TrimSpace(payload.LeadAgent),
+	}, nil
+}
+
 // enqueuePipelineStageJob enqueues a stage job idempotently: on an enqueue error
 // (e.g. a duplicate id from a re-scan that raced the stage-row write) it adopts an
 // already-created job with the same deterministic id, mirroring the engine's
 // enqueue idiom (engine.go). A genuinely new error with no matching job propagates.
-func enqueuePipelineStageJob(ctx context.Context, store *db.Store, enqueue pipelineStageEnqueuer, request workflow.JobRequest) (db.Job, error) {
+func enqueuePipelineStageJob(ctx context.Context, store *db.Store, enqueue pipelineStageEnqueuer, request workflow.JobRequest, adoptBeforeEnqueue bool) (db.Job, error) {
+	// A source-bound review allocates its deterministic pinned worktree before the
+	// mailbox creates the deterministic job. If a scan dies after that enqueue but
+	// before its stage row records JobID, the next scan must adopt the existing job
+	// BEFORE calling the allocating enqueuer again; otherwise worktree allocation
+	// collides with the still-valid worktree and fail-closes forever. Keep this
+	// preflight opt-in so every non-bound stage retains the original enqueue-first
+	// behavior below byte-for-byte.
+	if adoptBeforeEnqueue {
+		existing, err := store.GetJob(ctx, request.ID)
+		if err == nil {
+			return existing, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return db.Job{}, err
+		}
+	}
 	job, err := enqueue(ctx, request)
 	if err == nil {
 		return job, nil
@@ -796,7 +890,34 @@ func advancePipelineRun(ctx context.Context, store *db.Store, enqueue pipelineSt
 		// prompt (dataflow), so e.g. a triage stage can act on an upstream extract
 		// stage's output. Deterministic + bounded; "" for shell stages / root stages.
 		upstreamContext := buildPipelineAgentStageContext(stage, byID)
-		job, err := enqueuePipelineStageJob(ctx, store, enqueue, pipelineStageJobRequest(rec, stage, run, row.Attempt, upstreamContext))
+		binding := pipelineStagePRBinding{}
+		if pipelineSourceBoundReview(stage) {
+			sourceRow := byID[strings.TrimSpace(stage.Source)]
+			binding, err = resolvePipelineStagePRBinding(ctx, store, sourceRow)
+			if err != nil {
+				return run, err
+			}
+			if binding.PullRequest <= 0 {
+				// implementStageSettleOutcome only folds success once its payload stamp is
+				// final. A zero PR here is therefore terminal (no-op or skipped), never a
+				// finalizer race: park immediately instead of dispatching an unbound review.
+				row.State = pipeline.StageBlocked
+				row.Summary = fmt.Sprintf("review cannot run: source stage %q produced no PR", stage.Source)
+				row.NeedsJSON = marshalPipelineNeeds([]string{"source stage produced no PR; nothing to review"})
+				row.FinishedAt = now
+				if err := persistPipelineStage(ctx, store, byID[stage.ID], row); err != nil {
+					return run, err
+				}
+				byID[stage.ID] = row
+				continue
+			}
+			if strings.TrimSpace(binding.HeadSHA) == "" {
+				return run, fmt.Errorf("source stage %q job payload has PR #%d but no head SHA", stage.Source, binding.PullRequest)
+			}
+		}
+		skipNativeReviewFanout := stage.Kind() == pipeline.StageKindAgentImplement && pipelineImplementHasSourceBoundReview(spec, stage.ID)
+		request := pipelineStageJobRequest(rec, stage, run, row.Attempt, upstreamContext, binding, skipNativeReviewFanout)
+		job, err := enqueuePipelineStageJob(ctx, store, enqueue, request, pipelineStageSourceBoundReviewRequest(request))
 		if err != nil {
 			return run, err
 		}

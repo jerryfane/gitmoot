@@ -71,7 +71,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `stages[].write`            | stage        | cond.    | Acknowledges that an `implement` stage **mutates** the repo (#768). Required with `action: implement`, and valid **only** there — a double-key so a typo/injection can't turn a read-only pipeline into a writing one. |
 | `stages[].orchestrate`      | stage        | no       | `true` makes an agent stage a **sub-tree coordinator** (#758): its `delegations[]` fan out as owned children and the stage waits for the whole tree, then folds the synthesis. Agent stage only; `action` must be `ask`. |
 | `stages[].gate`             | stage        | cond.    | Makes this a **jobless gate stage** (#768): it runs no worker and folds when an external predicate holds. Only `pr_merged` today. Exclusive with `cmd`/`agent`. Requires `source`. |
-| `stages[].source`           | stage        | cond.    | For a `gate` stage: the id of the upstream `implement` stage whose PR to watch. Must be one of the gate's own `needs`. |
+| `stages[].source`           | stage        | cond.    | The upstream `implement` stage whose PR to bind. Required on a `gate`; optional on `action: review`; rejected on shell/ask/implement/orchestrate stages. It must be one of the stage's own `needs`. |
 | `stages[].needs`            | stage        | no       | Ids of sibling stages that must **succeed** before this stage is enqueued. Must reference known stages, never the stage itself, and form no cycle. |
 | `stages[].timeout`          | stage        | no       | Per-stage job timeout (positive Go duration). |
 | `stages[].retry`            | stage        | no       | How many times a **failed** stage may be re-attempted (`>= 0`, default `0`). |
@@ -82,8 +82,8 @@ non-name-safe name/id, a duplicate stage id, a stage that is not **exactly one**
 `cmd`, `agent`, or `gate` (and, per kind: an agent stage's missing `prompt`, an
 invalid `action`, `implement` without `write: true` or `write: true` off an
 implement stage, a mutating stage on a scheduled pipeline without
-`allow_scheduled_writes`, a gate's invalid predicate or a `source` that is not an
-upstream implement stage in `needs`), an unknown/self/cyclic `needs`, an invalid
+`allow_scheduled_writes`, a gate/review `source` that is not an upstream implement
+stage in `needs`, or `source` on another stage kind), an unknown/self/cyclic `needs`, an invalid
 timeout/interval/jitter, a negative retry, or a `success_decisions` value outside the
 allowed set — so a structural mistake surfaces as a clear error at registration
 rather than a stuck run later.
@@ -140,9 +140,12 @@ stages:
   `worktree:<path>` rather than the shared `repo:<repo>` live checkout — same-repo
   agent stages then run **concurrently** and never mutate the live checkout. The
   worktree is disposed when the stage job settles (and reclaimed on daemon restart).
-  Allocation is fail-open: if it cannot be created the stage still runs, serialized on
-  the shared checkout, with a loud skip event. A pure-reasoning agent stage with no
-  `repo` needs no worktree.
+  Allocation is fail-open for ordinary ask/review stages: if it cannot be created the
+  stage still runs, serialized on the shared checkout, with a loud skip event. A
+  source-bound PR review is the safety exception: its detached worktree is pinned to
+  the source payload's `HeadSHA`, validated clean at that exact SHA, and allocation
+  fails closed rather than reviewing the shared default branch. A pure-reasoning
+  agent stage with no `repo` needs no worktree.
 - **Stateless per run.** Because each agent stage runs in a freshly-created worktree
   directory, a runtime that scopes sessions by working directory (e.g. Claude Code)
   starts a **fresh session each run** — a pipeline stage carries no session context
@@ -167,7 +170,13 @@ stages:
   - id: verify
     agent: reviewer
     action: review
+    source: fix                       # bind to fix's PR + exact head SHA
     needs: [fix]
+    success_decisions: [approved]     # changes_requested parks before the merge gate
+  - id: wait
+    gate: pr_merged
+    source: fix
+    needs: [fix, verify]
 ```
 
 - **Writable worktree + deterministic branch reuse.** Unlike a read-only stage, an
@@ -181,7 +190,30 @@ stages:
   downstream stage sees it via upstream-context injection.
 - **Never auto-merges.** The pipeline **opens** the PR; a human or your CI does the
   merge. See [Gate stages](#gate-stages) to make a later stage wait for that merge.
+- **Declared review suppresses native fan-out.** When an implement stage has a
+  downstream `action: review` stage with `source` pointing to it, its job carries
+  `SkipNativeReviewFanout`. Gitmoot does not also enqueue the ordinary native
+  reviewers; without that declaration, native review behavior is unchanged.
 - Still a **leaf** — it may mutate but never fan out.
+
+### Source-bound review stages
+
+Set `source: <implement-stage>` on an `action: review` stage to review the PR that
+the implement stage just opened. `source` must also appear in the review stage's
+`needs`, and must name an `action: implement` stage.
+
+- At enqueue, Gitmoot reads the succeeded source stage row's `JobID`, parses that
+  job's structured payload stamp, and copies `PullRequest`, `HeadSHA`, `Branch`,
+  `TaskID`, and `LeadAgent` onto the review job. It never scrapes the stage summary.
+- The review runs in a detached read-only worktree at the stamped `HeadSHA` and the
+  existing review checkout preflight verifies that exact clean head.
+- The review is **report-only** for native PR lifecycle purposes. Its verdict is
+  still posted as a PR comment and folded by the pipeline's `success_decisions`, but
+  `changes_requested` does not dispatch a native fix job and `approved` does not run
+  the native merge gate. Human merge remains the default.
+- If the succeeded implement stage produced no PR (a permanent no-op or a first-class
+  `skipped` result), the review stage immediately folds `blocked` with
+  `source stage produced no PR; nothing to review`; no unbound review job is sent.
 
 ### Gate stages
 

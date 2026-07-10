@@ -57,7 +57,7 @@ gitmoot pipeline show "$RUN"
 name/id, a duplicate stage id, a stage that is not exactly one of `cmd`, `agent`, or
 `gate` (and, per kind: an agent stage's missing `prompt` or invalid `action`,
 `implement` without `write: true`, a mutating stage on a scheduled pipeline without
-`allow_scheduled_writes`, a gate's bad predicate/`source`), an unknown/self/cyclic
+`allow_scheduled_writes`, a gate/review's bad `source`, or `source` on another kind), an unknown/self/cyclic
 `needs`, an invalid duration, a negative retry, or a
 `success_decisions` value outside `approved`/`implemented`/`changes_requested`/`skipped` - so a
 structural mistake is a clear error at registration, not a stuck run later. It stores the raw YAML **verbatim**
@@ -164,7 +164,7 @@ is **exactly one** of `cmd`, `agent`, or `gate`. There are four agent-stage kind
 
 | Kind | Declared by | What it does |
 | ---- | ----------- | ------------ |
-| **ask / review** (#757) | `action: ask\|review` | Read-only leaf — looks + decides, never mutates. |
+| **ask / review** (#757/#813) | `action: ask\|review` (review may add `source:`) | Read-only leaf; optionally reviews one upstream implement PR at its exact head. |
 | **implement** (#768) | `action: implement` + `write: true` | Mutates the repo + opens a PR (fold-on-PR-opened); never auto-merges. |
 | **orchestrate** (#758) | `orchestrate: true` | Sub-tree coordinator — fans out owned children, waits, folds the synthesis. |
 | **gate** (#768) | `gate: pr_merged` + `source:` (no `agent`) | Jobless waiter — folds when an upstream implement stage's PR merges. |
@@ -190,6 +190,34 @@ stages:
     needs: [fix]
 ```
 
+For the first-class `implement -> review the PR -> wait for human merge` flow, bind
+the review to the implement stage:
+
+```yaml
+  - id: review
+    agent: reviewer
+    action: review
+    prompt: "Review the implementation PR."
+    source: fix              # must also be in needs; must name an implement stage
+    needs: [fix]
+    success_decisions: [approved]
+  - id: wait
+    gate: pr_merged
+    source: fix
+    needs: [fix, review]
+```
+
+At enqueue, Gitmoot copies the source implement job's structured PR number, head
+SHA, branch, task, and lead-agent stamp onto the review job. The read-only worktree
+is detached at that exact head and checkout validation confirms it; this binding is
+never inferred from summary text. Pipeline reviews are **report-only**: the verdict
+still appears as a PR comment and folds through `success_decisions`, but
+`changes_requested` does not dispatch a native fix and `approved` does not run the
+native merge gate. Human merge remains required. Declaring the binding sets
+`SkipNativeReviewFanout` on the implement request so Gitmoot does not also enqueue
+native reviewers. If the source produced no PR (no-op or `skipped`), the review
+folds blocked immediately with `source stage produced no PR; nothing to review`.
+
 An agent stage runs the named agent on **its own registered runtime** (claude /
 codex — no per-job shell override):
 
@@ -213,7 +241,8 @@ codex — no per-job shell override):
 - **isolated read-only worktree** — a repo-bound ask/review agent stage runs in its
   own detached, committed-tip read-only worktree (#739), so same-repo agent stages
   parallelize and never touch the live checkout; the worktree is disposed when the
-  stage job settles.
+  stage job settles. A source-bound review is pinned to its payload `HeadSHA` and
+  fails closed if that detached checkout cannot be allocated.
 
 Agent stages fold by `gitmoot_result` `decision` and park/advance exactly like shell
 stages — an `approved`/`implemented` review advances dependents, a `blocked` result

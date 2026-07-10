@@ -20,7 +20,7 @@ func TestPipelineOrchestrateStageJobRequestShape(t *testing.T) {
 	run := db.PipelineRun{ID: "prun-orch-abc", Pipeline: "orch"}
 
 	orch := pipeline.Stage{ID: "decompose", Agent: "coordinator", Prompt: "Fan out.", Action: "ask", Orchestrate: true, Timeout: "30m"}
-	req := pipelineStageJobRequest(rec, orch, run, 0, "UPSTREAM\n")
+	req := pipelineStageJobRequest(rec, orch, run, 0, "UPSTREAM\n", pipelineStagePRBinding{}, false)
 
 	wantID := pipelineStageJobID(run.ID, orch.ID, 0)
 	if req.ID != wantID {
@@ -53,7 +53,7 @@ func TestPipelineOrchestrateStageJobRequestShape(t *testing.T) {
 
 	// Control: a plain #757 agent stage — no OrchestrateStage flag, RootJobID = run.ID.
 	leaf := pipeline.Stage{ID: "review", Agent: "reviewer", Prompt: "Review.", Action: "review"}
-	leafReq := pipelineStageJobRequest(rec, leaf, run, 0, "")
+	leafReq := pipelineStageJobRequest(rec, leaf, run, 0, "", pipelineStagePRBinding{}, false)
 	if leafReq.OrchestrateStage {
 		t.Fatalf("a plain #757 agent stage must NOT set OrchestrateStage")
 	}
