@@ -125,10 +125,11 @@ type Stage struct {
 	// advancer's settle pass evaluates its predicate per scan. Mutually exclusive with
 	// Cmd and Agent (exactly one of the three executors). Pairs with Source.
 	Gate string `yaml:"gate,omitempty"`
-	// Source is the id of the upstream stage a gate stage watches (required for — and
-	// valid ONLY on — a gate stage): the implement stage whose opened PR the gate's
-	// predicate observes. It must be one of the gate's own Needs, so the gate only
-	// begins watching once that upstream stage has succeeded (and stamped its PR).
+	// Source is the id of the upstream implement stage whose opened PR this stage
+	// binds to. It is required on a gate stage and optional on an action: review
+	// agent stage; it is rejected on every other stage kind. Source must be one of
+	// the stage's own Needs, so binding begins only after the implement stage has
+	// succeeded and its job payload carries the final PR stamp.
 	Source string `yaml:"source,omitempty"`
 	// Needs lists the ids of stages that must succeed before this stage is enqueued.
 	Needs []string `yaml:"needs,omitempty"`

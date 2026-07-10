@@ -1505,6 +1505,28 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 		}
 	}
 
+	if job.Type == "review" && payload.Sender == PipelineJobSender {
+		// Pipeline PR reviews are report-only: delivery and the daemon's PR-comment
+		// posting already happened, while the pipeline advancer owns decision folding.
+		// Do not enter the native review lifecycle here: changes_requested would fan
+		// out a fix job and approved could run the merge gate (and merge the PR), both
+		// violating the human-merge pipeline policy. This is the single policy seam
+		// where a future explicit `merge: auto` mode can branch.
+		events, err := e.Store.ListJobEvents(ctx, job.ID)
+		if err != nil {
+			return err
+		}
+		for _, event := range events {
+			if event.Kind == "pipeline_review_report_only" {
+				return nil
+			}
+		}
+		return e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "pipeline_review_report_only",
+			Message: "pipeline review recorded as report-only; pipeline advancement owns the verdict and human merge remains required",
+		})
+	}
 	if job.Type == "review" {
 		latest, err := e.latestReviewRound(ctx, payload)
 		if err != nil {

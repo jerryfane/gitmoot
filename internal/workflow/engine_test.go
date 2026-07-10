@@ -1238,6 +1238,61 @@ func TestEngineAdvanceReviewChangesRequestedDispatchesFix(t *testing.T) {
 	}
 }
 
+func TestEngineAdvancePipelineReviewIsReportOnly(t *testing.T) {
+	for _, decision := range []string{"changes_requested", "approved"} {
+		t.Run(decision, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEngineStore(t)
+			seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+			engine := testEngine(store)
+			gate := &fakeMergeGate{onEvaluate: func(MergeRequest) {
+				t.Fatalf("merge gate evaluated for report-only pipeline review")
+			}}
+			engine.MergeGate = gate
+			insertCompletedJob(t, store, db.Job{
+				ID:    "pipeline-review-job",
+				Agent: "audit",
+				Type:  "review",
+			}, JobPayload{
+				Repo:        "jerryfane/gitmoot",
+				Branch:      "task-813",
+				PullRequest: 813,
+				HeadSHA:     "head813",
+				TaskID:      "task-813",
+				LeadAgent:   "lead",
+				Sender:      PipelineJobSender,
+				Result:      &AgentResult{Decision: decision, Summary: "pipeline verdict"},
+			})
+
+			if err := engine.AdvanceJob(ctx, "pipeline-review-job"); err != nil {
+				t.Fatalf("AdvanceJob returned error: %v", err)
+			}
+			if err := engine.AdvanceJob(ctx, "pipeline-review-job"); err != nil {
+				t.Fatalf("replayed AdvanceJob returned error: %v", err)
+			}
+			if _, err := store.GetJob(ctx, "implement-lead-task-813"); err == nil {
+				t.Fatal("report-only pipeline review dispatched a native fix job")
+			}
+			if len(gate.requests) != 0 {
+				t.Fatalf("merge gate requests = %+v, want none", gate.requests)
+			}
+			events, err := store.ListJobEvents(ctx, "pipeline-review-job")
+			if err != nil {
+				t.Fatalf("ListJobEvents: %v", err)
+			}
+			count := 0
+			for _, event := range events {
+				if event.Kind == "pipeline_review_report_only" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("pipeline_review_report_only event count = %d, want 1; events=%+v", count, events)
+			}
+		})
+	}
+}
+
 func TestEngineAdvanceReviewSkipsPullRequestFlowWhenNoPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)

@@ -175,6 +175,32 @@ stages:
 	}
 }
 
+func TestLoadValidSourceBoundReviewSpec(t *testing.T) {
+	const spec = `name: review-flow
+repo: owner/repo
+stages:
+  - id: impl
+    agent: coder
+    prompt: Fix the bug.
+    action: implement
+    write: true
+  - id: review
+    agent: reviewer
+    prompt: Review the implementation PR.
+    action: review
+    source: impl
+    needs: [impl]
+`
+	loaded, err := Load([]byte(spec))
+	if err != nil {
+		t.Fatalf("Load valid source-bound review spec: %v", err)
+	}
+	review := loaded.Stages[1]
+	if review.Kind() != StageKindAgentReview || review.Source != "impl" {
+		t.Fatalf("review stage = %+v, want action: review source: impl", review)
+	}
+}
+
 func TestLoadValidationErrors(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -270,6 +296,36 @@ func TestLoadValidationErrors(t *testing.T) {
 			name:    "gate with agent rejected",
 			spec:    "name: p\nstages:\n  - {id: a, cmd: echo}\n  - {id: g, gate: pr_merged, source: a, needs: [a], agent: rev, prompt: hi}\n",
 			wantSub: `stage "g" sets both gate and agent`,
+		},
+		{
+			name:    "review source not in needs",
+			spec:    "name: p\nstages:\n  - {id: impl, agent: coder, prompt: fix, action: implement, write: true}\n  - {id: other, cmd: echo}\n  - {id: review, agent: rev, prompt: inspect, action: review, source: impl, needs: [other]}\n",
+			wantSub: `review source "impl" must be one of the stage's needs`,
+		},
+		{
+			name:    "review source wrong kind",
+			spec:    "name: p\nstages:\n  - {id: prep, cmd: echo}\n  - {id: review, agent: rev, prompt: inspect, action: review, source: prep, needs: [prep]}\n",
+			wantSub: `review source "prep" must be a mutating implement stage`,
+		},
+		{
+			name:    "shell source rejected",
+			spec:    "name: p\nstages:\n  - {id: impl, agent: coder, prompt: fix, action: implement, write: true}\n  - {id: shell, cmd: echo, source: impl, needs: [impl]}\n",
+			wantSub: `stage "shell" sets source "impl" but is neither a gate nor an action: review agent stage`,
+		},
+		{
+			name:    "ask source rejected",
+			spec:    "name: p\nstages:\n  - {id: impl, agent: coder, prompt: fix, action: implement, write: true}\n  - {id: ask, agent: helper, prompt: inspect, source: impl, needs: [impl]}\n",
+			wantSub: `stage "ask" sets source "impl" but is neither a gate nor an action: review agent stage`,
+		},
+		{
+			name:    "implement source rejected",
+			spec:    "name: p\nstages:\n  - {id: first, agent: coder, prompt: fix, action: implement, write: true}\n  - {id: second, agent: coder, prompt: more, action: implement, write: true, source: first, needs: [first]}\n",
+			wantSub: `stage "second" sets source "first" but is neither a gate nor an action: review agent stage`,
+		},
+		{
+			name:    "orchestrate source rejected",
+			spec:    "name: p\nstages:\n  - {id: impl, agent: coder, prompt: fix, action: implement, write: true}\n  - {id: orch, agent: lead, prompt: coordinate, orchestrate: true, source: impl, needs: [impl]}\n",
+			wantSub: `stage "orch" sets source "impl" but is neither a gate nor an action: review agent stage`,
 		},
 		{
 			name:    "shell stage with prompt",

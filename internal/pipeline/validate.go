@@ -89,15 +89,12 @@ func (s Spec) Validate() error {
 		if err := s.validateMutatingStage(stage); err != nil {
 			return err
 		}
-		// A gate's source must be a mutating implement stage: the pr_merged predicate reads
-		// the "(opened PR #<n>)" marker only an implement stage stamps onto its summary, so
-		// a gate pointed at a shell/ask/review source would find no PR and wait/time out
-		// silently instead of failing fast. Checked here (not in validateGateStage) because
-		// it needs the SOURCE stage's kind — spec-level context the per-stage validator lacks.
-		if stage.Kind() == StageKindGate {
-			if src, ok := stageByID[stage.Source]; ok && src.Kind() != StageKindAgentImplement {
-				return fmt.Errorf("pipeline %q stage %q gate source %q must be a mutating implement stage (action: implement) so the gate has a PR to watch", s.Name, stage.ID, stage.Source)
-			}
+		// source is meaningful only for a gate or a review agent. Both bind to the
+		// structured PR produced by an upstream implement stage, so validate the same
+		// dependency and source-kind invariants at add time instead of silently ignoring
+		// a stray source on another kind.
+		if err := validateStageSource(s.Name, stage, stageByID); err != nil {
+			return err
 		}
 		if stage.Retry < 0 {
 			return fmt.Errorf("pipeline %q stage %q retry must be >= 0", s.Name, stage.ID)
@@ -127,6 +124,40 @@ func (s Spec) Validate() error {
 		}
 	}
 	return s.detectCycle()
+}
+
+// validateStageSource applies the spec-level half of source binding. Gate-local
+// requirements (source is mandatory, non-self, and in Needs) remain in
+// validateGateStage; this helper adds the source-stage kind check shared by gates
+// and reviews and rejects source everywhere else.
+func validateStageSource(pipelineName string, stage Stage, stageByID map[string]Stage) error {
+	source := strings.TrimSpace(stage.Source)
+	switch stage.Kind() {
+	case StageKindGate:
+		if src, ok := stageByID[source]; ok && src.Kind() != StageKindAgentImplement {
+			return fmt.Errorf("pipeline %q stage %q gate source %q must be a mutating implement stage (action: implement) so the gate has a PR to watch", pipelineName, stage.ID, source)
+		}
+		return nil
+	case StageKindAgentReview:
+		if source == "" {
+			return nil
+		}
+		if source == stage.ID {
+			return fmt.Errorf("pipeline %q stage %q review source cannot be the stage itself", pipelineName, stage.ID)
+		}
+		if !containsToken(stage.Needs, source) {
+			return fmt.Errorf("pipeline %q stage %q review source %q must be one of the stage's needs (a review binds to an upstream stage it depends on)", pipelineName, stage.ID, source)
+		}
+		if src, ok := stageByID[source]; ok && src.Kind() != StageKindAgentImplement {
+			return fmt.Errorf("pipeline %q stage %q review source %q must be a mutating implement stage (action: implement) so the review has a PR to inspect", pipelineName, stage.ID, source)
+		}
+		return nil
+	default:
+		if source != "" {
+			return fmt.Errorf("pipeline %q stage %q sets source %q but is neither a gate nor an action: review agent stage", pipelineName, stage.ID, source)
+		}
+		return nil
+	}
 }
 
 // validateSchedule checks the optional schedule block: a present block requires a

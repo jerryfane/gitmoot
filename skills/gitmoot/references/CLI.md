@@ -2097,6 +2097,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
     needs: [score]          #   upstream results are prepended to the prompt
   # other agent-stage kinds:
   #   implement (#768): action: implement + write: true → mutates repo + opens a PR (never auto-merges)
+  #   bound review (#813): action: review + source: <impl stage> -> reviews that PR/head, report-only
   #   orchestrate (#758): orchestrate: true → sub-tree coordinator (fans out owned children, folds synthesis)
   #   gate (#768): gate: pr_merged + source: <impl stage> (no agent) → jobless, folds when that PR merges
   - id: deploy
@@ -2122,8 +2123,8 @@ gitmoot pipeline remove nightly-sync
 `pipeline add` validates the whole spec at add time (unknown keys, duplicate/self/
 cyclic `needs`, a stage that is not exactly one of `cmd`/`agent`/`gate`, an agent stage
 missing a `prompt` / invalid `action` / `implement` without `write: true` / a mutating
-stage on a scheduled pipeline without `allow_scheduled_writes` / a gate's bad
-predicate or `source`, invalid durations, a `success_decisions` outside
+stage on a scheduled pipeline without `allow_scheduled_writes` / a gate or review's
+bad `source` / `source` on another stage kind, invalid durations, a `success_decisions` outside
 `approved`/`implemented`/`changes_requested`/`skipped`) so a mistake is a clear error, not a
 stuck run. It stores the raw YAML **verbatim** plus a content hash; each run
 snapshots that hash and executes its snapshot, so editing the file later never
@@ -2134,6 +2135,17 @@ runs a named managed agent on its own runtime as a read-only leaf (`ask`/`review
 its `needs` stages' result summaries are prepended to the prompt, and a repo-bound
 agent stage runs in its own detached read-only worktree so same-repo agent stages
 parallelize without touching the live checkout.
+
+An `action: review` stage may set `source: <implement-stage>` (also listed in its
+`needs`) to bind to that implement job's structured PR stamp. The review payload
+inherits the PR number, head SHA, branch, task, and lead agent; its detached worktree
+is pinned to the exact PR head. The verdict still posts as a PR comment and folds by
+`success_decisions`, but pipeline reviews are report-only: they dispatch no native
+fix job and never run the native merge gate. Declaring this review also sets
+`SkipNativeReviewFanout` on the source implement request, avoiding duplicate native
+reviewer jobs. If the source permanently produces no PR (no-op or `skipped`), the
+review folds blocked immediately with `source stage produced no PR; nothing to
+review` and no unbound review is dispatched.
 
 `pipeline install-defaults` installs the built-in memory pipelines
 `memory-ingest-sweep` and `memory-groom-propose`. The daemon also runs this

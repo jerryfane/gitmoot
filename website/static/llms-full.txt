@@ -2632,7 +2632,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `stages[].write`            | stage        | cond.    | Acknowledges that an `implement` stage **mutates** the repo (#768). Required with `action: implement`, and valid **only** there — a double-key so a typo/injection can't turn a read-only pipeline into a writing one. |
 | `stages[].orchestrate`      | stage        | no       | `true` makes an agent stage a **sub-tree coordinator** (#758): its `delegations[]` fan out as owned children and the stage waits for the whole tree, then folds the synthesis. Agent stage only; `action` must be `ask`. |
 | `stages[].gate`             | stage        | cond.    | Makes this a **jobless gate stage** (#768): it runs no worker and folds when an external predicate holds. Only `pr_merged` today. Exclusive with `cmd`/`agent`. Requires `source`. |
-| `stages[].source`           | stage        | cond.    | For a `gate` stage: the id of the upstream `implement` stage whose PR to watch. Must be one of the gate's own `needs`. |
+| `stages[].source`           | stage        | cond.    | The upstream `implement` stage whose PR to bind. Required on a `gate`; optional on `action: review`; rejected on shell/ask/implement/orchestrate stages. It must be one of the stage's own `needs`. |
 | `stages[].needs`            | stage        | no       | Ids of sibling stages that must **succeed** before this stage is enqueued. Must reference known stages, never the stage itself, and form no cycle. |
 | `stages[].timeout`          | stage        | no       | Per-stage job timeout (positive Go duration). |
 | `stages[].retry`            | stage        | no       | How many times a **failed** stage may be re-attempted (`>= 0`, default `0`). |
@@ -2643,8 +2643,8 @@ non-name-safe name/id, a duplicate stage id, a stage that is not **exactly one**
 `cmd`, `agent`, or `gate` (and, per kind: an agent stage's missing `prompt`, an
 invalid `action`, `implement` without `write: true` or `write: true` off an
 implement stage, a mutating stage on a scheduled pipeline without
-`allow_scheduled_writes`, a gate's invalid predicate or a `source` that is not an
-upstream implement stage in `needs`), an unknown/self/cyclic `needs`, an invalid
+`allow_scheduled_writes`, a gate/review `source` that is not an upstream implement
+stage in `needs`, or `source` on another stage kind), an unknown/self/cyclic `needs`, an invalid
 timeout/interval/jitter, a negative retry, or a `success_decisions` value outside the
 allowed set — so a structural mistake surfaces as a clear error at registration
 rather than a stuck run later.
@@ -2701,9 +2701,12 @@ stages:
   `worktree:<path>` rather than the shared `repo:<repo>` live checkout — same-repo
   agent stages then run **concurrently** and never mutate the live checkout. The
   worktree is disposed when the stage job settles (and reclaimed on daemon restart).
-  Allocation is fail-open: if it cannot be created the stage still runs, serialized on
-  the shared checkout, with a loud skip event. A pure-reasoning agent stage with no
-  `repo` needs no worktree.
+  Allocation is fail-open for ordinary ask/review stages: if it cannot be created the
+  stage still runs, serialized on the shared checkout, with a loud skip event. A
+  source-bound PR review is the safety exception: its detached worktree is pinned to
+  the source payload's `HeadSHA`, validated clean at that exact SHA, and allocation
+  fails closed rather than reviewing the shared default branch. A pure-reasoning
+  agent stage with no `repo` needs no worktree.
 - **Stateless per run.** Because each agent stage runs in a freshly-created worktree
   directory, a runtime that scopes sessions by working directory (e.g. Claude Code)
   starts a **fresh session each run** — a pipeline stage carries no session context
@@ -2728,7 +2731,13 @@ stages:
   - id: verify
     agent: reviewer
     action: review
+    source: fix                       # bind to fix's PR + exact head SHA
     needs: [fix]
+    success_decisions: [approved]     # changes_requested parks before the merge gate
+  - id: wait
+    gate: pr_merged
+    source: fix
+    needs: [fix, verify]
 ```
 
 - **Writable worktree + deterministic branch reuse.** Unlike a read-only stage, an
@@ -2742,7 +2751,30 @@ stages:
   downstream stage sees it via upstream-context injection.
 - **Never auto-merges.** The pipeline **opens** the PR; a human or your CI does the
   merge. See [Gate stages](#gate-stages) to make a later stage wait for that merge.
+- **Declared review suppresses native fan-out.** When an implement stage has a
+  downstream `action: review` stage with `source` pointing to it, its job carries
+  `SkipNativeReviewFanout`. Gitmoot does not also enqueue the ordinary native
+  reviewers; without that declaration, native review behavior is unchanged.
 - Still a **leaf** — it may mutate but never fan out.
+
+### Source-bound review stages
+
+Set `source: <implement-stage>` on an `action: review` stage to review the PR that
+the implement stage just opened. `source` must also appear in the review stage's
+`needs`, and must name an `action: implement` stage.
+
+- At enqueue, Gitmoot reads the succeeded source stage row's `JobID`, parses that
+  job's structured payload stamp, and copies `PullRequest`, `HeadSHA`, `Branch`,
+  `TaskID`, and `LeadAgent` onto the review job. It never scrapes the stage summary.
+- The review runs in a detached read-only worktree at the stamped `HeadSHA` and the
+  existing review checkout preflight verifies that exact clean head.
+- The review is **report-only** for native PR lifecycle purposes. Its verdict is
+  still posted as a PR comment and folded by the pipeline's `success_decisions`, but
+  `changes_requested` does not dispatch a native fix job and `approved` does not run
+  the native merge gate. Human merge remains the default.
+- If the succeeded implement stage produced no PR (a permanent no-op or a first-class
+  `skipped` result), the review stage immediately folds `blocked` with
+  `source stage produced no PR; nothing to review`; no unbound review job is sent.
 
 ### Gate stages
 
@@ -10293,6 +10325,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
     needs: [score]          #   upstream results are prepended to the prompt
   # other agent-stage kinds:
   #   implement (#768): action: implement + write: true → mutates repo + opens a PR (never auto-merges)
+  #   bound review (#813): action: review + source: <impl stage> -> reviews that PR/head, report-only
   #   orchestrate (#758): orchestrate: true → sub-tree coordinator (fans out owned children, folds synthesis)
   #   gate (#768): gate: pr_merged + source: <impl stage> (no agent) → jobless, folds when that PR merges
   - id: deploy
@@ -10318,8 +10351,8 @@ gitmoot pipeline remove nightly-sync
 `pipeline add` validates the whole spec at add time (unknown keys, duplicate/self/
 cyclic `needs`, a stage that is not exactly one of `cmd`/`agent`/`gate`, an agent stage
 missing a `prompt` / invalid `action` / `implement` without `write: true` / a mutating
-stage on a scheduled pipeline without `allow_scheduled_writes` / a gate's bad
-predicate or `source`, invalid durations, a `success_decisions` outside
+stage on a scheduled pipeline without `allow_scheduled_writes` / a gate or review's
+bad `source` / `source` on another stage kind, invalid durations, a `success_decisions` outside
 `approved`/`implemented`/`changes_requested`/`skipped`) so a mistake is a clear error, not a
 stuck run. It stores the raw YAML **verbatim** plus a content hash; each run
 snapshots that hash and executes its snapshot, so editing the file later never
@@ -10330,6 +10363,17 @@ runs a named managed agent on its own runtime as a read-only leaf (`ask`/`review
 its `needs` stages' result summaries are prepended to the prompt, and a repo-bound
 agent stage runs in its own detached read-only worktree so same-repo agent stages
 parallelize without touching the live checkout.
+
+An `action: review` stage may set `source: <implement-stage>` (also listed in its
+`needs`) to bind to that implement job's structured PR stamp. The review payload
+inherits the PR number, head SHA, branch, task, and lead agent; its detached worktree
+is pinned to the exact PR head. The verdict still posts as a PR comment and folds by
+`success_decisions`, but pipeline reviews are report-only: they dispatch no native
+fix job and never run the native merge gate. Declaring this review also sets
+`SkipNativeReviewFanout` on the source implement request, avoiding duplicate native
+reviewer jobs. If the source permanently produces no PR (no-op or `skipped`), the
+review folds blocked immediately with `source stage produced no PR; nothing to
+review` and no unbound review is dispatched.
 
 `pipeline install-defaults` installs the built-in memory pipelines
 `memory-ingest-sweep` and `memory-groom-propose`. The daemon also runs this
@@ -11616,7 +11660,8 @@ exactly one of `cmd`, `agent`, or `gate`. An agent stage runs on its **own** reg
 runtime (claude / codex). Four kinds:
 
 - **ask / review** (#757) — read-only **leaf** (`action: ask|review`); `delegations[]`
-  and `human_questions[]` stripped. Model judgement inline in a deterministic flow.
+  and `human_questions[]` stripped. A review may add `source: <implement stage>`
+  (#813) to bind to that stage's PR and exact head SHA.
 - **implement** (#768) — `action: implement` + `write: true`. MUTATES the repo + opens a
   PR on a deterministic `gitmoot/pipe-<run>-<stage>` branch (retry reuses it, never
   duplicates), folds **on PR-opened**, **never auto-merges**. Scheduled pipelines also
@@ -11648,6 +11693,32 @@ stages:
     source: fix
     needs: [fix]
 ```
+
+To make review first-class between implementation and the human merge, insert a
+source-bound review before the gate:
+
+```yaml
+  - id: review
+    agent: reviewer
+    action: review
+    prompt: "Review the implementation PR."
+    source: fix
+    needs: [fix]
+    success_decisions: [approved]
+  - id: wait
+    gate: pr_merged
+    source: fix
+    needs: [fix, review]
+```
+
+The review job copies the structured PR/head/branch/task/lead stamp from the
+succeeded implement job and runs in a detached worktree pinned to that head. It is
+report-only: the verdict is posted to the PR and folded by the pipeline, but it does
+not dispatch a native fix job or run the native merge gate. The declared binding
+also sets `SkipNativeReviewFanout` on `fix`, preventing duplicate reviewer fan-out;
+pipelines without the declaration keep native behavior. A permanent no-PR source
+(no-op or `skipped`) blocks the review immediately with `source stage produced no
+PR; nothing to review` instead of dispatching an unbound job or waiting.
 
 `pipeline add` warns (does not block) when an agent stage names an agent that does
 not exist yet; create it before the stage runs. The
