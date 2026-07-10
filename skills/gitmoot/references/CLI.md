@@ -1791,6 +1791,19 @@ their author. With auto-confirm enabled, the confirmed write still goes to
 `--agent NAME`'s private pool, not shared. `--dry-run` reports what would be
 staged without writing.
 
+Chunk keys are **stable**: `slug(file)-slug(heading)`, with an ordinal suffix
+(`-2`, `-3`) only when a file/heading pair repeats within one sweep. The content
+hash participates only in dedup, never in the key, so a re-swept **edited** note
+lands on the same key as its earlier edition and, under auto-confirm, updates
+the existing confirmed fact **in place**. Auto-confirmed key-matched updates
+(ingest auto-confirm and `chat remember`) are **supersede-preserving**: the
+prior edition is archived first as a `superseded_by` row (out of FTS, out of the
+vault; `memory_links` stay on the unchanged live row id) so a bad edit never
+destroys the last reviewed edition. Manual paths (vault import CAS edits,
+`memory confirm --yes`) keep plain overwrite semantics. Keys minted before this
+scheme end in an 8-hex content-hash suffix; the groom **rekey** detector
+migrates them (below).
+
 `memory ingest sweep` reads every configured `[[memory.ingest]]` source from the
 current config at run time and runs the same ingest logic in-process for each one.
 `--json` emits per-source entries with `path`, `agent`, `repo`, `tier`,
@@ -1879,8 +1892,8 @@ gitmoot memory groom --yes --plan PLAN.json [--json]
 `--propose` reads every **active** confirmed memory (retired rows excluded),
 computes the current vault `snapshot_hash` (the same anchor `vault export`/`import`
 use), runs deterministic detectors, and writes a reviewable plan artifact
-(`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags, stats}`). It
-**touches nothing** in the store. The detectors are:
+(`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags, rekeys,
+cross_pool, stats}`). It **touches nothing** in the store. The detectors are:
 
 - **status/changelog/ToC snapshots** — notes dominated (≥80% of non-blank lines) by
   `STATUS:` markers, `SHIPPED`/`merged & deployed` changelog phrases, ISO-date-led
@@ -1897,14 +1910,31 @@ use), runs deterministic detectors, and writes a reviewable plan artifact
   proposed retirement so you can tell them apart);
 - **over-long "bricks"** (content > ~1200 chars) are **flagged for rewrite**, never
   retired — P4.2 only lists them for the owner (LLM rewriting is the follow-up
-  P4.3).
+  P4.3);
+- **legacy-key rekeys** (#804): active rows whose key still ends in the
+  pre-stable-key 8-hex content-hash suffix (`…-a1b2c3d4`) are grouped per
+  owner/repo/scope by their stripped stable key. Organic sweeps can never fix
+  them (content dedup skips unchanged notes; the first edit would spawn a
+  stable-keyed third sibling), so the plan keeps the current edition (the row
+  already holding the stable key when one exists, otherwise the newest by
+  `updated_at`), rewrites its key to the stable form, and retires the older
+  siblings with reason `rekey: superseded edition`;
+- **cross-pool stale shared editions** (#804): a shared-pool fact gets a
+  **promote-and-retire pair** when a strictly newer private fact matches it in
+  the same repo and scope, by stable-key equality (primary, deterministic) or
+  by a strong BM25 top-match that also shares a `memory_links` edge (composite
+  secondary evidence; BM25 alone never proposes). Applying promotes the newer
+  private edition to the shared pool (author preserved) and retires the stale
+  shared edition with reason `cross-pool: superseded by promoted edition`.
 
 `--yes --plan` recomputes the `snapshot_hash` and **aborts as stale** if it differs
 from the plan's (a vault edit between propose and apply invalidates it), then
-retires exactly the planned ids in **one transaction** (reason `groom:<detector>`,
-FTS index cleared in the same tx). It is **retire-only** — no content is edited or
-rewritten — and idempotent: an already-retired or missing id in the plan is skipped
-gracefully rather than aborting the batch.
+applies the whole plan in **one transaction**: retirements (reason
+`groom:<detector>`, FTS index cleared in the same tx), rekey groups (FTS key
+column re-synced in the same tx), and cross-pool pairs. **No content is edited or
+rewritten**, and applying is idempotent: an already-retired or missing id is
+skipped gracefully, and a rekey group or cross-pool pair whose rows changed state
+since the proposal is skipped whole rather than half-applied.
 
 The built-in `memory-groom-propose` pipeline runs only the proposal half:
 `gitmoot memory groom --propose --out <run-scoped-plan> --json`, then summarizes
