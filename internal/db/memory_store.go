@@ -666,6 +666,42 @@ ORDER BY ml.dst_id`, srcID)
 	return out, rows.Err()
 }
 
+// ListMemoryLinksAmong returns every persisted link whose source and target are
+// both in ids. It deliberately applies no memory visibility or active-row
+// policy: callers supply an already-filtered fact set, and this query only
+// intersects the side-table edges against that set.
+func (s *Store) ListMemoryLinksAmong(ctx context.Context, ids []int64) ([]MemoryLink, error) {
+	ids = uniquePositiveInt64s(ids)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	values := strings.TrimSuffix(strings.Repeat("(?),", len(ids)), ",")
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+WITH selected(id) AS (VALUES `+values+`)
+SELECT ml.src_id, ml.dst_id, ml.score, ml.origin, ml.created_at
+FROM memory_links ml
+JOIN selected src ON src.id = ml.src_id
+JOIN selected dst ON dst.id = ml.dst_id
+ORDER BY ml.src_id, ml.dst_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list memory links among facts: %w", err)
+	}
+	defer rows.Close()
+	var out []MemoryLink
+	for rows.Next() {
+		var l MemoryLink
+		if err := rows.Scan(&l.SrcID, &l.DstID, &l.Score, &l.Origin, &l.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 // ListMemoryLinksForSources returns active linked target facts for a batch of
 // source ids. It applies only the universal active-row filter; callers that need
 // owner/repo visibility should use one of the visibility-specific variants
