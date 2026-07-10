@@ -442,7 +442,7 @@ VALUES (?, ?, ?, 'test', '2026-07-10T00:00:00Z')`, src, dst, score); err != nil 
 	insert(a, b, 0.8)      // same cluster
 	insert(b, a, 0.6)      // duplicate reverse direction; lower score loses
 	insert(a, c, 0.7)      // cross cluster
-	insert(c, d, 1.4)      // cross repo; clamp to 1
+	insert(c, d, 1.4)      // cross repo; raw score squashed via s/(s+20)
 	insert(a, hidden, 0.9) // dangling: role fact is not in the Knowledge payload
 	insert(b, c, 0)        // non-positive score is skipped
 	insert(d, d, 0.5)      // self-link is skipped
@@ -464,7 +464,7 @@ VALUES (?, ?, ?, 'test', '2026-07-10T00:00:00Z')`, src, dst, score); err != nil 
 	want := []dashboard.KnowledgeEdge{
 		{Source: fmt.Sprintf("fact:%d", a), Target: fmt.Sprintf("fact:%d", b), Kind: "link", Score: 0.8},
 		{Source: fmt.Sprintf("fact:%d", a), Target: fmt.Sprintf("fact:%d", c), Kind: "link", Score: 0.7},
-		{Source: fmt.Sprintf("fact:%d", c), Target: fmt.Sprintf("fact:%d", d), Kind: "link", Score: 1},
+		{Source: fmt.Sprintf("fact:%d", c), Target: fmt.Sprintf("fact:%d", d), Kind: "link", Score: 1.4 / 21.4},
 	}
 	if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
 		t.Fatalf("link edges = %+v, want normalized/deduped/sorted %+v", got, want)

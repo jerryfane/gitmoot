@@ -704,8 +704,16 @@ func knowledgeLinkEdges(links []db.MemoryLink, idByRow map[int64]string) []dashb
 		if score <= 0 || math.IsNaN(score) {
 			continue
 		}
-		if score > 1 || math.IsInf(score, 1) {
+		if math.IsInf(score, 1) {
 			score = 1
+		} else if score > 1 {
+			// The live link generator writes RAW relatedness scores (~2..106 on
+			// this box), not normalized weights. Clamping them all to 1 would
+			// erase the visual-weight signal the UI's score ramp renders, so
+			// squash monotonically into (0,1): s/(s+20) maps 2->0.09, 24->0.55,
+			// 106->0.84. Scores already in (0,1] pass through untouched so a
+			// future normalized generator needs no change here.
+			score = score / (score + 20)
 		}
 		if src > dst {
 			src, dst = dst, src
