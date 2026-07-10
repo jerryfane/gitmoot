@@ -267,6 +267,28 @@ plan without writing. `--shared` stages observations in the shared pool and
 records `--agent NAME` as the authoring identity. With auto-confirm enabled, the
 confirmed write still goes to `--agent NAME`'s private pool, not shared.
 
+### Stable chunk keys and edition history
+
+Each chunk's observation key is a stable function of its source location alone:
+`slug(file)-slug(heading)`. The content hash is deliberately not part of the key;
+it participates only in exact-content dedup. When a section splits into several
+pieces, or a heading repeats within one sweep, later pieces take an ordinal
+suffix (`-2`, `-3`) in document order. Because the key survives edits, a
+re-swept edited note lands on the same key as its earlier edition, and with
+`ingest_auto_confirm` enabled the existing confirmed fact is updated **in
+place** instead of accumulating a new hash-suffixed sibling on every edit.
+`chat remember` keys (`chat-<thread>-<seq>`) follow the same scheme.
+
+Auto-confirmed in-place updates (ingest auto-confirm and `chat remember`) are
+**supersede-preserving**: before the live row is overwritten, the prior edition
+is copied to an archived row whose `superseded_by` points at the live row. The
+archive never injects, never exports, and carries no links; `memory_links` stay
+keyed on the live row id, which does not change, so a bad or poisoned edit can
+never silently destroy the last reviewed edition. Manual human paths (vault
+import CAS edits, `memory confirm --yes`) keep their plain overwrite semantics.
+Keys minted before this scheme carry a trailing 8-hex content-hash suffix; the
+groom **rekey** detector migrates them (see below).
+
 `memory observations` lists pending observations, flagging which have already
 been confirmed. `memory confirm` is the **human-gated promotion**: it copies
 selected observations (by id, or every one matching a `--provenance-prefix`) into
@@ -357,8 +379,8 @@ gitmoot memory groom --yes --plan PLAN.json [--json]
 `--propose` reads every **active** confirmed memory (retired rows excluded),
 computes the current vault `snapshot_hash` (the same anchor `vault export`/`import`
 use), runs deterministic detectors, and writes a reviewable plan artifact
-(`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags, stats}`). It
-touches nothing in the store. The detectors flag:
+(`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags, rekeys,
+cross_pool, stats}`). It touches nothing in the store. The detectors flag:
 
 - **status/changelog/ToC snapshots** — notes dominated by `STATUS:` markers,
   `SHIPPED`/`merged & deployed` phrases, ISO-date-led lines, or Markdown link-list
@@ -369,13 +391,33 @@ touches nothing in the store. The detectors flag:
   lowest id is kept and the rest proposed. Copies across owners/repos/scopes are kept
   (each is the only one its scope can see);
 - **over-long "bricks"** (> ~1200 chars) are **flagged for rewrite, not retired** —
-  P4.2 only lists them for the owner (LLM rewriting is the follow-up P4.3).
+  P4.2 only lists them for the owner (LLM rewriting is the follow-up P4.3);
+- **legacy-key rekeys**: keys minted before the stable-key scheme end in an
+  8-hex content-hash suffix (for example `runbook-deploy-a1b2c3d4`). Organic
+  sweeps can never converge them, because content dedup skips unchanged notes
+  and the first edit would spawn a stable-keyed third sibling. The detector
+  groups active rows per owner, repo, and scope by the stripped stable key,
+  keeps the current edition (the row already holding the stable key when one
+  exists, otherwise the newest by `updated_at`), proposes rewriting its key to
+  the stable form, and proposes retiring the older siblings with reason
+  `rekey: superseded edition`. Applying re-syncs the FTS key column in the same
+  transaction;
+- **cross-pool stale shared editions**: a shared-pool fact gets a
+  promote-and-retire pair when a strictly newer private fact matches it in the
+  same repo and scope, either by stable-key equality (the primary,
+  deterministic signal) or by a strong BM25 top-match that also shares a
+  `memory_links` edge (composite secondary evidence; BM25 alone never
+  proposes). Applying promotes the newer private edition into the shared pool
+  with its author preserved and retires the stale shared edition with reason
+  `cross-pool: superseded by promoted edition`.
 
 `--yes --plan` recomputes the `snapshot_hash` and **aborts as stale** if it differs
 from the plan's (a vault edit between propose and apply invalidates it), then
-retires exactly the planned ids in one transaction (reason `groom:<detector>`,
-clearing each from the FTS index). It is retire-only and idempotent — an
-already-retired or missing id is skipped gracefully.
+applies the whole plan in one transaction: retirements first (reason
+`groom:<detector>`, clearing each from the FTS index), then rekey groups, then
+cross-pool pairs. Content is never edited or rewritten, and applying is
+idempotent: an already-retired or missing id is skipped gracefully, and a rekey
+group or cross-pool pair whose target rows changed state is skipped whole.
 
 Gitmoot also ships a built-in `memory-groom-propose` pipeline. It writes the
 proposal plan under the current run's gitmoot home, summarizes retirement and

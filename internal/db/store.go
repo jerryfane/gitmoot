@@ -8323,4 +8323,22 @@ ALTER TABLE memory_observations ADD COLUMN author_ref TEXT NOT NULL DEFAULT '';
 	`
 ALTER TABLE memory_clusters ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0;
 	`,
+	// #804 stable ingest keys. Supersede-preserving auto-confirm updates and the
+	// groom rekey / cross-pool actions must be able to keep MULTIPLE rows per
+	// (owner, repo, key): the one live row plus archived superseded editions, and
+	// a freshly rekeyed or promoted active row alongside retired same-key
+	// siblings. The original unique indexes covered EVERY row, so an archival
+	// insert or a promote-after-retire would abort on the constraint. Recreate
+	// them as partial ACTIVE-ROW indexes: uniqueness still holds where it matters
+	// (at most one injectable row per owner/repo/key), while superseded and
+	// retired rows fall outside the constraint. UpsertConfirmedMemory's key
+	// lookup orders active rows first (then newest) so key-matched upserts and
+	// explicit resurrection stay deterministic when several inactive rows share a
+	// key. Byte-appended migration only; no earlier migration changes.
+	`
+DROP INDEX idx_confirmed_repo_key;
+DROP INDEX idx_confirmed_general_key;
+CREATE UNIQUE INDEX idx_confirmed_repo_key ON confirmed_memories(owner_kind, owner_ref, owner_version, repo, key) WHERE repo IS NOT NULL AND superseded_by IS NULL AND retired_at = '';
+CREATE UNIQUE INDEX idx_confirmed_general_key ON confirmed_memories(owner_kind, owner_ref, owner_version, key) WHERE repo IS NULL AND superseded_by IS NULL AND retired_at = '';
+	`,
 }

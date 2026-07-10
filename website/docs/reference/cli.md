@@ -1464,11 +1464,20 @@ repo still stages), and inserts survivors with
 `provenance = ingest:<relpath>` and **`trust_mark = low`**. `--tier` defaults to
 `repo`; `general` is only chosen explicitly. `--shared` stages observations in the
 shared pool while recording `--agent NAME` as the authoring identity.
+Chunk keys are **stable**: `slug(file)-slug(heading)`, with an ordinal suffix
+(`-2`, `-3`) only when a file/heading pair repeats within one sweep; the content
+hash participates only in dedup, never in the key, so an edited note re-sweeps
+onto the same key and updates its confirmed fact in place instead of spawning a
+hash-suffixed sibling.
 By default observations stay pending. If `[memory].ingest_auto_confirm = true`,
 `memory ingest`, `memory ingest sweep`, and `chat remember` immediately confirm
 the staged observation into the authoring agent's private pool only. They never
 auto-confirm into shared; shared stays explicit through `confirm --to-shared` or
-`promote --to-shared`.
+`promote --to-shared`. Auto-confirmed key-matched updates are
+**supersede-preserving**: the prior edition is archived as a `superseded_by` row
+(out of FTS, out of the vault, links unchanged on the live row) before the live
+row is overwritten; manual paths (vault import CAS edits, `memory confirm
+--yes`) keep plain overwrite semantics.
 `memory ingest sweep` reads every configured `[[memory.ingest]]` source from the
 current config at run time and runs the same ingest logic in-process for each one.
 `--json` reports per-source `path`, `agent`, `repo`, `tier`, `inserted`,
@@ -1506,16 +1515,26 @@ new. `memory links list <id>` shows one fact's outgoing persisted links. Vault
 export merges these persisted links with content-derived links and dedupes by
 target in each note's `## Links` section.
 
-`memory groom` retires stale, low-signal confirmed memories as a **propose →
-review → apply** round-trip. `--propose` reads active confirmed memory, computes
-the current vault `snapshot_hash`, runs deterministic detectors
+`memory groom` curates confirmed memory as a **propose → review → apply**
+round-trip. `--propose` reads active confirmed memory, computes the current
+vault `snapshot_hash`, runs deterministic detectors
 (status/changelog/ToC snapshots — short notes need a strong `STATUS:`/`… & deployed`
 marker; bare to-do lists; exact duplicates scoped to the same owner/repo/scope;
-over-long "bricks" are flagged for rewrite, not retired), and writes a reviewable plan
-artifact — it touches nothing in the store. `--yes --plan` recomputes the
-`snapshot_hash`, **aborts as stale** if the store changed since the proposal, then
-retires exactly the planned ids in one transaction (reason `groom:<detector>`). It
-is retire-only and idempotent (already-retired ids are skipped). A ready-to-register
+over-long "bricks" are flagged for rewrite, not retired; **legacy-key rekeys**
+that migrate pre-stable-key rows ending in an 8-hex hash suffix, keeping the
+newest edition under the stable key and retiring older siblings with reason
+`rekey: superseded edition`; **cross-pool stale shared editions**, where a
+strictly newer private fact matches a shared fact in the same repo and scope by
+stable-key equality, or by a strong BM25 top-match that also shares a
+`memory_links` edge, proposing promote-the-private-and-retire-the-shared with
+reason `cross-pool: superseded by promoted edition`), and writes a reviewable
+plan artifact — it touches nothing in the store. `--yes --plan` recomputes the
+`snapshot_hash`, **aborts as stale** if the store changed since the proposal,
+then applies the whole plan in one transaction: retirements (reason
+`groom:<detector>`), rekey groups (FTS key column re-synced in the same
+transaction), and cross-pool promote-and-retire pairs. Content is never edited,
+and applying is idempotent (already-retired ids skip; a group whose rows changed
+state skips whole). A ready-to-register
 nightly proposal pipeline lives under
 [`docs/examples/memory-groom-nightly`](https://github.com/jerryfane/gitmoot/tree/main/docs/examples/memory-groom-nightly).
 
