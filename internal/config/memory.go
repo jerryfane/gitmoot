@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jerryfane/gitmoot/internal/runtime"
 )
@@ -21,6 +22,8 @@ const (
 	DefaultMemoryGroomSplitLLMRuntime   = runtime.CodexRuntime
 	DefaultMemoryGroomSplitLLMModel     = ""
 	DefaultMemoryGroomSplitLLMMaxPerRun = 5
+	DefaultMemoryGroomStale             = true
+	DefaultMemoryGroomStaleAge          = 14 * 24 * time.Hour
 	DefaultMemoryClusterFanout          = 12
 	DefaultMemoryClusterFanoutKeep      = 9
 	DefaultMemoryClusterDepthCap        = 4
@@ -84,6 +87,11 @@ type MemorySettings struct {
 	GroomSplitLLMRuntime   string
 	GroomSplitLLMModel     string
 	GroomSplitLLMMaxPerRun int
+	// GroomStale enables deterministic operational-status detection. Automatic
+	// retirement remains additionally gated by GroomSplitLLM; StaleAge is the
+	// minimum age of the newest in-content date.
+	GroomStale    bool
+	GroomStaleAge time.Duration
 	// ClusterFanout bounds rendered sibling entries per repo scope. FanoutKeep is
 	// the strict hysteresis boundary below which a prior grouping dissolves, and
 	// ClusterDepthCap bounds recursive grouping/splitting.
@@ -107,6 +115,8 @@ func DefaultMemorySettings() MemorySettings {
 		GroomSplitLLMRuntime:   DefaultMemoryGroomSplitLLMRuntime,
 		GroomSplitLLMModel:     DefaultMemoryGroomSplitLLMModel,
 		GroomSplitLLMMaxPerRun: DefaultMemoryGroomSplitLLMMaxPerRun,
+		GroomStale:             DefaultMemoryGroomStale,
+		GroomStaleAge:          DefaultMemoryGroomStaleAge,
 		ClusterFanout:          DefaultMemoryClusterFanout,
 		ClusterFanoutKeep:      DefaultMemoryClusterFanoutKeep,
 		ClusterDepthCap:        DefaultMemoryClusterDepthCap,
@@ -217,6 +227,21 @@ func LoadMemorySettings(paths Paths) (MemorySettings, error) {
 				return MemorySettings{}, fmt.Errorf("parse [memory].groom_split_llm_max_per_run: %w", err)
 			}
 			settings.GroomSplitLLMMaxPerRun = parsed
+		case "groom_stale":
+			parsed, err := parseConfigBool(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].groom_stale: %w", err)
+			}
+			settings.GroomStale = parsed
+		case "groom_stale_age":
+			parsed, err := parseConfigString(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].groom_stale_age: %w", err)
+			}
+			settings.GroomStaleAge, err = time.ParseDuration(strings.TrimSpace(parsed))
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].groom_stale_age: %w", err)
+			}
 		case "cluster_fanout":
 			parsed, err := strconv.Atoi(value)
 			if err != nil {
@@ -258,6 +283,9 @@ func validateMemorySettings(s MemorySettings) error {
 	}
 	if s.GroomSplitLLMMaxPerRun < 1 {
 		return fmt.Errorf("memory.groom_split_llm_max_per_run must be >= 1, got %d", s.GroomSplitLLMMaxPerRun)
+	}
+	if s.GroomStaleAge <= 0 {
+		return fmt.Errorf("memory.groom_stale_age must be > 0, got %s", s.GroomStaleAge)
 	}
 	if s.ClusterFanout < 2 {
 		return fmt.Errorf("memory.cluster_fanout must be >= 2, got %d", s.ClusterFanout)

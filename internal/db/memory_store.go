@@ -1292,6 +1292,64 @@ ON CONFLICT(content_hash) DO NOTHING`, verdict.ContentHash, verdict.Verdict, ver
 	return nil
 }
 
+// GroomStaleVerdict is one immutable operational-status decision. Residue is a
+// model quote identifying keeper material when Verdict is
+// "contains_durable_residue".
+type GroomStaleVerdict struct {
+	ContentHash string
+	Verdict     string
+	Residue     string
+	Model       string
+	CreatedAt   string
+}
+
+func (s *Store) GetGroomStaleVerdict(ctx context.Context, contentHash string) (GroomStaleVerdict, bool, error) {
+	var verdict GroomStaleVerdict
+	err := s.db.QueryRowContext(ctx, `
+SELECT content_hash, verdict, residue, model, created_at
+FROM groom_stale_verdicts WHERE content_hash = ?`, strings.TrimSpace(contentHash)).Scan(
+		&verdict.ContentHash, &verdict.Verdict, &verdict.Residue, &verdict.Model, &verdict.CreatedAt)
+	if err == sql.ErrNoRows {
+		return GroomStaleVerdict{}, false, nil
+	}
+	if err != nil {
+		return GroomStaleVerdict{}, false, fmt.Errorf("get groom stale verdict: %w", err)
+	}
+	return verdict, true, nil
+}
+
+// StoreGroomStaleVerdict records the first valid decision for a content hash.
+// A cache entry is immutable so concurrent and repeated groom runs never rebill
+// or silently reinterpret the same bytes.
+func (s *Store) StoreGroomStaleVerdict(ctx context.Context, verdict GroomStaleVerdict) error {
+	verdict.ContentHash = strings.TrimSpace(verdict.ContentHash)
+	verdict.Verdict = strings.TrimSpace(verdict.Verdict)
+	verdict.Residue = strings.TrimSpace(verdict.Residue)
+	if verdict.ContentHash == "" {
+		return fmt.Errorf("groom stale verdict content hash is required")
+	}
+	switch verdict.Verdict {
+	case "expired", "still_relevant":
+		if verdict.Residue != "" {
+			return fmt.Errorf("groom stale %s verdict must not include residue", verdict.Verdict)
+		}
+	case "contains_durable_residue":
+		if verdict.Residue == "" {
+			return fmt.Errorf("groom stale durable-residue verdict requires residue")
+		}
+	default:
+		return fmt.Errorf("invalid groom stale verdict %q", verdict.Verdict)
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO groom_stale_verdicts(content_hash, verdict, residue, model)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(content_hash) DO NOTHING`, verdict.ContentHash, verdict.Verdict, verdict.Residue, strings.TrimSpace(verdict.Model))
+	if err != nil {
+		return fmt.Errorf("store groom stale verdict: %w", err)
+	}
+	return nil
+}
+
 // ApplyGroomSplits applies every deterministic split in one transaction. Each
 // parent is CAS-guarded against the detector's active revision. Children inherit
 // ownership, author, repo, scope, and source lineage; every child FTS row, the

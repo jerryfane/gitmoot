@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadMemorySettingsDefaults(t *testing.T) {
@@ -37,6 +38,9 @@ func TestLoadMemorySettingsDefaults(t *testing.T) {
 	}
 	if settings.GroomSplitLLMRuntime != "codex" || settings.GroomSplitLLMModel != "" || settings.GroomSplitLLMMaxPerRun != 5 {
 		t.Fatalf("groom LLM defaults = %+v", settings)
+	}
+	if !settings.GroomStale || settings.GroomStaleAge != 14*24*time.Hour {
+		t.Fatalf("groom stale defaults = %+v", settings)
 	}
 	if settings.ClusterFanout != 12 || settings.ClusterFanoutKeep != 9 || settings.ClusterDepthCap != 4 {
 		t.Fatalf("cluster hierarchy defaults = %+v", settings)
@@ -97,6 +101,8 @@ groom_split_llm = true
 groom_split_llm_runtime = "claude"
 groom_split_llm_model = "sonnet"
 groom_split_llm_max_per_run = 3
+groom_stale = false
+groom_stale_age = "720h"
 cluster_fanout = 10
 cluster_fanout_keep = 7
 cluster_depth_cap = 3
@@ -107,7 +113,7 @@ cluster_depth_cap = 3
 	if err != nil {
 		t.Fatalf("LoadMemorySettings: %v", err)
 	}
-	if !settings.Disabled || settings.TokenBudget != 800 || settings.MaxEntries != 7 || !settings.IngestAutoConfirm || !settings.GroomSplitLLM || settings.GroomSplitLLMRuntime != "claude" || settings.GroomSplitLLMModel != "sonnet" || settings.GroomSplitLLMMaxPerRun != 3 || settings.ClusterFanout != 10 || settings.ClusterFanoutKeep != 7 || settings.ClusterDepthCap != 3 {
+	if !settings.Disabled || settings.TokenBudget != 800 || settings.MaxEntries != 7 || !settings.IngestAutoConfirm || !settings.GroomSplitLLM || settings.GroomSplitLLMRuntime != "claude" || settings.GroomSplitLLMModel != "sonnet" || settings.GroomSplitLLMMaxPerRun != 3 || settings.GroomStale || settings.GroomStaleAge != 30*24*time.Hour || settings.ClusterFanout != 10 || settings.ClusterFanoutKeep != 7 || settings.ClusterDepthCap != 3 {
 		t.Fatalf("parsed = %+v", settings)
 	}
 }
@@ -119,6 +125,23 @@ func TestLoadMemorySettingsRejectsInvalidGroomLLMKnobs(t *testing.T) {
 		"groom_split_llm_max_per_run = 0",
 	}
 	for _, setting := range tests {
+		t.Run(setting, func(t *testing.T) {
+			paths := PathsForHome(t.TempDir())
+			if err := Initialize(paths); err != nil {
+				t.Fatalf("Initialize: %v", err)
+			}
+			if err := os.WriteFile(paths.ConfigFile, []byte(DefaultConfig(paths)+"\n[memory]\n"+setting+"\n"), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			if _, err := LoadMemorySettings(paths); err == nil {
+				t.Fatalf("expected %q to be rejected", setting)
+			}
+		})
+	}
+}
+
+func TestLoadMemorySettingsRejectsInvalidGroomStaleAge(t *testing.T) {
+	for _, setting := range []string{`groom_stale_age = "not-a-duration"`, `groom_stale_age = "0s"`, `groom_stale_age = "-1h"`} {
 		t.Run(setting, func(t *testing.T) {
 			paths := PathsForHome(t.TempDir())
 			if err := Initialize(paths); err != nil {

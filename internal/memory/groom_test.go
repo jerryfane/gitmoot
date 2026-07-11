@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectStatusChangelog(t *testing.T) {
@@ -85,6 +86,65 @@ func TestDetectStatusChangelog(t *testing.T) {
 				t.Fatalf("detectStatusChangelog(%q) = %v, want %v", tc.content, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDetectStaleStatusCandidatesLiveFixtures(t *testing.T) {
+	read := func(id string) string {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join("testdata", "groom", id+".md"))
+		if err != nil {
+			t.Fatalf("read fixture %s: %v", id, err)
+		}
+		return strings.TrimSuffix(string(body), "\n")
+	}
+	var cands []GroomCandidate
+	for _, id := range []string{"154", "158", "164", "349"} {
+		cands = append(cands, GroomCandidate{ID: int64(len(cands) + 1), Key: "fact-" + id, Content: read(id)})
+	}
+	got := DetectStaleStatusCandidates(cands, time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC), 14*24*time.Hour)
+	if len(got) != 3 {
+		t.Fatalf("live stale candidates = %+v, want facts 154/158/164 only", got)
+	}
+	for i, wantKey := range []string{"fact-154", "fact-158", "fact-164"} {
+		if got[i].Key != wantKey || got[i].ContentHash == "" {
+			t.Fatalf("candidate %d = %+v, want %s", i, got[i], wantKey)
+		}
+	}
+}
+
+func TestDetectStaleStatusCandidatesShapeRules(t *testing.T) {
+	now := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		content string
+		age     time.Duration
+		want    bool
+	}{
+		{name: "dated pending header", content: "## PENDING RUN 2026-06-10\nWait for the result.", age: 14 * 24 * time.Hour, want: true},
+		{name: "status header plus tracker", content: "STATUS: AWAITING SCORE\njob-run_abcdef is pending since 2026-06-10.", age: 14 * 24 * time.Hour, want: true},
+		{name: "fresh newest date", content: "## SUBMITTED 2026-06-10\nCheck back after refresh 2026-07-10.", age: 14 * 24 * time.Hour},
+		{name: "no header", content: "Submission 2026-06-10 is AWAITING SCORE.", age: 14 * 24 * time.Hour},
+		{name: "lowercase status verb", content: "## submitted 2026-06-10\nAwaiting a score.", age: 14 * 24 * time.Hour},
+		{name: "no date", content: "## PENDING SUBMISSION\njob-run_abcdef remains queued.", age: 14 * 24 * time.Hour},
+		{name: "no corroboration", content: "## PENDING SUBMISSION\nThe queue remains blocked, last month.", age: 14 * 24 * time.Hour},
+		{name: "lesson why", content: "## CANCELLED 2026-06-10\n**Why:** cancellation prevents duplicate work.", age: 14 * 24 * time.Hour},
+		{name: "lesson how", content: "## CANCELLED 2026-06-10\n**How to apply:** cancel the old run first.", age: 14 * 24 * time.Hour},
+		{name: "inline lesson marker", content: "## CANCELLED 2026-06-10\nThe durable rule has **Why:** context.", age: 14 * 24 * time.Hour},
+		{name: "invalid date fails closed", content: "## PENDING 2026-06-10\nRefresh marker 2026-99-99.", age: 14 * 24 * time.Hour},
+		{name: "status changelog routed", content: "STATUS: CANCELLED 2026-06-10\nSTATUS: SUBMITTED 2026-06-09\nSTATUS: AWAITING SCORE 2026-06-08", age: 14 * 24 * time.Hour},
+		{name: "age boundary is not older", content: "## PENDING 2026-06-27\nWaiting.", age: 14 * 24 * time.Hour},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DetectStaleStatusCandidates([]GroomCandidate{{ID: 1, Key: "candidate", Content: tc.content}}, now, tc.age)
+			if (len(got) == 1) != tc.want {
+				t.Fatalf("DetectStaleStatusCandidates() = %+v, want candidate=%v", got, tc.want)
+			}
+		})
+	}
+	if got := DetectStaleStatusCandidates([]GroomCandidate{{ID: 1, Content: "## PENDING 2026-06-10"}}, now, 0); got != nil {
+		t.Fatalf("non-positive age should fail closed: %+v", got)
 	}
 }
 

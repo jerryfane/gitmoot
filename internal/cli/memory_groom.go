@@ -92,6 +92,23 @@ type groomPlanCrossPool struct {
 	FirstLine  string `json:"first_line,omitempty"`
 }
 
+type groomStaleCandidateSummary struct {
+	ID          int64  `json:"id"`
+	Key         string `json:"key"`
+	ContentHash string `json:"content_hash"`
+	NewestDate  string `json:"newest_date"`
+}
+
+type groomStaleEntry struct {
+	Candidate      groomStaleCandidateSummary `json:"candidate"`
+	Verdict        string                     `json:"verdict"`
+	Action         string                     `json:"action"`
+	Residue        string                     `json:"residue,omitempty"`
+	Model          string                     `json:"model,omitempty"`
+	Cached         bool                       `json:"cached"`
+	FallbackReason string                     `json:"fallback_reason"`
+}
+
 // groomPlan is the reviewable artifact `--propose` writes and `--yes --plan` reads.
 type groomPlan struct {
 	SchemaVersion       int                    `json:"schema_version"`
@@ -100,6 +117,7 @@ type groomPlan struct {
 	RewriteFlags        []groomPlanRewriteFlag `json:"rewrite_flags"`
 	Rekeys              []groomPlanRekey       `json:"rekeys"`
 	CrossPool           []groomPlanCrossPool   `json:"cross_pool"`
+	Stale               []groomStaleEntry      `json:"stale"`
 	Stats               memory.GroomStats      `json:"stats"`
 }
 
@@ -129,12 +147,15 @@ type groomSplitSummary struct {
 }
 
 type groomSplitOutput struct {
-	DryRun   bool                 `json:"dry_run"`
-	Detected int                  `json:"detected"`
-	Applied  int                  `json:"applied"`
-	Skipped  []int64              `json:"skipped"`
-	Splits   []groomSplitSummary  `json:"splits"`
-	LLM      []groomSplitLLMEntry `json:"llm,omitempty"`
+	DryRun       bool                 `json:"dry_run"`
+	Detected     int                  `json:"detected"`
+	Applied      int                  `json:"applied"`
+	Skipped      []int64              `json:"skipped"`
+	Splits       []groomSplitSummary  `json:"splits"`
+	LLM          []groomSplitLLMEntry `json:"llm,omitempty"`
+	Stale        []groomStaleEntry    `json:"stale,omitempty"`
+	StaleRetired []int64              `json:"stale_retired,omitempty"`
+	StaleSkipped []int64              `json:"stale_skipped,omitempty"`
 }
 
 type groomSplitLLMEntry struct {
@@ -155,6 +176,11 @@ type groomLLMCut struct {
 type groomLLMReply struct {
 	Split bool          `json:"split"`
 	Cuts  []groomLLMCut `json:"cuts"`
+}
+
+type groomStaleReply struct {
+	Verdict string `json:"verdict"`
+	Residue string `json:"residue"`
 }
 
 type groomLLMDeliverFunc func(context.Context, runtime.Agent, string) (string, error)
@@ -256,15 +282,16 @@ func printMemoryGroomUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --propose  read active confirmed memory, run the deterministic detectors")
 	fmt.Fprintln(w, "             (status/changelog/ToC snapshots, bare to-do lists, exact duplicates,")
 	fmt.Fprintln(w, "             legacy-key rekeys, cross-pool stale shared editions; over-long bricks")
-	fmt.Fprintln(w, "             are FLAGGED, not retired) and write a reviewable plan.")
-	fmt.Fprintln(w, "             The store is not touched.")
+	fmt.Fprintln(w, "             are FLAGGED, not retired) and write a reviewable plan. Confirmed")
+	fmt.Fprintln(w, "             memory is not changed; enabled stale checks may cache LLM verdicts.")
 	fmt.Fprintln(w, "  --yes      apply a plan's actions in one transaction: retirements, legacy-key")
 	fmt.Fprintln(w, "             rekeys, and cross-pool promote-and-retire pairs. Recomputes the vault")
 	fmt.Fprintln(w, "             snapshot and ABORTS AS STALE if the store changed since --propose.")
 	fmt.Fprintln(w, "             Content is never edited or rewritten.")
 	fmt.Fprintln(w, "  --split    automatically split qualifying multi-story bricks at deterministic")
 	fmt.Fprintln(w, "             seams, then optional host-bounded LLM cuts. Children remain exact")
-	fmt.Fprintln(w, "             substrings; the parent is superseded.")
+	fmt.Fprintln(w, "             substrings; the parent is superseded. Expired status batons retire")
+	fmt.Fprintln(w, "             only when deterministic shape and an LLM verdict agree.")
 	fmt.Fprintln(w, "  --split-revert  retire intact split children and restore their superseded parent.")
 	fmt.Fprintln(w, "                  Defaults to all active groom splits; --parent and --since filter.")
 	fmt.Fprintln(w, "  --dry-run  with --split or --split-revert, print changes without touching the store.")
@@ -272,9 +299,12 @@ func printMemoryGroomUsage(w io.Writer) {
 
 func runMemoryGroomSplit(home string, dryRun, jsonOut bool, stdout, stderr io.Writer) int {
 	ctx := context.Background()
+	now := time.Now().UTC()
 	var splits []memory.GroomSplit
 	var applied db.GroomSplitResult
+	var staleResult db.GroomRetireResult
 	var llmEntries []groomSplitLLMEntry
+	var staleEntries []groomStaleEntry
 	run := func(paths config.Paths, store *db.Store) error {
 		settings, err := config.LoadMemorySettings(paths)
 		if err != nil {
@@ -292,28 +322,56 @@ func runMemoryGroomSplit(home string, dryRun, jsonOut bool, stdout, stderr io.Wr
 				Scope: row.Scope, UpdatedAt: row.UpdatedAt,
 			})
 		}
-		splits = memory.DetectGroomSplits(cands)
+		splitCands := cands
+		var staleRetirements []db.GroomRetire
+		if settings.GroomStale {
+			entries, retirements, err := runMemoryGroomStale(ctx, store, settings, cands, now, true, dryRun)
+			if err != nil {
+				return err
+			}
+			staleEntries, staleRetirements = entries, retirements
+			staleIDs := make(map[int64]struct{}, len(entries))
+			for _, entry := range entries {
+				staleIDs[entry.Candidate.ID] = struct{}{}
+			}
+			splitCands = make([]memory.GroomCandidate, 0, len(cands)-len(staleIDs))
+			for _, candidate := range cands {
+				if _, stale := staleIDs[candidate.ID]; !stale {
+					splitCands = append(splitCands, candidate)
+				}
+			}
+		}
+		splits = memory.DetectGroomSplits(splitCands)
 		if settings.GroomSplitLLM {
-			llmSplits, entries, err := runMemoryGroomLLMSplits(ctx, store, settings, cands, splits, dryRun)
+			llmSplits, entries, err := runMemoryGroomLLMSplits(ctx, store, settings, splitCands, splits, dryRun)
 			if err != nil {
 				return err
 			}
 			splits = append(splits, llmSplits...)
 			llmEntries = entries
 		}
-		if dryRun || len(splits) == 0 {
+		if dryRun {
 			return nil
 		}
-		items := make([]db.GroomSplitItem, 0, len(splits))
-		for _, split := range splits {
-			item := db.GroomSplitItem{ParentID: split.ParentID, ExpectedUpdatedAt: split.ExpectedUpdatedAt}
-			for _, child := range split.Children {
-				item.Children = append(item.Children, db.GroomSplitChild{Key: child.Key, Content: child.Content})
+		if len(splits) > 0 {
+			items := make([]db.GroomSplitItem, 0, len(splits))
+			for _, split := range splits {
+				item := db.GroomSplitItem{ParentID: split.ParentID, ExpectedUpdatedAt: split.ExpectedUpdatedAt}
+				for _, child := range split.Children {
+					item.Children = append(item.Children, db.GroomSplitChild{Key: child.Key, Content: child.Content})
+				}
+				items = append(items, item)
 			}
-			items = append(items, item)
+			applied, err = store.ApplyGroomSplits(ctx, items)
+			if err != nil {
+				return err
+			}
 		}
-		applied, err = store.ApplyGroomSplits(ctx, items)
-		return err
+		if len(staleRetirements) > 0 {
+			staleResult, err = store.ApplyGroomRetirements(ctx, staleRetirements)
+			return err
+		}
+		return nil
 	}
 	var err error
 	if dryRun {
@@ -336,7 +394,8 @@ func runMemoryGroomSplit(home string, dryRun, jsonOut bool, stdout, stderr io.Wr
 	}
 	out := groomSplitOutput{
 		DryRun: dryRun, Detected: len(splits), Applied: len(applied.Applied), Skipped: applied.Skipped,
-		Splits: make([]groomSplitSummary, 0, len(splits)), LLM: llmEntries,
+		Splits: make([]groomSplitSummary, 0, len(splits)), LLM: llmEntries, Stale: staleEntries,
+		StaleRetired: staleResult.Retired, StaleSkipped: staleResult.Skipped,
 	}
 	for _, split := range splits {
 		summary := groomSplitSummary{ParentID: split.ParentID, ParentKey: split.ParentKey}
@@ -366,6 +425,9 @@ func runMemoryGroomSplit(home string, dryRun, jsonOut bool, stdout, stderr io.Wr
 		fmt.Fprintf(stdout, "; applied %d, skipped %d", len(applied.Applied), len(applied.Skipped))
 	}
 	fmt.Fprintln(stdout)
+	if len(staleEntries) > 0 {
+		fmt.Fprintf(stdout, "stale status candidates %d; retired %d, skipped %d\n", len(staleEntries), len(staleResult.Retired), len(staleResult.Skipped))
+	}
 	for _, split := range out.Splits {
 		fmt.Fprintf(stdout, "  parent %d %s ->", split.ParentID, split.ParentKey)
 		for _, child := range split.Children {
@@ -378,6 +440,142 @@ func runMemoryGroomSplit(home string, dryRun, jsonOut bool, stdout, stderr io.Wr
 		fmt.Fprintln(stdout)
 	}
 	return 0
+}
+
+func runMemoryGroomStale(ctx context.Context, store *db.Store, settings config.MemorySettings, cands []memory.GroomCandidate, now time.Time, autoRetire, dryRun bool) ([]groomStaleEntry, []db.GroomRetire, error) {
+	candidates := memory.DetectStaleStatusCandidates(cands, now, settings.GroomStaleAge)
+	modelLabel := groomLLMModelLabel(settings.GroomSplitLLMRuntime, settings.GroomSplitLLMModel)
+	entries := make([]groomStaleEntry, 0, len(candidates))
+	var retirements []db.GroomRetire
+	calls := 0
+	for _, candidate := range candidates {
+		entry := groomStaleEntry{
+			Candidate: groomStaleCandidateSummary{ID: candidate.ID, Key: candidate.Key, ContentHash: candidate.ContentHash, NewestDate: candidate.NewestDate},
+			Verdict:   "unknown", Action: "propose_review", Model: modelLabel,
+		}
+		cached, found, err := store.GetGroomStaleVerdict(ctx, candidate.ContentHash)
+		if err != nil {
+			return nil, nil, err
+		}
+		var reply groomStaleReply
+		if found {
+			entry.Cached = true
+			entry.Model = cached.Model
+			reply = groomStaleReply{Verdict: cached.Verdict, Residue: cached.Residue}
+			if err := validateGroomStaleReply(reply, candidate.Content); err != nil {
+				entry.FallbackReason = "cached verdict: " + err.Error()
+				entries = append(entries, entry)
+				continue
+			}
+		} else {
+			if !settings.GroomSplitLLM {
+				entry.FallbackReason = "groom_split_llm is disabled"
+				entries = append(entries, entry)
+				continue
+			}
+			if calls >= settings.GroomSplitLLMMaxPerRun {
+				entry.FallbackReason = "per-run LLM cap reached"
+				entries = append(entries, entry)
+				continue
+			}
+			calls++
+			agent := groomLLMRuntimeAgent(ctx, store, settings, candidate.GroomCandidate)
+			callCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			raw, deliverErr := memoryGroomLLMDeliver(callCtx, agent, groomStalePrompt(candidate))
+			cancel()
+			if deliverErr != nil {
+				entry.FallbackReason = "runtime delivery: " + deliverErr.Error()
+				entries = append(entries, entry)
+				continue
+			}
+			reply, err = parseGroomStaleReply(raw)
+			if err != nil {
+				entry.FallbackReason = "invalid reply: " + err.Error()
+				entries = append(entries, entry)
+				continue
+			}
+			if err := validateGroomStaleReply(reply, candidate.Content); err != nil {
+				entry.FallbackReason = "invalid verdict: " + err.Error()
+				entries = append(entries, entry)
+				continue
+			}
+			if !dryRun {
+				if err := store.StoreGroomStaleVerdict(ctx, db.GroomStaleVerdict{
+					ContentHash: candidate.ContentHash, Verdict: reply.Verdict, Residue: reply.Residue, Model: modelLabel,
+				}); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+
+		entry.Verdict = reply.Verdict
+		entry.Residue = reply.Residue
+		switch reply.Verdict {
+		case "expired":
+			entry.Action = "auto_retire"
+			if autoRetire {
+				retirements = append(retirements, db.GroomRetire{ID: candidate.ID, Reason: "groom-stale:" + now.Format(time.DateOnly)})
+			}
+		case "still_relevant":
+			entry.Action = "keep"
+		case "contains_durable_residue":
+			entry.Action = "propose_extract"
+		}
+		entries = append(entries, entry)
+	}
+	return entries, retirements, nil
+}
+
+func groomStalePrompt(candidate memory.GroomStaleStatusCandidate) string {
+	return "Classify this dated operational-status memory. Return exactly one JSON object with no markdown: " +
+		`{"verdict":"expired|still_relevant|contains_durable_residue","residue":""}. ` +
+		"Use expired only when the operational baton itself is no longer actionable. Use still_relevant when its current status still matters. " +
+		"Use contains_durable_residue when stale status is mixed with a timeless rule or lesson; residue must then be one exact verbatim quote from the content. " +
+		"For the other verdicts residue must be empty.\n\nMemory key: " + candidate.Key +
+		"\nNewest in-content date: " + candidate.NewestDate + "\nContent (verbatim):\n<content>\n" + candidate.Content + "\n</content>"
+}
+
+func parseGroomStaleReply(raw string) (groomStaleReply, error) {
+	object, err := firstJSONObject(raw)
+	if err != nil {
+		return groomStaleReply{}, err
+	}
+	var wire struct {
+		Verdict *string `json:"verdict"`
+		Residue *string `json:"residue"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(object))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return groomStaleReply{}, err
+	}
+	if wire.Verdict == nil || wire.Residue == nil {
+		return groomStaleReply{}, fmt.Errorf("reply must include verdict and residue")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return groomStaleReply{}, fmt.Errorf("reply contains trailing JSON values")
+	}
+	return groomStaleReply{Verdict: strings.TrimSpace(*wire.Verdict), Residue: strings.TrimSpace(*wire.Residue)}, nil
+}
+
+func validateGroomStaleReply(reply groomStaleReply, content string) error {
+	switch reply.Verdict {
+	case "expired", "still_relevant":
+		if reply.Residue != "" {
+			return fmt.Errorf("%s requires empty residue", reply.Verdict)
+		}
+	case "contains_durable_residue":
+		if reply.Residue == "" {
+			return fmt.Errorf("contains_durable_residue requires a residue quote")
+		}
+		if !strings.Contains(content, reply.Residue) {
+			return fmt.Errorf("residue is not an exact content quote")
+		}
+	default:
+		return fmt.Errorf("unknown verdict %q", reply.Verdict)
+	}
+	return nil
 }
 
 func runMemoryGroomLLMSplits(ctx context.Context, store *db.Store, settings config.MemorySettings, cands []memory.GroomCandidate, deterministic []memory.GroomSplit, dryRun bool) ([]memory.GroomSplit, []groomSplitLLMEntry, error) {
@@ -735,10 +933,16 @@ func runMemoryGroomSplitRevert(home string, parentIDs []int64, since string, dry
 
 func runMemoryGroomPropose(home, out string, jsonOut bool, stdout, stderr io.Writer) int {
 	var plan groomPlan
-	err := withReadOnlyStore(home, func(store *db.Store) error {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	err := withStoreAndPaths(home, func(paths config.Paths, store *db.Store) error {
+		settings, err := config.LoadMemorySettings(paths)
+		if err != nil {
+			return err
+		}
 		// Reuse the exact vault build path: the same active-confirmed lister and the
 		// same snapshot_hash the export/import staleness guard uses.
-		notes, _, snapshotHash, _, err := buildVault(context.Background(), store, "")
+		notes, _, snapshotHash, _, err := buildVault(ctx, store, "")
 		if err != nil {
 			return err
 		}
@@ -772,6 +976,13 @@ func runMemoryGroomPropose(home, out string, jsonOut bool, stdout, stderr io.Wri
 				surviving = append(surviving, c)
 			}
 		}
+		stale := make([]groomStaleEntry, 0)
+		if settings.GroomStale {
+			stale, _, err = runMemoryGroomStale(ctx, store, settings, surviving, now, false, false)
+			if err != nil {
+				return err
+			}
+		}
 		rekeys := memory.DetectGroomRekeys(surviving)
 		rekeyRetiring := make(map[int64]bool)
 		for _, rk := range rekeys {
@@ -785,7 +996,7 @@ func runMemoryGroomPropose(home, out string, jsonOut bool, stdout, stderr io.Wri
 				crossCands = append(crossCands, c)
 			}
 		}
-		signals, err := store.ListCrossPoolSharedMatches(context.Background())
+		signals, err := store.ListCrossPoolSharedMatches(ctx)
 		if err != nil {
 			return err
 		}
@@ -806,6 +1017,7 @@ func runMemoryGroomPropose(home, out string, jsonOut bool, stdout, stderr io.Wri
 			RewriteFlags:        make([]groomPlanRewriteFlag, 0, len(proposal.RewriteFlags)),
 			Rekeys:              make([]groomPlanRekey, 0, len(rekeys)),
 			CrossPool:           make([]groomPlanCrossPool, 0, len(crossPool)),
+			Stale:               stale,
 			Stats:               proposal.Stats,
 		}
 		for _, r := range proposal.Retirements {
@@ -1004,8 +1216,8 @@ func groomScopeLabel(r groomPlanRetirement) string {
 
 func printGroomProposal(w io.Writer, plan groomPlan, outPath string) {
 	fmt.Fprintf(w, "groom proposal (snapshot %s)\n", plan.SnapshotHash)
-	fmt.Fprintf(w, "  %d of %d memory(ies) proposed for retirement; %d flagged for rewrite; %d rekey group(s); %d cross-pool pair(s)\n",
-		plan.Stats.ProposedRetirements, plan.Stats.TotalMemories, plan.Stats.RewriteFlags, plan.Stats.Rekeys, plan.Stats.CrossPool)
+	fmt.Fprintf(w, "  %d of %d memory(ies) proposed for retirement; %d flagged for rewrite; %d rekey group(s); %d cross-pool pair(s); %d stale status candidate(s)\n",
+		plan.Stats.ProposedRetirements, plan.Stats.TotalMemories, plan.Stats.RewriteFlags, plan.Stats.Rekeys, plan.Stats.CrossPool, len(plan.Stale))
 	if len(plan.Stats.ByReason) > 0 {
 		reasons := make([]string, 0, len(plan.Stats.ByReason))
 		for r := range plan.Stats.ByReason {
@@ -1047,8 +1259,22 @@ func printGroomProposal(w io.Writer, plan groomPlan, outPath string) {
 			fmt.Fprintf(w, "  - memory %d [%s] %d chars\n", f.ID, f.Key, f.Chars)
 		}
 	}
+	if len(plan.Stale) > 0 {
+		fmt.Fprintln(w, "\nStale operational-status candidates:")
+		for _, entry := range plan.Stale {
+			fmt.Fprintf(w, "  - memory %d [%s] newest=%s verdict=%s action=%s cached=%t",
+				entry.Candidate.ID, entry.Candidate.Key, entry.Candidate.NewestDate, entry.Verdict, entry.Action, entry.Cached)
+			if entry.Residue != "" {
+				fmt.Fprintf(w, " residue=%q", entry.Residue)
+			}
+			if entry.FallbackReason != "" {
+				fmt.Fprintf(w, " fallback=%q", entry.FallbackReason)
+			}
+			fmt.Fprintln(w)
+		}
+	}
 	fmt.Fprintf(w, "\nplan written to %s\n", outPath)
-	if plan.Stats.ProposedRetirements == 0 && plan.Stats.Rekeys == 0 && plan.Stats.CrossPool == 0 {
+	if plan.Stats.ProposedRetirements == 0 && plan.Stats.Rekeys == 0 && plan.Stats.CrossPool == 0 && len(plan.Stale) == 0 {
 		fmt.Fprintln(w, "nothing to do.")
 		return
 	}

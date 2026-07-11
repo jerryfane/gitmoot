@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -126,6 +127,16 @@ type GroomLLMCandidate struct {
 	GroomCandidate
 	ContentHash string
 	Bytes       int
+}
+
+// GroomStaleStatusCandidate is one active operational-status baton whose newest
+// in-content date is older than the configured freshness window. ContentHash is
+// the immutable LLM verdict-cache key; NewestDate is the ISO date that justified
+// the deterministic age decision.
+type GroomStaleStatusCandidate struct {
+	GroomCandidate
+	ContentHash string
+	NewestDate  string
 }
 
 // GroomLLMBoundary is one host-approved cut location. Text is the exact source
@@ -322,6 +333,77 @@ func DetectGroomLLMCandidates(cands []GroomCandidate) []GroomLLMCandidate {
 func GroomContentHash(content string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(content)))
 	return hex.EncodeToString(sum[:])
+}
+
+var (
+	groomStaleDate = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}\b`)
+	// Status verbs intentionally remain case-sensitive. A status-looking word in
+	// ordinary prose is not enough; the operational baton must advertise its state
+	// in the uppercase header convention used by the live records.
+	groomStaleStatusVerb = regexp.MustCompile(`\b(?:AWAITING|PENDING|SUBMITTED|IN[ -]FLIGHT|CANCELLED|CHECK(?:ING)? (?:SCORE|BACK)|UNDER[ -]REVIEW)\b`)
+	groomStaleStatusHead = regexp.MustCompile(`^STATUS(?:\s+[^:]*)?:`)
+	groomStaleTracker    = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:job|task|run|submission|cron)[-_: ]+[a-z0-9][a-z0-9._-]{5,})\b`)
+	groomStaleLesson     = regexp.MustCompile(`(?i)\*\*(?:Why|How to apply):\*\*`)
+)
+
+// DetectStaleStatusCandidates identifies expired operational-status batons. It
+// is deliberately conservative: header shape, corroboration, and age must all
+// agree, while lesson-shaped and existing status/changelog-routed memories are
+// excluded. The caller supplies active rows and the reference clock.
+func DetectStaleStatusCandidates(cands []GroomCandidate, now time.Time, staleAge time.Duration) []GroomStaleStatusCandidate {
+	if staleAge <= 0 {
+		return nil
+	}
+	cutoff := now.Add(-staleAge)
+	var out []GroomStaleStatusCandidate
+	for _, candidate := range cands {
+		content := strings.TrimSpace(candidate.Content)
+		if content == "" || groomStaleLesson.MatchString(content) || detectStatusChangelog(content) {
+			continue
+		}
+
+		headerMatched := false
+		datedHeader := false
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+			isHeader := strings.HasPrefix(line, "## ") || groomStaleStatusHead.MatchString(line)
+			if !isHeader || !groomStaleStatusVerb.MatchString(line) {
+				continue
+			}
+			headerMatched = true
+			datedHeader = groomStaleDate.MatchString(line)
+			break
+		}
+		if !headerMatched || (!datedHeader && !groomStaleTracker.MatchString(content)) {
+			continue
+		}
+
+		newest, ok := newestGroomContentDate(content)
+		if !ok || !newest.Before(cutoff) {
+			continue
+		}
+		out = append(out, GroomStaleStatusCandidate{
+			GroomCandidate: candidate,
+			ContentHash:    GroomContentHash(candidate.Content),
+			NewestDate:     newest.Format(time.DateOnly),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+func newestGroomContentDate(content string) (time.Time, bool) {
+	var newest time.Time
+	for _, raw := range groomStaleDate.FindAllString(content, -1) {
+		parsed, err := time.Parse(time.DateOnly, raw)
+		if err != nil {
+			return time.Time{}, false
+		}
+		if parsed.After(newest) {
+			newest = parsed
+		}
+	}
+	return newest, !newest.IsZero()
 }
 
 func groomSplitDomain(c GroomCandidate) string {

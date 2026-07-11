@@ -89,6 +89,8 @@ groom_split_llm = false     # default-off LLM boundary chooser after determinist
 groom_split_llm_runtime = "codex"
 groom_split_llm_model = "" # empty uses the runtime default
 groom_split_llm_max_per_run = 5
+groom_stale = true          # detect expired operational-status batons
+groom_stale_age = "336h"   # newest content date must be older than 14d
 ```
 
 Every `[memory]` key is read **per tick**, so flipping `distill_at_terminal`, `distill_successes`
@@ -423,7 +425,8 @@ whole, repeated runs are no-ops, and `--dry-run` only reports candidates.
 computes the current vault `snapshot_hash` (the same anchor `vault export`/`import`
 use), runs deterministic detectors, and writes a reviewable plan artifact
 (`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags, rekeys,
-cross_pool, stats}`). It touches nothing in the store. The detectors flag:
+cross_pool, stale, stats}`). It never changes confirmed memories; an enabled
+staleness LLM pass may add immutable verdict-cache rows. The detectors flag:
 
 - **status/changelog/ToC snapshots** — notes dominated by `STATUS:` markers,
   `SHIPPED`/`merged & deployed` phrases, ISO-date-led lines, or Markdown link-list
@@ -454,6 +457,23 @@ cross_pool, stats}`). It touches nothing in the store. The detectors flag:
   proposes). Applying promotes the newer private edition into the shared pool
   with its author preserved and retires the stale shared edition with reason
   `cross-pool: superseded by promoted edition`.
+- **expired operational-status batons**: the default-on `groom_stale` detector
+  requires an uppercase in-flight/status verb in a `##` or `STATUS:` header,
+  tracker-id or dated-header corroboration, and a newest in-content ISO date
+  older than `groom_stale_age` (default `336h`, 14 days). `**Why:**` and
+  `**How to apply:**` lessons and status/changelog-routed notes are excluded.
+
+Stale candidates reuse the split LLM runtime, model, and per-run call cap. The
+strict verdict is `expired`, `still_relevant`, or `contains_durable_residue`;
+residue must be an exact content quote. Verdicts have a separate SHA-256 cache.
+Plan `stale` entries report candidate details, verdict, action, cache hit,
+residue, and fail-closed fallback reason. Only deterministic shape plus
+`expired` agreement auto-retires, via the house path with reason
+`groom-stale:<date>` and FTS removal. All other outcomes remain proposals.
+The row and content are preserved for audit. To reverse a stale retirement, an
+owner must clear its `retired_at` and `retired_reason` and reinsert the row's
+`(rowid, content, key)` into `confirmed_memories_fts` in one transaction; clearing
+only the retirement fields leaves it absent from search and prompt injection.
 
 `--yes --plan` recomputes the `snapshot_hash` and **aborts as stale** if it differs
 from the plan's (a vault edit between propose and apply invalidates it), then
@@ -464,10 +484,10 @@ idempotent: an already-retired or missing id is skipped gracefully, and a rekey
 group or cross-pool pair whose target rows changed state is skipped whole.
 
 Gitmoot also ships a built-in `memory-groom-propose` pipeline. It auto-applies
-lossless splits first, then writes the owner-gated proposal plan under the current
-run's gitmoot home and summarizes split, retirement, and rewrite counts. It never
-auto-applies retirement, rekey, or cross-pool proposals. Configure an interval or
-run it on demand:
+lossless splits first and, when enabled, retires only deterministically stale
+status batons whose verdict is `expired`. It then writes the owner-gated proposal
+plan. Ordinary retirement, rekey, cross-pool, residue, and fail-closed stale
+proposals are never auto-applied. Configure an interval or run it on demand:
 
 ```toml
 [memory.pipelines]
