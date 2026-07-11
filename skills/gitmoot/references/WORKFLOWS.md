@@ -1004,7 +1004,7 @@ runtime (claude / codex). Four kinds:
 - **implement** (#768): `action: implement` + `write: true`. MUTATES the repo on a
   deterministic `gitmoot/pipe-<run>-<stage>` branch (retry reuses it, never duplicates).
   The `implemented` decision folds **on PR-opened**; other configured success decisions
-  settle immediately without promising a PR. It **never auto-merges**. Scheduled
+  settle immediately without promising a PR. The implement job never merges. Scheduled
   pipelines also need pipeline-level `allow_scheduled_writes: true`.
 - **produce** (#814) — `action: produce` + `write: true` + absolute cleaned
   `writes:`. Codex uses its native sandbox; Claude/modern Kimi are supported when
@@ -1024,7 +1024,8 @@ runtime (claude / codex). Four kinds:
   continuation chain, folds the tail. `retry: 0`.
 - **gate** (#768) — `gate: pr_merged` + `source: <upstream implement stage>`, no
   `agent`. Jobless waiter: folds succeeded when the source PR merges; parks `blocked`
-  on close-unmerged or timeout. The composable *wait-for-merge*.
+  on close-unmerged or timeout. Human merge is the default. Add gate-level
+  `merge: auto` plus top-level `allow_auto_merge: true` for reviewed auto-merge.
 
 ```yaml
 stages:
@@ -1072,6 +1073,21 @@ also sets `SkipNativeReviewFanout` on `fix`, preventing duplicate reviewer fan-o
 pipelines without the declaration keep native behavior. Any terminal succeeded no-PR
 source (a no-op or a non-`implemented` success decision) blocks the review immediately with `source stage produced no
 PR; nothing to review` instead of dispatching an unbound job or waiting.
+
+For opt-in auto-merge, add `merge: auto` to the `pr_merged` gate and
+`allow_auto_merge: true` at pipeline level. Registration refuses this mode without
+at least one review bound to the same implement source. The advancer requires every
+such review to fold succeeded with decision `approved`, verifies the live PR head
+still equals the reviewed structured `HeadSHA`, then requires GitHub mergeability
+and passing checks before one squash attempt. Pending checks wait within the gate
+timeout; head drift, unmergeability/conflict, and merge API errors fold blocked, and
+merge errors are not retried. The review job remains report-only. Scheduled flows
+also require `allow_scheduled_writes: true`; both top-level safety keys are required.
+Without `merge: auto`, human merge remains unchanged.
+Pending checks wait; skipped/neutral check-runs pass; failures block; and zero
+external statuses/checks always block regardless of `require_external_ci`. The
+source job event timeline atomically records `pipeline_auto_merge_claim` before
+the write and `pipeline_auto_merge_confirmed` after GitHub confirms it.
 
 `pipeline add` warns (does not block) when an agent stage names an agent that does
 not exist yet; create it before the stage runs. The

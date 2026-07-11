@@ -2115,10 +2115,11 @@ stages:                     # the DAG, keyed by unique id and wired by needs
     prompt: "Triage the scored data; block if a human is needed."
     needs: [score]          #   upstream results are prepended to the prompt
   # other agent-stage kinds:
-  #   implement (#768): action: implement + write: true → mutates repo + opens a PR (never auto-merges)
+  #   implement (#768): action: implement + write: true → mutates repo + opens a PR
   #   bound review (#813): action: review + source: <impl stage> -> reviews that PR/head, report-only
   #   orchestrate (#758): orchestrate: true → sub-tree coordinator (fans out owned children, folds synthesis)
-  #   gate (#768): gate: pr_merged + source: <impl stage> (no agent) → jobless, folds when that PR merges
+  #   gate (#768): gate: pr_merged + source: <impl stage> (no agent) → jobless; human merge is default
+  #   auto-merge gate: add merge: auto plus top-level allow_auto_merge: true; requires source-bound review
   - id: deploy
     cmd: "rclone copy out/ r2:bucket"
     needs: [triage]
@@ -2187,6 +2188,20 @@ fix job and never run the native merge gate. Declaring this review also sets
 reviewer jobs. If the source permanently produces no PR (no-op or `skipped`), the
 review folds blocked immediately with `source stage produced no PR; nothing to
 review` and no unbound review is dispatched.
+
+The `pr_merged` gate remains a human-merge waiter by default. Opt-in
+`merge: auto` is gate-only and also requires top-level `allow_auto_merge: true`
+plus at least one review stage bound to the same implement source. The advancer,
+not the report-only review job, performs one squash attempt only after every bound
+review folded `approved`, the live PR head still equals the reviewed payload
+`HeadSHA`, GitHub reports mergeable, and checks pass. Pending checks keep waiting;
+head drift, conflicts/unmergeability, or a merge API error fold the gate blocked.
+Merge errors are not retried. Scheduled pipelines need both `allow_auto_merge` and
+the existing `allow_scheduled_writes` key. Omitting `merge` preserves human merge.
+Pending checks wait; skipped/neutral check-runs pass; failures block; and zero
+external statuses/checks always block regardless of `require_external_ci`. The
+source job atomically records `pipeline_auto_merge_claim` before the write and
+`pipeline_auto_merge_confirmed` after GitHub confirms it.
 
 `pipeline install-defaults` installs the built-in memory pipelines
 `memory-ingest-sweep` and `memory-groom-propose`. The daemon also runs this

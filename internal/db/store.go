@@ -18,7 +18,8 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 type Repo struct {
@@ -576,7 +577,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	store := &Store{db: db}
+	store := &Store{db: db, path: path}
 	if err := store.Migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -600,7 +601,17 @@ func OpenReadOnly(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
+}
+
+// DatabasePath returns the path used to open the store. It lets home-scoped
+// read-only policy consumers resolve the config beside gitmoot.db without
+// re-resolving an already-resolved Gitmoot home.
+func (s *Store) DatabasePath() string {
+	if s == nil {
+		return ""
+	}
+	return s.path
 }
 
 func configureWritableSQLite(ctx context.Context, db *sql.DB) error {
@@ -3096,6 +3107,26 @@ func (s *Store) AddJobEventIfAbsent(ctx context.Context, event JobEvent) error {
 			SELECT 1 FROM job_events WHERE job_id = ? AND kind = ?
 		)`, event.JobID, event.Kind, event.Message, event.JobID, event.Kind)
 	return err
+}
+
+// ClaimJobEvent atomically inserts an exact job/kind/message event and reports
+// whether this caller won. The NOT EXISTS guard and insert share one SQLite
+// statement, so concurrent pipeline scans cannot both claim the same external
+// write identified by the event content.
+func (s *Store) ClaimJobEvent(ctx context.Context, event JobEvent) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `INSERT INTO job_events(job_id, kind, message)
+		SELECT ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM job_events WHERE job_id = ? AND kind = ? AND message = ?
+		)`, event.JobID, event.Kind, event.Message, event.JobID, event.Kind, event.Message)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
 }
 
 // UpsertLatestJobEvent keeps one mutable latest-only row for a job/event kind.
