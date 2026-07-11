@@ -13,9 +13,15 @@ import (
 const (
 	DefaultMemoryTokenBudget = 1500
 	DefaultMemoryMaxEntries  = 15
+	// DefaultMemoryGroomSplitLLM gates the lossy Phase-2 atomizer. Phase 1 only
+	// parses this default-off switch; no LLM rewrite path is implemented yet.
+	DefaultMemoryGroomSplitLLM     = false
+	DefaultMemoryClusterFanout     = 12
+	DefaultMemoryClusterFanoutKeep = 9
+	DefaultMemoryClusterDepthCap   = 4
 	// DefaultMemoryDistillMaxPerJob caps how many pending observations the
 	// deterministic distill-at-terminal producers (#737 P4.1) may stage per job.
-	// It is only consulted when distill_at_terminal is enabled.
+	// It is only consulted when distill_at_terminal or distill_successes is enabled.
 	DefaultMemoryDistillMaxPerJob = 3
 )
 
@@ -45,9 +51,15 @@ type MemorySettings struct {
 	// deterministically from the result — never confirmed memory (the owner's
 	// `memory confirm` gate stays the only promotion path).
 	DistillAtTerminal bool
+	// DistillSuccesses enables deterministic success-side memory producers (#781).
+	// Default false: no SkillOpt promotion observations and no recovered-failure
+	// observations are staged. When true, those producers still write only pending
+	// low-trust observations; they never confirm memory directly.
+	DistillSuccesses bool
 	// DistillMaxPerJob is the hard per-job cap on distill writes (default 3). Only
-	// consulted when DistillAtTerminal is true; a value <= 0 falls back to the
-	// default so the producers can never write an unbounded number of rows.
+	// consulted when DistillAtTerminal or DistillSuccesses is true; a value <= 0
+	// falls back to the default so the producers can never write an unbounded number
+	// of rows.
 	DistillMaxPerJob int
 	// DistillAllJobs widens distill to EVERY job, not only memory-enrolled agents.
 	// Default false: distill (like the rest of memory) runs only for agents with
@@ -55,6 +67,20 @@ type MemorySettings struct {
 	// — useful to harvest failure signal box-wide — while the READ/injection and
 	// the confirmed mechanical producers stay enrolled-only.
 	DistillAllJobs bool
+	// IngestAutoConfirm immediately promotes memory ingest and chat remember
+	// observations into the authoring agent's private pool. Default false keeps the
+	// pending human gate. Shared memory remains explicit through confirm/promote
+	// commands even when this is enabled.
+	IngestAutoConfirm bool
+	// GroomSplitLLM is the parsed Phase-2 gate for an eventual lossy LLM
+	// atomizer. Deterministic lossless splitting does not consult this flag.
+	GroomSplitLLM bool
+	// ClusterFanout bounds rendered sibling entries per repo scope. FanoutKeep is
+	// the strict hysteresis boundary below which a prior grouping dissolves, and
+	// ClusterDepthCap bounds recursive grouping/splitting.
+	ClusterFanout     int
+	ClusterFanoutKeep int
+	ClusterDepthCap   int
 }
 
 // DefaultMemorySettings returns the off-by-default resolved settings.
@@ -64,8 +90,14 @@ func DefaultMemorySettings() MemorySettings {
 		TokenBudget:       DefaultMemoryTokenBudget,
 		MaxEntries:        DefaultMemoryMaxEntries,
 		DistillAtTerminal: false,
+		DistillSuccesses:  false,
 		DistillMaxPerJob:  DefaultMemoryDistillMaxPerJob,
 		DistillAllJobs:    false,
+		IngestAutoConfirm: false,
+		GroomSplitLLM:     DefaultMemoryGroomSplitLLM,
+		ClusterFanout:     DefaultMemoryClusterFanout,
+		ClusterFanoutKeep: DefaultMemoryClusterFanoutKeep,
+		ClusterDepthCap:   DefaultMemoryClusterDepthCap,
 	}
 }
 
@@ -125,6 +157,12 @@ func LoadMemorySettings(paths Paths) (MemorySettings, error) {
 				return MemorySettings{}, fmt.Errorf("parse [memory].distill_at_terminal: %w", err)
 			}
 			settings.DistillAtTerminal = parsed
+		case "distill_successes":
+			parsed, err := parseConfigBool(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].distill_successes: %w", err)
+			}
+			settings.DistillSuccesses = parsed
 		case "distill_max_per_job":
 			parsed, err := strconv.Atoi(value)
 			if err != nil {
@@ -137,6 +175,36 @@ func LoadMemorySettings(paths Paths) (MemorySettings, error) {
 				return MemorySettings{}, fmt.Errorf("parse [memory].distill_all_jobs: %w", err)
 			}
 			settings.DistillAllJobs = parsed
+		case "ingest_auto_confirm":
+			parsed, err := parseConfigBool(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].ingest_auto_confirm: %w", err)
+			}
+			settings.IngestAutoConfirm = parsed
+		case "groom_split_llm":
+			parsed, err := parseConfigBool(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].groom_split_llm: %w", err)
+			}
+			settings.GroomSplitLLM = parsed
+		case "cluster_fanout":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].cluster_fanout: %w", err)
+			}
+			settings.ClusterFanout = parsed
+		case "cluster_fanout_keep":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].cluster_fanout_keep: %w", err)
+			}
+			settings.ClusterFanoutKeep = parsed
+		case "cluster_depth_cap":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].cluster_depth_cap: %w", err)
+			}
+			settings.ClusterDepthCap = parsed
 		}
 	}
 	if err := validateMemorySettings(settings); err != nil {
@@ -154,6 +222,15 @@ func validateMemorySettings(s MemorySettings) error {
 	}
 	if s.DistillMaxPerJob < 0 {
 		return fmt.Errorf("memory.distill_max_per_job must be >= 0, got %d", s.DistillMaxPerJob)
+	}
+	if s.ClusterFanout < 2 {
+		return fmt.Errorf("memory.cluster_fanout must be >= 2, got %d", s.ClusterFanout)
+	}
+	if s.ClusterFanoutKeep < 1 || s.ClusterFanoutKeep >= s.ClusterFanout {
+		return fmt.Errorf("memory.cluster_fanout_keep must be >= 1 and < cluster_fanout, got %d", s.ClusterFanoutKeep)
+	}
+	if s.ClusterDepthCap < 1 || s.ClusterDepthCap > DefaultMemoryClusterDepthCap {
+		return fmt.Errorf("memory.cluster_depth_cap must be between 1 and %d, got %d", DefaultMemoryClusterDepthCap, s.ClusterDepthCap)
 	}
 	return nil
 }

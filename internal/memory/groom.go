@@ -10,17 +10,18 @@ package memory
 // run. The db-coupled orchestration (reading the vault snapshot, writing the plan
 // artifact, applying retirements in one transaction) lives in the cli package.
 //
-// P4.2 is PROPOSE + retire-only: the detectors emit a reviewable plan the owner
-// applies explicitly. Over-long "brick" memories are only FLAGGED for a later,
-// human/LLM rewrite pass (P4.3) — this track never rewrites content, only
-// proposes retirements the owner confirms.
+// P4.2 retirement/rekey/cross-pool actions remain owner-gated proposals. P4.3
+// adds one automatic operation: a deterministic, lossless brick split whose
+// children are exact source substrings. Lossy LLM rewriting remains deferred.
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Groom detector reason tokens. They name WHY a memory was proposed for
@@ -29,6 +30,18 @@ const (
 	GroomReasonDuplicate       = "duplicate"
 	GroomReasonStatusChangelog = "status-changelog"
 	GroomReasonTaskList        = "task-list"
+)
+
+// Retire reasons stamped VERBATIM (no "groom:" prefix) by the #804 plan actions,
+// so a retired row names the exact mechanism that replaced it.
+const (
+	// GroomReasonRekeySuperseded marks legacy sibling editions retired by a
+	// rekey action: the kept edition carries the stable key from now on.
+	GroomReasonRekeySuperseded = "rekey: superseded edition"
+	// GroomReasonCrossPoolStale marks a stale shared edition retired by a
+	// cross-pool promote-and-retire action: the newer private edition was
+	// promoted into the shared pool in its place.
+	GroomReasonCrossPoolStale = "cross-pool: superseded by promoted edition"
 )
 
 // GroomRewriteThreshold is the content length (in bytes) above which a memory is
@@ -56,6 +69,7 @@ type GroomCandidate struct {
 	OwnerVersion string
 	Repo         string // "" == general scope
 	Scope        string
+	UpdatedAt    string // RFC3339; lexicographic order == chronological order
 }
 
 // GroomRetirement is one proposed retirement: the memory id, its key, the detector
@@ -79,11 +93,32 @@ type GroomRewriteFlag struct {
 	Chars int
 }
 
-// GroomStats is the roll-up carried in the plan artifact.
+// GroomSplitChild is one lossless child of a brick memory. Content is an exact,
+// contiguous substring of the parent's trimmed coverage; children remain in
+// byte order and concatenate back to that coverage exactly.
+type GroomSplitChild struct {
+	Key     string
+	Content string
+}
+
+// GroomSplit is one deterministic split action over an active parent. UpdatedAt
+// is carried to the store as the optimistic-concurrency guard.
+type GroomSplit struct {
+	ParentID          int64
+	ParentKey         string
+	ExpectedUpdatedAt string
+	Children          []GroomSplitChild
+}
+
+// GroomStats is the roll-up carried in the plan artifact. Rekeys and CrossPool
+// count the #804 plan actions; DetectGroomActions leaves them zero and the plan
+// builder fills them in after running the dedicated detectors.
 type GroomStats struct {
 	TotalMemories       int            `json:"total_memories"`
 	ProposedRetirements int            `json:"proposed_retirements"`
 	RewriteFlags        int            `json:"rewrite_flags"`
+	Rekeys              int            `json:"rekeys"`
+	CrossPool           int            `json:"cross_pool"`
 	ByReason            map[string]int `json:"by_reason"`
 }
 
@@ -167,7 +202,7 @@ func DetectGroomActions(cands []GroomCandidate) GroomProposal {
 		if retired[c.ID] {
 			continue
 		}
-		if len(c.Content) > GroomRewriteThreshold {
+		if len(c.Content) > GroomRewriteThreshold || len(SplitBrick(c.Key, c.Content)) > 0 {
 			flags = append(flags, GroomRewriteFlag{ID: c.ID, Key: c.Key, Chars: len(c.Content)})
 		}
 	}
@@ -186,6 +221,285 @@ func DetectGroomActions(cands []GroomCandidate) GroomProposal {
 			ByReason:            byReason,
 		},
 	}
+}
+
+// DetectGroomSplits returns every active-candidate brick that can be split
+// losslessly. The caller supplies only active rows; sorting by parent id makes
+// output independent of query/input order.
+func DetectGroomSplits(cands []GroomCandidate) []GroomSplit {
+	sorted := append([]GroomCandidate(nil), cands...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	usedByDomain := make(map[string]map[string]struct{})
+	for _, c := range sorted {
+		domain := groomSplitDomain(c)
+		if usedByDomain[domain] == nil {
+			usedByDomain[domain] = make(map[string]struct{})
+		}
+		usedByDomain[domain][c.Key] = struct{}{}
+	}
+	var out []GroomSplit
+	for _, c := range sorted {
+		children := SplitBrick(c.Key, c.Content)
+		if len(children) == 0 {
+			continue
+		}
+		used := usedByDomain[groomSplitDomain(c)]
+		for i := range children {
+			base := children[i].Key
+			key := base
+			for n := 2; ; n++ {
+				if _, exists := used[key]; !exists {
+					break
+				}
+				key = base + "-" + strconv.Itoa(n)
+			}
+			children[i].Key = key
+			used[key] = struct{}{}
+		}
+		out = append(out, GroomSplit{
+			ParentID: c.ID, ParentKey: c.Key, ExpectedUpdatedAt: c.UpdatedAt, Children: children,
+		})
+	}
+	return out
+}
+
+func groomSplitDomain(c GroomCandidate) string {
+	return strings.Join([]string{c.OwnerKind, c.OwnerRef, c.OwnerVersion, c.Repo, c.Scope}, "\x00")
+}
+
+// groomBoldHeader matches the house-style story seam used by ingested session
+// notes: a whole line wrapped in Markdown bold markers.
+var groomBoldHeader = regexp.MustCompile(`^\s*\*\*[^*\r\n].*\*\*\s*:?[ \t]*$`)
+
+// groomBoldLead matches the OTHER house seam shape: a line that STARTS with a
+// bold header but continues with prose on the same line
+// ("**Waveform refinement (2026-06-19, PR #241):** fixed ..."). To avoid
+// over-fragmenting at sub-field leads like "**Why:**" / "**How to apply:**",
+// a bold-lead only counts as a story seam when the bold span itself carries
+// dated/PR evidence (groomSeamEvidence) — story headers do, sub-fields don't.
+var groomBoldLead = regexp.MustCompile(`^\s*\*\*([^*\r\n]+)\*\*`)
+
+// groomSeamEvidence is the date/PR signature that promotes a bold-lead line to
+// a story seam.
+var groomSeamEvidence = regexp.MustCompile(`(?i)\d{4}-\d{2}-\d{2}|PR\s*#?\d+|#\d+`)
+
+// groomPRMarker recognizes stand-alone PR/story markers that commonly lead a
+// shipped-work paragraph. Date-led lines reuse groomDateLed below.
+var groomPRMarker = regexp.MustCompile(`(?i)^\s*(?:[-*]\s*)?(?:PR\s*#?\d+\b|#\d+\b|(?:SHIPPED|MERGED|DEPLOYED)\b[^\r\n]*#\d+\b)`)
+
+type groomTextUnit struct {
+	start int
+	end   int
+}
+
+// SplitBrick partitions one parent at byte offsets only. Under-threshold bricks
+// require at least two strong story seams. Over-threshold bricks may use the
+// same blank-line paragraph units as atomicUnits. In every case at least two
+// substantive segments are required, and any coverage mismatch fails closed by
+// returning nil so the existing rewrite flag remains the only action.
+func SplitBrick(parentKey, content string) []GroomSplitChild {
+	coverage := strings.TrimSpace(content)
+	if coverage == "" {
+		return nil
+	}
+	units := groomParagraphUnits(coverage)
+	strong := groomStrongSeams(coverage)
+	strongCount := len(strong)
+	if strongCount < 2 && len(content) <= GroomRewriteThreshold {
+		return nil
+	}
+	if strongCount < 2 && len(units) < 2 {
+		return nil
+	}
+
+	cutStarts := []int{0}
+	if strongCount >= 2 {
+		for _, seam := range strong {
+			if seam.start > 0 {
+				cutStarts = append(cutStarts, seam.start)
+			}
+		}
+	}
+	if len(content) > GroomRewriteThreshold {
+		for _, unit := range units[1:] {
+			cutStarts = append(cutStarts, unit.start)
+		}
+	}
+	cutStarts = uniqueSortedOffsets(cutStarts, len(coverage))
+	if len(cutStarts) < 2 {
+		return nil
+	}
+
+	children := make([]GroomSplitChild, 0, len(cutStarts))
+	usedKeys := make(map[string]struct{}, len(cutStarts))
+	substantive := 0
+	for i, start := range cutStarts {
+		end := len(coverage)
+		if i+1 < len(cutStarts) {
+			end = cutStarts[i+1]
+		}
+		if start < 0 || start >= end || end > len(coverage) {
+			return nil
+		}
+		text := coverage[start:end]
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		if groomSubstantive(text) {
+			substantive++
+		}
+		label := groomFirstNonBlankLine(groomTextUnit{start: start, end: end}, coverage)
+		base := parentKey + "-" + Slug(groomSeamLabel(label))
+		key := base
+		for n := 2; ; n++ {
+			if _, exists := usedKeys[key]; !exists {
+				break
+			}
+			key = base + "-" + strconv.Itoa(n)
+		}
+		usedKeys[key] = struct{}{}
+		children = append(children, GroomSplitChild{Key: key, Content: text})
+	}
+	if substantive < 2 || concatGroomSplitChildren(children) != coverage {
+		return nil
+	}
+	return children
+}
+
+func groomStrongSeams(content string) []groomTextUnit {
+	var out []groomTextUnit
+	offset := 0
+	for _, withNewline := range strings.SplitAfter(content, "\n") {
+		line := strings.TrimSuffix(withNewline, "\n")
+		trimmed := strings.TrimSpace(line)
+		if isGroomStrongSeam(trimmed) {
+			out = append(out, groomTextUnit{start: offset, end: offset + len(withNewline)})
+		}
+		offset += len(withNewline)
+	}
+	return out
+}
+
+// groomParagraphUnits mirrors atomicUnits' first boundary: non-empty paragraph
+// groups separated by one or more blank lines, while retaining byte offsets.
+func groomParagraphUnits(content string) []groomTextUnit {
+	blankLine := regexp.MustCompile(`\r?\n[ \t]*\r?\n(?:[ \t]*\r?\n)*`)
+	locs := blankLine.FindAllStringIndex(content, -1)
+	starts := []int{0}
+	for _, loc := range locs {
+		if loc[1] < len(content) {
+			starts = append(starts, loc[1])
+		}
+	}
+	starts = uniqueSortedOffsets(starts, len(content))
+	out := make([]groomTextUnit, 0, len(starts))
+	for i, start := range starts {
+		end := len(content)
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		if strings.TrimSpace(content[start:end]) != "" {
+			out = append(out, groomTextUnit{start: start, end: end})
+		}
+	}
+	return out
+}
+
+func groomFirstNonBlankLine(unit groomTextUnit, content string) string {
+	if unit.start < 0 || unit.end > len(content) || unit.start >= unit.end {
+		return ""
+	}
+	part := content[unit.start:unit.end]
+	for _, line := range strings.SplitAfter(part, "\n") {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\n"))
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func isGroomStrongSeam(line string) bool {
+	if groomBoldHeader.MatchString(line) || groomDateLed.MatchString(line) || groomPRMarker.MatchString(line) {
+		return true
+	}
+	if m := groomBoldLead.FindStringSubmatch(line); m != nil && groomSeamEvidence.MatchString(m[1]) {
+		return true
+	}
+	return false
+}
+
+func groomSeamLabel(line string) string {
+	label := strings.TrimSpace(line)
+	label = strings.TrimSuffix(label, ":")
+	if strings.HasPrefix(label, "**") && strings.HasSuffix(label, "**") && len(label) >= 4 {
+		label = strings.TrimSpace(label[2 : len(label)-2])
+	} else if m := groomBoldLead.FindStringSubmatch(label); m != nil {
+		// Bold-lead seam ("**Header:** prose..."): the header span is the label,
+		// not the whole line.
+		label = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[1]), ":"))
+	}
+	return label
+}
+
+func groomSubstantive(content string) bool {
+	count := 0
+	seenContent := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if !seenContent && isGroomStrongSeam(trimmed) {
+			seenContent = true
+			trimmed = groomStrongSeamPayload(trimmed)
+			if trimmed == "" {
+				continue
+			}
+		}
+		seenContent = true
+		for _, r := range trimmed {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				count++
+			}
+		}
+	}
+	return count >= 8
+}
+
+func groomStrongSeamPayload(line string) string {
+	if groomBoldHeader.MatchString(line) {
+		return ""
+	}
+	if loc := groomDateLed.FindStringIndex(line); loc != nil && loc[0] == 0 {
+		return strings.TrimSpace(line[loc[1]:])
+	}
+	if loc := groomPRMarker.FindStringIndex(line); loc != nil && loc[0] == 0 {
+		return strings.TrimSpace(line[loc[1]:])
+	}
+	return line
+}
+
+func uniqueSortedOffsets(offsets []int, max int) []int {
+	sort.Ints(offsets)
+	out := offsets[:0]
+	last := -1
+	for _, offset := range offsets {
+		if offset < 0 || offset >= max || offset == last {
+			continue
+		}
+		out = append(out, offset)
+		last = offset
+	}
+	return out
+}
+
+func concatGroomSplitChildren(children []GroomSplitChild) string {
+	var b strings.Builder
+	for _, child := range children {
+		b.WriteString(child.Content)
+	}
+	return b.String()
 }
 
 // groomOwnerLabel renders a candidate's owner as a stable "kind:ref@version" label
@@ -348,6 +662,269 @@ const groomStatusDominance = 0.8
 // retired. The dominance guard alone is vacuous at n=1 (a single matching line is
 // trivially 100% of the note).
 const groomStatusMinLines = 3
+
+// ---- #804 legacy-key rekey detector ----------------------------------------
+
+// legacyIngestKeySuffix recognizes the pre-#804 ingest key shape: a trailing
+// "-<8 hex>" content-hash suffix appended by the old IngestKey.
+var legacyIngestKeySuffix = regexp.MustCompile(`-[0-9a-f]{8}$`)
+
+// StableKey returns the #804 stable form of an ingest key: the trailing legacy
+// content-hash suffix stripped when present, the key unchanged otherwise. It is
+// a deterministic HEURISTIC — a key whose final segment legitimately happens to
+// be 8 hex characters is treated as legacy — which is one reason rekey proposals
+// flow through the human-reviewed groom plan instead of applying silently. A key
+// that is NOTHING but a hash suffix is returned unchanged (stripping would leave
+// an empty key).
+func StableKey(key string) string {
+	stripped := legacyIngestKeySuffix.ReplaceAllString(key, "")
+	if stripped == "" {
+		return key
+	}
+	return stripped
+}
+
+// GroomRekeyRetire is one older sibling edition a rekey group retires.
+type GroomRekeyRetire struct {
+	ID        int64
+	Key       string
+	FirstLine string
+}
+
+// GroomRekeyAction is one proposed legacy-key migration (#804): keep the current
+// edition, rewrite its key to the stable form, retire the older sibling
+// editions. Organic sweeps can never fix legacy keys on their own — content-hash
+// dedup skips unchanged notes, and the first edit would spawn a stable-keyed
+// THIRD sibling — so groom is the only path that converges a legacy group.
+type GroomRekeyAction struct {
+	KeepID    int64
+	KeepKey   string // the keeper's current key
+	NewKey    string // the stable key; equals KeepKey when the keeper already carries it
+	Retire    []GroomRekeyRetire
+	Owner     string // "kind:ref@version" label
+	Repo      string
+	Scope     string
+	FirstLine string // keeper content preview
+}
+
+// DetectGroomRekeys groups active candidates per (owner, repo, scope) by their
+// STABLE key and proposes one rekey action for every group containing at least
+// one legacy-suffixed key. The keeper is the row already carrying the stable key
+// when one exists (under the post-#804 write path that row is the current
+// edition by construction); otherwise the newest edition by UpdatedAt (ties
+// break to the highest id). Every other group member is proposed for retirement
+// with GroomReasonRekeySuperseded. Output is deterministic and independent of
+// input order.
+func DetectGroomRekeys(cands []GroomCandidate) []GroomRekeyAction {
+	sorted := append([]GroomCandidate(nil), cands...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+
+	groups := make(map[string][]GroomCandidate)
+	var order []string
+	for _, c := range sorted {
+		k := strings.Join([]string{
+			c.OwnerKind, c.OwnerRef, c.OwnerVersion, c.Repo, c.Scope, StableKey(c.Key),
+		}, "\x00")
+		if _, seen := groups[k]; !seen {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], c)
+	}
+
+	var out []GroomRekeyAction
+	for _, gk := range order {
+		group := groups[gk]
+		stable := StableKey(group[0].Key)
+		hasLegacy := false
+		for _, c := range group {
+			if c.Key != stable {
+				hasLegacy = true
+				break
+			}
+		}
+		if !hasLegacy {
+			continue
+		}
+		keep := group[0]
+		haveStable := false
+		for _, c := range group {
+			if c.Key == stable {
+				keep = c
+				haveStable = true
+				break
+			}
+		}
+		if !haveStable {
+			for _, c := range group[1:] {
+				if c.UpdatedAt > keep.UpdatedAt || (c.UpdatedAt == keep.UpdatedAt && c.ID > keep.ID) {
+					keep = c
+				}
+			}
+		}
+		action := GroomRekeyAction{
+			KeepID:    keep.ID,
+			KeepKey:   keep.Key,
+			NewKey:    stable,
+			Owner:     groomOwnerLabel(keep),
+			Repo:      keep.Repo,
+			Scope:     keep.Scope,
+			FirstLine: groomFirstLine(keep.Content),
+		}
+		for _, c := range group {
+			if c.ID == keep.ID {
+				continue
+			}
+			action.Retire = append(action.Retire, GroomRekeyRetire{
+				ID:        c.ID,
+				Key:       c.Key,
+				FirstLine: groomFirstLine(c.Content),
+			})
+		}
+		out = append(out, action)
+	}
+	return out
+}
+
+// ---- #804 cross-pool staleness detector -------------------------------------
+
+// CrossPoolBM25Strong is the minimum bm25 relevance (as -bm25: higher is better)
+// at which a private fact's TOP shared-pool match counts as secondary evidence
+// of a cross-pool duplicate. bm25 magnitudes are corpus-dependent, so the bar is
+// deliberately high AND the signal additionally requires an existing
+// memory_links edge between the two rows — a strong bm25 score alone never
+// proposes anything.
+const CrossPoolBM25Strong = 15.0
+
+// GroomCrossPoolSignal is one store-computed secondary-evidence tuple for
+// DetectCrossPoolStaleness: a private fact's top bm25 match in the shared pool
+// and whether a memory_links edge connects the two rows in either direction.
+type GroomCrossPoolSignal struct {
+	PrivateID int64
+	SharedID  int64
+	Score     float64 // -bm25 relevance, higher is better
+	Linked    bool
+}
+
+// Cross-pool proposal bases: the deterministic primary signal (stable-key
+// equality) and the composite secondary signal (strong bm25 top-match plus a
+// memory_links edge).
+const (
+	CrossPoolBasisStableKey = "stable-key"
+	CrossPoolBasisBM25Link  = "bm25-link"
+)
+
+// GroomCrossPoolAction proposes one promote-and-retire pair (#804): promote the
+// newer private edition into the shared pool (author preserved) and retire the
+// stale shared edition it replaces.
+type GroomCrossPoolAction struct {
+	PrivateID  int64
+	PrivateKey string
+	Owner      string // private owner label
+	SharedID   int64
+	SharedKey  string
+	Basis      string // CrossPoolBasisStableKey | CrossPoolBasisBM25Link
+	Repo       string
+	Scope      string
+	FirstLine  string // the newer (private) edition's preview
+}
+
+// DetectCrossPoolStaleness finds shared-pool facts that a NEWER private-pool
+// edition has superseded. Primary, fully deterministic signal: a private agent
+// fact whose STABLE key equals a shared fact's stable key in the same repo and
+// scope. Secondary, composite signal: a store-computed bm25 top-match at or
+// above CrossPoolBM25Strong that ALSO shares a memory_links edge — bm25 alone is
+// never enough. Both require the private edition to be strictly newer
+// (UpdatedAt) than the shared one. At most one action is proposed per shared
+// row (the newest qualifying private edition wins; primary beats secondary).
+// Output is deterministic and independent of input order.
+func DetectCrossPoolStaleness(cands []GroomCandidate, signals []GroomCrossPoolSignal) []GroomCrossPoolAction {
+	sorted := append([]GroomCandidate(nil), cands...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	byID := make(map[int64]GroomCandidate, len(sorted))
+	var private, shared []GroomCandidate
+	for _, c := range sorted {
+		byID[c.ID] = c
+		switch {
+		case c.OwnerKind == OwnerKindAgent:
+			private = append(private, c)
+		case c.OwnerKind == OwnerKindShared && c.OwnerRef == SharedOwnerRef:
+			shared = append(shared, c)
+		}
+	}
+
+	claimed := make(map[int64]bool) // shared id -> already has an action
+	var out []GroomCrossPoolAction
+	propose := func(p, s GroomCandidate, basis string) {
+		claimed[s.ID] = true
+		out = append(out, GroomCrossPoolAction{
+			PrivateID:  p.ID,
+			PrivateKey: p.Key,
+			Owner:      groomOwnerLabel(p),
+			SharedID:   s.ID,
+			SharedKey:  s.Key,
+			Basis:      basis,
+			Repo:       s.Repo,
+			Scope:      s.Scope,
+			FirstLine:  groomFirstLine(p.Content),
+		})
+	}
+
+	// Primary: stable-key equality within the same repo/scope, private newer.
+	for _, s := range shared {
+		var best GroomCandidate
+		found := false
+		for _, p := range private {
+			if p.Repo != s.Repo || p.Scope != s.Scope {
+				continue
+			}
+			if StableKey(p.Key) != StableKey(s.Key) {
+				continue
+			}
+			if !(p.UpdatedAt > s.UpdatedAt) {
+				continue
+			}
+			if !found || p.UpdatedAt > best.UpdatedAt || (p.UpdatedAt == best.UpdatedAt && p.ID > best.ID) {
+				best, found = p, true
+			}
+		}
+		if found {
+			propose(best, s, CrossPoolBasisStableKey)
+		}
+	}
+
+	// Secondary: strong bm25 top-match plus a memory_links edge, private newer.
+	ordered := append([]GroomCrossPoolSignal(nil), signals...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].PrivateID != ordered[j].PrivateID {
+			return ordered[i].PrivateID < ordered[j].PrivateID
+		}
+		return ordered[i].SharedID < ordered[j].SharedID
+	})
+	for _, sig := range ordered {
+		if !sig.Linked || sig.Score < CrossPoolBM25Strong {
+			continue
+		}
+		if claimed[sig.SharedID] {
+			continue
+		}
+		p, okP := byID[sig.PrivateID]
+		s, okS := byID[sig.SharedID]
+		if !okP || !okS {
+			continue
+		}
+		if p.OwnerKind != OwnerKindAgent || s.OwnerKind != OwnerKindShared || s.OwnerRef != SharedOwnerRef {
+			continue
+		}
+		if p.Repo != s.Repo || p.Scope != s.Scope {
+			continue
+		}
+		if !(p.UpdatedAt > s.UpdatedAt) {
+			continue
+		}
+		propose(p, s, CrossPoolBasisBM25Link)
+	}
+	return out
+}
 
 // detectStatusChangelog reports whether content is predominantly a status,
 // changelog, or table-of-contents snapshot: at least groomStatusDominance of the

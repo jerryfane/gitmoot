@@ -2094,14 +2094,14 @@ func TestRunQueuedJobsMaterializesAndDisposesEphemeralWorker(t *testing.T) {
 		Action:    "ask",
 		Repo:      "owner/repo",
 		Branch:    "main",
-		Ephemeral: &workflow.EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4"},
+		Ephemeral: &workflow.EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4", Effort: "high"},
 	})
 
 	startAdapter := &cliWorkerFakeAdapter{startRuntimeRef: "550e8400-e29b-41d4-a716-446655440555"}
 	deliveryAdapter := &cliWorkerFakeAdapter{
 		output: `{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}
-	var deliveredModel string
+	var deliveredModel, deliveredEffort string
 	startCheckouts := []string{}
 	worker := defaultJobWorker(store, io.Discard)
 	worker.CheckoutValidator = func(context.Context, db.Job, workflow.JobPayload, runtime.Agent) (string, error) {
@@ -2113,6 +2113,7 @@ func TestRunQueuedJobsMaterializesAndDisposesEphemeralWorker(t *testing.T) {
 	}
 	worker.AdapterFactory = func(agent runtime.Agent, _ string) (workflow.DeliveryAdapter, error) {
 		deliveredModel = agent.Model
+		deliveredEffort = agent.Effort
 		return deliveryAdapter, nil
 	}
 	worker.WorkflowFactory = func(string) workflow.Engine {
@@ -2135,6 +2136,9 @@ func TestRunQueuedJobsMaterializesAndDisposesEphemeralWorker(t *testing.T) {
 	}
 	if deliveredModel != "gpt-5.4" {
 		t.Fatalf("delivered agent model = %q, want gpt-5.4", deliveredModel)
+	}
+	if deliveredEffort != "high" {
+		t.Fatalf("delivered agent effort = %q, want high", deliveredEffort)
 	}
 	if len(startCheckouts) != 1 || startCheckouts[0] != checkout {
 		t.Fatalf("start checkouts = %+v, want %q", startCheckouts, checkout)
@@ -7007,6 +7011,48 @@ func TestWarnSerializedParallelJobsSilentBelowTwo(t *testing.T) {
 	warnSerializedParallelJobs(ctx, worker, 1, "owner/repo", "")
 	if out.Len() != 0 {
 		t.Fatalf("warning emitted for a single parallelizable job: %q", out.String())
+	}
+}
+
+func TestResolveJobCheckoutSelfHealsDanglingLinkedWorktree(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	primary, linked := setupLinkedWorktreeRepo(t)
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if err := store.UpsertRepoForce(ctx, db.Repo{Owner: "owner", Name: "repo", CheckoutPath: linked, PrimaryCheckoutPath: primary}); err != nil {
+		t.Fatalf("UpsertRepoForce returned error: %v", err)
+	}
+	job := db.Job{ID: "job-checkout-heal", Agent: "audit", Type: "ask", State: string(workflow.JobQueued), Payload: `{"repo":"owner/repo"}`}
+	if err := store.CreateJobWithEvent(ctx, job, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
+		t.Fatalf("CreateJobWithEvent returned error: %v", err)
+	}
+	runGit(t, primary, "worktree", "remove", "--force", linked)
+	var output bytes.Buffer
+	worker := jobWorker{Store: store, Stdout: &output}
+	checkout, err := worker.resolveJobCheckout(ctx, job, workflow.JobPayload{Repo: "owner/repo"})
+	if err != nil {
+		t.Fatalf("resolveJobCheckout returned error: %v", err)
+	}
+	if checkout != primary {
+		t.Fatalf("checkout = %q, want healed primary %q", checkout, primary)
+	}
+	record, err := store.GetRepo(ctx, "owner/repo")
+	if err != nil {
+		t.Fatalf("GetRepo returned error: %v", err)
+	}
+	if record.CheckoutPath != primary || record.PrimaryCheckoutPath != primary {
+		t.Fatalf("healed record = %+v", record)
+	}
+	events, err := store.ListJobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	if !daemonWorkerHasEvent(events, "repo_checkout_self_healed") {
+		t.Fatalf("events = %+v, want repo_checkout_self_healed", events)
+	}
+	if !strings.Contains(output.String(), "WARN:") || !strings.Contains(output.String(), linked) || !strings.Contains(output.String(), primary) {
+		t.Fatalf("warning output = %q", output.String())
 	}
 }
 

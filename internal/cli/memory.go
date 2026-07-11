@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
@@ -28,6 +30,8 @@ func runMemory(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "list":
 		return runMemoryList(args[1:], stdout, stderr)
+	case "recall":
+		return runMemoryRecall(args[1:], stdout, stderr)
 	case "replay":
 		return runMemoryReplay(args[1:], stdout, stderr)
 	case "eval":
@@ -40,6 +44,12 @@ func runMemory(args []string, stdout, stderr io.Writer) int {
 		return runMemoryObservations(args[1:], stdout, stderr)
 	case "confirm":
 		return runMemoryConfirm(args[1:], stdout, stderr)
+	case "retire":
+		return runMemoryRetire(args[1:], stdout, stderr)
+	case "promote":
+		return runMemoryPromote(args[1:], stdout, stderr)
+	case "links":
+		return runMemoryLinks(args[1:], stdout, stderr)
 	case "groom":
 		return runMemoryGroom(args[1:], stdout, stderr)
 	case "clusters":
@@ -62,28 +72,323 @@ func printMemoryUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot memory list [--pending|--confirmed] [--agent NAME] [--repo R] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory recall \"<query>\" [--repo R] [--agent NAME|--shared] [--limit N] [--expand] [--json]")
 	fmt.Fprintln(w, "  gitmoot memory replay [--agent NAME] [--repo R] [--limit N] [--json]")
 	fmt.Fprintln(w, "  gitmoot memory eval --fixtures FILE [--k N] [--json]")
 	fmt.Fprintln(w, "  gitmoot memory vault export [--out DIR] [--agent NAME] [--json]")
-	fmt.Fprintln(w, "  gitmoot memory ingest <path|dir> --agent NAME [--repo R] [--tier repo|general] [--dry-run] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory ingest <path|dir> --agent NAME [--shared] [--repo R] [--tier repo|general] [--dry-run] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory ingest sweep [--json]")
 	fmt.Fprintln(w, "  gitmoot memory observations [--agent NAME] [--provenance-prefix P] [--json]")
-	fmt.Fprintln(w, "  gitmoot memory confirm <obs-id>... | --provenance-prefix P [--agent NAME] [--yes] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory confirm <obs-id>... | --provenance-prefix P [--agent NAME] [--to-shared] [--yes] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory retire --provenance-prefix P [--agent NAME] [--dry-run] [--yes] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory promote --to-shared <id>... [--json]")
+	fmt.Fprintln(w, "  gitmoot memory links backfill [--dry-run] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory links list <id> [--json]")
 	fmt.Fprintln(w, "  gitmoot memory groom --propose [--out PLAN.json] [--json] | --yes --plan PLAN.json [--json]")
 	fmt.Fprintln(w, "  gitmoot memory clusters [--json]")
 	fmt.Fprintln(w, "  gitmoot memory clusters recompute --propose [--out PLAN.json] [--json] | --apply [--plan PLAN.json] [--json]")
 	fmt.Fprintln(w, "  gitmoot memory cluster rename <cluster-id> <label>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  list          show stored memories (confirmed and/or pending observations)")
+	fmt.Fprintln(w, "  recall        retrieve ranked confirmed memories; defaults to all agent pools plus shared")
 	fmt.Fprintln(w, "  replay        offline A/B: render recent real jobs' prompts with vs without the")
 	fmt.Fprintln(w, "                learnings block and report the injection delta (tokens, entries)")
 	fmt.Fprintln(w, "  eval          recall/precision@K of retrieval over a labeled fixtures file")
 	fmt.Fprintln(w, "  vault         render memory as a disposable Obsidian-compatible vault view")
-	fmt.Fprintln(w, "  ingest        stage markdown as trust_mark=low pending observations (PreFilter-gated)")
+	fmt.Fprintln(w, "  ingest        stage markdown as trust_mark=low pending observations, or sweep configured sources")
 	fmt.Fprintln(w, "  observations  list pending observations, flagging which keys are already confirmed")
 	fmt.Fprintln(w, "  confirm       human-gated promotion of pending observations into confirmed memory")
+	fmt.Fprintln(w, "  retire        bulk-retire active confirmed memory by provenance prefix")
+	fmt.Fprintln(w, "  promote       explicitly move active confirmed facts into the shared pool")
+	fmt.Fprintln(w, "  links         inspect persisted memory links; backfill links for existing facts")
 	fmt.Fprintln(w, "  groom         deterministically propose stale-memory retirements, apply on confirmation")
 	fmt.Fprintln(w, "  clusters      list emergent memory clusters; recompute them via a propose/apply plan")
 	fmt.Fprintln(w, "  cluster       rename a cluster (owner label override)")
+}
+
+// ---- memory recall --------------------------------------------------------
+
+type memoryRecallOwner struct {
+	Kind    string `json:"kind"`
+	Ref     string `json:"ref"`
+	Version string `json:"version,omitempty"`
+}
+
+type memoryRecallEntry struct {
+	ID         int64             `json:"id"`
+	Owner      memoryRecallOwner `json:"owner"`
+	AuthorRef  string            `json:"author_ref,omitempty"`
+	LinkedFrom int64             `json:"linked_from,omitempty"`
+	Repo       string            `json:"repo"`
+	Scope      string            `json:"scope"`
+	Key        string            `json:"key"`
+	Content    string            `json:"content"`
+	Provenance string            `json:"provenance"`
+	UpdatedAt  string            `json:"updated_at"`
+}
+
+func runMemoryRecall(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("memory recall", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	agent := fs.String("agent", "", "filter to one agent owner pool; default searches all agent pools")
+	shared := fs.Bool("shared", false, "search only the shared pool")
+	repo := fs.String("repo", "", "filter by repo (owner/repo); omitted searches all repos")
+	limit := fs.Int("limit", 15, "maximum number of matching memories to return")
+	expand := fs.Bool("expand", false, "include 1-hop linked memory neighbors after direct matches")
+	jsonOut := fs.Bool("json", false, "print as JSON")
+	queryText, err := parseMemoryRecallArgs(fs, args)
+	if err != nil {
+		return memoryFlagExit(err)
+	}
+	if strings.TrimSpace(queryText) == "" {
+		fmt.Fprintln(stderr, "usage: gitmoot memory recall \"<query>\" [--repo owner/repo] [--agent NAME|--shared] [--limit N] [--expand] [--json]")
+		return 2
+	}
+	if *shared && strings.TrimSpace(*agent) != "" {
+		fmt.Fprintln(stderr, "memory recall: --shared cannot be combined with --agent")
+		return 2
+	}
+	query := workflow.BuildMemoryMatchQuery(queryText)
+	effectiveLimit := *limit
+	if effectiveLimit <= 0 {
+		effectiveLimit = 15
+	}
+
+	var rows []db.ConfirmedMemory
+	linkedFrom := map[int64]int64{}
+	err = withReadOnlyStore(*home, func(store *db.Store) error {
+		var err error
+		ctx := context.Background()
+		if *shared {
+			rows, err = store.QueryConfirmedMemoriesForShared(ctx, strings.TrimSpace(*repo), query, effectiveLimit)
+		} else if strings.TrimSpace(*agent) != "" {
+			owner := db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: strings.TrimSpace(*agent)}
+			if strings.TrimSpace(*repo) != "" {
+				rows, err = store.QueryConfirmedMemories(ctx, owner, strings.TrimSpace(*repo), query, effectiveLimit)
+			} else {
+				rows, err = store.QueryConfirmedMemoriesForOwnerAllRepos(ctx, owner, query, effectiveLimit)
+			}
+		} else {
+			rows, err = store.QueryConfirmedMemoriesForAllAgents(ctx, strings.TrimSpace(*repo), query, effectiveLimit)
+		}
+		if err != nil || !*expand || len(rows) == 0 || len(rows) >= effectiveLimit {
+			return err
+		}
+		linked, linkErr := memoryRecallLinkedRows(ctx, store, *shared, strings.TrimSpace(*agent), strings.TrimSpace(*repo), rows)
+		if linkErr != nil {
+			return linkErr
+		}
+		rows, linkedFrom = appendMemoryRecallExpansion(rows, linked, effectiveLimit)
+		return err
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "memory recall: %v\n", err)
+		return 1
+	}
+
+	if *jsonOut {
+		entries := make([]memoryRecallEntry, 0, len(rows))
+		for _, r := range rows {
+			entries = append(entries, memoryRecallJSONEntry(r, linkedFrom[r.ID]))
+		}
+		if err := writeJSON(stdout, entries); err != nil {
+			fmt.Fprintf(stderr, "memory recall: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(stdout, "no matches")
+		return 0
+	}
+	for _, r := range rows {
+		fmt.Fprintf(stdout, "%s repo=%s scope=%s owner=%s:%s\n",
+			r.Key, memoryRecallDisplayRepo(r), r.Scope, r.Owner.Kind, r.Owner.Ref)
+		fmt.Fprintln(stdout, memory.RenderBullet(memory.Entry{
+			Scope:     r.Scope,
+			Key:       r.Key,
+			Content:   r.Content,
+			UpdatedAt: r.UpdatedAt,
+			Linked:    linkedFrom[r.ID] != 0,
+		}))
+	}
+	return 0
+}
+
+func parseMemoryRecallArgs(fs *flag.FlagSet, args []string) (string, error) {
+	var flagArgs []string
+	var queryParts []string
+	flagsWithValues := map[string]bool{
+		"-home": true, "--home": true,
+		"-agent": true, "--agent": true,
+		"-repo": true, "--repo": true,
+		"-limit": true, "--limit": true,
+		"-shared": false, "--shared": false,
+		"-expand": false, "--expand": false,
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			queryParts = append(queryParts, args[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			flagArgs = append(flagArgs, arg)
+			if strings.Contains(arg, "=") {
+				continue
+			}
+			if flagsWithValues[arg] && i+1 < len(args) {
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+			continue
+		}
+		queryParts = append(queryParts, arg)
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(strings.Join(queryParts, " ")), nil
+}
+
+func memoryRecallLinkedRows(ctx context.Context, store *db.Store, sharedOnly bool, agentName, repo string, direct []db.ConfirmedMemory) ([]db.LinkedConfirmedMemory, error) {
+	srcIDs := make([]int64, 0, len(direct))
+	for _, r := range direct {
+		srcIDs = append(srcIDs, r.ID)
+	}
+	if sharedOnly {
+		return store.ListMemoryLinksForSourcesVisibleToShared(ctx, repo, srcIDs)
+	}
+	if agentName != "" {
+		owner := db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: agentName}
+		if repo != "" {
+			return store.ListMemoryLinksForSourcesVisibleToOwner(ctx, owner, repo, srcIDs)
+		}
+		return store.ListMemoryLinksForSourcesVisibleToOwnerAllRepos(ctx, owner, srcIDs)
+	}
+	return store.ListMemoryLinksForSourcesVisibleToAllAgents(ctx, repo, srcIDs)
+}
+
+func appendMemoryRecallExpansion(direct []db.ConfirmedMemory, linked []db.LinkedConfirmedMemory, limit int) ([]db.ConfirmedMemory, map[int64]int64) {
+	linkedFrom := map[int64]int64{}
+	if len(direct) == 0 || limit <= 0 || len(direct) >= limit {
+		return direct, linkedFrom
+	}
+	out := make([]db.ConfirmedMemory, 0, limit)
+	out = append(out, direct...)
+	seen := make(map[int64]struct{}, len(direct)+len(linked))
+	for _, r := range direct {
+		seen[r.ID] = struct{}{}
+	}
+	for _, l := range linked {
+		if _, ok := seen[l.Memory.ID]; ok {
+			continue
+		}
+		seen[l.Memory.ID] = struct{}{}
+		out = append(out, l.Memory)
+		linkedFrom[l.Memory.ID] = l.SrcID
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, linkedFrom
+}
+
+func memoryRecallJSONEntry(r db.ConfirmedMemory, linkedFrom int64) memoryRecallEntry {
+	return memoryRecallEntry{
+		ID: r.ID,
+		Owner: memoryRecallOwner{
+			Kind:    r.Owner.Kind,
+			Ref:     r.Owner.Ref,
+			Version: r.Owner.Version,
+		},
+		AuthorRef:  r.AuthorRef,
+		LinkedFrom: linkedFrom,
+		Repo:       r.Repo,
+		Scope:      r.Scope,
+		Key:        r.Key,
+		Content:    r.Content,
+		Provenance: r.Provenance,
+		UpdatedAt:  r.UpdatedAt,
+	}
+}
+
+func memoryRecallDisplayRepo(r db.ConfirmedMemory) string {
+	if strings.TrimSpace(r.Repo) != "" {
+		return r.Repo
+	}
+	return "(general)"
+}
+
+// ---- memory promote -------------------------------------------------------
+
+type memoryPromoteResult struct {
+	ToShared bool                `json:"to_shared"`
+	Promoted int                 `json:"promoted"`
+	Rows     []memoryRecallEntry `json:"rows,omitempty"`
+}
+
+func runMemoryPromote(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("memory promote", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	toShared := fs.Bool("to-shared", false, "move confirmed memory rows into the shared pool")
+	jsonOut := fs.Bool("json", false, "print as JSON")
+	if err := parseMemoryFlags(fs, args); err != nil {
+		return memoryFlagExit(err)
+	}
+	if !*toShared {
+		fmt.Fprintln(stderr, "memory promote: --to-shared is required")
+		return 2
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(stderr, "usage: gitmoot memory promote --to-shared <id>... [--json]")
+		return 2
+	}
+	ids := make([]int64, 0, fs.NArg())
+	for _, arg := range fs.Args() {
+		id, err := strconv.ParseInt(strings.TrimSpace(arg), 10, 64)
+		if err != nil || id <= 0 {
+			fmt.Fprintf(stderr, "memory promote: invalid confirmed memory id %q\n", arg)
+			return 2
+		}
+		ids = append(ids, id)
+	}
+
+	result := memoryPromoteResult{ToShared: true}
+	err := withStore(*home, func(store *db.Store) error {
+		rows, err := store.PromoteConfirmedMemoriesToShared(context.Background(), ids)
+		if err != nil {
+			return err
+		}
+		result.Promoted = len(rows)
+		result.Rows = make([]memoryRecallEntry, 0, len(rows))
+		for _, r := range rows {
+			result.Rows = append(result.Rows, memoryRecallJSONEntry(r, 0))
+		}
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "memory promote: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		if err := writeJSON(stdout, result); err != nil {
+			fmt.Fprintf(stderr, "memory promote: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "moved %d confirmed memory row(s) into the shared pool\n", result.Promoted)
+	for _, r := range result.Rows {
+		author := r.AuthorRef
+		if author == "" {
+			author = r.Owner.Ref
+		}
+		fmt.Fprintf(stdout, "  %d %s author=%s\n", r.ID, r.Key, author)
+	}
+	return 0
 }
 
 // ---- memory list ----------------------------------------------------------
@@ -93,6 +398,7 @@ type memoryListEntry struct {
 	ID         int64  `json:"id"`
 	OwnerKind  string `json:"owner_kind"`
 	OwnerRef   string `json:"owner_ref"`
+	AuthorRef  string `json:"author_ref,omitempty"`
 	Repo       string `json:"repo,omitempty"`
 	Scope      string `json:"scope"`
 	Key        string `json:"key"`
@@ -130,7 +436,8 @@ func runMemoryList(args []string, stdout, stderr io.Writer) int {
 			for _, r := range rows {
 				entries = append(entries, memoryListEntry{
 					Tier: "confirmed", ID: r.ID, OwnerKind: r.Owner.Kind, OwnerRef: r.Owner.Ref,
-					Repo: r.Repo, Scope: r.Scope, Key: r.Key, Content: r.Content,
+					AuthorRef: r.AuthorRef,
+					Repo:      r.Repo, Scope: r.Scope, Key: r.Key, Content: r.Content,
 					Provenance: r.Provenance, SourceJob: r.SourceJob, UpdatedAt: r.UpdatedAt,
 				})
 			}
@@ -143,7 +450,8 @@ func runMemoryList(args []string, stdout, stderr io.Writer) int {
 			for _, r := range rows {
 				entries = append(entries, memoryListEntry{
 					Tier: "pending", ID: r.ID, OwnerKind: r.Owner.Kind, OwnerRef: r.Owner.Ref,
-					Repo: r.Repo, Scope: r.Scope, Key: r.Key, Content: r.Content,
+					AuthorRef: r.AuthorRef,
+					Repo:      r.Repo, Scope: r.Scope, Key: r.Key, Content: r.Content,
 					Provenance: r.Provenance, TrustMark: r.TrustMark, SourceJob: r.SourceJob, UpdatedAt: r.CreatedAt,
 				})
 			}

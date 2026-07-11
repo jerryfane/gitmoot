@@ -265,6 +265,187 @@ func TestClustersIncrementalAttach(t *testing.T) {
 	}
 }
 
+func TestClustersListHierarchyAndAggregateCounts(t *testing.T) {
+	home, store := memoryTestHome(t)
+	dbIDs, netIDs := seedClusterCorpus(t, store)
+	ctx := context.Background()
+	const (
+		parentID = int64(1)
+		childAID = int64(1<<52 + 11)
+		childBID = int64(1<<52 + 22)
+	)
+	assignment := db.MemoryClusterAssignment{Clusters: []db.MemoryCluster{
+		{ClusterID: parentID, Label: "storage", MedoidID: dbIDs[0]},
+		{ClusterID: childAID, ParentID: parentID, Label: "database", MedoidID: dbIDs[0]},
+		{ClusterID: childBID, ParentID: parentID, Label: "network", MedoidID: netIDs[0]},
+	}}
+	for _, id := range dbIDs {
+		assignment.Members = append(assignment.Members, db.MemoryClusterMember{MemoryID: id, ClusterID: childAID})
+	}
+	for _, id := range netIDs {
+		assignment.Members = append(assignment.Members, db.MemoryClusterMember{MemoryID: id, ClusterID: childBID})
+	}
+	if err := store.RecomputeMemoryClusters(ctx, assignment); err != nil {
+		t.Fatalf("seed hierarchy: %v", err)
+	}
+
+	entries := clustersJSON(t, home)
+	if len(entries) != 3 || entries[0].ClusterID != parentID || entries[1].ParentID != parentID || entries[2].ParentID != parentID {
+		t.Fatalf("hierarchy list order/parents = %+v", entries)
+	}
+	if entries[0].Count != 6 || entries[1].Count != 3 || entries[2].Count != 3 {
+		t.Fatalf("hierarchy counts = %+v, want parent 6 and children 3/3", entries)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runMemory([]string{"clusters", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("text list exit %d: %s", code, stderr.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("\n  "+itoaTest(childAID))) || !bytes.Contains(stdout.Bytes(), []byte("\n  "+itoaTest(childBID))) {
+		t.Fatalf("child rows are not indented:\n%s", stdout.String())
+	}
+}
+
+func TestClusterPlanIncludesSplitsAndDissolves(t *testing.T) {
+	const (
+		parentID = int64(1)
+		childAID = int64(1<<52 + 31)
+		childBID = int64(1<<52 + 32)
+	)
+	flat := []db.MemoryCluster{{ClusterID: parentID, Label: "parent", MedoidID: 7}}
+	split := []db.MemoryCluster{
+		{ClusterID: parentID, Label: "parent", MedoidID: 7},
+		{ClusterID: childAID, ParentID: parentID, Label: "alpha", MedoidID: 7},
+		{ClusterID: childBID, ParentID: parentID, Label: "beta", MedoidID: 9},
+	}
+	built := builtClustering{
+		previousClusters: flat,
+		assignment:       db.MemoryClusterAssignment{Clusters: split},
+		realClusters:     1,
+		subclusters:      2,
+	}
+	plan := makeClusterPlan(built, "anchor", nil)
+	if len(plan.Splits) != 1 || len(plan.Dissolves) != 0 || !equalInt64s(plan.Splits[0].ChildIDs, []int64{childAID, childBID}) {
+		t.Fatalf("split plan changes = splits %+v dissolves %+v", plan.Splits, plan.Dissolves)
+	}
+
+	built.previousClusters = split
+	built.assignment.Clusters = flat
+	built.subclusters = 0
+	plan = makeClusterPlan(built, "anchor", nil)
+	if len(plan.Splits) != 0 || len(plan.Dissolves) != 1 || !equalInt64s(plan.Dissolves[0].ChildIDs, []int64{childAID, childBID}) {
+		t.Fatalf("dissolve plan changes = splits %+v dissolves %+v", plan.Splits, plan.Dissolves)
+	}
+}
+
+func TestClusterPlanDeepHierarchyCountsAndLegacyMigration(t *testing.T) {
+	const (
+		legacyParent = int64(1)
+		legacyA      = int64(1<<52 + 61)
+		legacyB      = int64(1<<52 + 62)
+		synthetic    = int64(1<<51 + 63)
+	)
+	current := []db.MemoryCluster{
+		{ClusterID: legacyParent, MedoidID: 7},
+		{ClusterID: legacyA, ParentID: legacyParent, MedoidID: 7},
+		{ClusterID: legacyB, ParentID: legacyParent, MedoidID: 9},
+	}
+	proposed := []db.MemoryCluster{
+		{ClusterID: synthetic, MedoidID: 5},
+		{ClusterID: legacyParent, ParentID: synthetic, MedoidID: 7},
+		{ClusterID: legacyA, ParentID: legacyParent, MedoidID: 7},
+		{ClusterID: legacyB, ParentID: legacyParent, MedoidID: 9},
+	}
+	splits, dissolves := hierarchyPlanChanges(current, proposed)
+	if len(dissolves) != 0 {
+		t.Fatalf("legacy split falsely dissolved during deep migration: %+v", dissolves)
+	}
+	if len(splits) != 1 || splits[0].ParentID != synthetic || !equalInt64s(splits[0].ChildIDs, []int64{legacyParent}) {
+		t.Fatalf("migration splits = %+v, want only synthetic parent", splits)
+	}
+
+	plan := clusterPlan{Clusters: []clusterPlanCluster{
+		{ClusterID: synthetic, Label: "root", MedoidID: 5},
+		{ClusterID: legacyParent, ParentID: synthetic, Label: "middle", MedoidID: 7},
+		{ClusterID: legacyA, ParentID: legacyParent, Label: "leaf-a", MedoidID: 7, Members: []int64{1, 2}},
+		{ClusterID: legacyB, ParentID: legacyParent, Label: "leaf-b", MedoidID: 9, Members: []int64{3}},
+	}}
+	if got := planClusterCount(plan.Clusters, synthetic); got != 3 {
+		t.Fatalf("deep root count = %d, want 3", got)
+	}
+	real, subclusters, unclustered := countPlanBuckets(plan)
+	if real != 1 || subclusters != 3 || unclustered != 0 {
+		t.Fatalf("deep buckets = %d/%d/%d, want 1/3/0", real, subclusters, unclustered)
+	}
+	ordered := hierarchyOrderedPlanClusters(plan.Clusters)
+	if len(ordered) != 4 || ordered[0].ClusterID != synthetic || ordered[1].ClusterID != legacyParent || ordered[2].ParentID != legacyParent || ordered[3].ParentID != legacyParent {
+		t.Fatalf("deep order = %+v", ordered)
+	}
+}
+
+func TestClusterOwnerRenameSurvivesRegrouping(t *testing.T) {
+	previous := []db.MemoryCluster{
+		{ClusterID: 1, MedoidID: 7, LabelOverride: "owner-root"},
+		{ClusterID: int64(1<<51 + 77), MedoidID: 9, LabelOverride: "owner-synthetic"},
+		{ClusterID: int64(1<<52 + 78), ParentID: 1, MedoidID: 11, LabelOverride: "owner-child"},
+	}
+	byID, roots := previousClusterOverrides(previous)
+	tests := []struct {
+		cluster memory.Cluster
+		want    string
+	}{
+		{cluster: memory.Cluster{ID: 99, ParentID: int64(1<<51 + 90), MedoidID: 7, BaseCommunity: true}, want: "owner-root"},
+		{cluster: memory.Cluster{ID: int64(1<<51 + 77), MedoidID: 9}, want: "owner-synthetic"},
+		{cluster: memory.Cluster{ID: int64(1<<52 + 78), MedoidID: 11}, want: "owner-child"},
+	}
+	for _, tc := range tests {
+		if got := preservedClusterOverride(tc.cluster, byID, roots); got != tc.want {
+			t.Fatalf("override for %+v = %q, want %q", tc.cluster, got, tc.want)
+		}
+	}
+}
+
+func TestClustersIncrementalAttachTargetsLeaf(t *testing.T) {
+	home, store := memoryTestHome(t)
+	dbIDs, netIDs := seedClusterCorpus(t, store)
+	ctx := context.Background()
+	const (
+		parentID = int64(1)
+		childID  = int64(1<<52 + 41)
+	)
+	assignment := db.MemoryClusterAssignment{Clusters: []db.MemoryCluster{
+		{ClusterID: parentID, Label: "storage", MedoidID: dbIDs[0]},
+		{ClusterID: childID, ParentID: parentID, Label: "database", MedoidID: dbIDs[0]},
+		{ClusterID: 2, Label: "network", MedoidID: netIDs[0]},
+	}}
+	for _, id := range dbIDs {
+		assignment.Members = append(assignment.Members, db.MemoryClusterMember{MemoryID: id, ClusterID: childID})
+	}
+	for _, id := range netIDs {
+		assignment.Members = append(assignment.Members, db.MemoryClusterMember{MemoryID: id, ClusterID: 2})
+	}
+	if err := store.RecomputeMemoryClusters(ctx, assignment); err != nil {
+		t.Fatalf("seed hierarchy: %v", err)
+	}
+
+	obsID, err := store.InsertMemoryObservation(ctx, db.MemoryObservation{
+		Owner: db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: "researcher"},
+		Repo:  "acme/widget", Scope: "repo", Key: "db-partition",
+		Content: "database partitioning splits the query index across storage nodes", TrustMark: "normal",
+	})
+	if err != nil {
+		t.Fatalf("insert observation: %v", err)
+	}
+	var b bytes.Buffer
+	if code := runMemory([]string{"confirm", "--yes", "--home", home, itoaTest(obsID)}, &b, &b); code != 0 {
+		t.Fatalf("confirm exit %d: %s", code, b.String())
+	}
+	newID := confirmedIDForKey(t, store, ctx, "db-partition")
+	if got := clusterOf(t, store, ctx, newID); got != childID {
+		t.Fatalf("new fact attached to %d, want leaf %d", got, childID)
+	}
+}
+
 // ---- small test helpers ----
 
 func clusterOf(t *testing.T, store *db.Store, ctx context.Context, id int64) int64 {

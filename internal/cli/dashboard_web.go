@@ -45,7 +45,10 @@ func runDashboardWeb(home, addr string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dashboard: %v\n", err)
 		return 1
 	}
-	srv := &http.Server{Handler: dashboard.Serve(ds)}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/learning/knowledge", ds.handleLearningKnowledge)
+	mux.Handle("/", dashboard.Serve(ds))
+	srv := &http.Server{Handler: mux}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -1861,7 +1864,7 @@ func firstInstructionLine(instructions string) string {
 // review") are deliberately absent, so their ids fall through to the root job's
 // Type/Agent columns instead of being mis-split (kind="skillopt", agent absorbs
 // the rest).
-var knownRunKinds = map[string]bool{"ask": true, "review": true, "implement": true, "orchestrate": true, "goal": true}
+var knownRunKinds = map[string]bool{"ask": true, "review": true, "implement": true, "produce": true, "orchestrate": true, "goal": true}
 
 func parseRunKindAgent(rootID string, root db.Job) (kind, agent string) {
 	parts := strings.Split(strings.TrimSpace(rootID), "-")

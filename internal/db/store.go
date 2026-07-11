@@ -11,14 +11,19 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	gitutil "github.com/jerryfane/gitmoot/internal/git"
 
 	_ "modernc.org/sqlite"
 )
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 type Repo struct {
@@ -27,10 +32,14 @@ type Repo struct {
 	DefaultBranch string
 	RemoteURL     string
 	CheckoutPath  string
-	Enabled       bool
-	PollInterval  string
-	LastPollAt    string
-	LastError     string
+	// PrimaryCheckoutPath is the durable first non-bare checkout reported by
+	// `git worktree list --porcelain`. It lets dispatch recover when a mistakenly
+	// registered linked worktree has been removed.
+	PrimaryCheckoutPath string
+	Enabled             bool
+	PollInterval        string
+	LastPollAt          string
+	LastError           string
 }
 
 type Agent struct {
@@ -41,6 +50,7 @@ type Agent struct {
 	RepoScope      string
 	TemplateID     string
 	Model          string
+	Effort         string
 	Capabilities   []string
 	AutonomyPolicy string
 	HealthStatus   string
@@ -180,6 +190,7 @@ type AgentInstance struct {
 	Role           string
 	TemplateID     string
 	Model          string
+	Effort         string
 	Capabilities   []string
 	AutonomyPolicy string
 	State          string
@@ -574,7 +585,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	store := &Store{db: db}
+	store := &Store{db: db, path: path}
 	if err := store.Migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -598,7 +609,17 @@ func OpenReadOnly(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
+}
+
+// DatabasePath returns the path used to open the store. It lets home-scoped
+// read-only policy consumers resolve the config beside gitmoot.db without
+// re-resolving an already-resolved Gitmoot home.
+func (s *Store) DatabasePath() string {
+	if s == nil {
+		return ""
+	}
+	return s.path
 }
 
 func configureWritableSQLite(ctx context.Context, db *sql.DB) error {
@@ -735,32 +756,76 @@ func (s *Store) applyMigration(ctx context.Context, version int, migration strin
 }
 
 func (s *Store) UpsertRepo(ctx context.Context, repo Repo) error {
+	return s.upsertRepo(ctx, repo, false)
+}
+
+// UpsertRepoForce deliberately bypasses linked-worktree overwrite protection.
+// It is reserved for the explicit `repo add --force` operator path.
+func (s *Store) UpsertRepoForce(ctx context.Context, repo Repo) error {
+	return s.upsertRepo(ctx, repo, true)
+}
+
+func (s *Store) upsertRepo(ctx context.Context, repo Repo, force bool) error {
 	fullName := repo.Owner + "/" + repo.Name
+	if strings.TrimSpace(repo.CheckoutPath) != "" && strings.TrimSpace(repo.PrimaryCheckoutPath) == "" {
+		if primary, err := (gitutil.Client{Dir: repo.CheckoutPath}).PrimaryWorktree(ctx); err == nil {
+			repo.PrimaryCheckoutPath = primary
+		}
+	}
+	if !force && strings.TrimSpace(repo.CheckoutPath) != "" {
+		if existing, err := s.GetRepo(ctx, fullName); err == nil && shouldProtectRepoCheckout(existing, repo.CheckoutPath) {
+			if linked, linkErr := (gitutil.Client{Dir: repo.CheckoutPath}).IsLinkedWorktree(ctx); linkErr == nil && linked {
+				log.Printf("WARNING: keeping registered checkout for %s at %s; refusing linked worktree %s (use gitmoot repo add --force to override)", fullName, existing.CheckoutPath, repo.CheckoutPath)
+				repo.CheckoutPath = ""
+				repo.PrimaryCheckoutPath = ""
+			}
+		}
+	}
 	updatePollInterval := repo.PollInterval
 	insertPollInterval := repo.PollInterval
 	if strings.TrimSpace(insertPollInterval) == "" {
 		insertPollInterval = "30s"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO repos(owner, name, full_name, default_branch, remote_url, checkout_path, enabled, poll_interval, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO repos(owner, name, full_name, default_branch, remote_url, checkout_path, primary_checkout_path, enabled, poll_interval, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(full_name) DO UPDATE SET
 			default_branch = CASE WHEN excluded.default_branch <> '' THEN excluded.default_branch ELSE repos.default_branch END,
 			remote_url = CASE WHEN excluded.remote_url <> '' THEN excluded.remote_url ELSE repos.remote_url END,
 			checkout_path = CASE WHEN excluded.checkout_path <> '' THEN excluded.checkout_path ELSE repos.checkout_path END,
+			primary_checkout_path = CASE WHEN excluded.primary_checkout_path <> '' THEN excluded.primary_checkout_path ELSE repos.primary_checkout_path END,
 			poll_interval = CASE WHEN ? <> '' THEN excluded.poll_interval ELSE repos.poll_interval END,
 			updated_at = CURRENT_TIMESTAMP`,
-		repo.Owner, repo.Name, fullName, repo.DefaultBranch, repo.RemoteURL, repo.CheckoutPath, insertPollInterval, updatePollInterval)
+		repo.Owner, repo.Name, fullName, repo.DefaultBranch, repo.RemoteURL, repo.CheckoutPath, repo.PrimaryCheckoutPath, insertPollInterval, updatePollInterval)
 	return err
 }
 
+func shouldProtectRepoCheckout(existing Repo, incoming string) bool {
+	if sameRepoCheckoutPath(existing.CheckoutPath, incoming) {
+		return false
+	}
+	if info, err := os.Stat(strings.TrimSpace(existing.CheckoutPath)); err == nil && info.IsDir() {
+		return true
+	}
+	return strings.TrimSpace(existing.PrimaryCheckoutPath) != "" && sameRepoCheckoutPath(existing.CheckoutPath, existing.PrimaryCheckoutPath)
+}
+
+func sameRepoCheckoutPath(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
 func (s *Store) GetRepo(ctx context.Context, fullName string) (Repo, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT owner, name, default_branch, remote_url, checkout_path, enabled, poll_interval, last_poll_at, last_error
+	row := s.db.QueryRowContext(ctx, `SELECT owner, name, default_branch, remote_url, checkout_path, primary_checkout_path, enabled, poll_interval, last_poll_at, last_error
 		FROM repos WHERE full_name = ?`, fullName)
 	return scanRepo(row)
 }
 
 func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT owner, name, default_branch, remote_url, checkout_path, enabled, poll_interval, last_poll_at, last_error
+	rows, err := s.db.QueryContext(ctx, `SELECT owner, name, default_branch, remote_url, checkout_path, primary_checkout_path, enabled, poll_interval, last_poll_at, last_error
 		FROM repos ORDER BY full_name`)
 	if err != nil {
 		return nil, err
@@ -775,6 +840,24 @@ func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
 		repos = append(repos, repo)
 	}
 	return repos, rows.Err()
+}
+
+// HealRepoCheckout atomically replaces a repo checkout only when it still has
+// the path the caller observed. The compare guard prevents a concurrent,
+// deliberate re-registration from being overwritten by a stale healer.
+func (s *Store) HealRepoCheckout(ctx context.Context, fullName, expectedCheckoutPath, checkoutPath, primaryCheckoutPath string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE repos
+		SET checkout_path = ?, primary_checkout_path = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE full_name = ? AND checkout_path = ?`,
+		strings.TrimSpace(checkoutPath), strings.TrimSpace(primaryCheckoutPath), strings.TrimSpace(fullName), strings.TrimSpace(expectedCheckoutPath))
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
 }
 
 func (s *Store) SetRepoEnabled(ctx context.Context, fullName string, enabled bool) error {
@@ -812,7 +895,7 @@ func (s *Store) RemoveRepo(ctx context.Context, fullName string) (bool, error) {
 func scanRepo(row interface{ Scan(dest ...any) error }) (Repo, error) {
 	var repo Repo
 	var enabled int
-	if err := row.Scan(&repo.Owner, &repo.Name, &repo.DefaultBranch, &repo.RemoteURL, &repo.CheckoutPath, &enabled, &repo.PollInterval, &repo.LastPollAt, &repo.LastError); err != nil {
+	if err := row.Scan(&repo.Owner, &repo.Name, &repo.DefaultBranch, &repo.RemoteURL, &repo.CheckoutPath, &repo.PrimaryCheckoutPath, &enabled, &repo.PollInterval, &repo.LastPollAt, &repo.LastError); err != nil {
 		return Repo{}, err
 	}
 	repo.Enabled = enabled != 0
@@ -836,8 +919,8 @@ func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, preset_delivery, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, role, runtime, runtime_ref, repo_scope, template_id, model, effort, capabilities_json, autonomy_policy, health_status, preset_delivery, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			ON CONFLICT(name) DO UPDATE SET
 				role = excluded.role,
 				runtime = excluded.runtime,
@@ -845,12 +928,13 @@ func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
 				repo_scope = excluded.repo_scope,
 				template_id = excluded.template_id,
 				model = excluded.model,
+				effort = excluded.effort,
 				capabilities_json = excluded.capabilities_json,
 				autonomy_policy = excluded.autonomy_policy,
 				health_status = excluded.health_status,
 				preset_delivery = excluded.preset_delivery,
 				updated_at = CURRENT_TIMESTAMP`,
-		agent.Name, agent.Role, agent.Runtime, agent.RuntimeRef, agent.RepoScope, agent.TemplateID, agent.Model, string(capabilities), agent.AutonomyPolicy, agent.HealthStatus, normalizePresetDeliveryStored(agent.PresetDelivery)); err != nil {
+		agent.Name, agent.Role, agent.Runtime, agent.RuntimeRef, agent.RepoScope, agent.TemplateID, agent.Model, agent.Effort, string(capabilities), agent.AutonomyPolicy, agent.HealthStatus, normalizePresetDeliveryStored(agent.PresetDelivery)); err != nil {
 		return err
 	}
 	if strings.TrimSpace(agent.RepoScope) != "" {
@@ -872,7 +956,7 @@ func (s *Store) UpdateAgentRuntime(ctx context.Context, name, runtime string) er
 	if runtime != "codex" && runtime != "claude" && runtime != "kimi" {
 		return fmt.Errorf("unknown runtime %q (want codex, claude, or kimi)", runtime)
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, preset_delivery
+	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, effort, capabilities_json, autonomy_policy, health_status, preset_delivery
 		FROM agents WHERE name = ?`, name)
 	agent, err := scanAgent(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -909,7 +993,7 @@ func (s *Store) UpdateAgentRuntimeRef(ctx context.Context, name, ref string) err
 }
 
 func (s *Store) GetAgent(ctx context.Context, name string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, preset_delivery
+	row := s.db.QueryRowContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, effort, capabilities_json, autonomy_policy, health_status, preset_delivery
 		FROM agents WHERE name = ?`, name)
 	agent, err := scanAgent(row)
 	if err == nil {
@@ -934,6 +1018,7 @@ func (s *Store) GetAgent(ctx context.Context, name string) (Agent, error) {
 		RepoScope:      instance.RepoFullName,
 		TemplateID:     instance.TemplateID,
 		Model:          instance.Model,
+		Effort:         instance.Effort,
 		Capabilities:   instance.Capabilities,
 		AutonomyPolicy: policy,
 		HealthStatus:   instance.State,
@@ -944,7 +1029,7 @@ func (s *Store) GetAgent(ctx context.Context, name string) (Agent, error) {
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, capabilities_json, autonomy_policy, health_status, preset_delivery
+	rows, err := s.db.QueryContext(ctx, `SELECT name, role, runtime, runtime_ref, repo_scope, template_id, model, effort, capabilities_json, autonomy_policy, health_status, preset_delivery
 		FROM agents ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -1894,8 +1979,8 @@ func (s *Store) UpsertAgentInstance(ctx context.Context, instance AgentInstance)
 	if strings.TrimSpace(instance.AutonomyPolicy) == "" {
 		instance.AutonomyPolicy = "auto"
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO agent_instances(name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO agent_instances(name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, effort, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			type = excluded.type,
 			runtime = excluded.runtime,
@@ -1904,17 +1989,18 @@ func (s *Store) UpsertAgentInstance(ctx context.Context, instance AgentInstance)
 			role = excluded.role,
 			template_id = excluded.template_id,
 			model = excluded.model,
+			effort = excluded.effort,
 			capabilities_json = excluded.capabilities_json,
 			autonomy_policy = excluded.autonomy_policy,
 			state = excluded.state,
 			last_used_at = excluded.last_used_at,
 			expires_at = excluded.expires_at`,
-		instance.Name, instance.Type, instance.Runtime, instance.RuntimeRef, instance.RepoFullName, instance.Role, instance.TemplateID, instance.Model, string(capabilities), instance.AutonomyPolicy, instance.State, instance.CreatedAt, instance.LastUsedAt, instance.ExpiresAt)
+		instance.Name, instance.Type, instance.Runtime, instance.RuntimeRef, instance.RepoFullName, instance.Role, instance.TemplateID, instance.Model, instance.Effort, string(capabilities), instance.AutonomyPolicy, instance.State, instance.CreatedAt, instance.LastUsedAt, instance.ExpiresAt)
 	return err
 }
 
 func (s *Store) GetAgentInstance(ctx context.Context, name string) (AgentInstance, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at
+	row := s.db.QueryRowContext(ctx, `SELECT name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, effort, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at
 		FROM agent_instances WHERE name = ?`, name)
 	return scanAgentInstance(row)
 }
@@ -1923,7 +2009,7 @@ func (s *Store) FindReusableAgentInstance(ctx context.Context, typ string, repo 
 	if strings.TrimSpace(autonomyPolicy) == "" {
 		autonomyPolicy = "auto"
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at
+	row := s.db.QueryRowContext(ctx, `SELECT name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, effort, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at
 		FROM agent_instances
 		WHERE type = ? AND repo_full_name = ? AND autonomy_policy = ? AND expires_at > ?
 			AND state = 'idle'
@@ -1966,7 +2052,7 @@ func (s *Store) FindActiveAgentInstance(ctx context.Context, typ string, repo st
 	if strings.TrimSpace(autonomyPolicy) == "" {
 		autonomyPolicy = "auto"
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at
+	row := s.db.QueryRowContext(ctx, `SELECT name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, effort, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at
 		FROM agent_instances
 		WHERE type = ? AND repo_full_name = ? AND autonomy_policy = ?
 			AND (
@@ -1993,7 +2079,7 @@ func (s *Store) FindActiveAgentInstance(ctx context.Context, typ string, repo st
 }
 
 func (s *Store) ListAgentInstances(ctx context.Context) ([]AgentInstance, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at
+	rows, err := s.db.QueryContext(ctx, `SELECT name, type, runtime, runtime_ref, repo_full_name, role, template_id, model, effort, capabilities_json, autonomy_policy, state, created_at, last_used_at, expires_at
 		FROM agent_instances ORDER BY type, repo_full_name, name`)
 	if err != nil {
 		return nil, err
@@ -2099,7 +2185,7 @@ func (s *Store) ReconcileOrphanedRunningInstances(ctx context.Context, now time.
 func scanAgentInstance(row interface{ Scan(dest ...any) error }) (AgentInstance, error) {
 	var instance AgentInstance
 	var capabilities string
-	if err := row.Scan(&instance.Name, &instance.Type, &instance.Runtime, &instance.RuntimeRef, &instance.RepoFullName, &instance.Role, &instance.TemplateID, &instance.Model, &capabilities, &instance.AutonomyPolicy, &instance.State, &instance.CreatedAt, &instance.LastUsedAt, &instance.ExpiresAt); err != nil {
+	if err := row.Scan(&instance.Name, &instance.Type, &instance.Runtime, &instance.RuntimeRef, &instance.RepoFullName, &instance.Role, &instance.TemplateID, &instance.Model, &instance.Effort, &capabilities, &instance.AutonomyPolicy, &instance.State, &instance.CreatedAt, &instance.LastUsedAt, &instance.ExpiresAt); err != nil {
 		return AgentInstance{}, err
 	}
 	if strings.TrimSpace(instance.AutonomyPolicy) == "" {
@@ -3079,6 +3165,123 @@ func (s *Store) RecordRuntimeSessionUsageDelta(ctx context.Context, sessionKey s
 func (s *Store) AddJobEvent(ctx context.Context, event JobEvent) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO job_events(job_id, kind, message) VALUES (?, ?, ?)`, event.JobID, event.Kind, event.Message)
 	return err
+}
+
+// AddJobEventIfAbsent atomically inserts one event for a job/kind pair. The
+// existence check and insert share one SQLite statement, so concurrent callers
+// cannot both pass a check-then-insert window.
+func (s *Store) AddJobEventIfAbsent(ctx context.Context, event JobEvent) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO job_events(job_id, kind, message)
+		SELECT ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM job_events WHERE job_id = ? AND kind = ?
+		)`, event.JobID, event.Kind, event.Message, event.JobID, event.Kind)
+	return err
+}
+
+// ClaimJobEvent atomically inserts an exact job/kind/message event and reports
+// whether this caller won. The NOT EXISTS guard and insert share one SQLite
+// statement, so concurrent pipeline scans cannot both claim the same external
+// write identified by the event content.
+func (s *Store) ClaimJobEvent(ctx context.Context, event JobEvent) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `INSERT INTO job_events(job_id, kind, message)
+		SELECT ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM job_events WHERE job_id = ? AND kind = ? AND message = ?
+		)`, event.JobID, event.Kind, event.Message, event.JobID, event.Kind, event.Message)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// UpsertLatestJobEvent keeps one mutable latest-only row for a job/event kind.
+// The write is guarded by jobs.state='running' in the same transaction, so a
+// delayed best-effort progress tick that races terminalization becomes a no-op.
+// This intentionally touches only job_events: the stuck-running reaper keys on
+// the jobs row (including runner_boot_id), so progress cannot refresh or mask
+// job liveness and cannot perturb pipeline_run_stages advancement invariants.
+func (s *Store) UpsertLatestJobEvent(ctx context.Context, event JobEvent) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `UPDATE job_events
+		SET message = ?, created_at = CURRENT_TIMESTAMP
+		WHERE job_id = ? AND kind = ?
+		  AND EXISTS (SELECT 1 FROM jobs WHERE id = ? AND state = 'running')`,
+		event.Message, event.JobID, event.Kind, event.JobID)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO job_events(job_id, kind, message)
+			SELECT ?, ?, ? WHERE EXISTS (
+				SELECT 1 FROM jobs WHERE id = ? AND state = 'running'
+			)`, event.JobID, event.Kind, event.Message, event.JobID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// GetLatestJobEventByKind returns the newest event of kind for jobID. The
+// idx_job_events_kind_job_id covering index serves the lookup.
+func (s *Store) GetLatestJobEventByKind(ctx context.Context, jobID, kind string) (JobEvent, bool, error) {
+	var event JobEvent
+	err := s.db.QueryRowContext(ctx, `SELECT job_id, kind, message, created_at
+		FROM job_events WHERE kind = ? AND job_id = ? ORDER BY id DESC LIMIT 1`,
+		kind, jobID).Scan(&event.JobID, &event.Kind, &event.Message, &event.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return JobEvent{}, false, nil
+	}
+	return event, err == nil, err
+}
+
+// GetLatestJobEventsByKind returns the newest event of kind for each requested
+// job in one indexed query. Empty input returns an initialized empty map.
+func (s *Store) GetLatestJobEventsByKind(ctx context.Context, jobIDs []string, kind string) (map[string]JobEvent, error) {
+	out := map[string]JobEvent{}
+	if len(jobIDs) == 0 {
+		return out, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(jobIDs)), ",")
+	args := make([]any, 0, 2*(len(jobIDs)+1))
+	args = append(args, kind)
+	for _, jobID := range jobIDs {
+		args = append(args, jobID)
+	}
+	args = append(args, kind)
+	for _, jobID := range jobIDs {
+		args = append(args, jobID)
+	}
+	query := `SELECT job_id, kind, message, created_at FROM job_events
+		WHERE kind = ? AND job_id IN (` + placeholders + `)
+		  AND id IN (SELECT MAX(id) FROM job_events
+			WHERE kind = ? AND job_id IN (` + placeholders + `) GROUP BY job_id)`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var event JobEvent
+		if err := rows.Scan(&event.JobID, &event.Kind, &event.Message, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		out[event.JobID] = event
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListJobEvents(ctx context.Context, jobID string) ([]JobEvent, error) {
@@ -6430,7 +6633,7 @@ type agentScanner interface {
 func scanAgent(scanner agentScanner) (Agent, error) {
 	var agent Agent
 	var capabilities string
-	if err := scanner.Scan(&agent.Name, &agent.Role, &agent.Runtime, &agent.RuntimeRef, &agent.RepoScope, &agent.TemplateID, &agent.Model, &capabilities, &agent.AutonomyPolicy, &agent.HealthStatus, &agent.PresetDelivery); err != nil {
+	if err := scanner.Scan(&agent.Name, &agent.Role, &agent.Runtime, &agent.RuntimeRef, &agent.RepoScope, &agent.TemplateID, &agent.Model, &agent.Effort, &capabilities, &agent.AutonomyPolicy, &agent.HealthStatus, &agent.PresetDelivery); err != nil {
 		return Agent{}, err
 	}
 	if err := json.Unmarshal([]byte(capabilities), &agent.Capabilities); err != nil {
@@ -8286,5 +8489,71 @@ CREATE TABLE memory_cluster_members (
 	cluster_id INTEGER NOT NULL
 );
 CREATE INDEX idx_memory_cluster_members_cluster ON memory_cluster_members(cluster_id);
+	`,
+	// #784 auto cross-link confirmed memories. Links are stored in a dedicated side
+	// table rather than mutating owner-authored fact content: the confirmed memory
+	// row remains the source of truth for the fact, while this table records a
+	// deterministic, capped similarity edge from one active fact to another. Pure
+	// additive append (CREATE TABLE/INDEX only): the table stays empty until a
+	// memory is confirmed or `gitmoot memory links backfill` runs, so every
+	// existing read path is byte-identical unless it explicitly opts into links.
+	`
+CREATE TABLE memory_links (
+	src_id INTEGER NOT NULL,
+	dst_id INTEGER NOT NULL,
+	score REAL NOT NULL,
+	origin TEXT NOT NULL DEFAULT 'auto',
+	created_at TEXT NOT NULL,
+	UNIQUE(src_id, dst_id)
+);
+CREATE INDEX idx_memory_links_dst ON memory_links(dst_id);
+	`,
+	// #777 shared memory pool author preservation. Moving a confirmed fact into
+	// the reserved shared pool changes owner_kind/owner_ref, but the dashboard and
+	// vault still need to know who wrote the fact. author_ref is empty for legacy
+	// and private rows, where author == owner_ref, and is populated only when the
+	// author differs from the current pool owner. Observations get the same column
+	// so `memory ingest --shared` can stage shared observations while preserving the
+	// authoring agent. ALTER ADD COLUMN only; existing rows read byte-identically.
+	`
+ALTER TABLE confirmed_memories ADD COLUMN author_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_observations ADD COLUMN author_ref TEXT NOT NULL DEFAULT '';
+	`,
+	// #779 automatic memory-cluster hierarchy. parent_id=0 marks a top-level
+	// cluster; child rows point to their top-level parent. Existing flat clusters
+	// are therefore top-level after migration without a data rewrite. This is a
+	// byte-appended migration only: no earlier migration is changed or renumbered.
+	`
+ALTER TABLE memory_clusters ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0;
+	`,
+	// #804 stable ingest keys. Supersede-preserving auto-confirm updates and the
+	// groom rekey / cross-pool actions must be able to keep MULTIPLE rows per
+	// (owner, repo, key): the one live row plus archived superseded editions, and
+	// a freshly rekeyed or promoted active row alongside retired same-key
+	// siblings. The original unique indexes covered EVERY row, so an archival
+	// insert or a promote-after-retire would abort on the constraint. Recreate
+	// them as partial ACTIVE-ROW indexes: uniqueness still holds where it matters
+	// (at most one injectable row per owner/repo/key), while superseded and
+	// retired rows fall outside the constraint. UpsertConfirmedMemory's key
+	// lookup orders active rows first (then newest) so key-matched upserts and
+	// explicit resurrection stay deterministic when several inactive rows share a
+	// key. Byte-appended migration only; no earlier migration changes.
+	`
+DROP INDEX idx_confirmed_repo_key;
+DROP INDEX idx_confirmed_general_key;
+CREATE UNIQUE INDEX idx_confirmed_repo_key ON confirmed_memories(owner_kind, owner_ref, owner_version, repo, key) WHERE repo IS NOT NULL AND superseded_by IS NULL AND retired_at = '';
+CREATE UNIQUE INDEX idx_confirmed_general_key ON confirmed_memories(owner_kind, owner_ref, owner_version, key) WHERE repo IS NULL AND superseded_by IS NULL AND retired_at = '';
+	`,
+	// #797 per-agent reasoning effort. Mirrors the additive model columns: empty
+	// defaults preserve every existing agent and managed instance unchanged.
+	// Byte-appended migration only; no earlier migration changes.
+	`
+ALTER TABLE agents ADD COLUMN effort TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_instances ADD COLUMN effort TEXT NOT NULL DEFAULT '';
+	`,
+	// #831 durable repo checkout recovery. Existing rows lazily backfill this on
+	// their next healthy registration, doctor pass, or dispatch touch.
+	`
+ALTER TABLE repos ADD COLUMN primary_checkout_path TEXT NOT NULL DEFAULT '';
 	`,
 }

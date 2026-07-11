@@ -46,6 +46,9 @@ type MemoryController struct {
 	// producers (#737 P4.1). Default false: with it off, record() runs exactly the
 	// Phase-1 write path and the terminal is byte-identical (no distilled rows).
 	DistillAtTerminal bool
+	// DistillSuccesses enables deterministic success-side distill producers (#781).
+	// Default false: no success-side observation rows are staged.
+	DistillSuccesses bool
 	// DistillMaxPerJob is the hard per-job cap on distill writes; <= 0 falls back
 	// to config.DefaultMemoryDistillMaxPerJob so the producers are always bounded.
 	DistillMaxPerJob int
@@ -78,6 +81,19 @@ func (c *MemoryController) distillEnabledFor(agentName string) bool {
 	return c.enabledFor(agentName)
 }
 
+// distillSuccessEnabledFor mirrors distillEnabledFor for the success-side
+// producers (#781). It is separately gated so an operator can keep failure
+// distill enabled while success producers remain off.
+func (c *MemoryController) distillSuccessEnabledFor(agentName string) bool {
+	if c == nil || c.Store == nil || !c.DistillSuccesses {
+		return false
+	}
+	if c.DistillAllJobs {
+		return true
+	}
+	return c.enabledFor(agentName)
+}
+
 // ownerForJob derives the structured memory owner for a job's executor. Phase 1
 // scopes memory to REGISTERED agents (owner_kind=agent); the role-pool owner
 // (owner_kind=role, template identity + version) is structural-only until the
@@ -85,6 +101,14 @@ func (c *MemoryController) distillEnabledFor(agentName string) bool {
 // simply never enrolled.
 func ownerForJob(agent runtime.Agent, _ JobPayload) db.MemoryOwner {
 	return db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: agent.Name}
+}
+
+// BuildMemoryMatchQuery returns the sanitized FTS5 MATCH query used by the
+// memory read path. Callers outside workflow use this instead of reaching for
+// memory.SanitizeFTSQuery directly so recall surfaces and prompt injection stay
+// byte-for-byte aligned.
+func BuildMemoryMatchQuery(instructions string) string {
+	return memory.SanitizeFTSQuery(instructions)
 }
 
 // injectBlock is the READ path (job-prompt assembly). It builds a SANITIZED FTS
@@ -98,11 +122,31 @@ func (c *MemoryController) injectBlock(ctx context.Context, agent runtime.Agent,
 		return ""
 	}
 	entries := c.retrieve(ctx, ownerForJob(agent, payload), payload.Repo, payload.Instructions, c.MaxEntries)
+	// The mid-job recall affordance renders for EVERY enrolled agent, hits or
+	// not: agents need on-demand recall most when the startup push MISSED
+	// (panel-adjudicated #780 finding). It sits OUTSIDE the learnings block so
+	// the block stays reference-only data.
+	hint := memoryRecallHint(agent.Name)
 	if len(entries) == 0 {
-		return ""
+		return hint
 	}
 	block, _ := memory.RenderBlock(entries, c.TokenBudget)
-	return block
+	if block == "" {
+		return hint
+	}
+	if !strings.HasSuffix(block, "\n") {
+		block += "\n"
+	}
+	return block + "\n" + hint
+}
+
+// memoryRecallHint is the one-line, deterministic mid-job recall affordance.
+func memoryRecallHint(agentName string) string {
+	name := strings.TrimSpace(agentName)
+	if name == "" {
+		name = "<agent-name>"
+	}
+	return fmt.Sprintf("Project memory is searchable mid-job: run `gitmoot memory recall \"<query>\" --agent %s`.", name)
 }
 
 // retrieve runs the tiered, confirmed-only, sanitized-FTS retrieval and returns
@@ -114,7 +158,7 @@ func (c *MemoryController) retrieve(ctx context.Context, owner db.MemoryOwner, r
 	if c == nil || c.Store == nil {
 		return nil
 	}
-	query := memory.SanitizeFTSQuery(instructions)
+	query := BuildMemoryMatchQuery(instructions)
 	if query == "" {
 		return nil
 	}
@@ -125,14 +169,37 @@ func (c *MemoryController) retrieve(ctx context.Context, owner db.MemoryOwner, r
 	if err != nil || len(rows) == 0 {
 		return nil
 	}
-	entries := make([]memory.Entry, 0, len(rows))
+	entries := make([]memory.Entry, 0, limit)
+	seen := make(map[int64]struct{}, len(rows))
+	srcIDs := make([]int64, 0, len(rows))
 	for _, r := range rows {
-		entries = append(entries, memory.Entry{
-			Scope:     r.Scope,
-			Key:       r.Key,
-			Content:   r.Content,
-			UpdatedAt: r.UpdatedAt,
-		})
+		entries = append(entries, memoryEntryFromConfirmed(r, false))
+		seen[r.ID] = struct{}{}
+		srcIDs = append(srcIDs, r.ID)
+	}
+	if len(entries) < limit {
+		// Linked expansion fills spare capacity only, and is hard-capped at 3
+		// entries so bm25-derived neighbors can never dominate a sparse direct
+		// result (panel-adjudicated #780 finding).
+		maxExpand := limit - len(entries)
+		if maxExpand > 3 {
+			maxExpand = 3
+		}
+		added := 0
+		linked, err := c.Store.ListMemoryLinksForSourcesVisibleToOwner(ctx, owner, repo, srcIDs)
+		if err == nil {
+			for _, l := range linked {
+				if added >= maxExpand {
+					break
+				}
+				if _, dup := seen[l.Memory.ID]; dup {
+					continue
+				}
+				seen[l.Memory.ID] = struct{}{}
+				entries = append(entries, memoryEntryFromConfirmed(l.Memory, true))
+				added++
+			}
+		}
 	}
 	return entries
 }
@@ -153,8 +220,20 @@ func (c *MemoryController) PreviewEntries(ctx context.Context, agentName, repo, 
 // ungated, for the harness), returning the block text, the entries injected, and
 // the block's estimated token cost.
 func (c *MemoryController) PreviewBlock(ctx context.Context, agentName, repo, instructions string) (block string, entries int, tokens int) {
+	// The harness measures the learnings BLOCK alone; the mid-job recall hint is
+	// a constant-cost prompt line, not part of the measured injection delta.
 	rendered, n := memory.RenderBlock(c.PreviewEntries(ctx, agentName, repo, instructions, 0), c.TokenBudget)
 	return rendered, n, memory.EstimateTokens(rendered)
+}
+
+func memoryEntryFromConfirmed(r db.ConfirmedMemory, linked bool) memory.Entry {
+	return memory.Entry{
+		Scope:     r.Scope,
+		Key:       r.Key,
+		Content:   r.Content,
+		UpdatedAt: r.UpdatedAt,
+		Linked:    linked,
+	}
 }
 
 // record is the WRITE path, run at job terminal. The ENROLLED-ONLY Phase-1 body
@@ -180,6 +259,9 @@ func (c *MemoryController) record(ctx context.Context, jobID string, agent runti
 	// un-enrolled agents when DistillAllJobs is set. Fail-safe: any error inside is
 	// swallowed and can never affect the job outcome.
 	c.distillAtTerminal(ctx, jobID, agent, action, payload, result)
+	// (d) #781 success distill — also PENDING-only and low-trust. It is separately
+	// gated by [memory].distill_successes so the default terminal path stays inert.
+	c.distillRecoveredFailuresAtSuccess(ctx, jobID, agent, payload, result)
 }
 
 // recordEnrolled is the Phase-1 ENROLLED-ONLY write path: shadow-log the agent's

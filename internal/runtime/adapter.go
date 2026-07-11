@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jerryfane/gitmoot/internal/subprocess"
@@ -44,6 +46,7 @@ type Agent struct {
 	AutonomyPolicy string
 	HealthStatus   string
 	Model          string
+	Effort         string
 	// PresetDelivery is the agent's prompt preset delivery mode (#33): full
 	// (default), referenced, or auto. Carried in-memory from the stored agents row
 	// so the delivery seam can decide whether to inline the whole preset or send a
@@ -81,6 +84,12 @@ type Agent struct {
 	// marshaled to the wire. Empty means "fall back to RepoScope" (unchanged
 	// legacy behavior for callers that never set it).
 	WorkingDir string
+	// WritablePaths are additive runtime workspace grants for an action: produce
+	// pipeline stage. Codex enforces them itself; Claude/Kimi receive matching
+	// --add-dir hints while Gitmoot's Landlock wrapper provides hard enforcement.
+	WritablePaths []string
+	// ProduceNetwork opts that produce delivery into workspace-write network access.
+	ProduceNetwork bool
 }
 
 type Job struct {
@@ -91,6 +100,7 @@ type Job struct {
 	Repository  string
 	PullRequest int
 	Model       string
+	Effort      string
 	// RuntimeDefaultModel is the runtime's configured registry default_model
 	// (#652), threaded in by the dispatch layer from the HOME-AWARE resolved runtime
 	// registry (built-in defaults overlaid with [runtimes.<name>] config). It is the
@@ -100,6 +110,12 @@ type Job struct {
 	// sets it — means "no registry default", so delivery defers to the runtime CLI's
 	// own default exactly as before #652 (byte-identical).
 	RuntimeDefaultModel string
+	// RuntimeDefaultEffort is the runtime's configured registry default_effort,
+	// threaded in by the dispatch layer from the HOME-AWARE resolved runtime
+	// registry. It is the FINAL effort fallback: effectiveEffort uses it ONLY when
+	// neither the job (Effort) nor the agent (Agent.Effort) pins an effort, so an
+	// agent/job --effort always wins. Empty means no -c argument is emitted.
+	RuntimeDefaultEffort string
 }
 
 type Result struct {
@@ -148,6 +164,83 @@ type Result struct {
 	// self-heal path (a genuinely dead pinned session, replaced permanently) leaves
 	// this false so its re-pin IS persisted.
 	SessionEphemeral bool
+	// SessionDiag carries process-level diagnostics for the runtime CLI run
+	// backing this delivery (#806). Adapters populate it best-effort on every
+	// Deliver return that actually ran a CLI process — success and failure alike —
+	// so the engine can persist bounded, redacted crash context when a job ends
+	// WITHOUT producing a gitmoot_result envelope. nil means no CLI process ran
+	// (e.g. a validation error), so there is nothing to diagnose.
+	SessionDiag *SessionDiag
+}
+
+// SessionDiag is the raw process-level evidence of how a runtime CLI run ended
+// (#806). It is UNREDACTED and UNBOUNDED here — the workflow engine redacts and
+// bounds the stderr before anything is persisted or surfaced.
+type SessionDiag struct {
+	// Stderr is the CLI process's captured stderr, kept separate from Result.Raw
+	// (which merges stdout+stderr on failure paths).
+	Stderr string
+	// StdoutSeen reports whether the CLI produced any stdout before it ended —
+	// the engine uses it to distinguish a crash before output (launched) from a
+	// crash mid-output (streaming).
+	StdoutSeen bool
+	// ExitCode is the process exit status when known; nil when the process was
+	// terminated by a signal or the run error was not a process exit at all
+	// (spawn failure, context cancellation).
+	ExitCode *int
+	// Signal is the signal name when the process was terminated by a signal.
+	Signal string
+	// SessionID is the concrete runtime session id in play when one was
+	// created/known; empty for runtimes without session ids (shell, kimi's
+	// unreported per-job sessions) and for non-concrete refs ("last", fresh:*).
+	SessionID string
+}
+
+// newSessionDiag builds the SessionDiag for one runner invocation: the captured
+// stderr, whether any stdout was produced, and the exit code/signal decoded from
+// the runner error (nil error means the process exited 0).
+func newSessionDiag(res subprocess.Result, runErr error, sessionID string) *SessionDiag {
+	code, signal := decodeProcessExit(runErr)
+	return &SessionDiag{
+		Stderr:     res.Stderr,
+		StdoutSeen: strings.TrimSpace(res.Stdout) != "",
+		ExitCode:   code,
+		Signal:     signal,
+		SessionID:  strings.TrimSpace(sessionID),
+	}
+}
+
+// decodeProcessExit extracts how a runner subprocess ended from its run error:
+// (code, "") for a plain exit — a nil error means exit 0 — (nil, signal) when
+// the process was terminated by a signal, and (nil, "") when the error is not a
+// process exit at all (spawn failure, context cancellation).
+func decodeProcessExit(err error) (*int, string) {
+	if err == nil {
+		code := 0
+		return &code, ""
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return nil, ""
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return nil, status.Signal().String()
+	}
+	if code := exitErr.ExitCode(); code >= 0 {
+		return &code, ""
+	}
+	return nil, ""
+}
+
+// concreteSessionRef returns the agent's runtime ref when it names a concrete
+// resumable session, and "" for the non-concrete forms ("last", fresh:*, empty)
+// that identify no specific session.
+func concreteSessionRef(agent Agent) string {
+	ref := strings.TrimSpace(agent.RuntimeRef)
+	if ref == "" || ref == LastRef || IsFreshRef(ref) {
+		return ""
+	}
+	return ref
 }
 
 type StartRequest struct {
@@ -385,9 +478,12 @@ func (a CodexAdapter) Start(ctx context.Context, request StartRequest) (StartRes
 	if err := validateStartRequest(request.Agent, a.Name(), request.Prompt); err != nil {
 		return StartResult{}, err
 	}
-	args := append([]string{"exec"}, codexSandboxArgs(request.Agent)...)
+	args := append([]string{"exec"}, codexSandboxArgs(request.Agent, a.Dir)...)
 	if request.Agent.Model != "" {
 		args = append(args, "--model", request.Agent.Model)
+	}
+	if request.Agent.Effort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+request.Agent.Effort)
 	}
 	args = append(args, "--json", "--", request.Prompt)
 	result, err := a.runner().Run(ctx, a.Dir, "codex", args...)
@@ -422,6 +518,7 @@ func (a CodexAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 		return Result{}, err
 	}
 	model := effectiveModel(agent, job)
+	effort := effectiveEffort(agent, job)
 	// A fresh ref (per-job --runtime override, #531) starts a brand-new exec
 	// session — never `resume` — so an overridden job cannot read or pollute any
 	// stored session's state. Every other ref resumes an existing session, which
@@ -431,9 +528,16 @@ func (a CodexAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 			return Result{}, err
 		}
 	}
-	result, err := a.runCodex(ctx, agent, job.Prompt, model)
+	result, err := a.runCodex(ctx, agent, job.Prompt, model, effort)
+	// The session id in play: the pinned concrete thread on a resume, or the
+	// thread id codex printed for a fresh/`last` run (best-effort — the stream
+	// may not carry one when the run died early).
+	sessionID := concreteSessionRef(agent)
+	if sessionID == "" {
+		sessionID = parseCodexThreadID(result.Stdout)
+	}
 	if err != nil {
-		return Result{Raw: result.Stdout + result.Stderr}, codexCommandError(result, err)
+		return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, sessionID)}, codexCommandError(result, err)
 	}
 	// Usage is attributable to this job when the session belongs to it alone:
 	// a fresh ref (brand-new session, no resume) or a single-use session
@@ -443,10 +547,14 @@ func (a CodexAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 	if IsFreshRef(agent.RuntimeRef) {
 		parsed.RefreshedRuntimeRef = parseCodexThreadID(result.Stdout)
 	}
+	parsed.SessionDiag = newSessionDiag(result, nil, sessionID)
 	return parsed, nil
 }
 
 // codexDeliverArgs builds the `codex exec` argument vector for a Deliver call.
+// dir is the adapter's working directory (the job checkout); when it is a linked
+// git worktree and the sandbox is workspace-write, codexSandboxArgs grants the
+// worktree's resolved gitdir as an extra writable root (#805).
 // jsonOutput adds --json so codex streams JSONL events (thread/turn/item) on
 // stdout, which is what lets a delivery capture token usage (#658). --json is an
 // `exec` option that codex accepts before the `resume` subcommand, which is where
@@ -460,8 +568,8 @@ func (a CodexAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 // `codex exec` reads the prompt from stdin when the positional is `-` or omitted
 // ("instructions are read from stdin"). Routing oversize prompts through stdin is
 // deferred to a follow-up; #723 fixes kimi, which offers no stdin/file channel.
-func codexDeliverArgs(agent Agent, prompt, model string, jsonOutput bool) []string {
-	args := append([]string{"exec"}, codexSandboxArgs(agent)...)
+func codexDeliverArgs(agent Agent, dir, prompt, model string, effort string, jsonOutput bool) []string {
+	args := append([]string{"exec"}, codexSandboxArgs(agent, dir)...)
 	if jsonOutput {
 		args = append(args, "--json")
 	}
@@ -469,11 +577,17 @@ func codexDeliverArgs(agent Agent, prompt, model string, jsonOutput bool) []stri
 		if model != "" {
 			args = append(args, "--model", model)
 		}
+		if effort != "" {
+			args = append(args, "-c", "model_reasoning_effort="+effort)
+		}
 		return append(args, "--", prompt)
 	}
 	args = append(args, "resume")
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+effort)
 	}
 	if agent.RuntimeRef == "last" {
 		args = append(args, "--last")
@@ -489,10 +603,10 @@ func codexDeliverArgs(agent Agent, prompt, model string, jsonOutput bool) []stri
 // pre-#658 semantics; codexDeliverResult then fails open on the non-JSONL stdout
 // and contributes 0 usage. Only the JSON re-run is retried — a genuine delivery
 // failure surfaces unchanged.
-func (a CodexAdapter) runCodex(ctx context.Context, agent Agent, prompt, model string) (subprocess.Result, error) {
-	result, err := a.runner().Run(ctx, a.Dir, "codex", codexDeliverArgs(agent, prompt, model, true)...)
+func (a CodexAdapter) runCodex(ctx context.Context, agent Agent, prompt, model string, effort string) (subprocess.Result, error) {
+	result, err := a.runner().Run(ctx, a.Dir, "codex", codexDeliverArgs(agent, a.Dir, prompt, model, effort, true)...)
 	if err != nil && isCodexJSONUnsupported(result) {
-		result, err = a.runner().Run(ctx, a.Dir, "codex", codexDeliverArgs(agent, prompt, model, false)...)
+		result, err = a.runner().Run(ctx, a.Dir, "codex", codexDeliverArgs(agent, a.Dir, prompt, model, effort, false)...)
 	}
 	return result, err
 }
@@ -558,7 +672,7 @@ func (a CodexAdapter) Health(ctx context.Context, agent Agent) error {
 }
 
 func (a CodexAdapter) Capabilities(context.Context) ([]string, error) {
-	return []string{"review", "implement", "ask"}, nil
+	return []string{"review", "implement", "ask", "produce"}, nil
 }
 
 func (a CodexAdapter) runner() subprocess.Runner {
@@ -611,14 +725,29 @@ func effectiveModel(agent Agent, job Job) string {
 	return strings.TrimSpace(job.RuntimeDefaultModel)
 }
 
-func codexSandboxArgs(agent Agent) []string {
+// effectiveEffort resolves which reasoning effort a delivered job runs with.
+// Precedence mirrors effectiveModel exactly: the per-job override wins, then the
+// agent default, then the runtime registry default_effort. An empty result means
+// no `-c model_reasoning_effort=...` argument is emitted.
+func effectiveEffort(agent Agent, job Job) string {
+	if job.Effort != "" {
+		return job.Effort
+	}
+	if agent.Effort != "" {
+		return agent.Effort
+	}
+	return strings.TrimSpace(job.RuntimeDefaultEffort)
+}
+
+func codexSandboxArgs(agent Agent, workdir string) []string {
 	// #732: a moot/chat seat must reach the daemon chat-relay unix socket, but a
 	// codex read-only sandbox blocks the connect() syscall itself (empirically
 	// probed on codex-cli 0.142.4 bubblewrap+seccomp). Dispatch the seat with
 	// workspace-write + network so it can connect; the gitmoot home is NOT in
 	// workspace-write's writable roots (workdir + /tmp + $TMPDIR), so the home stays
 	// read-only — the relay, not the seat, does the write. This is self-contained
-	// (does not depend on the operator's global ~/.codex/config.toml).
+	// (does not depend on the operator's global ~/.codex/config.toml). A seat's
+	// whole job is chat, not git, so it takes no #805 gitdir grant.
 	if agent.ChatSeat {
 		return []string{"--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"}
 	}
@@ -626,12 +755,86 @@ func codexSandboxArgs(agent Agent) []string {
 	case AutonomyPolicyReadOnly:
 		return []string{"--sandbox", "read-only"}
 	case AutonomyPolicyWorkspaceWrite:
-		return []string{"--sandbox", "workspace-write"}
+		args := []string{"--sandbox", "workspace-write"}
+		// #805: a linked-worktree checkout keeps its real git metadata under the
+		// main repo's .git/worktrees/<name>, OUTSIDE workspace-write's writable
+		// roots, so every metadata-writing git operation (status refresh, add,
+		// commit) fails on the index lock inside the sandbox. Grant exactly that
+		// resolved gitdir via --add-dir — additive, mirroring how `plugin
+		// codex-launch` grants the gitmoot home, and unlike a
+		// `-c sandbox_workspace_write.writable_roots=[...]` override it cannot
+		// clobber roots the operator's config.toml already grants. A primary
+		// checkout (or empty/unknown workdir) resolves to "" and the argv stays
+		// byte-identical.
+		if gitdir := linkedWorktreeGitDir(workdir); gitdir != "" {
+			args = append(args, "--add-dir", gitdir)
+		}
+		for _, path := range agent.WritablePaths {
+			if path = strings.TrimSpace(path); path != "" {
+				args = append(args, "--add-dir", path)
+			}
+		}
+		if agent.ProduceNetwork {
+			args = append(args, "-c", "sandbox_workspace_write.network_access=true")
+		}
+		return args
 	case AutonomyPolicyDangerFullAccess:
+		// Full access is already unrestricted. Produce-only workspace grants and
+		// network configuration must not leak into this policy's argv.
 		return []string{"--sandbox", "danger-full-access"}
 	default:
 		return nil
 	}
+}
+
+// ProduceDispatchError enforces the runtime/policy portion of produce dispatch.
+// The daemon separately requires a successful Landlock probe before Claude or
+// Kimi delivery; keeping that host capability check at the launch boundary lets
+// the workflow engine validate jobs without pretending it enforced a sandbox.
+func ProduceDispatchError(action string, agent Agent) error {
+	if strings.TrimSpace(action) != "produce" {
+		return nil
+	}
+	if agent.Runtime != CodexRuntime && agent.Runtime != ClaudeRuntime && agent.Runtime != KimiRuntime {
+		return fmt.Errorf("produce stages require the codex runtime; agent %q uses runtime %q", agent.Name, agent.Runtime)
+	}
+	if !PolicyGrantsImplementWrite(agent.AutonomyPolicy) {
+		return fmt.Errorf("produce stages require a writable autonomy policy; agent %q uses %q", agent.Name, NormalizeStoredAutonomyPolicy(agent.AutonomyPolicy))
+	}
+	return nil
+}
+
+// linkedWorktreeGitDir resolves the per-worktree git metadata directory of a
+// linked `git worktree` checkout (#805). In a linked worktree, <dir>/.git is a
+// FILE whose first line is "gitdir: <main-repo>/.git/worktrees/<name>"; that
+// resolved directory holds the worktree's index/HEAD and lives outside the
+// checkout. It returns "" — the fail-open "not applicable" answer — for a
+// primary checkout (.git is a directory), a missing or empty dir, or a
+// malformed .git file. A relative gitdir (git tolerates one) is resolved
+// against dir so the sandbox grant is always an absolute root.
+func linkedWorktreeGitDir(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".git"))
+	if err != nil {
+		// A primary checkout's .git is a directory (EISDIR) and a non-repo has
+		// none (ENOENT); both mean there is no linked gitdir to grant.
+		return ""
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(string(data)), "\n")
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "gitdir:")
+	if !ok {
+		return ""
+	}
+	gitdir := strings.TrimSpace(rest)
+	if gitdir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(dir, gitdir)
+	}
+	return filepath.Clean(gitdir)
 }
 
 // defaultClaudeRetryBackoff is the base pause between Claude delivery attempts
@@ -767,6 +970,10 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 	// never masks an auth failure (a fresh start that fails for auth reasons
 	// still surfaces as auth below).
 	var refreshedRef string
+	// The session id this delivery is actually running on, for crash
+	// diagnostics (#806): the pinned concrete ref, replaced by the minted fresh
+	// id when the self-heal below takes over the delivery.
+	diagSessionRef := concreteSessionRef(agent)
 	if err != nil && agent.RuntimeRef != LastRef && ctx.Err() == nil {
 		sessionMissing := isClaudeSessionMissing(result)
 		transient := isTransientClaudeDeliveryError(result, err)
@@ -778,20 +985,21 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resul
 				if sessionMissing {
 					refreshedRef = newRef
 				}
+				diagSessionRef = newRef
 				result, err = a.runner().Run(ctx, a.Dir, "claude", claudeFreshSessionArgs(agent, job.Prompt, model, newRef)...)
 				if err != nil {
 					if sessionMissing {
-						return Result{Raw: result.Stdout + result.Stderr}, a.claudeSessionMissingError(agent, result, err)
+						return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, diagSessionRef)}, a.claudeSessionMissingError(agent, result, err)
 					}
-					return Result{Raw: result.Stdout + result.Stderr}, claudeCommandError(result, err)
+					return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, diagSessionRef)}, claudeCommandError(result, err)
 				}
 			}
 		}
 	}
 	if err != nil {
-		return Result{Raw: result.Stdout + result.Stderr}, claudeCommandError(result, err)
+		return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, diagSessionRef)}, claudeCommandError(result, err)
 	}
-	parsed := Result{Raw: result.Stdout, RefreshedRuntimeRef: refreshedRef}
+	parsed := Result{Raw: result.Stdout, RefreshedRuntimeRef: refreshedRef, SessionDiag: newSessionDiag(result, nil, diagSessionRef)}
 	summary, inTok, outTok := parseClaudeJSONResult(result.Stdout)
 	if summary != "" {
 		parsed.Summary = summary
@@ -828,13 +1036,13 @@ func (a ClaudeAdapter) deliverFresh(ctx context.Context, agent Agent, job Job, m
 		}
 	}
 	if err != nil {
-		return Result{Raw: result.Stdout + result.Stderr}, claudeCommandError(result, err)
+		return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, sessionID)}, claudeCommandError(result, err)
 	}
 	// SessionEphemeral marks this session as by-design per-job (fresh-ref #531 or
 	// last+template coordinator): the mailbox adopts sessionID in-memory for
 	// same-job repair but must NOT persist it onto the agent's stored ref, or the
 	// isolation would end after job 1.
-	parsed := Result{Raw: result.Stdout, RefreshedRuntimeRef: sessionID, SessionEphemeral: true}
+	parsed := Result{Raw: result.Stdout, RefreshedRuntimeRef: sessionID, SessionEphemeral: true, SessionDiag: newSessionDiag(result, nil, sessionID)}
 	summary, inTok, outTok := parseClaudeJSONResult(result.Stdout)
 	if summary != "" {
 		parsed.Summary = summary
@@ -1010,7 +1218,7 @@ func (a ClaudeAdapter) Health(ctx context.Context, agent Agent) error {
 }
 
 func (a ClaudeAdapter) Capabilities(context.Context) ([]string, error) {
-	return []string{"review", "implement", "ask"}, nil
+	return []string{"review", "implement", "ask", "produce"}, nil
 }
 
 func (a ClaudeAdapter) runner() subprocess.Runner {
@@ -1058,10 +1266,12 @@ func (a ShellAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 		return Result{}, errors.New("shell runtime cannot mint a fresh session; provide an explicit session command")
 	}
 	result, err := a.runner().Run(ctx, a.Dir, "sh", "-c", agent.RuntimeRef, "gitmoot", job.Prompt)
+	// A shell "session" is a command line, not a session id, so SessionID stays
+	// empty; the exit/stderr diagnostics still apply.
 	if err != nil {
-		return Result{Raw: result.Stdout + result.Stderr}, commandError(result, err)
+		return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, "")}, commandError(result, err)
 	}
-	return Result{Raw: result.Stdout, Summary: strings.TrimSpace(result.Stdout)}, nil
+	return Result{Raw: result.Stdout, Summary: strings.TrimSpace(result.Stdout), SessionDiag: newSessionDiag(result, nil, "")}, nil
 }
 
 func (a ShellAdapter) Health(ctx context.Context, agent Agent) error {
@@ -1370,16 +1580,21 @@ func claudeArgs(agent Agent, prompt string, jsonOutput bool, model string) []str
 }
 
 func claudePermissionArgs(agent Agent) []string {
+	var args []string
 	switch NormalizeStoredAutonomyPolicy(agent.AutonomyPolicy) {
 	case AutonomyPolicyReadOnly:
-		return []string{"--permission-mode", "plan"}
+		args = []string{"--permission-mode", "plan"}
 	case AutonomyPolicyWorkspaceWrite:
-		return []string{"--permission-mode", "acceptEdits"}
+		args = []string{"--permission-mode", "acceptEdits"}
 	case AutonomyPolicyDangerFullAccess:
-		return []string{"--permission-mode", "bypassPermissions"}
-	default:
-		return nil
+		args = []string{"--permission-mode", "bypassPermissions"}
 	}
+	for _, path := range agent.WritablePaths {
+		if path = strings.TrimSpace(path); path != "" {
+			args = append(args, "--add-dir", path)
+		}
+	}
+	return args
 }
 
 func isClaudeJSONUnsupported(result subprocess.Result) bool {

@@ -1,9 +1,10 @@
 # Pipelines
 
-Pipelines (#681) let the gitmoot daemon run a **declared DAG of shell stages** —
-a small, durable multi-step flow — on demand or on an interval schedule. Each
-stage is an ordinary queued job run through the **shell runtime**: the normal
-worker tick claims and runs it, and a scan-based **advancer** folds each stage's
+Pipelines (#681) let the gitmoot daemon run a **declared DAG of shell and agent
+stages** — a small, durable multi-step flow — on demand or on an interval schedule.
+Each stage is an ordinary queued job: shell commands use the shell runtime, while
+agent stages use their registered runtime. The normal worker tick claims and runs
+it, and a scan-based **advancer** folds each stage's
 `gitmoot_result` decision and enqueues the stages whose dependencies have all
 succeeded. Pipelines reuse the same job queue, result contract, and scheduling
 idiom as heartbeats — there is no separate runner.
@@ -37,6 +38,7 @@ schedule:                   # optional; interval schedule (no cron in v1)
 success_decisions:          # optional top-level default (see below)
   - approved
   - implemented
+  - skipped
 stages:                     # the DAG, keyed by unique id and wired by needs
   - id: source
     cmd: "curl -sf https://example.com/data > data.json"
@@ -60,12 +62,23 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `repo`                      | pipeline     | no\*     | `owner/name` the stages run against. Optional to **register**, but **required to run** — stage jobs need a managed repo for the worker to claim them. |
 | `schedule.interval`         | pipeline     | cond.    | Required when a `schedule:` block is present. A positive Go duration (`24h`, `1h30m`). |
 | `schedule.jitter`           | pipeline     | no       | Random `[0, jitter]` added to each `next_due` to de-thunder (`>= 0`). |
-| `success_decisions`         | pipeline     | no       | Decisions that mark a stage succeeded. Default `["approved","implemented"]`. Any value must be one of `approved`, `implemented`, `changes_requested` — `blocked`/`failed` are park states and are rejected. |
+| `success_decisions`         | pipeline     | no       | Decisions that mark a stage succeeded. Default `["approved","implemented","skipped"]`. Any value must be one of `approved`, `implemented`, `changes_requested`, `skipped` - `blocked`/`failed` are park states and are rejected. An explicit list is strict: omitting `skipped` requires real work and makes a skipped result fail. |
+| `allow_scheduled_writes`    | pipeline     | no       | Safety flag. A **mutating** `implement` or `produce` stage on a **scheduled** pipeline is rejected unless this is `true`. Manual runs do not need it. Default `false`. |
+| `allow_auto_merge`          | pipeline     | no       | Pipeline-level half of the auto-merge double key. Required with a gate's `merge: auto`; default `false`. It does not replace `allow_scheduled_writes` on scheduled pipelines. |
 | `stages[].id`               | stage        | yes      | Unique, name-safe stage id. Appears verbatim in the stage job's fingerprint and deterministic id. |
-| `stages[].cmd`              | stage        | cond.    | Shell command run verbatim via `sh -c` (see the stage contract below). **Exactly one** of `cmd` or `agent` per stage. |
-| `stages[].agent`            | stage        | cond.    | Name of a managed gitmoot agent to run this stage as a read-only leaf (#757), instead of a shell `cmd`. Must be a name-safe token; `pipeline add` warns (does not block) if the agent does not exist yet, but it must exist before the stage runs. Mutually exclusive with `cmd`. See [Agent stages](#agent-stages). |
-| `stages[].prompt`           | stage        | cond.    | Instruction handed to an agent stage's agent. **Required** for an agent stage; rejected for a shell stage. Prepended with the upstream `needs` stages' result summaries at enqueue. |
-| `stages[].action`           | stage        | no       | Read-only verb for an agent stage: `ask` (default) or `review`. `implement` is rejected — an agent stage is a read-only leaf. Rejected for a shell stage. |
+| `stages[].cmd`              | stage        | cond.    | Shell command run verbatim via `sh -c` (see the stage contract below). A stage is **exactly one** of `cmd`, `agent`, or `gate`. |
+| `stages[].agent`            | stage        | cond.    | Name of a managed gitmoot agent to run this stage (instead of a shell `cmd`). Must be a name-safe token; `pipeline add` warns (does not block) if the agent does not exist yet, but it must exist before the stage runs. Mutually exclusive with `cmd`/`gate`. The stage kind depends on `action`/`write`/`orchestrate` — see [Agent stages](#agent-stages). |
+| `stages[].prompt`           | stage        | cond.    | Instruction handed to an agent stage's agent. **Required** for an agent stage; rejected for a shell/gate stage. Prepended with the upstream `needs` stages' result summaries at enqueue. |
+| `stages[].action`           | stage        | no       | `ask` (default), `review`, `implement`, or `produce`. Produce writes operator-owned data but never the repo or a PR. |
+| `stages[].write`            | stage        | cond.    | Required acknowledgement for both mutating actions: `implement` and `produce`; rejected elsewhere. |
+| `stages[].writes`           | stage        | cond.    | Required non-empty list for `produce`. Paths must be absolute and cleaned. At add time symlinks are resolved and overlap with `/`, the Gitmoot home, or any managed checkout is rejected in either direction. Rejected elsewhere. |
+| `stages[].network`          | stage        | no       | Produce-only opt-in to Codex workspace-write network access. Default `false`. |
+| `stages[].check`            | stage        | no       | Produce-only trusted operator command run with `sh -c` after a valid result, in the stage cwd with the daemon environment. |
+| `stages[].check_retries`    | stage        | no       | Produce-only count of same-session correction turns after a non-zero `check` (`>= 0`, default `0`). |
+| `stages[].orchestrate`      | stage        | no       | `true` makes an agent stage a **sub-tree coordinator** (#758): its `delegations[]` fan out as owned children and the stage waits for the whole tree, then folds the synthesis. Agent stage only; `action` must be `ask`. |
+| `stages[].gate`             | stage        | cond.    | Makes this a **jobless gate stage** (#768): it runs no worker and folds when an external predicate holds. Only `pr_merged` today. Exclusive with `cmd`/`agent`. Requires `source`. |
+| `stages[].merge`            | stage        | no       | Gate-only merge authority. Omit for the unchanged human-merge default; `auto` lets the pipeline advancer squash-merge after all safety conditions hold. |
+| `stages[].source`           | stage        | cond.    | The upstream `implement` stage whose PR to bind. Required on a `gate`; optional on `action: review`; rejected on shell/ask/implement/orchestrate stages. It must be one of the stage's own `needs`. |
 | `stages[].needs`            | stage        | no       | Ids of sibling stages that must **succeed** before this stage is enqueued. Must reference known stages, never the stage itself, and form no cycle. |
 | `stages[].timeout`          | stage        | no       | Per-stage job timeout (positive Go duration). |
 | `stages[].retry`            | stage        | no       | How many times a **failed** stage may be re-attempted (`>= 0`, default `0`). |
@@ -73,17 +86,30 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 
 `gitmoot pipeline add` validates the whole spec **at add time** — unknown keys, a
 non-name-safe name/id, a duplicate stage id, a stage that is not **exactly one** of
-`cmd` or `agent` (and, for an agent stage, a missing `prompt`, a non-existent agent,
-or a non-read-only `action`), an unknown/self/cyclic `needs`, an invalid
+`cmd`, `agent`, or `gate` (and, per kind: an agent stage's missing `prompt`, an
+invalid `action`, `implement` without `write: true` or `write: true` off an
+implement stage, a mutating stage on a scheduled pipeline without
+`allow_scheduled_writes`, a gate/review `source` that is not an upstream implement
+stage in `needs`, or `source` on another stage kind), an unknown/self/cyclic `needs`, an invalid
 timeout/interval/jitter, a negative retry, or a `success_decisions` value outside the
 allowed set — so a structural mistake surfaces as a clear error at registration
 rather than a stuck run later.
 
 ### Agent stages
 
-A stage may run a **named managed gitmoot agent** as a read-only leaf instead of a
-shell command (#757). Set `agent` + `prompt` (and optionally `action`) in place of
-`cmd`:
+A stage may run a **named managed gitmoot agent** instead of a shell command. There
+are four agent-stage kinds, all sharing the mechanics in this section:
+
+| Kind | Declared by | What it does |
+| ---- | ----------- | ------------ |
+| **ask** / **review** (#757) | `agent` + `action: ask\|review` | Read-only leaf: looks + decides, never mutates. |
+| **implement** (#768) | `agent` + `action: implement` + `write: true` | Mutates the repo + opens a PR (fold-on-PR-opened). See [Implement stages](#implement-stages). |
+| **produce** (#814/#825) | `agent` + `action: produce` + `write: true` + `writes:` | Sandboxed data writer: Codex everywhere it is supported, plus Claude/Kimi on Landlock-capable Linux; never creates a branch, task, commit, or PR. |
+| **orchestrate** (#758) | `agent` + `orchestrate: true` | Sub-tree coordinator: fans out owned children, waits for the tree, folds the synthesis. See [Orchestrate stages](#orchestrate-stages). |
+| **gate** (#768) | `gate:` (no `agent`) | Jobless waiter: folds when an external predicate holds (e.g. a PR merges). See [Gate stages](#gate-stages). |
+
+The basic read-only form (#757) sets `agent` + `prompt` (and optionally `action`) in
+place of `cmd`:
 
 ```yaml
 stages:
@@ -100,9 +126,10 @@ stages:
   hidden per-pipeline shell runner via a per-job runtime override), an agent stage
   binds the stage job to the named agent and runs it on **its own** registered runtime
   (claude / codex) and session — no runtime override.
-- **Read-only leaf.** `action` is `ask` or `review` only; `implement` is rejected. The
-  stage is a leaf: its `delegations[]` are stripped (Sender is the pipeline sender),
-  so an agent stage can never fan out.
+- **Leaf by default.** An `ask`/`review`/`implement`/`produce` stage is a **leaf**: its
+  `delegations[]` and `human_questions[]` are stripped (Sender is the pipeline sender),
+  so it can neither fan out nor pause a human. (An `orchestrate` stage is the one
+  exception — it is a coordinator, not a leaf; see [Orchestrate stages](#orchestrate-stages).)
 - **Agent existence is warned at add time.** `pipeline add` checks every referenced
   agent and prints a warning for any that does not exist yet, but does **not** block —
   a spec may legitimately be added before its agents are provisioned (bundled or
@@ -121,9 +148,12 @@ stages:
   `worktree:<path>` rather than the shared `repo:<repo>` live checkout — same-repo
   agent stages then run **concurrently** and never mutate the live checkout. The
   worktree is disposed when the stage job settles (and reclaimed on daemon restart).
-  Allocation is fail-open: if it cannot be created the stage still runs, serialized on
-  the shared checkout, with a loud skip event. A pure-reasoning agent stage with no
-  `repo` needs no worktree.
+  Allocation is fail-open for ordinary ask/review stages: if it cannot be created the
+  stage still runs, serialized on the shared checkout, with a loud skip event. A
+  source-bound PR review is the safety exception: its detached worktree is pinned to
+  the source payload's `HeadSHA`, validated clean at that exact SHA, and allocation
+  fails closed rather than reviewing the shared default branch. A pure-reasoning
+  agent stage with no `repo` needs no worktree.
 - **Stateless per run.** Because each agent stage runs in a freshly-created worktree
   directory, a runtime that scopes sessions by working directory (e.g. Claude Code)
   starts a **fresh session each run** — a pipeline stage carries no session context
@@ -132,6 +162,243 @@ stages:
   not via accumulated agent memory.
 
 Agent stages fold by `decision` and advance/park exactly like shell stages.
+
+### Produce stages
+
+`action: produce` is the data-writing agent stage. Codex keeps its existing native
+sandbox. On Linux hosts where `gitmoot sandbox probe` reports supported, Claude and
+modern Kimi are also accepted: Gitmoot re-execs the runtime under a strict Landlock
+ruleset before it starts. On non-Linux or unsupported kernels, Claude/Kimi retain the
+explicit Codex-only refusal; Kimi CLI and shell are always refused. The bound agent
+must advertise the `produce` capability and use a `workspace-write` or
+`danger-full-access` policy; read-only/auto agents are refused.
+
+```yaml
+  - id: publish-dataset
+    agent: dataset-writer
+    action: produce
+    write: true
+    writes:
+      - /srv/datasets/nightly
+    network: true
+    check: test -s /srv/datasets/nightly/index.json
+    check_retries: 2
+    prompt: Reconcile and atomically replace tonight's dataset export.
+```
+
+Each declared path becomes an additive runtime `--add-dir` grant. For Claude/Kimi,
+that polite CLI hint is backed by the kernel-enforced Landlock allowlist: writes are
+limited to the declared directories, the disposable workdir, `/tmp`/`$TMPDIR`, the
+runtime's own state, and the standard `/dev` files needed by CLI children; reads and
+execution remain broadly available for runtime auth/config. Runtime state is writable
+by design: Claude receives `$HOME/.claude` plus its empirically used
+`$XDG_CACHE_HOME/claude-cli-nodejs` cache (and Gitmoot sets
+`CLAUDE_CONFIG_DIR=$HOME/.claude`); Kimi receives `$HOME/.kimi-code`. Apart from
+those runtime-owned locations and device nodes, the declared data paths, disposable
+workdir, and temp roots are the only writable filesystem locations. Declared
+directories must exist when delivery begins. Codex stays exactly as before: its own
+workspace-write defaults remain
+writable, and danger-full-access receives no add-dir/network arguments. A produce
+stage runs from a disposable detached worktree so accidental repo writes land in
+throwaway state; its request never carries branch/task/PR fields and Gitmoot never
+pushes that cwd. Unlike read-only ask/review isolation, produce worktree allocation
+fails closed and records a failed stage job rather than falling back to the managed
+checkout.
+
+Landlock governs filesystem access only in this feature. It does **not** implement
+the stage's network policy; network behavior remains whatever the selected runtime
+and its CLI policy enforce.
+
+The worker repeats the same symlink resolution and protected-root containment check
+immediately before delivery. If a path was retargeted after `pipeline add`, the job
+fails before any runtime command starts.
+
+After every valid result, `check` runs deterministically. A failure sends the
+redacted, 8 KiB-capped output back to the same runtime session and asks for a fresh
+result, up to `check_retries`; every correction turn contributes tokens. Exhaustion
+fails the stage, after which ordinary stage `retry` may re-run it. Stage retries warn
+that partial data may already exist. Produce commands therefore **must be idempotent**:
+reconcile or atomically overwrite instead of appending duplicates. Declared data
+directories are operator-owned and Gitmoot never deletes or cleans them; only its
+disposable cwd follows normal cleanup.
+
+Batch decision convention: `implemented` means the batch is complete;
+`changes_requested` means partial output (opt in through `success_decisions` if that
+should advance); `blocked` means human input is required and parks with `needs`;
+`skipped` means there was no work.
+
+### Implement stages
+
+An `implement` agent stage (#768) **mutates the repo and opens a pull request**, then
+the pipeline advances the moment the PR is opened (**fold-on-PR-opened**):
+
+```yaml
+stages:
+  - id: fix
+    agent: fixer
+    action: implement
+    write: true                       # required acknowledgement (see Safety)
+    prompt: "Apply the change described in the ticket."
+  - id: verify
+    agent: reviewer
+    action: review
+    source: fix                       # bind to fix's PR + exact head SHA
+    needs: [fix]
+    success_decisions: [approved]     # changes_requested parks before the merge gate
+  - id: wait
+    gate: pr_merged
+    source: fix
+    needs: [fix, verify]
+```
+
+- **Writable worktree + deterministic branch reuse.** Unlike a read-only stage, an
+  implement stage runs in a **writable** task-worktree on a deterministic,
+  attempt-independent branch `gitmoot/pipe-<run>-<stage>` (reusing the implement
+  dispatch's fail-closed guards). A **retry** lands in the *same* branch/PR — never a
+  duplicate — and fails closed if that worktree is dirty or has a live process.
+- **`implemented` folds on PR-opened.** Only `implemented` promises a PR, so that
+  decision waits until the job carries the opened PR stamp (or the engine confirms a
+  terminal no-PR no-op). Other configured success decisions, including `approved` and
+  `skipped`, settle immediately without a PR. The stage summary records the opened PR
+  number or the terminal no-PR outcome for downstream context.
+- **Does not merge by itself.** The implement stage only opens the PR. The default
+  gate still waits for a human merge; a separately double-keyed `merge: auto` gate
+  may merge after review and CI (see [Gate stages](#gate-stages)).
+- **Declared review suppresses native fan-out.** When an implement stage has a
+  downstream `action: review` stage with `source` pointing to it, its job carries
+  `SkipNativeReviewFanout`. Gitmoot does not also enqueue the ordinary native
+  reviewers; without that declaration, native review behavior is unchanged.
+- Still a **leaf** — it may mutate but never fan out.
+
+### Source-bound review stages
+
+Set `source: <implement-stage>` on an `action: review` stage to review the PR that
+the implement stage just opened. `source` must also appear in the review stage's
+`needs`, and must name an `action: implement` stage.
+
+- At enqueue, Gitmoot reads the succeeded source stage row's `JobID`, parses that
+  job's structured payload stamp, and copies `PullRequest`, `HeadSHA`, `Branch`,
+  `TaskID`, and `LeadAgent` onto the review job. It never scrapes the stage summary.
+- The review runs in a detached read-only worktree at the stamped `HeadSHA` and the
+  existing review checkout preflight verifies that exact clean head.
+- The review is **report-only** for native PR lifecycle purposes. Its verdict is
+  still posted as a PR comment and folded by the pipeline's `success_decisions`, but
+  `changes_requested` does not dispatch a native fix job and `approved` does not run
+  the native merge gate. Human merge remains the default.
+- If the succeeded implement stage produced no PR (a permanent no-op or any successful
+  non-`implemented` decision), the review stage immediately folds `blocked` with
+  `source stage produced no PR; nothing to review`; no unbound review job is sent.
+
+### Gate stages
+
+A `gate` stage (#768) runs **no worker job** — it is a patient waiter that folds when an
+external predicate holds. It is the composable way to express *wait-for-merge* without
+making the implement stage itself block:
+
+```yaml
+stages:
+  - id: fix
+    agent: fixer
+    action: implement
+    write: true
+    prompt: "Apply the change."
+  - id: wait
+    gate: pr_merged                   # only predicate today
+    source: fix                       # the upstream implement stage whose PR to watch
+    needs: [fix]
+  - id: deploy
+    cmd: "./deploy.sh"
+    needs: [wait]
+```
+
+- **`pr_merged`** watches the PR opened by the `source` implement stage and folds
+  **succeeded** once it merges. It reads the store's PR state (kept current by the
+  daemon's PR poller), so it needs no live GitHub call, is **non-blocking** and
+  **fails open** (keeps waiting while unmerged), and is bounded by the stage `timeout`.
+- A PR that is **closed without merging**, or a **timeout**, parks the run `blocked`
+  (a gate is a wait, not a failure — so a retry budget can't re-arm the timer).
+- A source stage that succeeds without opening a PR also parks the gate `blocked`
+  immediately with `source stage succeeded without opening a PR; nothing to wait for`.
+  Only `implemented` promises the PR that this gate can watch.
+
+#### Opt-in auto-merge
+
+The default is and remains **human merge**. To let the pipeline advancer perform
+the squash merge, spell both keys and declare at least one source-bound review:
+
+```yaml
+allow_auto_merge: true
+stages:
+  - id: fix
+    agent: fixer
+    action: implement
+    write: true
+    prompt: "Apply the change."
+  - id: review
+    agent: reviewer
+    action: review
+    source: fix
+    needs: [fix]
+    prompt: "Review the implementation PR."
+    success_decisions: [approved]
+  - id: merge
+    gate: pr_merged
+    merge: auto
+    source: fix
+    needs: [fix, review]
+```
+
+- `merge: auto` is valid only on a gate and requires top-level
+  `allow_auto_merge: true`. A scheduled pipeline still needs
+  `allow_scheduled_writes: true` for its implement stage, so scheduled auto-merge
+  requires **both** top-level keys.
+- Registration rejects an auto-merge gate unless at least one `action: review`
+  stage binds to the same implement `source`. Before merging, the advancer requires
+  **every** such review stage to have folded `succeeded` with decision `approved`.
+  `changes_requested` parks the run and never merges.
+- The source PR and reviewed head come from structured job payloads, never summary
+  prose. The live PR head must still equal that reviewed `HeadSHA`; drift parks the
+  gate `blocked` and names the mismatch.
+- GitHub must report the PR mergeable and at least one external CI status/check.
+  Pending checks keep the jobless gate waiting within its stage timeout. Check-run
+  `skipped`/`neutral` outcomes count as passing, matching the native merge gate;
+  failed checks park it `blocked`. Zero external statuses/checks always park
+  pipeline auto-merge `blocked`, even when `[merge_gate] require_external_ci` is
+  false—the unattended path never synthesizes no-CI success.
+- Unmergeable/conflicting PRs, head drift, and merge API errors park it `blocked`;
+  a merge API failure is tried once and never retry-spammed.
+- The source job timeline atomically records `pipeline_auto_merge_claim` before
+  the write and `pipeline_auto_merge_confirmed` afterward, carrying pipeline/run,
+  stage, PR, and head SHA. Racing scans that lose the claim never call merge.
+
+### Orchestrate stages
+
+An `orchestrate` agent stage (#758) is a **bounded sub-tree coordinator**: instead of
+doing the work itself, its agent returns `delegations[]` that fan out as **children it
+owns**, and the stage waits for the whole tree, then folds the synthesis:
+
+```yaml
+stages:
+  - id: investigate
+    agent: coordinator
+    orchestrate: true
+    prompt: "Decompose the incident and delegate the sub-investigations."
+  - id: report
+    cmd: "./publish.sh"
+    needs: [investigate]
+```
+
+- **The stage job is the sub-tree root.** Children inherit the full delegation bounds
+  ladder (depth cap, job-budget admission, wall-clock / token / cost budgets, loop
+  detection, graceful finalize, root kill). The stage `timeout` bounds the whole tree.
+- **Not a leaf.** The delegations strip is relaxed **only** for a validated orchestrate
+  stage — a stage that merely sets `orchestrate: true` but validates as something else
+  cannot fan out.
+- **Waits, then folds the synthesis.** The pipeline follows the coordinator's
+  continuation chain to the terminal tail and folds *that* result — a pure, restartable
+  DB walk (a daemon restart re-derives the wait, never restarting the sub-tree).
+- **`retry: 0` recommended** — a retry mints a fresh tree only after the old one is
+  terminal, never resuming a half-finished tree.
 
 ### The stage contract
 
@@ -143,6 +410,9 @@ the stage by that result's **`decision`**, never by the job's exit state:
 ```sh
 # A stage that succeeds:
 printf '%s' '{"gitmoot_result":{"decision":"approved","summary":"synced"}}'
+
+# A stage whose task had no work:
+printf '%s' '{"gitmoot_result":{"decision":"skipped","summary":"no new replies today"}}'
 
 # A stage that parks the run awaiting a human, listing what it needs:
 printf '%s' '{"gitmoot_result":{"decision":"blocked","summary":"secret missing","needs":["R2 token"]}}'
@@ -164,6 +434,13 @@ The decision drives advancement:
 job succeeded — because a stage folds on the decision, not the job state, and a
 review that asked for changes is not "this step landed." List it in a stage's (or
 the pipeline's) `success_decisions` to treat it as success instead.
+
+`skipped` is a stage **success by default**. Gitmoot prefixes its persisted summary
+with `[skipped: no work]`, and downstream agent stages receive that honest note in
+their upstream context. An explicit `success_decisions` list is strict: if it omits
+`skipped`, the stage fails because the author required real work. A skipped result
+uses the existing succeeded stage state; the `SKIPPED` funnel state still means a
+downstream stage never ran after the pipeline halted.
 
 ## CLI
 
@@ -204,6 +481,28 @@ needs: R2 token
 
 source OK -> score BLOCKED (needs: R2 token) -> deploy SKIPPED
 ```
+
+The run header also prints `tokens: N (best-effort)`. JSON includes run `tokens`
+and each stage job's `input_tokens`/`output_tokens` when captured. Codex resumed
+session edge cases and runtimes without usage reporting contribute `0`, so this is
+honest accounting rather than a billing guarantee.
+
+Queued and running stages also get detail lines such as:
+
+```
+  source: RUNNING; enqueued 2m14s ago
+    last activity 8s ago: downloading object 41
+```
+
+`enqueued` is deliberate: the stage `started_at` is written when the job is
+enqueued, not when a worker claims it. After 60 seconds of delivery, pipeline
+workers update one latest-only `progress` job event about every 30 seconds. Its
+age is computed from the stored event timestamp, so a stopped daemon never looks
+fresh. Activity is stripped of terminal controls, redacted, and length-capped
+before storage. Orchestrate stages may have no current per-stage event while their
+sub-tree runs; the view says `(sub-tree running; no per-stage progress)` and does
+not treat that absence as a failure. `--json` stage objects add `started_at`,
+`finished_at`, and optional `{elapsed, activity, updated_at}` progress data.
 
 Funnel labels are `OK` for a succeeded stage, `BLOCKED (needs: …)` for a parked
 stage, and the uppercased state otherwise (`PENDING`, `QUEUED`, `RUNNING`,
@@ -318,6 +617,15 @@ verbatim (raw bytes), so treat a spec containing private hostnames, paths, or re
 names the same as any other private-repo data. See `SAFETY.md → Pipeline stages run
 with daemon permissions`.
 
+**Mutating (`implement`) stages** carry an extra safety model (#768): `action:
+implement` requires an explicit `write: true` double-key (and `write: true` is valid
+only on an implement stage), so a typo or prompt injection cannot flip a read-only
+pipeline into a writing one; a mutating stage on a **scheduled** pipeline is rejected
+unless the pipeline sets `allow_scheduled_writes: true`; the bound agent's own
+capability/policy still applies; and the implement job never merges its own PR. The
+default gate leaves merge to a human or CI; only the separately double-keyed,
+review-required `merge: auto` gate grants merge authority to the advancer.
+
 ## Not yet supported (deferred)
 
 These are intentionally out of scope for v1 and tracked as follow-ups:
@@ -326,8 +634,10 @@ These are intentionally out of scope for v1 and tracked as follow-ups:
 - Approval gates / secret stores / an approval UI for a blocked stage (#682) — v1
   ships the manual `pipeline resume` seam.
 - Auto-filing a bug for a failed stage (`show` prints the command; you run it).
-- LLM stages, upstream stage output flowing into a downstream stage's prompt, and
-  per-stage env/workdir.
+- Per-stage env/workdir. (Agent stages and upstream stage output flowing into a
+  downstream stage's prompt **are** supported — see [Agent stages](#agent-stages).)
+- Gate predicates beyond `pr_merged`, and a `gate` folding on PR-**merged** built into
+  the implement stage itself (use a separate `gate` stage).
 - Matrix / dynamic stages, more than one concurrent run per pipeline, pipelines
   defined from the dashboard, a web funnel view, and a foreground `--watch`.
 </content>

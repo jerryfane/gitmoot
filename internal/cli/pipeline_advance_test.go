@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -487,6 +488,96 @@ stages:
 	}
 }
 
+// TestAdvancerSkippedAdvancesByDefault proves an honest no-work result is a
+// first-class successful fold: the existing StageSucceeded row carries the trusted
+// marker and the dependent stage enqueues with zero success_decisions config.
+func TestAdvancerSkippedAdvancesByDefault(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	rec, spec := newTestPipeline(t, store, "skip-default", changesRequestedSpec)
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+
+	run := startTestRun(t, store, rec, spec, enqueue, now)
+	settleStageJob(t, store, stageRow(t, store, run.ID, "a").JobID, "skipped", "no new replies", nil)
+	run = advance(t, store, rec, spec, enqueue, run, now)
+
+	a := stageRow(t, store, run.ID, "a")
+	if a.State != pipeline.StageSucceeded {
+		t.Fatalf("stage a = %s, want succeeded", a.State)
+	}
+	if a.Summary != "[skipped: no work] no new replies" {
+		t.Fatalf("stage a summary = %q", a.Summary)
+	}
+	if got := stageRow(t, store, run.ID, "b"); got.State != pipeline.StageQueued || got.JobID == "" {
+		t.Fatalf("stage b = %+v, want queued with a job", got)
+	}
+}
+
+// TestAdvancerSkippedHonorsStrictSuccessDecisions proves an explicit list can
+// require real work: omitting skipped makes the no-work decision fail the stage.
+func TestAdvancerSkippedHonorsStrictSuccessDecisions(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	const spec = `name: skip-strict
+repo: owner/repo
+success_decisions: [approved, implemented]
+stages:
+  - id: a
+    cmd: echo a
+  - id: b
+    cmd: echo b
+    needs: [a]
+`
+	rec, parsed := newTestPipeline(t, store, "skip-strict", spec)
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+
+	run := startTestRun(t, store, rec, parsed, enqueue, now)
+	settleStageJob(t, store, stageRow(t, store, run.ID, "a").JobID, "skipped", "no new replies", nil)
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+
+	if got := stageRow(t, store, run.ID, "a"); got.State != pipeline.StageFailed {
+		t.Fatalf("stage a = %s, want failed when strict list omits skipped", got.State)
+	}
+	if got := stageRow(t, store, run.ID, "b"); got.State != pipeline.StageSkipped || got.JobID != "" {
+		t.Fatalf("stage b = %+v, want skipped and never enqueued", got)
+	}
+	if run.State != pipeline.RunFailed {
+		t.Fatalf("run = %s, want failed", run.State)
+	}
+}
+
+// TestAdvancerStripsForgedSkippedMarkerFromNonSkippedOutcomes proves failed and
+// blocked folds cannot persist Gitmoot's reserved no-work provenance marker.
+func TestAdvancerStripsForgedSkippedMarkerFromNonSkippedOutcomes(t *testing.T) {
+	cases := []struct {
+		decision string
+		summary  string
+		want     string
+	}{
+		{"blocked", pipelineSkippedSummaryMarker, "stage blocked"},
+		{"failed", pipelineSkippedSummaryMarker + pipelineSkippedSummaryMarker + " boom", "boom"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.decision, func(t *testing.T) {
+			store := pipelineAdvanceStore(t)
+			enqueue := testStageEnqueuer(store)
+			rec, spec := newTestPipeline(t, store, "forged-"+tc.decision, changesRequestedSpec)
+			now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
+			run := startTestRun(t, store, rec, spec, enqueue, now)
+			settleStageJob(t, store, stageRow(t, store, run.ID, "a").JobID, tc.decision, tc.summary, []string{"operator input"})
+
+			run = advance(t, store, rec, spec, enqueue, run, now)
+			got := stageRow(t, store, run.ID, "a")
+			if got.Summary != tc.want {
+				t.Fatalf("persisted summary = %q, want %q", got.Summary, tc.want)
+			}
+			if pipelineSummaryIsSkipped(got.Summary) {
+				t.Fatalf("persisted summary retained forged skipped marker: %q", got.Summary)
+			}
+		})
+	}
+}
+
 // TestAdvancerSkippedPropagation proves a failed stage's transitive dependents are
 // all marked skipped (never enqueued), giving a clean terminal picture.
 func TestAdvancerSkippedPropagation(t *testing.T) {
@@ -549,6 +640,90 @@ func TestAdvancerIdempotentRescan(t *testing.T) {
 	}
 	if got := stageRow(t, store, run.ID, "b").JobID; got != bJob {
 		t.Fatalf("re-scan changed stage b job id: before=%q after=%q", bJob, got)
+	}
+}
+
+// TestPipelineStageSettleOutcomeDefaultMatchesFold pins the settle-predicate seam
+// (stageSettleOutcome) for today's kinds: (1) a non-terminal stage job is NOT
+// settled, so the FOLD pass leaves it in flight; (2) once the job settles, the seam
+// reports settled AND returns EXACTLY what foldPipelineStageOutcome returns for the
+// same job — for a shell stage AND a read-only agent stage, across a success and a
+// blocked/needs decision. This is the byte-identity contract a future gate/orchestrate
+// kind must not disturb for existing kinds.
+func TestPipelineStageSettleOutcomeDefaultMatchesFold(t *testing.T) {
+	const settleSpec = `name: settle
+repo: owner/repo
+stages:
+  - id: sh
+    cmd: echo hi
+  - id: ag
+    agent: asker
+    prompt: What changed?
+  - id: data
+    agent: producer
+    action: produce
+    prompt: Write data.
+    write: true
+    writes: [/tmp/gitmoot-produce-test]
+`
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	rec, spec := newTestPipeline(t, store, "settle", settleSpec)
+	now := time.Date(2026, 7, 8, 9, 0, 0, 0, time.UTC)
+	run := startTestRun(t, store, rec, spec, enqueue, now)
+	ctx := context.Background()
+
+	specByID := make(map[string]pipeline.Stage, len(spec.Stages))
+	for _, s := range spec.Stages {
+		specByID[s.ID] = s
+	}
+
+	cases := []struct {
+		stageID, decision, summary string
+		needs                      []string
+	}{
+		{"sh", "approved", "shell landed", nil},
+		{"ag", "blocked", "needs a hint", []string{"which module?"}},
+		{"data", "skipped", "no batch", nil},
+	}
+	for _, tc := range cases {
+		row := stageRow(t, store, run.ID, tc.stageID)
+		if row.JobID == "" {
+			t.Fatalf("%s: stage not enqueued (job id empty)", tc.stageID)
+		}
+		stage := specByID[tc.stageID]
+
+		// The seam loads the job itself via deps.store, so a jobless future kind is
+		// never handed a fabricated job; today's kinds read only the store.
+		deps := pipelineStageSettleDeps{store: store, rec: rec, run: run, now: now}
+
+		// (1) Before settling, the job is queued/running: the seam reports unsettled,
+		// matching the inline IsSettledJobState guard the FOLD pass used to run.
+		pending, err := store.GetJob(ctx, row.JobID)
+		if err != nil {
+			t.Fatalf("GetJob(%s): %v", tc.stageID, err)
+		}
+		if settled, _, _, _, _, err := stageSettleOutcome(ctx, deps, spec, stage, row); err != nil || settled {
+			t.Fatalf("%s: seam settled a non-terminal job (state=%q, err=%v)", tc.stageID, pending.State, err)
+		}
+
+		// (2) After settling, the seam must settle and return the identical fold.
+		settleStageJob(t, store, row.JobID, tc.decision, tc.summary, tc.needs)
+		job, err := store.GetJob(ctx, row.JobID)
+		if err != nil {
+			t.Fatalf("GetJob(%s) after settle: %v", tc.stageID, err)
+		}
+		wantState, wantSummary, wantNeeds := foldPipelineStageOutcome(spec.EffectiveSuccessDecisions(stage), job)
+		settled, gotState, gotSummary, gotNeeds, _, err := stageSettleOutcome(ctx, deps, spec, stage, row)
+		if err != nil {
+			t.Fatalf("%s: seam returned err on terminal job: %v", tc.stageID, err)
+		}
+		if !settled {
+			t.Fatalf("%s: seam did not settle a terminal job (state=%q)", tc.stageID, job.State)
+		}
+		if gotState != wantState || gotSummary != wantSummary || !reflect.DeepEqual(gotNeeds, wantNeeds) {
+			t.Fatalf("%s: seam (%q,%q,%v) != fold (%q,%q,%v)", tc.stageID, gotState, gotSummary, gotNeeds, wantState, wantSummary, wantNeeds)
+		}
 	}
 }
 

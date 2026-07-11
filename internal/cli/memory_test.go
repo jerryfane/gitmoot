@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/memory"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
@@ -75,6 +77,360 @@ func TestMemoryListShowsBothTiers(t *testing.T) {
 			t.Fatalf("--confirmed returned a %q entry", e.Tier)
 		}
 	}
+}
+
+func TestMemoryRetireByProvenancePrefixDryRunApplyAndFTS(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	lead := db.MemoryOwner{Kind: "agent", Ref: "lead"}
+	audit := db.MemoryOwner{Kind: "agent", Ref: "audit"}
+	chatID, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: lead, Repo: "owner/repo", Scope: "repo", Key: "chat-decision",
+		Content: "The quasar rollout decision lives in the release room.", Provenance: "chat:thread-a#2",
+	})
+	if err != nil {
+		t.Fatalf("seed chat memory: %v", err)
+	}
+	if _, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: lead, Repo: "owner/repo", Scope: "repo", Key: "ingest-note",
+		Content: "The quasar rollout runbook has a separate ingest note.", Provenance: "ingest:runbook.md",
+	}); err != nil {
+		t.Fatalf("seed ingest memory: %v", err)
+	}
+	if _, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: audit, Repo: "owner/repo", Scope: "repo", Key: "audit-chat",
+		Content: "The audit room also mentions quasar cleanup.", Provenance: "chat:thread-b#1",
+	}); err != nil {
+		t.Fatalf("seed audit memory: %v", err)
+	}
+
+	code, out, errOut := runMemoryCapture(t, "retire", "--home", home,
+		"--provenance-prefix", "chat:", "--agent", "lead", "--json")
+	if code != 0 {
+		t.Fatalf("retire dry-run exit %d: %s", code, errOut)
+	}
+	var dry memoryRetireResult
+	if err := json.Unmarshal([]byte(out), &dry); err != nil {
+		t.Fatalf("parse dry-run result: %v (%s)", err, out)
+	}
+	if !dry.DryRun || dry.Selected != 1 || dry.Retired != 0 || len(dry.IDs) != 1 || dry.IDs[0] != chatID {
+		t.Fatalf("dry-run result wrong: %+v", dry)
+	}
+	before, err := store.QueryConfirmedMemories(ctx, lead, "owner/repo", `"quasar"`, 10)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("dry-run must leave injection intact, rows=%+v err=%v", before, err)
+	}
+
+	code, out, errOut = runMemoryCapture(t, "retire", "--home", home,
+		"--provenance-prefix", "chat:", "--agent", "lead", "--yes", "--json")
+	if code != 0 {
+		t.Fatalf("retire apply exit %d: %s", code, errOut)
+	}
+	var applied memoryRetireResult
+	if err := json.Unmarshal([]byte(out), &applied); err != nil {
+		t.Fatalf("parse apply result: %v (%s)", err, out)
+	}
+	if applied.DryRun || applied.Selected != 1 || applied.Retired != 1 || len(applied.IDs) != 1 || applied.IDs[0] != chatID {
+		t.Fatalf("apply result wrong: %+v", applied)
+	}
+	after, err := store.QueryConfirmedMemories(ctx, lead, "owner/repo", `"decision" OR "quasar"`, 10)
+	if err != nil {
+		t.Fatalf("query after retire: %v", err)
+	}
+	for _, row := range after {
+		if row.ID == chatID {
+			t.Fatalf("retired row still appears in injection query: %+v", after)
+		}
+	}
+	remainingAudit, err := store.QueryConfirmedMemories(ctx, audit, "owner/repo", `"audit" OR "quasar"`, 10)
+	if err != nil || len(remainingAudit) != 1 {
+		t.Fatalf("--agent filter retired the wrong owner, rows=%+v err=%v", remainingAudit, err)
+	}
+
+	raw, err := sql.Open("sqlite", config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer raw.Close()
+	var ftsRows int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM confirmed_memories_fts WHERE rowid = ?`, chatID).Scan(&ftsRows); err != nil {
+		t.Fatalf("count FTS rows: %v", err)
+	}
+	if ftsRows != 0 {
+		t.Fatalf("retired row still has %d FTS row(s)", ftsRows)
+	}
+}
+
+func TestMemoryRecallRanksAndFiltersConfirmedMemories(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	for _, cm := range []db.ConfirmedMemory{
+		{
+			Owner: db.MemoryOwner{Kind: "agent", Ref: "lead"}, Repo: "acme/widget", Scope: "repo", Key: "widget-flake",
+			Content: "arm64 runner flake arm64 runner flake in widget tests", Provenance: "seed",
+		},
+		{
+			Owner: db.MemoryOwner{Kind: "agent", Ref: "audit"}, Repo: "acme/widget", Scope: "repo", Key: "audit-runner",
+			Content: "arm64 runner policy differs for audit", Provenance: "seed",
+		},
+		{
+			Owner: db.MemoryOwner{Kind: "agent", Ref: "lead"}, Repo: "acme/api", Scope: "repo", Key: "api-arm64",
+			Content: "arm64 api migrations need a canary", Provenance: "seed",
+		},
+		{
+			Owner: db.MemoryOwner{Kind: "agent", Ref: "audit"}, Scope: "general", Key: "general-arm64",
+			Content: "arm64 runner facts apply across repositories", Provenance: "seed",
+		},
+		{
+			Owner: db.MemoryOwner{Kind: "role", Ref: "reviewer"}, Repo: "acme/widget", Scope: "repo", Key: "role-hidden",
+			Content: "arm64 runner flake from a role pool", Provenance: "seed",
+		},
+	} {
+		if _, err := store.UpsertConfirmedMemory(ctx, cm); err != nil {
+			t.Fatalf("seed %s: %v", cm.Key, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runMemory([]string{"recall", "arm64 runner flake", "--home", home, "--repo", "acme/widget", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall exit %d: %s", code, stderr.String())
+	}
+	var all []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &all); err != nil {
+		t.Fatalf("parse recall json: %v (%s)", err, stdout.String())
+	}
+	if len(all) < 3 {
+		t.Fatalf("expected all-agent recall to include both owners and general memory, got %+v", all)
+	}
+	if all[0].Key != "widget-flake" {
+		t.Fatalf("ranking top key = %q, want widget-flake; rows=%+v", all[0].Key, all)
+	}
+	owners := map[string]bool{}
+	for _, e := range all {
+		owners[e.Owner.Ref] = true
+		if e.Owner.Kind != "agent" {
+			t.Fatalf("recall without --agent must search only agent pools, got %+v", e.Owner)
+		}
+	}
+	if !owners["lead"] || !owners["audit"] {
+		t.Fatalf("expected recall without --agent to search all agent pools, got owners %+v", owners)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "--home", home, "--agent", "lead", "--repo", "acme/widget", "--json", "arm64 runner flake"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall --agent exit %d: %s", code, stderr.String())
+	}
+	var leadOnly []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &leadOnly); err != nil {
+		t.Fatalf("parse lead recall json: %v (%s)", err, stdout.String())
+	}
+	for _, e := range leadOnly {
+		if e.Owner.Ref != "lead" {
+			t.Fatalf("--agent lead returned owner %+v", e.Owner)
+		}
+	}
+	if len(leadOnly) == 0 || leadOnly[0].Owner.Kind != "agent" || leadOnly[0].Owner.Ref != "lead" || leadOnly[0].UpdatedAt == "" {
+		t.Fatalf("json shape missing expected owner/updated_at fields: %+v", leadOnly)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "--home", home, "--agent", "lead", "--json", "api migrations"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall no repo filter exit %d: %s", code, stderr.String())
+	}
+	var unfiltered []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &unfiltered); err != nil {
+		t.Fatalf("parse unfiltered recall json: %v (%s)", err, stdout.String())
+	}
+	if len(unfiltered) == 0 || unfiltered[0].Key != "api-arm64" || unfiltered[0].Repo != "acme/api" {
+		t.Fatalf("omitted --repo should search all repos, got %+v", unfiltered)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "--home", home, "--repo", "acme/api", "--json", "arm64 runner"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall --repo exit %d: %s", code, stderr.String())
+	}
+	var apiRows []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &apiRows); err != nil {
+		t.Fatalf("parse api recall json: %v (%s)", err, stdout.String())
+	}
+	keys := map[string]bool{}
+	for _, e := range apiRows {
+		keys[e.Key] = true
+		if e.Scope == "repo" && e.Repo != "acme/api" {
+			t.Fatalf("--repo acme/api returned repo-scoped row from %q: %+v", e.Repo, apiRows)
+		}
+	}
+	if !keys["api-arm64"] || !keys["general-arm64"] {
+		t.Fatalf("repo filter should include repo row and general row, got keys %+v", keys)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "--home", home, "--repo", "acme/widget", "arm64 runner flake"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall text exit %d: %s", code, stderr.String())
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "widget-flake repo=acme/widget scope=repo owner=agent:lead") ||
+		!strings.Contains(text, "- [this repo] arm64 runner flake arm64 runner flake in widget tests") {
+		t.Fatalf("text recall did not render metadata plus injection bullet format:\n%s", text)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "--home", home, "zzznomatch"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall no-match exit %d: %s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "no matches" {
+		t.Fatalf("no-match stdout = %q, want no matches", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "--home", home, "--json", "zzznomatch"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall no-match json exit %d: %s", code, stderr.String())
+	}
+	var none []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &none); err != nil {
+		t.Fatalf("parse empty recall json: %v (%s)", err, stdout.String())
+	}
+	if len(none) != 0 {
+		t.Fatalf("empty recall JSON returned rows: %+v", none)
+	}
+}
+
+func TestMemoryRecallSharedParity(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	for _, cm := range []db.ConfirmedMemory{
+		{
+			Owner: db.MemoryOwner{Kind: "agent", Ref: "lead"}, Repo: "acme/widget", Scope: "repo", Key: "lead-private",
+			Content: "atlas runner private lead fact", Provenance: "seed",
+		},
+		{
+			Owner: db.MemoryOwner{Kind: "agent", Ref: "audit"}, Repo: "acme/widget", Scope: "repo", Key: "audit-private",
+			Content: "atlas runner private audit fact", Provenance: "seed",
+		},
+		{
+			Owner: db.MemoryOwner{Kind: memory.OwnerKindShared, Ref: memory.SharedOwnerRef}, AuthorRef: "lead",
+			Repo: "acme/widget", Scope: "repo", Key: "shared-atlas",
+			Content: "atlas runner shared fact", Provenance: "seed",
+		},
+	} {
+		if _, err := store.UpsertConfirmedMemory(ctx, cm); err != nil {
+			t.Fatalf("seed %s: %v", cm.Key, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runMemory([]string{"recall", "atlas runner", "--home", home, "--repo", "acme/widget", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("default recall exit %d: %s", code, stderr.String())
+	}
+	var all []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &all); err != nil {
+		t.Fatalf("parse all recall: %v (%s)", err, stdout.String())
+	}
+	if !recallHasKey(all, "lead-private") || !recallHasKey(all, "audit-private") || !recallHasKey(all, "shared-atlas") {
+		t.Fatalf("default recall should include all agent pools plus shared, got %+v", all)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "atlas runner", "--home", home, "--repo", "acme/widget", "--agent", "lead", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("agent recall exit %d: %s", code, stderr.String())
+	}
+	var lead []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &lead); err != nil {
+		t.Fatalf("parse lead recall: %v (%s)", err, stdout.String())
+	}
+	if !recallHasKey(lead, "lead-private") || !recallHasKey(lead, "shared-atlas") || recallHasKey(lead, "audit-private") {
+		t.Fatalf("--agent lead should include lead private plus shared only, got %+v", lead)
+	}
+	for _, e := range lead {
+		if e.Key == "shared-atlas" && e.AuthorRef != "lead" {
+			t.Fatalf("shared recall JSON should expose author_ref lead, got %+v", e)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "atlas runner", "--home", home, "--repo", "acme/widget", "--shared", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("shared recall exit %d: %s", code, stderr.String())
+	}
+	var sharedOnly []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &sharedOnly); err != nil {
+		t.Fatalf("parse shared recall: %v (%s)", err, stdout.String())
+	}
+	if len(sharedOnly) != 1 || sharedOnly[0].Key != "shared-atlas" {
+		t.Fatalf("--shared should return only shared rows, got %+v", sharedOnly)
+	}
+}
+
+func TestMemoryRecallExpandAddsLinkedFromJSON(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	owner := db.MemoryOwner{Kind: "agent", Ref: "lead"}
+	if _, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "linked-neighbor",
+		Content: "aurora quartz vector hidden neighbor", Provenance: "seed",
+	}); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	srcID, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "direct-source",
+		Content: "aurora quartz vector source instructions", Provenance: "seed",
+	})
+	if err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runMemory([]string{"recall", "instructions", "--home", home, "--repo", "acme/widget", "--agent", "lead", "--limit", "2", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall without expand exit %d: %s", code, stderr.String())
+	}
+	var directOnly []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &directOnly); err != nil {
+		t.Fatalf("parse direct recall: %v (%s)", err, stdout.String())
+	}
+	if len(directOnly) != 1 || directOnly[0].Key != "direct-source" || directOnly[0].LinkedFrom != 0 {
+		t.Fatalf("without --expand should return only direct source without linked_from, got %+v", directOnly)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "instructions", "--home", home, "--repo", "acme/widget", "--agent", "lead", "--limit", "2", "--expand", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall --expand exit %d: %s", code, stderr.String())
+	}
+	var expanded []memoryRecallEntry
+	if err := json.Unmarshal(stdout.Bytes(), &expanded); err != nil {
+		t.Fatalf("parse expanded recall: %v (%s)", err, stdout.String())
+	}
+	if len(expanded) != 2 || expanded[0].Key != "direct-source" || expanded[1].Key != "linked-neighbor" {
+		t.Fatalf("--expand should append linked neighbor after direct hit, got %+v", expanded)
+	}
+	if expanded[0].LinkedFrom != 0 || expanded[1].LinkedFrom != srcID {
+		t.Fatalf("linked_from JSON mismatch, source=%d rows=%+v", srcID, expanded)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMemory([]string{"recall", "instructions", "--home", home, "--repo", "acme/widget", "--agent", "lead", "--limit", "2", "--expand"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall --expand text exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "- [this repo] [linked] aurora quartz vector hidden neighbor") {
+		t.Fatalf("text --expand should mark linked bullet, got:\n%s", stdout.String())
+	}
+}
+
+func recallHasKey(rows []memoryRecallEntry, key string) bool {
+	for _, r := range rows {
+		if r.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMemoryReplayReportsInjectionDelta(t *testing.T) {

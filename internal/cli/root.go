@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
@@ -31,6 +33,7 @@ var rootCommands = []command{
 	{name: "daemon", summary: "run the local PR watcher", run: runDaemon},
 	{name: "agent", summary: "manage registered agents", run: runAgent},
 	{name: "runtime", summary: "inspect runtime metadata (models, capabilities, usage)", run: runRuntime},
+	{name: "sandbox", summary: "probe kernel-enforced runtime sandbox support", run: runSandbox},
 	{name: "orchestrate", summary: "Orchestrate work across agents (a coordinator that fans out delegations)", run: runOrchestrate},
 	{name: "plugin", summary: "build and inspect Gitmoot agent plugins", run: runPlugin},
 	{name: "events", summary: "show local repo events", run: runEvents},
@@ -45,6 +48,7 @@ var rootCommands = []command{
 	{name: "skillopt", summary: "export and import SkillOpt packages", run: runSkillOpt},
 	{name: "memory", summary: "inspect and measure agent persistent memory", run: runMemory},
 	{name: "pipeline", summary: "define, run, and manage declarative pipelines", run: runPipeline},
+	{name: "bridge", summary: "serve the authenticated localhost HTTP bridge", run: runBridge},
 	{name: "chat", summary: "durable agent chat threads (create, send, inbox)", run: runChat},
 	{name: "moot", summary: "convene registered agents into a bounded multi-agent brainstorm", run: runMoot},
 	{name: "router", summary: "inspect execution-grounded routing telemetry (advisory)", run: runRouter},
@@ -57,6 +61,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	name := args[0]
+	if name == "sandbox-exec" {
+		return runSandboxExec(args[1:], stdout, stderr)
+	}
 	for _, cmd := range rootCommands {
 		if cmd.name == name {
 			return cmd.run(args[1:], stdout, stderr)
@@ -149,6 +156,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	if check, ok := blockedBacklogDoctorCheck(paths); ok {
 		checks = append(checks, check)
 	}
+	checks = append(checks, repoCheckoutDoctorChecks(paths)...)
 	if *jsonOutput {
 		type checkJSON struct {
 			Name     string `json:"name"`
@@ -196,6 +204,49 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// repoCheckoutDoctorChecks is the store-aware aggregate sweep for `gitmoot
+// doctor`. It stays in the CLI layer so the doctor package remains store-less.
+func repoCheckoutDoctorChecks(paths config.Paths) []doctor.Check {
+	if strings.TrimSpace(paths.Database) == "" {
+		return nil
+	}
+	if _, err := os.Stat(paths.Database); err != nil {
+		return nil
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		return nil
+	}
+	defer store.Close()
+	repos, err := store.ListRepos(context.Background())
+	if err != nil {
+		return nil
+	}
+	checks := make([]doctor.Check, 0, len(repos))
+	for _, repo := range repos {
+		primary, linked, err := inspectRegisteredRepoCheckout(context.Background(), store, repo)
+		check := doctor.Check{Name: "repo checkout", Required: false}
+		switch {
+		case err != nil:
+			check.Detail = fmt.Sprintf("%s: %v", repo.FullName(), err)
+			if recorded := strings.TrimSpace(repo.PrimaryCheckoutPath); recorded != "" {
+				if _, statErr := os.Stat(recorded); statErr == nil {
+					check.Detail += fmt.Sprintf("; primary checkout %s is available", recorded)
+				} else {
+					check.Detail += fmt.Sprintf("; primary checkout %s is unavailable", recorded)
+				}
+			}
+		case linked:
+			check.Detail = fmt.Sprintf("%s: registered checkout %s is a linked worktree; use primary checkout %s", repo.FullName(), repo.CheckoutPath, primary)
+		default:
+			check.OK = true
+			check.Detail = fmt.Sprintf("%s: registered checkout %s is primary", repo.FullName(), repo.CheckoutPath)
+		}
+		checks = append(checks, check)
+	}
+	return checks
 }
 
 func pathsFromFlag(home string) (config.Paths, error) {

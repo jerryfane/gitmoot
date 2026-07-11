@@ -234,6 +234,74 @@ func TestEffectiveModelResolutionOrder(t *testing.T) {
 	}
 }
 
+func TestEffectiveEffortResolutionOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		agentEffort string
+		jobEffort   string
+		rtDefault   string
+		want        string
+	}{
+		{"job wins over all", "medium", "xhigh", "low", "xhigh"},
+		{"agent wins over runtime default", "high", "", "low", "high"},
+		{"runtime default when neither pins", "", "", "medium", "medium"},
+		{"empty when nothing set", "", "", "", ""},
+		{"runtime default trimmed", "", "", "  high  ", "high"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := effectiveEffort(Agent{Effort: tc.agentEffort}, Job{Effort: tc.jobEffort, RuntimeDefaultEffort: tc.rtDefault})
+			if got != tc.want {
+				t.Fatalf("effectiveEffort(agent=%q, job=%q, rtDefault=%q) = %q, want %q", tc.agentEffort, tc.jobEffort, tc.rtDefault, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexDeliverArgsReasoningEffort(t *testing.T) {
+	freshRef, err := NewFreshRef()
+	if err != nil {
+		t.Fatalf("NewFreshRef: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		agent  Agent
+		model  string
+		effort string
+		want   []string
+	}{
+		{
+			name:   "fresh ref emits config before separator",
+			agent:  Agent{RuntimeRef: freshRef},
+			model:  "gpt-5.5-codex",
+			effort: "high",
+			want:   []string{"exec", "--json", "--model", "gpt-5.5-codex", "-c", "model_reasoning_effort=high", "--", "prompt"},
+		},
+		{
+			name:   "resume emits config before ref and separator",
+			agent:  Agent{RuntimeRef: "thread-1"},
+			model:  "gpt-5.5-codex",
+			effort: "xhigh",
+			want:   []string{"exec", "--json", "resume", "--model", "gpt-5.5-codex", "-c", "model_reasoning_effort=xhigh", "thread-1", "--", "prompt"},
+		},
+		{
+			name:  "empty fresh emits nothing",
+			agent: Agent{RuntimeRef: freshRef},
+			want:  []string{"exec", "--json", "--", "prompt"},
+		},
+		{
+			name:  "empty resume emits nothing",
+			agent: Agent{RuntimeRef: "thread-1"},
+			want:  []string{"exec", "--json", "resume", "thread-1", "--", "prompt"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexDeliverArgs(tc.agent, "", "prompt", tc.model, tc.effort, true); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("codexDeliverArgs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCodexStartCommandUsesAgentModel(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440009"}` + "\n"}}}
 	adapter := CodexAdapter{Runner: runner}
@@ -243,6 +311,17 @@ func TestCodexStartCommandUsesAgentModel(t *testing.T) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 	runner.want(t, 0, "codex", "exec", "--model", "opus", "--json", "--", "initialize")
+}
+
+func TestCodexStartCommandUsesAgentEffort(t *testing.T) {
+	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440009"}` + "\n"}}}
+	adapter := CodexAdapter{Runner: runner}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot", Effort: "high"}
+
+	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	runner.want(t, 0, "codex", "exec", "-c", "model_reasoning_effort=high", "--json", "--", "initialize")
 }
 
 func TestCodexStartCommandParsesThreadID(t *testing.T) {
@@ -315,6 +394,110 @@ func TestCodexDeliverNonSeatSandboxUnchanged(t *testing.T) {
 		t.Fatalf("Deliver returned error: %v", err)
 	}
 	runner.want(t, 0, "codex", "exec", "--sandbox", "read-only", "--json", "resume", "--last", "--", "converse")
+}
+
+// TestCodexDeliverWorkspaceWriteGrantsLinkedWorktreeGitDir pins the #805
+// sandbox grant: a workspace-write delivery whose working dir is a linked git
+// worktree passes the worktree's RESOLVED gitdir
+// (<main-repo>/.git/worktrees/<name>) as an extra writable root via --add-dir,
+// so metadata-writing git operations do not fail inside the sandbox. --add-dir
+// is additive, so operator-configured writable_roots are untouched.
+func TestCodexDeliverWorkspaceWriteGrantsLinkedWorktreeGitDir(t *testing.T) {
+	worktree := t.TempDir()
+	gitdir := filepath.Join(t.TempDir(), ".git", "worktrees", "adhoc-1")
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+gitdir+"\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok"}}}
+	adapter := CodexAdapter{Runner: runner, Dir: worktree}
+	agent := Agent{
+		Name: "worker", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot",
+		RuntimeRef: "last", AutonomyPolicy: AutonomyPolicyWorkspaceWrite,
+	}
+	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"}); err != nil {
+		t.Fatalf("Deliver returned error: %v", err)
+	}
+	runner.want(t, 0, "codex", "exec", "--sandbox", "workspace-write", "--add-dir", gitdir, "--json", "resume", "--last", "--", "implement")
+}
+
+// TestCodexDeliverPrimaryCheckoutOmitsGitDirGrant proves the #805 grant is a
+// no-op for a primary checkout: .git is a directory, no gitdir resolves, and
+// the workspace-write argv stays byte-identical to before the change.
+func TestCodexDeliverPrimaryCheckoutOmitsGitDirGrant(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok"}}}
+	adapter := CodexAdapter{Runner: runner, Dir: repo}
+	agent := Agent{
+		Name: "worker", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot",
+		RuntimeRef: "last", AutonomyPolicy: AutonomyPolicyWorkspaceWrite,
+	}
+	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"}); err != nil {
+		t.Fatalf("Deliver returned error: %v", err)
+	}
+	runner.want(t, 0, "codex", "exec", "--sandbox", "workspace-write", "--json", "resume", "--last", "--", "implement")
+}
+
+// TestCodexDeliverReadOnlyLinkedWorktreeOmitsGitDirGrant proves the #805 grant
+// never widens a read-only sandbox: even in a linked worktree, a read-only
+// policy keeps its exact pre-#805 args.
+func TestCodexDeliverReadOnlyLinkedWorktreeOmitsGitDirGrant(t *testing.T) {
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: /main/.git/worktrees/adhoc-1\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok"}}}
+	adapter := CodexAdapter{Runner: runner, Dir: worktree}
+	agent := Agent{
+		Name: "worker", Role: "reviewer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot",
+		RuntimeRef: "last", AutonomyPolicy: AutonomyPolicyReadOnly,
+	}
+	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
+		t.Fatalf("Deliver returned error: %v", err)
+	}
+	runner.want(t, 0, "codex", "exec", "--sandbox", "read-only", "--json", "resume", "--last", "--", "review")
+}
+
+// TestLinkedWorktreeGitDir covers the resolver's edge shapes directly: absolute
+// and relative gitdir pointers, and every "not applicable" input that must keep
+// the sandbox argv byte-identical.
+func TestLinkedWorktreeGitDir(t *testing.T) {
+	linked := t.TempDir()
+	if err := os.WriteFile(filepath.Join(linked, ".git"), []byte("gitdir: /main/.git/worktrees/wt-1\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	relative := t.TempDir()
+	if err := os.WriteFile(filepath.Join(relative, ".git"), []byte("gitdir: ../main/.git/worktrees/wt-2\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	malformed := t.TempDir()
+	if err := os.WriteFile(filepath.Join(malformed, ".git"), []byte("not a gitdir pointer\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	primary := t.TempDir()
+	if err := os.Mkdir(filepath.Join(primary, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	for _, tt := range []struct {
+		name string
+		dir  string
+		want string
+	}{
+		{name: "linked_absolute", dir: linked, want: "/main/.git/worktrees/wt-1"},
+		{name: "linked_relative", dir: relative, want: filepath.Clean(filepath.Join(relative, "../main/.git/worktrees/wt-2"))},
+		{name: "malformed_pointer", dir: malformed, want: ""},
+		{name: "primary_checkout", dir: primary, want: ""},
+		{name: "no_repo", dir: t.TempDir(), want: ""},
+		{name: "empty_dir", dir: "", want: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := linkedWorktreeGitDir(tt.dir); got != tt.want {
+				t.Fatalf("linkedWorktreeGitDir(%q) = %q, want %q", tt.dir, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestCodexStartRejectsMissingThreadID(t *testing.T) {
@@ -514,6 +697,32 @@ func TestClaudeDeliverCommandFallsBackToAgentModel(t *testing.T) {
 	runner.want(t, 0, "claude", "--model", "sonnet", "--resume", "550e8400-e29b-41d4-a716-446655440002", "-p", "--output-format", "json", "--", "review")
 }
 
+func TestNonCodexDeliveriesNeverEmitReasoningEffort(t *testing.T) {
+	t.Run("claude", func(t *testing.T) {
+		runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
+		adapter := ClaudeAdapter{Runner: runner}
+		agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot", Effort: "high"}
+		if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review", Effort: "xhigh", RuntimeDefaultEffort: "low"}); err != nil {
+			t.Fatalf("Deliver returned error: %v", err)
+		}
+		if strings.Contains(strings.Join(runner.calls[0], " "), "model_reasoning_effort") {
+			t.Fatalf("claude args unexpectedly contain reasoning effort: %v", runner.calls[0])
+		}
+	})
+
+	t.Run("kimi", func(t *testing.T) {
+		runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"role":"assistant","content":"done"}` + "\n"}}}
+		adapter := KimiAdapter{Runner: runner}
+		agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_1", RepoScope: "jerryfane/gitmoot", Effort: "high"}
+		if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review", Effort: "xhigh", RuntimeDefaultEffort: "low"}); err != nil {
+			t.Fatalf("Deliver returned error: %v", err)
+		}
+		if strings.Contains(strings.Join(runner.calls[0], " "), "model_reasoning_effort") {
+			t.Fatalf("kimi args unexpectedly contain reasoning effort: %v", runner.calls[0])
+		}
+	})
+}
+
 func TestIsClaudeSessionMissing(t *testing.T) {
 	missing := subprocess.Result{Stderr: "No conversation found with session ID: 550e8400-e29b-41d4-a716-446655440002"}
 	if !isClaudeSessionMissing(missing) {
@@ -538,6 +747,56 @@ func TestIsClaudeSessionMissing(t *testing.T) {
 		if name == "auth via stderr 401" && !isClaudeAuthFailure(result) {
 			t.Fatalf("%s should still be an auth failure", name)
 		}
+	}
+}
+
+func TestCodexSandboxArgsProduceGrants(t *testing.T) {
+	agent := Agent{
+		AutonomyPolicy: AutonomyPolicyWorkspaceWrite,
+		WritablePaths:  []string{"/data/one", "/data/two"},
+		ProduceNetwork: true,
+	}
+	args := codexSandboxArgs(agent, "")
+	want := []string{"--sandbox", "workspace-write", "--add-dir", "/data/one", "--add-dir", "/data/two", "-c", "sandbox_workspace_write.network_access=true"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("codexSandboxArgs = %v, want %v", args, want)
+	}
+	danger := agent
+	danger.AutonomyPolicy = AutonomyPolicyDangerFullAccess
+	if got := codexSandboxArgs(danger, ""); !reflect.DeepEqual(got, []string{"--sandbox", "danger-full-access"}) {
+		t.Fatalf("danger-full-access produce args = %v, want no leaked grants", got)
+	}
+	for _, runtimeName := range []string{CodexRuntime, ClaudeRuntime, KimiRuntime} {
+		if err := ProduceDispatchError("produce", Agent{Name: "p", Runtime: runtimeName, AutonomyPolicy: AutonomyPolicyWorkspaceWrite}); err != nil {
+			t.Fatalf("%s produce dispatch error = %v", runtimeName, err)
+		}
+	}
+	if err := ProduceDispatchError("produce", Agent{Name: "p", Runtime: KimiCLIRuntime, AutonomyPolicy: AutonomyPolicyWorkspaceWrite}); err == nil || !strings.Contains(err.Error(), `runtime "kimi-cli"`) {
+		t.Fatalf("legacy kimi produce error = %v", err)
+	}
+	if err := ProduceDispatchError("produce", Agent{Name: "p", Runtime: CodexRuntime, AutonomyPolicy: AutonomyPolicyReadOnly}); err == nil || !strings.Contains(err.Error(), "writable autonomy policy") {
+		t.Fatalf("read-only produce error = %v", err)
+	}
+}
+
+func TestClaudeKimiProducePermissionArgs(t *testing.T) {
+	agent := Agent{
+		AutonomyPolicy: AutonomyPolicyWorkspaceWrite,
+		WritablePaths:  []string{"/data/one", " ", "/data/two"},
+	}
+	if got, want := claudePermissionArgs(agent), []string{"--permission-mode", "acceptEdits", "--add-dir", "/data/one", "--add-dir", "/data/two"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claudePermissionArgs = %v, want %v", got, want)
+	}
+	if got, want := kimiPermissionArgs(agent), []string{"--add-dir", "/data/one", "--add-dir", "/data/two"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("kimiPermissionArgs = %v, want %v", got, want)
+	}
+	withoutPaths := agent
+	withoutPaths.WritablePaths = nil
+	if got, want := claudePermissionArgs(withoutPaths), []string{"--permission-mode", "acceptEdits"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("non-produce Claude args = %v, want %v", got, want)
+	}
+	if got := kimiPermissionArgs(withoutPaths); got != nil {
+		t.Fatalf("non-produce Kimi args = %v, want nil", got)
 	}
 }
 

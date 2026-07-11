@@ -37,6 +37,16 @@ workspaces = %q
 evals = %q
 artifact_blobs = %q
 
+# [workflow] controls job-level workflow defaults. implement_base is optional:
+# when set, agent implement and agent run jobs that route to implement create a
+# new-branch worktree from that ref. Use "origin/main" for a remote-tracking
+# default, or "HEAD" to follow the registered checkout. With no value, implement
+# follows checkout HEAD and guards stale non-default checkouts. result_checks is
+# off | warn | block and defaults to warn when omitted.
+# [workflow]
+# implement_base = "origin/main"
+# result_checks = "warn"
+
 # [daemon] is the OPTIONAL warm-reloadable runtime config (issue #577). CLI flags to
 # "daemon start" / "daemon run" remain the initial value; a key here is applied only
 # where the matching flag was NOT passed (flag = override). Its real purpose is WARM
@@ -117,10 +127,16 @@ path = ""
 # the master switch for #737 P4.1 deterministic distill-at-terminal: on an anomalous
 # terminal (failed/blocked/changes_requested) Gitmoot stages bounded PENDING
 # observations (failing tests + named errors) at trust_mark=low, provenance
-# distill:<job-id> — NEVER confirmed memory (the memory confirm gate stays the only
-# promotion path). distill_max_per_job (default 3, >= 0) caps distilled rows per job;
-# distill_all_jobs (default false) widens distill past enrolled agents to every job.
-# All [memory] keys are read PER TICK — no daemon restart is needed to flip them.
+# distill:<job-id>, NEVER confirmed memory (the memory confirm gate stays the only
+# promotion path). distill_successes (default false) enables #781 deterministic
+# success producers: SkillOpt promotions and recovered-failure observations. They
+# also stage only trust_mark=low pending observations. ingest_auto_confirm (default
+# false) lets memory ingest and chat remember immediately confirm into the authoring
+# agent's private pool only; the shared pool is always explicit through confirm
+# --to-shared or promote --to-shared. distill_max_per_job (default 3, >= 0) caps
+# distilled rows per job; distill_all_jobs (default false) widens distill past
+# enrolled agents to every job.
+# All [memory] keys are read PER TICK; no daemon restart is needed to flip them.
 # Inspect the store read-only with gitmoot memory list; see the "Agent Persistent
 # Memory" concepts page and CLI.md for the full model.
 # [memory]
@@ -128,8 +144,29 @@ path = ""
 # token_budget = 1500
 # max_entries = 15
 # distill_at_terminal = false
+# distill_successes = false
 # distill_max_per_job = 3
 # distill_all_jobs = false
+# ingest_auto_confirm = false
+# groom_split_llm = false # Phase 2 gate only; the LLM atomizer is not implemented yet.
+# cluster_fanout = 12
+# cluster_fanout_keep = 9
+# cluster_depth_cap = 4
+#
+# Built-in memory pipeline inputs are optional. The daemon and
+# gitmoot pipeline install-defaults register memory-ingest-sweep and
+# memory-groom-propose as ordinary pipelines, but schedules stay disabled unless
+# you set an interval here. "nightly" is accepted as 24h.
+# [[memory.ingest]]
+# path = "/path/to/markdown-notes"
+# agent = "builder"
+# repo = "owner/repo"
+# tier = "repo"
+#
+# [memory.pipelines]
+# repo = "owner/repo"
+# ingest_sweep = "nightly"
+# groom_propose = "nightly"
 #
 # Enroll a specific agent (per-agent opt-in; omit for byte-identical default):
 # [agents.builder]
@@ -378,28 +415,29 @@ path = ""
 
 # [runtimes.<name>] is the OPTIONAL config-driven runtime metadata registry
 # (issue #652). Gitmoot ships built-in metadata for each compiled runtime (codex,
-# claude, kimi, kimi-cli, shell) — capabilities, default/known models, and where
+# claude, kimi, kimi-cli, shell) — capabilities, default model/effort, known models, and where
 # token usage is read from — that reproduces today's behavior. A [runtimes.<name>]
 # section OVERRIDES that recorded metadata for a BUILT-IN runtime WITHOUT a
 # recompile: retarget the default model, record which models a runtime accepts, or
-# adjust its advertised capabilities. Exactly ONE field is BEHAVIORAL: default_model
-# is consulted at job DELIVERY (#652) as the model fallback when NEITHER the agent
-# NOR the job pins a --model — so setting it DOES retarget the model those jobs run
-# on (resolution order: agent/job --model win, then this default_model, then the
-# runtime CLI's own default). Every other field is inspection-only, surfaced by
+# adjust its advertised capabilities. Two fields are BEHAVIORAL: default_model is
+# consulted at job DELIVERY (#652) as the model fallback when NEITHER the agent
+# NOR the job pins a --model; default_effort follows the same precedence after
+# job/agent --effort and is forwarded to Codex as model_reasoning_effort. Claude
+# and Kimi ignore effort. Every other field is inspection-only, surfaced by
 # 'gitmoot runtime list' but changing nothing at runtime: models is advisory
 # (Gitmoot never REJECTS a --model based on it), and capabilities gates nothing at
 # dispatch (agent capabilities do). Adapter behavior (auth, sandbox, session resume,
 # stream parsing) always stays in Go. With no [runtimes.*] section — and with
-# default_model unset (empty = none recorded, the built-in default) — behavior is
-# byte-identical: no model is forced. NOTE: this section can only tweak a BUILT-IN
+# default_model/default_effort unset (empty = none recorded, the built-in default)
+# behavior is byte-identical: no model or effort is forced. NOTE: this section can only tweak a BUILT-IN
 # runtime's metadata — it cannot add a new first-class runtime (that is a code
-# change); an unknown runtime name here is an error. default_model is the configured
-# default surfaced by 'runtime list' AND the delivery fallback; models is the
-# advisory known-valid list; capabilities is a subset of review/implement/ask;
+# change); an unknown runtime name here is an error. default_model/default_effort
+# are surfaced by 'runtime list' AND used as delivery fallbacks; models is the
+# advisory known-valid list; capabilities is a subset of review/implement/ask/produce;
 # usage_source is a human-readable descriptor.
 # [runtimes.codex]
 # default_model = "gpt-5.5-codex"
+# default_effort = "high"
 # models = ["gpt-5.5-codex", "gpt-5.4-codex"]
 # capabilities = ["review", "implement", "ask"]
 

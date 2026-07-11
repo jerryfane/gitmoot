@@ -20,9 +20,16 @@ const groupKillGrace = 10 * time.Second
 // orphans grandchildren — runtime CLIs like codex/claude spawn helpers that
 // must die with the job. Used by the runtime adapters; short-lived tool calls
 // (gh, git) keep the plain ExecRunner.
-type GroupRunner struct{}
+type GroupRunner struct {
+	// MaxOutputBytes, when positive, retains only the tail of stdout and stderr
+	// independently. Zero preserves the historical unbounded capture behavior.
+	MaxOutputBytes int
+}
 
-func (GroupRunner) Run(ctx context.Context, dir string, command string, args ...string) (Result, error) {
+func (r GroupRunner) Run(ctx context.Context, dir string, command string, args ...string) (Result, error) {
+	if r.MaxOutputBytes > 0 {
+		return RunGroupEnvBounded(ctx, dir, nil, r.MaxOutputBytes, command, args...)
+	}
 	return RunGroup(ctx, dir, command, args...)
 }
 
@@ -31,7 +38,11 @@ func (GroupRunner) Run(ctx context.Context, dir string, command string, args ...
 // the #732 chat relay uses to inject a moot seat's GITMOOT_CHAT_RELAY[_AUTH] into
 // the runtime subprocess without losing whole-tree cancellation. A nil/empty env
 // is byte-identical to Run.
-func (GroupRunner) RunEnv(ctx context.Context, dir string, env []string, command string, args ...string) (Result, error) {
+
+func (r GroupRunner) RunEnv(ctx context.Context, dir string, env []string, command string, args ...string) (Result, error) {
+	if r.MaxOutputBytes > 0 {
+		return RunGroupEnvBounded(ctx, dir, env, r.MaxOutputBytes, command, args...)
+	}
 	return RunGroupEnv(ctx, dir, env, command, args...)
 }
 
@@ -42,6 +53,10 @@ func (GroupRunner) RunEnv(ctx context.Context, dir string, env []string, command
 // degrades to RunGroup.
 func (GroupRunner) RunStream(ctx context.Context, dir string, out io.Writer, command string, args ...string) (Result, error) {
 	return RunGroupStream(ctx, dir, out, command, args...)
+}
+
+func (GroupRunner) RunEnvStream(ctx context.Context, dir string, env []string, out io.Writer, command string, args ...string) (Result, error) {
+	return RunGroupEnvStream(ctx, dir, env, out, command, args...)
 }
 
 func (GroupRunner) LookPath(file string) (string, error) {
@@ -79,15 +94,60 @@ func RunGroupEnv(ctx context.Context, dir string, extraEnv []string, command str
 	}, err
 }
 
+// RunGroupEnvBounded is RunGroupEnv with bounded tail capture for stdout and
+// stderr. It preserves the same process-group cancellation, WaitDelay, and final
+// SIGKILL sweep while preventing a noisy child from growing memory without bound.
+func RunGroupEnvBounded(ctx context.Context, dir string, extraEnv []string, maxOutputBytes int, command string, args ...string) (Result, error) {
+	cmd, sweep := newGroupCmd(ctx, dir, command, args)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	stdout := tailBuffer{max: maxOutputBytes}
+	stderr := tailBuffer{max: maxOutputBytes}
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	sweep()
+	return Result{Command: command, Args: args, Stdout: stdout.String(), Stderr: stderr.String()}, err
+}
+
+type tailBuffer struct {
+	max  int
+	data []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.max <= 0 {
+		return n, nil
+	}
+	b.data = append(b.data, p...)
+	if len(b.data) > b.max {
+		b.data = append(b.data[:0], b.data[len(b.data)-b.max:]...)
+	}
+	return n, nil
+}
+
+func (b *tailBuffer) String() string { return string(b.data) }
+
 // RunGroupStream is RunGroup that additionally streams the child's stdout and
 // stderr to out, line by line, as they are produced — the buffered Result is
 // byte-identical to RunGroup's, so the tee is purely additive. A nil out
 // degrades to RunGroup. The whole-group cancellation/sweep is identical.
 func RunGroupStream(ctx context.Context, dir string, out io.Writer, command string, args ...string) (Result, error) {
+	return RunGroupEnvStream(ctx, dir, nil, out, command, args...)
+}
+
+// RunGroupEnvStream combines RunGroupEnv's environment injection with
+// RunGroupStream's live tee and the same whole-process-group cancellation.
+func RunGroupEnvStream(ctx context.Context, dir string, extraEnv []string, out io.Writer, command string, args ...string) (Result, error) {
 	if out == nil {
-		return RunGroup(ctx, dir, command, args...)
+		return RunGroupEnv(ctx, dir, extraEnv, command, args...)
 	}
 	cmd, sweep := newGroupCmd(ctx, dir, command, args)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	result, err := runStreamingCmd(cmd, out, command, args)
 	sweep()
 	return result, err

@@ -68,7 +68,7 @@ func printJobUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot job cancel --state blocked [--older-than 168h|7d] [--repo owner/repo] [--agent name] [--yes]")
 	fmt.Fprintln(w, "  gitmoot job kill <root-job-id>")
 	fmt.Fprintln(w, "  gitmoot job open --agent name --repo owner/repo --type ask|review|implement [--title ...] [--task id] [--pr n] [--json]")
-	fmt.Fprintln(w, "  gitmoot job close <id> --decision approved|changes_requested|blocked|implemented|failed [--summary ...] [--pr n] [--branch name] [--json]")
+	fmt.Fprintln(w, "  gitmoot job close <id> --decision approved|changes_requested|blocked|implemented|failed|skipped [--summary ...] [--pr n] [--branch name] [--json]")
 	fmt.Fprintln(w, "  gitmoot job record --agent name --repo owner/repo --type ask|review|implement --decision ... [--title ...] [--summary ...] [--task id] [--pr n] [--branch name] [--json]")
 }
 
@@ -774,8 +774,35 @@ func printJob(stdout io.Writer, job db.Job, payload workflow.JobPayload, reason 
 	if len(payload.RawOutputs) > 0 {
 		fmt.Fprintf(stdout, "raw_outputs: %d retained locally\n", len(payload.RawOutputs))
 	}
+	printFailureDiagnostics(stdout, payload.FailureDiagnostics)
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err == nil {
 		fmt.Fprintf(stdout, "payload: %s\n", string(encoded))
+	}
+}
+
+// printFailureDiagnostics renders the FAILURE DIAGNOSTICS block for a job whose
+// runtime session ended without producing a gitmoot_result envelope (#806).
+// The stderr tail was redacted and size-bounded at capture time.
+func printFailureDiagnostics(stdout io.Writer, diag *workflow.FailureDiagnostics) {
+	if diag == nil {
+		return
+	}
+	fmt.Fprintln(stdout, "failure_diagnostics:")
+	fmt.Fprintf(stdout, "  phase: %s\n", diag.Phase)
+	if diag.ExitCode != nil {
+		fmt.Fprintf(stdout, "  exit_code: %d\n", *diag.ExitCode)
+	}
+	if diag.Signal != "" {
+		fmt.Fprintf(stdout, "  signal: %s\n", diag.Signal)
+	}
+	if diag.SessionID != "" {
+		fmt.Fprintf(stdout, "  runtime_session: %s\n", diag.SessionID)
+	}
+	if diag.StderrTail != "" {
+		fmt.Fprintln(stdout, "  stderr_tail:")
+		for _, line := range strings.Split(diag.StderrTail, "\n") {
+			fmt.Fprintf(stdout, "    %s\n", line)
+		}
 	}
 }

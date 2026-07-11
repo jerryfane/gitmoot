@@ -15,7 +15,7 @@ arrays that describe the work:
 ```json
 {
   "gitmoot_result": {
-    "decision": "approved|changes_requested|blocked|implemented|failed",
+    "decision": "approved|changes_requested|blocked|implemented|failed|skipped",
     "summary": "Brief outcome.",
     "findings": [],
     "changes_made": [],
@@ -34,6 +34,13 @@ The `decision` field reports the outcome of the job:
   change.
 - `implemented`: the requested implementation work was completed.
 - `failed`: the attempted action errored or could not complete.
+- `skipped`: the task itself had no work to do. Do not use `skipped` in a PR
+  review to mean "nothing to flag"; reviewers use `approved`. A skipped result
+  cannot carry delegations. Outside pipelines it maps to a succeeded job state;
+  it is an abstention for quorum/verify, while vote counts that succeeded state.
+  Pipelines accept it as success by default and persist the existing succeeded
+  stage state, not the separate skipped state used for downstream stages that
+  never ran.
 
 The narrative and evidence fields are reporting-only. Do not claim tests were run
 in `tests_run` unless they were actually run, and do not list files in
@@ -230,7 +237,6 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
   (the `[runtimes.<name>].default_model` config), then the runtime CLI's own
   default. There is no allow-list; Gitmoot passes the value through to the
   runtime as-is.
-
   **Model-tier routing (recommendation).** Picking a per-delegation `model` is
   the coordinator's call — Gitmoot does not choose or override it. As a costing
   heuristic, think of each leg as falling into one of four abstract **tiers**,
@@ -268,6 +274,12 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
   **Rule of thumb:** downshift `model` for cheap/mechanical legs; leave `model`
   empty for standard legs (so they take the runtime default); and reserve a deep
   model for genuinely hard or quorum-critical legs.
+- `effort` (optional): a free-form, runtime-scoped reasoning effort for the
+  child job. This job-level value overrides the delegated agent's default or
+  the ephemeral worker's `effort`; when omitted, effort falls back to that
+  agent/worker default and then `[runtimes.<name>].default_effort`. Gitmoot does
+  not apply an allow-list. Codex receives
+  `-c model_reasoning_effort=<value>`; Claude and Kimi ignore the setting.
 - `phase` (optional): a free-form per-delegation string. It is pass-through
   metadata — Gitmoot carries it through to the child job untouched and echoes it
   back in the coordinator continuation for each delegation that set a non-empty
@@ -290,6 +302,9 @@ the same `delegations` field, `coordinator`, and `continuation` mechanics.
     `claude`, or `kimi`. It is never `shell`.
   - `model` (optional): a runtime-scoped model string, exactly like the
     delegation `model` field above.
+  - `effort` (optional): the worker's default reasoning effort. A top-level
+    delegation `effort` overrides it; omit both to use the runtime registry
+    default (if configured).
   - `template` (optional): an agent-template id used to seed the worker's prompt.
   - `role` (optional): a human-readable role label for the worker.
   - `capabilities` (optional): an array of capability strings the worker

@@ -158,14 +158,16 @@ func (a KimiAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result,
 	args = append(args, extraArgs...)
 	args = append(args, "-p", promptArg, "--output-format", "stream-json")
 	result, err := a.runner().Run(ctx, a.Dir, "kimi", args...)
+	// The fresh per-job kimi session never reports its id, so SessionID stays
+	// empty; the exit/stderr diagnostics still apply.
 	if err != nil {
-		return Result{Raw: result.Stdout + result.Stderr}, kimiCommandError(result, err)
+		return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, "")}, kimiCommandError(result, err)
 	}
 	content, _, usage, parseErr := parseKimiStreamJSON(result.Stdout)
 	if parseErr != nil {
-		return Result{Raw: result.Stdout}, fmt.Errorf("parse kimi stream-json output: %w", parseErr)
+		return Result{Raw: result.Stdout, SessionDiag: newSessionDiag(result, nil, "")}, fmt.Errorf("parse kimi stream-json output: %w", parseErr)
 	}
-	return Result{Raw: content, Summary: strings.TrimSpace(content), InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens}, nil
+	return Result{Raw: content, Summary: strings.TrimSpace(content), InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens, SessionDiag: newSessionDiag(result, nil, "")}, nil
 }
 
 func (a KimiAdapter) Health(ctx context.Context, agent Agent) error {
@@ -177,7 +179,7 @@ func (a KimiAdapter) Health(ctx context.Context, agent Agent) error {
 }
 
 func (a KimiAdapter) Capabilities(context.Context) ([]string, error) {
-	return []string{"review", "implement", "ask"}, nil
+	return []string{"review", "implement", "ask", "produce"}, nil
 }
 
 func (a KimiAdapter) runner() subprocess.Runner {
@@ -255,13 +257,13 @@ func (a KimiCLIAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Resu
 	defer cleanup()
 	result, err := a.runner().Run(ctx, a.Dir, "kimi", kimiCLIPromptArgs(agent, effectiveModel(agent, job), promptArg, extraArgs)...)
 	if err != nil {
-		return Result{Raw: result.Stdout + result.Stderr}, kimiCommandError(result, err)
+		return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, "")}, kimiCommandError(result, err)
 	}
 	content, _, usage, parseErr := parseKimiStreamJSON(result.Stdout)
 	if parseErr != nil {
-		return Result{Raw: result.Stdout}, fmt.Errorf("parse kimi stream-json output: %w", parseErr)
+		return Result{Raw: result.Stdout, SessionDiag: newSessionDiag(result, nil, "")}, fmt.Errorf("parse kimi stream-json output: %w", parseErr)
 	}
-	return Result{Raw: content, Summary: strings.TrimSpace(content), InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens}, nil
+	return Result{Raw: content, Summary: strings.TrimSpace(content), InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens, SessionDiag: newSessionDiag(result, nil, "")}, nil
 }
 
 func (a KimiCLIAdapter) Health(ctx context.Context, agent Agent) error {
@@ -307,11 +309,16 @@ func kimiCLIPromptArgs(agent Agent, model string, promptArg string, extraArgs []
 
 func kimiPermissionArgs(agent Agent) []string {
 	// Kimi's prompt mode already runs non-interactively. The --yolo and --auto
-	// flags cannot be combined with -p, so we pass no extra permission flags.
-	// Read-only enforcement is handled by the agent's capabilities and Gitmoot's
-	// dispatch/lock logic.
-	_ = agent
-	return nil
+	// flags cannot be combined with -p. Produce paths are still passed as
+	// cooperative workspace hints; Gitmoot's Landlock wrapper is the enforcement
+	// boundary and the flags only let Kimi's own file layer see the same roots.
+	var args []string
+	for _, path := range agent.WritablePaths {
+		if path = strings.TrimSpace(path); path != "" {
+			args = append(args, "--add-dir", path)
+		}
+	}
+	return args
 }
 
 type kimiStreamEvent struct {

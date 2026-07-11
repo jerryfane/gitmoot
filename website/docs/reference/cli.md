@@ -83,8 +83,8 @@ snippet with `--config-snippet`.
 
 Gitmoot drives four built-in runtimes (`codex`, `claude`, `kimi`, plus the
 subscribe-only `shell`; the legacy `kimi-cli` is also compiled in). Each carries
-declarative metadata — advertised capabilities, a default model, an advisory list
-of known-valid models, and a descriptor of where token usage is read from. Inspect
+declarative metadata — advertised capabilities, default model and effort values,
+an advisory list of known-valid models, and a descriptor of where token usage is read from. Inspect
 the resolved registry:
 
 ```sh
@@ -95,30 +95,51 @@ gitmoot runtime list --json
 The values come from the compiled built-in defaults, overlaid with any
 `[runtimes.<name>]` overrides in `config.toml`. Override a built-in runtime's
 recorded metadata **without recompiling** — for example to retarget its default
-model or record its known models:
+model/effort or record its known models:
 
 ```toml
 [runtimes.codex]
 default_model = "gpt-5.5-codex"
+default_effort = "high"
 models = ["gpt-5.5-codex", "gpt-5.4-codex"]
 capabilities = ["review", "implement", "ask"]
 usage_source = "codex exec --json turn.completed usage"
 ```
 
-Exactly one field is **behavioral**: `default_model` is consulted at job **delivery**
-as the model fallback when **neither the agent nor the job pins a `--model`** — so
-setting it **does** retarget the model those jobs run on. The resolution order is:
-the agent/job `--model` win, then this `default_model`, then the runtime CLI's own
-default. Every other field is **inspection-only**, surfaced by `gitmoot runtime list`
-but changing nothing at runtime: `models` is **advisory** (Gitmoot never rejects a
-`--model` based on it), and `capabilities` gates nothing at dispatch. Adapter
-behavior (auth, sandbox policy, session resume, stream parsing) always stays in Go.
-With no `[runtimes.*]` section — and with `default_model` unset — behavior is
-byte-identical: no model is forced.
+Two fields are **behavioral**. `default_model` is the model fallback when neither
+the agent nor the job pins `--model`: agent/job `--model`, then `default_model`,
+then the runtime CLI's own default. `default_effort` follows the same precedence
+after job/agent `--effort`; for Codex, Gitmoot emits
+`-c model_reasoning_effort=<value>`. Claude and Kimi do not expose a reasoning
+effort argument, so the resolved value is a no-op for those adapters. Every other
+field is **inspection-only**, surfaced by `gitmoot runtime list` but changing
+nothing at runtime: `models` is **advisory** (Gitmoot never rejects a `--model`
+based on it), and `capabilities` gates nothing at dispatch. Adapter behavior
+(auth, sandbox policy, session resume, stream parsing) always stays in Go. With
+no `[runtimes.*]` section, and with both defaults unset, no model or effort is
+forced.
 
 A `[runtimes.<name>]` section can only tweak a **built-in** runtime's metadata; it
 cannot add a new first-class runtime (that requires a code change). An unknown
 runtime name is a config error surfaced by `gitmoot runtime list`.
+
+## Runtime Launch Sandbox
+
+```sh
+gitmoot sandbox probe
+```
+
+`sandbox probe` prints whether this Linux host can enforce Gitmoot's strict
+Landlock launch sandbox and includes the detected ABI. It runs the real hidden
+re-exec shim and verifies both an allowed write and a denied outside write;
+unsupported kernels return non-zero. Claude/Kimi `produce` pipeline stages require
+this probe to pass and otherwise retain the explicit Codex-only refusal. Codex
+produce remains on its native sandbox. Landlock confines filesystem writes but does
+not govern network access; network policy remains the runtime CLI's. Wrapped Claude
+may write its runtime-owned `$HOME/.claude` state and
+`$XDG_CACHE_HOME/claude-cli-nodejs` cache; wrapped Kimi may write its runtime-owned
+`$HOME/.kimi-code` state. Apart from runtime state/cache and standard device nodes,
+only declared data paths, the disposable workdir, and temp roots are writable.
 
 ## Repo And Daemon Status
 
@@ -352,6 +373,7 @@ gitmoot agent start reviewer \
   --capability ask \
   --capability review \
   --model gpt-5-codex \
+  --effort high \
   --start-daemon
 ```
 
@@ -362,6 +384,15 @@ with no allow-list; both `--model X` and `--model=X` are accepted. A per-job
 `--model` (or a delegation's `model` field) overrides this default, and an
 omitted model preserves the runtime's own default. The same default can be set
 in config under `[agents.<type>].model`.
+
+The same commands accept `--effort <value>` as the agent's default reasoning
+effort, and `agent run`, `ask`, `implement`, `review`, and `orchestrate` accept it
+as a per-job override. A delegation's `effort` field is the child-job override,
+while an ephemeral worker spec's `effort` is that worker's default. The
+resolution order mirrors model selection: job/delegation effort, agent/worker
+effort, `[runtimes.<runtime>].default_effort`, then no explicit override. Values
+are free-form pass-through strings. Codex receives
+`-c model_reasoning_effort=<value>`; Claude and Kimi ignore the setting.
 
 `agent start` and `agent subscribe` accept `--policy` (default `auto`). The policy
 maps to the runtime permission mode and decides what a headless job may do:
@@ -436,7 +467,8 @@ gitmoot agent subscribe reviewer \
   --role reviewer \
   --capability ask \
   --capability review \
-  --model gpt-5-codex
+  --model gpt-5-codex \
+  --effort high
 ```
 
 `agent subscribe` additionally accepts `--runtime shell`, the deterministic
@@ -472,11 +504,34 @@ gitmoot agent run lead --repo owner/repo --task task-001 --background "Implement
 gitmoot agent run reviewer --repo owner/repo --pr 12 --background "Review this PR."
 gitmoot agent review reviewer --repo owner/repo --pr 12 "Review this PR."
 gitmoot agent implement lead --repo owner/repo --task task-001 "Implement this task."
+gitmoot agent implement lead --repo owner/repo --task task-002 --base origin/main "Implement from current origin/main."
 gitmoot agent ask project-planner --repo owner/repo "Return the plan status."
 gitmoot agent ask project-planner --repo owner/repo --background "Write the implementation plan and goal file."
 gitmoot agent run lead --repo owner/repo --model gpt-5-codex "Implement this task."
+gitmoot agent run lead --repo owner/repo --effort xhigh "Implement this task."
 gitmoot job watch <job-id>
 ```
+
+For `agent implement`, `--base <ref>` selects the commit used to create a new
+branch worktree. `agent run` accepts the same flag when it routes to implement.
+An `origin/*` ref is fetched before it is resolved, and an unknown ref fails
+before a job is enqueued. `--base HEAD` explicitly follows the registered
+checkout's current commit. On implement, `--head-sha <sha>` is a compatibility
+alias for `--base <sha>`; passing both with different values is an error.
+
+Set a default for implement dispatches in `config.toml`:
+
+```toml
+[workflow]
+implement_base = "origin/main"
+```
+
+The flag wins over the config value. The config value `"HEAD"` keeps
+checkout-following behavior. With no flag and no config value, Gitmoot still
+uses checkout HEAD, but refuses when the checkout is on a non-default branch
+that is behind `origin/<default>`. The error reports the branch and behind
+count and offers both explicit choices: `--base origin/<default>` or
+`--base HEAD`.
 
 `gitmoot agent run`, `ask`, `implement`, and `review` (and `orchestrate`) accept
 an optional `--model <name>` flag that pins the runtime model for that one job,
@@ -484,6 +539,10 @@ overriding the agent's configured default. It is a free-form, runtime-scoped
 string (a Codex, Claude Code, or Kimi Code model name) with no allow-list; an
 omitted `--model` leaves the agent's default model in effect. Both `--model X`
 and `--model=X` are accepted.
+
+`--effort <value>` and `--effort=<value>` select reasoning effort for one job
+with the same job-over-agent-over-registry precedence. Gitmoot does not validate
+an allow-list; Codex validates the forwarded value.
 
 The same commands accept an optional per-job `--runtime
 codex|claude|kimi|kimi-cli|shell` override: that ONE job runs through the named
@@ -498,7 +557,9 @@ override runtime so it cannot collide with the default session's lock. Model
 rule: `--model` combined with `--runtime` is interpreted for the OVERRIDE
 runtime; an override without `--model` uses the override runtime's default
 model — the agent's configured default model is never applied to a different
-runtime. An unknown
+runtime. The same rule applies to `--effort`: an explicit job value belongs to
+the override runtime, while the agent's default effort does not cross runtimes.
+An unknown
 `--runtime` fails before any job is enqueued, background (daemon) jobs honor
 the override identically to foreground, and a coordinator's delegation-tree
 continuations (synthesis, corrective, replan, finalize) inherit the override,
@@ -554,6 +615,7 @@ Start an orchestra of agents with `gitmoot orchestrate`:
 ```sh
 gitmoot orchestrate project-planner "Plan and split this work across agents." --repo owner/repo
 gitmoot orchestrate project-planner "Plan and split this work." --repo owner/repo --model gpt-5-codex
+gitmoot orchestrate project-planner "Plan and split this work." --repo owner/repo --effort high
 gitmoot orchestrate project-planner "Review PR #123 in this repo." --repo owner/repo --recipe review-panel
 ```
 
@@ -586,11 +648,15 @@ gitmoot agent type list
 gitmoot agent type show planner
 gitmoot agent type set planner --runtime codex --template planner --max-background 2 --idle-timeout 20m
 gitmoot agent type set planner --model gpt-5-codex
+gitmoot agent type set planner --effort high
 gitmoot agent gc
 ```
 
 `agent type set --model <name>` (or `[agents.<type>].model` in config) sets the
 default runtime model for that managed agent type.
+
+`agent type set --effort <value>` (or `[agents.<type>].effort`) sets its default
+reasoning effort.
 
 Schedule recurring agent work (heartbeats, off by default):
 
@@ -679,7 +745,7 @@ once you clock out:
 ```sh
 gitmoot agent prompt frontend-reviewer --record [--repo owner/repo] [--type ask|review|implement] [--json]
 # prints:  [gitmoot session job <id> — when this work is complete, run:
-#           gitmoot job close <id> --decision <approved|changes_requested|implemented|blocked|failed> --summary "..."]
+#           gitmoot job close <id> --decision <approved|changes_requested|implemented|blocked|failed|skipped> --summary "..."]
 # followed by the prompt body.
 ```
 
@@ -917,7 +983,7 @@ gitmoot job open --agent <name> --repo owner/repo --type ask|review|implement \
                  [--title "..."] [--task <id>] [--pr <n>] [--json]
 
 # Clock out: apply the result and move the job to its terminal state.
-gitmoot job close <id> --decision approved|changes_requested|blocked|implemented|failed \
+gitmoot job close <id> --decision approved|changes_requested|blocked|implemented|failed|skipped \
                  [--summary "..."] [--pr <n>] [--branch <name>] [--json]
 
 # One-shot post-hoc: create an already-terminal job (open + close in one).
@@ -931,8 +997,8 @@ the daemon never claims or Delivers it — no runtime subprocess, no runtime-ses
 or checkout lock) and the stuck-`running` reaper **skips** it, so a session may
 hold it open for as long as the work takes. `close` reuses the exact result path an
 engine-run job uses: `--decision` maps to the same terminal state
-(`approved`/`changes_requested`/`implemented` → succeeded, `blocked` → blocked,
-`failed` → failed) and emits the same finished/failed/blocked event, so a recorded
+(`approved`/`changes_requested`/`implemented`/`skipped` -> succeeded, `blocked` -> blocked,
+`failed` -> failed) and emits the same finished/failed/blocked event, so a recorded
 job is indistinguishable from an engine-run one in the dashboard and events. A job
 can be closed **once** (it must be a running session job); an orphaned open job
 stays `running` (reaper-exempt) until you `job close --decision failed` or `job
@@ -968,6 +1034,20 @@ until the earliest retry time. `gitmoot job show --json` carries the
 `job.deferred` follows the `job.failed` (making it non-terminal; see the
 [event stream](event-stream.md)). A job that "failed then reappeared as queued"
 is the deferral working, not a bug.
+
+When a runtime session ends **without** producing a `gitmoot_result` envelope —
+the CLI process crashed, exited non-zero, was signal-killed, or completed but
+never emitted a valid envelope even after repair attempts — the job records
+**failure diagnostics** (#806): a `phase` marker (`launched` = died before any stdout,
+`streaming` = died mid-output, `result-parse` = every delivery completed but no
+valid envelope was found), the process `exit_code` **or** terminating `signal`,
+a **redacted** stderr tail (hard-capped at 2 KB; redaction runs over the full
+text with the same token-redaction rules as job comments *before* the tail is
+cut, so a secret can never leak partially), and the runtime session id when one
+is known. `gitmoot job show` prints a `failure_diagnostics:` block,
+`job show --json` carries `payload.failure_diagnostics`, and `gitmoot report
+bug` includes a "Failure diagnostics" section. Successful jobs never store one,
+and a retried job clears the previous run's crash report.
 
 Jobs stuck in `running` are backstopped too: a running job with no lease
 progress past the staleness window (default 30m) is assumed orphaned by a dead
@@ -1331,23 +1411,30 @@ validation for final promotion decisions on fresh items.
 Agent persistent memory is **off by default** and enrolled per agent
 (`[agents.<name>].memory = true`), with optional `[memory]` knobs (`disabled`,
 `token_budget`, `max_entries`, and the distill-at-terminal knobs
-`distill_at_terminal`, `distill_max_per_job`, `distill_all_jobs` — all read per
-tick, no restart). See
+`distill_at_terminal`, `distill_successes`, `distill_max_per_job`,
+`distill_all_jobs`. All are read per tick, with no restart. See
 [Agent Persistent Memory](../concepts/agent-memory.md) for the full model. The
 inspection commands are read-only; `ingest` and `confirm` write behind a human
 gate:
 
 ```sh
 gitmoot memory list [--pending|--confirmed] [--agent NAME] [--repo owner/repo] [--json]
+gitmoot memory recall "<query>" [--repo owner/repo] [--agent NAME|--shared] [--limit N] [--expand] [--json]
 gitmoot memory replay [--agent NAME] [--repo owner/repo] [--limit N] [--json]
 gitmoot memory eval --fixtures fixtures.json [--k N] [--json]
 gitmoot memory vault export [--out DIR] [--agent NAME] [--force] [--json]
 gitmoot memory vault import <DIR> [--dry-run|--yes] [--json]
-gitmoot memory ingest <path|dir> --agent NAME [--repo owner/repo] [--tier repo|general] [--dry-run] [--json]
+gitmoot memory ingest <path|dir> --agent NAME [--shared] [--repo owner/repo] [--tier repo|general] [--dry-run] [--json]
+gitmoot memory ingest sweep [--json]
 gitmoot memory observations [--agent NAME] [--provenance-prefix P] [--json]
-gitmoot memory confirm <obs-id>... | --provenance-prefix P [--agent NAME] [--yes] [--json]
+gitmoot memory confirm <obs-id>... | --provenance-prefix P [--agent NAME] [--to-shared] [--yes] [--json]
+gitmoot memory retire --provenance-prefix P [--agent NAME] [--dry-run] [--yes] [--json]
+gitmoot memory promote --to-shared <id>... [--json]
+gitmoot memory links backfill [--dry-run] [--json]
+gitmoot memory links list <id> [--json]
 gitmoot memory groom --propose [--out PLAN.json] [--json]
 gitmoot memory groom --yes --plan PLAN.json [--json]
+gitmoot memory groom --split [--dry-run] [--json]
 gitmoot memory clusters [--json]
 gitmoot memory clusters recompute --propose [--out PLAN.json] [--json]
 gitmoot memory clusters recompute --apply [--plan PLAN.json] [--json]
@@ -1355,21 +1442,41 @@ gitmoot memory cluster rename <cluster-id> <label>
 ```
 
 `memory list` shows confirmed memories and/or pending observations. `memory
-replay` re-renders recent real jobs' prompts with and without the injected
+recall` runs the same FTS5/BM25 confirmed-memory retrieval used for prompt
+injection and prints the matching facts in injection bullet format. Without
+`--agent`, recall searches all agent owner pools plus the shared pool; pass
+`--agent NAME` to inspect that agent's private pool plus shared, or `--shared` to
+inspect only shared facts. Private matches outrank shared matches on equal BM25
+scores, and a floor guard keeps a private match visible when shared rows would
+otherwise fill the limit. Without `--repo`, recall searches every repo and
+general-scope facts. `--repo owner/repo` narrows repo-scoped facts to that repo while still including
+general-scope facts. `--expand` follows one hop of persisted memory links from
+direct matches, appending visible linked facts after all direct matches and
+marking their bullets with `[linked]`. `--json` returns raw rows for scripts,
+including `author_ref` for shared facts that preserve a different author and
+`linked_from` when a row came from link expansion. Prompt injection applies the
+same link expansion automatically for enrolled agents, within the entry limit
+and token budget, and non-empty memory blocks include a footer pointing the
+agent at `gitmoot memory recall "<query>" --agent <agent-name>` for on-demand
+search. Semantic or embedding search is future work; current retrieval stays
+SQLite FTS5 plus persisted links. `memory replay`
+re-renders recent real jobs' prompts with and without the injected
 learnings block and reports the token/entry delta. `memory eval` computes
 recall/precision@K of retrieval over a labeled `{agent, repo, instructions,
 expected_keys}` fixtures file.
 
 `memory vault export` renders confirmed memory as a **disposable, Obsidian-compatible
 vault view**: one Markdown note per confirmed memory (sorted-key YAML frontmatter,
-the content verbatim, and a `## Links` section of FTS co-occurrence `[[wikilinks]]`),
-a per-owner index note, and a `manifest.json` staleness anchor. The vault is a **view,
-not a replica** — the SQLite store stays the only source of truth, so it is
+the content verbatim, and a `## Links` section of FTS co-occurrence plus persisted
+`[[wikilinks]]`), a per-owner index note, and a `manifest.json` staleness anchor.
+The vault is a **view, not a replica**: the SQLite store stays the only source of truth, so it is
 regenerated from scratch on every export, safe to delete, and **deterministic**: the
 same store yields byte-identical files (no `exported_at`; stable id-derived
 filenames). The export is read-only and atomic (temp dir then rename over `--out`,
 default a `vault/` directory under the home's evals area); `--agent` narrows it to a
-single agent owner. Because the export **replaces `--out` wholesale**, it refuses to
+single agent owner plus shared facts authored by that agent. Shared notes include
+an `author:` frontmatter line when `author_ref` is set, so graph views still
+attribute moved facts to the real author. Because the export **replaces `--out` wholesale**, it refuses to
 overwrite a non-empty directory that is not itself a prior gitmoot vault (one with a
 `manifest.json`), so an accidental `--out ~/my-obsidian-vault` can never delete your
 own notes; pass `--force` to override.
@@ -1391,7 +1498,8 @@ fails to parse (e.g. broken YAML frontmatter), `--yes` **refuses to apply** so a
 malformed note is never misread as a deletion. A vault produced by `export --agent
 NAME` stays importable even when other owners have memories. The `<DIR>` positional
 may sit before or after the flags.
-`memory ingest` stages arbitrary Markdown as **pending observations**: it walks
+
+`memory ingest` stages arbitrary Markdown as observations: it walks
 `*.md`, strips leading YAML frontmatter, chunks a file only when its body exceeds
 ~512 estimated tokens (on `## ` headings, sub-splitting any still-oversized
 section on paragraph/line boundaries so no chunk exceeds the budget), PreFilters
@@ -1399,43 +1507,107 @@ every chunk (per-reason rejection counts in the summary), dedups by exact conten
 **within the same scope+repo visibility domain** (identical text under a second
 repo still stages), and inserts survivors with
 `provenance = ingest:<relpath>` and **`trust_mark = low`**. `--tier` defaults to
-`repo`; `general` is only chosen explicitly. `memory observations` lists pending
-observations, flagging which keys are already confirmed. `memory confirm` is the
-**human-gated promotion** — by id or `--provenance-prefix`, it copies observations
+`repo`; `general` is only chosen explicitly. `--shared` stages observations in the
+shared pool while recording `--agent NAME` as the authoring identity.
+Chunk keys are **stable**: `slug(file)-slug(heading)`, with an ordinal suffix
+(`-2`, `-3`) only when a file/heading pair repeats within one sweep; the content
+hash participates only in dedup, never in the key, so an edited note re-sweeps
+onto the same key and updates its confirmed fact in place instead of spawning a
+hash-suffixed sibling.
+By default observations stay pending. If `[memory].ingest_auto_confirm = true`,
+`memory ingest`, `memory ingest sweep`, and `chat remember` immediately confirm
+the staged observation into the authoring agent's private pool only. They never
+auto-confirm into shared; shared stays explicit through `confirm --to-shared` or
+`promote --to-shared`. Auto-confirmed key-matched updates are
+**supersede-preserving**: the prior edition is archived as a `superseded_by` row
+(out of FTS, out of the vault, links unchanged on the live row) before the live
+row is overwritten; manual paths (vault import CAS edits, `memory confirm
+--yes`) keep plain overwrite semantics.
+`memory ingest sweep` reads every configured `[[memory.ingest]]` source from the
+current config at run time and runs the same ingest logic in-process for each one.
+`--json` reports per-source `path`, `agent`, `repo`, `tier`, `inserted`,
+`confirmed`, `skipped_retired`, `deduped`, `rejected`, and `error`, plus aggregate
+totals. One bad source does not stop the rest; it exits non-zero only when the
+config is invalid or every source fails. With no sources it exits zero with a
+skipped note.
+`memory observations` lists pending observations, flagging which keys are already
+confirmed. `memory confirm` is the **human-gated promotion**: by id or
+`--provenance-prefix`, it copies observations
 into confirmed memory (idempotently), and without `--yes` only prints the plan.
-Ingested Markdown is an indirect-prompt-injection vector, so it stays inert at
-`trust_mark = low` until a human confirms it; that confirm gate is the trust
-boundary and nothing reads `trust_mark` for a decision yet.
+`--to-shared` confirms selected observations into the shared pool while preserving
+the observation author. `memory promote --to-shared <id>...` moves active
+confirmed facts into shared, refuses retired or superseded rows, preserves
+existing links, and stamps `author_ref` from the previous owner when needed.
+`memory retire --provenance-prefix P` is the blast-radius undo for a collector
+batch. It selects active confirmed rows whose provenance starts with `P`, scoped
+optionally by `--agent NAME`, and is a dry run unless `--yes` is passed. Applying
+the plan sets `retired_at` and `retired_reason` and removes the rows from FTS in
+the same transaction. Retired keys are not resurrected by ingest or collectors on
+re-ingest; only explicit human-controlled confirmation paths may revive a retired
+key.
+Ingested Markdown is an indirect-prompt-injection vector, so default installs keep
+it inert at `trust_mark = low` until a human confirms it; nothing reads
+`trust_mark` for a decision yet.
 
-`memory groom` retires stale, low-signal confirmed memories as a **propose →
-review → apply** round-trip. `--propose` reads active confirmed memory, computes
-the current vault `snapshot_hash`, runs deterministic detectors
+Confirming a fact also records up to three deterministic persisted links from that
+confirmed row to active related confirmed memories. Links live in `memory_links`
+with BM25-derived scores and do not rewrite fact content. Link candidates use the
+same private-plus-shared visibility as prompt injection, so private facts can link
+to shared facts and shared facts can link back through their author pool.
+`memory links backfill` runs the same pass over the active confirmed pool in id
+order; `--dry-run` reports what would be created, and repeat runs create nothing
+new. `memory links list <id>` shows one fact's outgoing persisted links. Vault
+export merges these persisted links with content-derived links and dedupes by
+target in each note's `## Links` section.
+
+`memory groom --split [--dry-run]` automatically partitions qualifying bricks at
+deterministic byte-offset seams into exact-substring children, supersedes and
+de-indexes the parent, and carries its cluster membership to the children in one
+CAS-guarded transaction. `memory groom` keeps all other curation as a
+**propose → review → apply** round-trip. `--propose` reads active confirmed memory, computes the current
+vault `snapshot_hash`, runs deterministic detectors
 (status/changelog/ToC snapshots — short notes need a strong `STATUS:`/`… & deployed`
 marker; bare to-do lists; exact duplicates scoped to the same owner/repo/scope;
-over-long "bricks" are flagged for rewrite, not retired), and writes a reviewable plan
-artifact — it touches nothing in the store. `--yes --plan` recomputes the
-`snapshot_hash`, **aborts as stale** if the store changed since the proposal, then
-retires exactly the planned ids in one transaction (reason `groom:<detector>`). It
-is retire-only and idempotent (already-retired ids are skipped). A ready-to-register
+over-long or strong-seam multi-story bricks are flagged when not already split;
+seam-poor long prose remains flag-only; **legacy-key rekeys**
+that migrate pre-stable-key rows ending in an 8-hex hash suffix, keeping the
+newest edition under the stable key and retiring older siblings with reason
+`rekey: superseded edition`; **cross-pool stale shared editions**, where a
+strictly newer private fact matches a shared fact in the same repo and scope by
+stable-key equality, or by a strong BM25 top-match that also shares a
+`memory_links` edge, proposing promote-the-private-and-retire-the-shared with
+reason `cross-pool: superseded by promoted edition`), and writes a reviewable
+plan artifact — it touches nothing in the store. `--yes --plan` recomputes the
+`snapshot_hash`, **aborts as stale** if the store changed since the proposal,
+then applies the whole plan in one transaction: retirements (reason
+`groom:<detector>`), rekey groups (FTS key column re-synced in the same
+transaction), and cross-pool promote-and-retire pairs. Content is never edited,
+and applying is idempotent (already-retired ids skip; a group whose rows changed
+state skips whole). A ready-to-register
 nightly proposal pipeline lives under
 [`docs/examples/memory-groom-nightly`](https://github.com/jerryfane/gitmoot/tree/main/docs/examples/memory-groom-nightly).
 
 `memory clusters` groups confirmed facts into **emergent communities** over the
 fact-similarity graph (the same bm25 + id-tiebreak signal the vault `[[links]]` use),
 retiring the dashboard's old fixed key-prefix "category" hubs. The community detection
-is **id-ordered label propagation with lowest-label tie-breaks** — a pure function of
+is **id-ordered label propagation with lowest-label tie-breaks**, a pure function of
 the graph, so the **same store yields byte-identical clusters, labels, medoids, and
-ids**. Labels are up to three distinctive terms (cluster term frequency weighted
+ids**. A top-level cluster splits automatically at 20 facts when a second pass over
+its internal graph yields at least two children of four or more facts. An existing
+split remains above 12 parent facts while every child stays at least four; otherwise
+it dissolves. Depth is capped at two levels. Labels are up to three distinctive terms (cluster term frequency weighted
 against corpus document frequency), anchored to the cluster **medoid**; facts with no
 neighbors fall into the reserved cluster **0 `unclustered`**. `recompute` is a
 human-gated **propose → apply** round-trip: `--propose` writes a plan with a staleness
-**anchor** over each active fact's `(id, updated_at)`; `--apply --plan` re-checks the
+**anchor** over each active fact's `(id, updated_at)` and explicit planned splits or
+dissolves; `--apply --plan` re-checks the
 anchor, **aborts as stale** on drift, then rewrites the whole clustering in one
 transaction (a bare `--apply` is allowed only on first run, when nothing exists to
-protect). Confirming a new fact best-effort attaches it to the nearest neighbor's
+protect). Confirming a new fact best-effort attaches it to the nearest neighbor's leaf
 cluster; `memory cluster rename` sets an owner label override that wins over the
-computed label and survives recomputes. The Knowledge view renders a **repo → cluster
-→ fact** hierarchy.
+computed label and survives while that parent or child identity persists. The
+Knowledge payload adds optional child `parent_id` values and renders a **repo →
+cluster → subcluster → fact** hierarchy. Parent hubs are view-only aggregates.
 
 ## Pipelines
 
@@ -1475,6 +1647,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 
 ```sh
 gitmoot pipeline add nightly-sync.yaml --enable   # validate + store; omit --enable to add disabled
+gitmoot pipeline install-defaults                 # install built-in memory pipelines, skipping existing names
 gitmoot pipeline list [--json]
 gitmoot pipeline show nightly-sync [--json]        # registry view for a name
 gitmoot pipeline run nightly-sync                  # start a manual run; prints the run id
@@ -1489,23 +1662,48 @@ gitmoot pipeline remove nightly-sync
 **verbatim** plus a content hash; each run snapshots the hash and executes its
 snapshot, so editing the file later never mutates an in-flight run. It also
 auto-creates one hidden shell runner agent (`pipeline-<name>-runner`) that owns the
-**shell** stage jobs — hidden from `agent list` and disposed by `pipeline remove`. A
-stage may instead set `agent` + `prompt` (#757) to run a named managed agent on its
-own runtime as a read-only leaf (`ask`/`review`, never `implement`); the agent must
-already exist, its `needs` stages' result summaries are prepended to its prompt, and
-a repo-bound agent stage runs in its own detached read-only worktree so same-repo
-agent stages parallelize without touching the live checkout.
+**shell** stage jobs; it is hidden from `agent list` and disposed by `pipeline remove`. A
+stage may instead set `agent` + `prompt` to run a named managed agent on its own
+runtime. Four agent-stage kinds: **ask**/**review** (#757, read-only leaves);
+**implement** (#768, `action: implement` + `write: true`; mutates the repo, with only
+`implemented` promising a PR and waiting for its stamp; other configured successes
+settle immediately; never auto-merges); **orchestrate** (#758, `orchestrate: true`; a sub-tree
+coordinator that fans out owned children and folds the synthesis); and **gate** (#768,
+`gate: pr_merged` + `source:`, no `agent`; a jobless waiter that folds when the source
+implement stage's PR merges). A read-only stage's `needs` result summaries are prepended
+to its prompt, and a repo-bound read-only agent stage runs in its own detached
+read-only worktree so same-repo stages parallelize without touching the live checkout.
+
+`pipeline install-defaults` installs the built-in `memory-ingest-sweep` and
+`memory-groom-propose` pipelines. The daemon also runs this installer at startup.
+It is idempotent: an existing pipeline with either name is skipped without
+overwriting user-edited YAML, enabled state, or schedule. Empty memory pipeline
+config installs manual-only definitions. Configure sources with `[[memory.ingest]]`
+and intervals with `[memory.pipelines]`, or run them on demand with
+`gitmoot pipeline run memory-ingest-sweep` and
+`gitmoot pipeline run memory-groom-propose`. The installed ingest sweep has a fixed
+two-stage shape that calls `gitmoot memory ingest sweep --json`, then summarizes the
+totals. It reads `[[memory.ingest]]` at run time, so config edits apply on the next
+manual or scheduled run without reinstalling defaults.
+The installed groom pipeline has a fixed `split -> propose -> summarize` shape:
+only the lossless split auto-applies, while the generated retirement/rekey/
+cross-pool plan remains owner-gated.
 
 A stage signals its outcome by printing a `gitmoot_result` blob to stdout; the
 advancer folds by the **decision**, never the job's exit state (`changes_requested`
 is a succeeded job but folds as a stage **failure** by default):
 
-- a decision in the stage's `success_decisions` (default `approved`/`implemented`) →
+- a decision in the stage's `success_decisions` (default `approved`/`implemented`/`skipped`) ->
   **succeeded**, dependents enqueue;
 - `blocked` → the stage blocks, its `needs` persist, the run **parks blocked**
   (downstream never enqueues, zero compute while parked);
 - `failed` / any other decision / a cancelled job / no `gitmoot_result` → the stage
   **fails** (retried if budget remains), else the run **parks failed**.
+
+`skipped` means the stage itself had no work and advances by default with a
+`[skipped: no work]` summary marker. An explicit `success_decisions` list is
+strict: omitting `skipped` makes it fail. A `pr_merged` gate whose terminal succeeded
+source opened no PR parks blocked because there is nothing to wait for.
 
 `pipeline run` prints only the run id (script-stable), ignores the `enabled` flag but
 still needs a `repo` and refuses to start while a run is active. `pipeline show
@@ -1532,6 +1730,7 @@ gitmoot chat create <name> --repo owner/repo [--topic "title"] [--json]
 gitmoot chat list [--repo owner/repo] [--all] [--json]      # open threads; --all includes archived
 gitmoot chat show <thread> [--repo owner/repo] [--limit N] [--json]
 gitmoot chat send <thread> "message" [--as agent] [--repo owner/repo] [--ref kind:value ...] [--json]
+gitmoot chat remember <thread> <message-seq> [--repo owner/repo] [--tier repo|general] [--agent NAME] [--json]
 gitmoot chat inbox <agent> [--unread] [--json]
 gitmoot chat task <thread> "@agent message" [--action ask|review|implement] [--repo owner/repo] [--json]
 gitmoot chat answer <thread> "<question-id>: answer text" [--repo owner/repo] [--json]
@@ -1547,6 +1746,13 @@ gitmoot chat rename <thread> "new name" [--repo owner/repo] [--json]
   agent's unread **inbox**; an unknown mention is recorded for audit with a stderr
   warning and **never fails the send**. `--as <agent>` authors as a registered
   agent (default: the human); `--ref kind:value` attaches structured refs.
+- **`remember`**: captures exactly one existing message by sequence as a memory
+  observation with deterministic provenance `chat:<thread-id>#<seq>`. It stores
+  the message body verbatim, applies the memory PreFilter, and dedups by content
+  hash in the target scope/repo. It does not scan for natural-language prefixes
+  or bulk-mine a thread. `--agent` defaults to `lead`; if
+  `[memory].ingest_auto_confirm = true`, the observation is confirmed into that
+  agent's private pool only.
 - **`inbox`** — an agent's mentions, newest first; `--unread` restricts to unread.
 - **`task`** — the one promotion verb. The body must name **exactly one**
   registered `@agent`; it records a `promotion_request` message, then dispatches a

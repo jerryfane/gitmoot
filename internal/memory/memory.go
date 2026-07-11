@@ -24,9 +24,13 @@ const (
 
 // Owner kind values. An agent owner is a registered persistent agent; a role
 // owner is an ephemeral role pool keyed by template identity (Phase 2+ writers).
+// The shared owner is a reserved, explicit human-curated pool that every agent
+// can read alongside its own private pool.
 const (
-	OwnerKindAgent = "agent"
-	OwnerKindRole  = "role"
+	OwnerKindAgent  = "agent"
+	OwnerKindRole   = "role"
+	OwnerKindShared = "shared"
+	SharedOwnerRef  = "shared"
 )
 
 // Trust marks recorded on an observation at birth. A learning derived from
@@ -54,6 +58,7 @@ type Entry struct {
 	Key       string
 	Content   string
 	UpdatedAt string
+	Linked    bool // true when included via a 1-hop memory_links expansion
 }
 
 // blockHeader is the first line of the rendered learnings block. It is
@@ -195,7 +200,7 @@ func RenderBlock(entries []Entry, budgetTokens int) (string, int) {
 	used := baseTokens
 	injected := 0
 	for _, e := range entries {
-		line := "- " + scopeTag(e.Scope) + " " + strings.TrimSpace(e.Content)
+		line := RenderBullet(e)
 		cost := EstimateTokens(line)
 		if budgetTokens > 0 && injected > 0 && used+cost > budgetTokens {
 			break
@@ -212,6 +217,17 @@ func RenderBlock(entries []Entry, budgetTokens int) (string, int) {
 		return "", 0
 	}
 	return b.String(), injected
+}
+
+// RenderBullet renders one memory entry in the exact bullet format used inside
+// RenderBlock. CLI recall uses it so on-demand retrieval matches prompt
+// injection without duplicating the presentation rule.
+func RenderBullet(e Entry) string {
+	tags := []string{scopeTag(e.Scope)}
+	if e.Linked {
+		tags = append(tags, "[linked]")
+	}
+	return "- " + strings.Join(tags, " ") + " " + strings.TrimSpace(e.Content)
 }
 
 // scopeTag renders the per-entry provenance tag used in the block.

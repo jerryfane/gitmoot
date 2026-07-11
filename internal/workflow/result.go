@@ -31,7 +31,7 @@ const PipelineJobSender = "pipeline"
 // the same order.
 
 // ResultDecisions are the allowed values of AgentResult.Decision.
-var ResultDecisions = []string{"approved", "changes_requested", "blocked", "implemented", "failed"}
+var ResultDecisions = []string{"approved", "changes_requested", "blocked", "implemented", "failed", "skipped"}
 
 // DelegationFailurePolicies are the allowed values of Delegation.FailurePolicy
 // (the empty string falls back to the default and is accepted separately).
@@ -64,6 +64,7 @@ func allowedSet(values []string) map[string]struct{} {
 type EphemeralSpec struct {
 	Runtime        string   `json:"runtime"`
 	Model          string   `json:"model,omitempty"`
+	Effort         string   `json:"effort,omitempty"`
 	Template       string   `json:"template,omitempty"`
 	Role           string   `json:"role,omitempty"`
 	Capabilities   []string `json:"capabilities,omitempty"`
@@ -88,6 +89,7 @@ type Delegation struct {
 	SynthesisRule string         `json:"synthesis_rule,omitempty"`
 	Quorum        int            `json:"quorum,omitempty"`
 	Model         string         `json:"model,omitempty"`
+	Effort        string         `json:"effort,omitempty"`
 	Phase         string         `json:"phase,omitempty"`
 }
 
@@ -243,6 +245,9 @@ func validateAgentResult(result AgentResult) error {
 	if strings.TrimSpace(result.Summary) == "" {
 		return errors.New("gitmoot_result summary is required")
 	}
+	if result.Decision == "skipped" && len(result.Delegations) > 0 {
+		return errors.New("gitmoot_result decision skipped cannot be used with delegations")
+	}
 	if err := validateHumanQuestions(result.HumanQuestions); err != nil {
 		return err
 	}
@@ -262,8 +267,13 @@ func validateAgentResult(result AgentResult) error {
 		if err := validateDelegationTarget(d); err != nil {
 			errs = append(errs, err)
 		}
-		if strings.TrimSpace(d.Action) == "" {
+		action := strings.TrimSpace(d.Action)
+		if action == "" {
 			errs = append(errs, delegationFieldError(i, d, "action", "is required"))
+		} else if d.Action != action {
+			errs = append(errs, delegationFieldError(i, d, "action", "must not have leading or trailing whitespace"))
+		} else if action != "ask" && action != "review" && action != "implement" {
+			errs = append(errs, delegationFieldError(i, d, "action", "must be one of ask, review, implement"))
 		}
 		if strings.TrimSpace(d.Prompt) == "" {
 			errs = append(errs, delegationFieldError(i, d, "prompt", "is required"))

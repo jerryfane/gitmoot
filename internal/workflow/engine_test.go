@@ -726,6 +726,15 @@ func TestEngineAdvanceImplementDispatchesReviewers(t *testing.T) {
 	}
 	assertTaskState(t, store, "task-7", TaskReviewing)
 	mustJob(t, store, "review-audit-task-7-review-1")
+	events, err := store.ListJobEvents(ctx, "implement-job")
+	if err != nil {
+		t.Fatalf("ListJobEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.Kind == "advance_skipped_no_pr" {
+			t.Fatalf("implemented job with PR recorded no-PR event: %+v", events)
+		}
+	}
 }
 
 func TestEngineAdvanceImplementDefaultsLeadAgent(t *testing.T) {
@@ -776,21 +785,131 @@ func TestEngineAdvanceImplementSkipsPullRequestFlowWhenNoPullRequest(t *testing.
 		Result:    &AgentResult{Decision: "implemented", Summary: "done locally"},
 	})
 
-	err := engine.AdvanceJob(ctx, "implement-job")
-
-	if err != nil {
-		t.Fatalf("AdvanceJob returned error: %v", err)
+	for i := 0; i < 2; i++ {
+		if err := engine.AdvanceJob(ctx, "implement-job"); err != nil {
+			t.Fatalf("AdvanceJob call %d returned error: %v", i+1, err)
+		}
 	}
 	events, err := store.ListJobEvents(ctx, "implement-job")
 	if err != nil {
 		t.Fatalf("ListJobEvents returned error: %v", err)
 	}
+	count := 0
 	for _, event := range events {
 		if event.Kind == "advance_skipped_no_pr" {
-			return
+			count++
 		}
 	}
-	t.Fatalf("events = %+v, want advance_skipped_no_pr", events)
+	if count != 1 {
+		t.Fatalf("advance_skipped_no_pr count = %d, want 1; events=%+v", count, events)
+	}
+}
+
+func TestEngineAdvanceImplementTerminalDecisionsRecordNoPROnce(t *testing.T) {
+	for _, decision := range []string{"approved", "changes_requested", "blocked", "failed"} {
+		t.Run(decision, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEngineStore(t)
+			seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+			engine := testEngine(store)
+			insertCompletedJob(t, store, db.Job{
+				ID:    "implement-job",
+				Agent: "lead",
+				Type:  "implement",
+			}, JobPayload{
+				Repo:      "jerryfane/gitmoot",
+				Branch:    "task-817",
+				TaskID:    "task-817",
+				TaskTitle: "Terminal implement decision",
+				Result:    &AgentResult{Decision: decision, Summary: "terminal without PR"},
+			})
+			if decision == "blocked" || decision == "failed" {
+				if err := store.UpdateJobState(ctx, "implement-job", string(stateForDecision(decision))); err != nil {
+					t.Fatalf("UpdateJobState: %v", err)
+				}
+			}
+
+			for i := 0; i < 2; i++ {
+				err := engine.AdvanceJob(ctx, "implement-job")
+				if decision == "blocked" || decision == "failed" {
+					var blocked BlockedError
+					if !errors.As(err, &blocked) {
+						t.Fatalf("AdvanceJob call %d error = %v, want BlockedError", i+1, err)
+					}
+				} else if err != nil {
+					t.Fatalf("AdvanceJob call %d: %v", i+1, err)
+				}
+			}
+
+			events, err := store.ListJobEvents(ctx, "implement-job")
+			if err != nil {
+				t.Fatalf("ListJobEvents: %v", err)
+			}
+			count := 0
+			for _, event := range events {
+				if event.Kind != "advance_skipped_no_pr" {
+					continue
+				}
+				count++
+				if !strings.Contains(event.Message, decision) {
+					t.Fatalf("event message %q does not identify decision %q", event.Message, decision)
+				}
+			}
+			if count != 1 {
+				t.Fatalf("advance_skipped_no_pr count = %d, want 1; events=%+v", count, events)
+			}
+		})
+	}
+}
+
+func TestEngineAdvanceImplementNoPREventConcurrent(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	insertCompletedJob(t, store, db.Job{
+		ID:    "implement-job",
+		Agent: "lead",
+		Type:  "implement",
+	}, JobPayload{
+		Repo:   "jerryfane/gitmoot",
+		Branch: "task-817",
+		Result: &AgentResult{Decision: "approved", Summary: "terminal without PR"},
+	})
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- engine.AdvanceJob(ctx, "implement-job")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent AdvanceJob: %v", err)
+		}
+	}
+
+	events, err := store.ListJobEvents(ctx, "implement-job")
+	if err != nil {
+		t.Fatalf("ListJobEvents: %v", err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Kind == "advance_skipped_no_pr" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("advance_skipped_no_pr count = %d, want 1; events=%+v", count, events)
+	}
 }
 
 func TestEngineAdvanceImplementDoesNotFinalizeWithoutTaskWorktree(t *testing.T) {
@@ -1235,6 +1354,61 @@ func TestEngineAdvanceReviewChangesRequestedDispatchesFix(t *testing.T) {
 	job := mustJob(t, store, "implement-lead-task-7")
 	if !strings.Contains(job.Payload, "fix edge case") {
 		t.Fatalf("fix job payload = %s", job.Payload)
+	}
+}
+
+func TestEngineAdvancePipelineReviewIsReportOnly(t *testing.T) {
+	for _, decision := range []string{"changes_requested", "approved"} {
+		t.Run(decision, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEngineStore(t)
+			seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+			engine := testEngine(store)
+			gate := &fakeMergeGate{onEvaluate: func(MergeRequest) {
+				t.Fatalf("merge gate evaluated for report-only pipeline review")
+			}}
+			engine.MergeGate = gate
+			insertCompletedJob(t, store, db.Job{
+				ID:    "pipeline-review-job",
+				Agent: "audit",
+				Type:  "review",
+			}, JobPayload{
+				Repo:        "jerryfane/gitmoot",
+				Branch:      "task-813",
+				PullRequest: 813,
+				HeadSHA:     "head813",
+				TaskID:      "task-813",
+				LeadAgent:   "lead",
+				Sender:      PipelineJobSender,
+				Result:      &AgentResult{Decision: decision, Summary: "pipeline verdict"},
+			})
+
+			if err := engine.AdvanceJob(ctx, "pipeline-review-job"); err != nil {
+				t.Fatalf("AdvanceJob returned error: %v", err)
+			}
+			if err := engine.AdvanceJob(ctx, "pipeline-review-job"); err != nil {
+				t.Fatalf("replayed AdvanceJob returned error: %v", err)
+			}
+			if _, err := store.GetJob(ctx, "implement-lead-task-813"); err == nil {
+				t.Fatal("report-only pipeline review dispatched a native fix job")
+			}
+			if len(gate.requests) != 0 {
+				t.Fatalf("merge gate requests = %+v, want none", gate.requests)
+			}
+			events, err := store.ListJobEvents(ctx, "pipeline-review-job")
+			if err != nil {
+				t.Fatalf("ListJobEvents: %v", err)
+			}
+			count := 0
+			for _, event := range events {
+				if event.Kind == "pipeline_review_report_only" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("pipeline_review_report_only event count = %d, want 1; events=%+v", count, events)
+			}
+		})
 	}
 }
 
@@ -2970,7 +3144,7 @@ func TestEngineDelegationWithoutTimeoutDefaultStaysUnbounded(t *testing.T) {
 	}
 }
 
-func TestEngineDelegationModelPlumbedToChildPayload(t *testing.T) {
+func TestEngineDelegationModelAndEffortPlumbedToChildPayload(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
 	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
@@ -2983,11 +3157,12 @@ func TestEngineDelegationModelPlumbedToChildPayload(t *testing.T) {
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
 		Sender:    "audit",
+		Effort:    "low",
 		Result: &AgentResult{
 			Decision: "approved",
 			Summary:  "done",
 			Delegations: []Delegation{
-				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Model: "  opus  "},
+				{ID: "del-1", Agent: "helper", Action: "review", Prompt: "review this", Model: "  opus  ", Effort: "  high  "},
 			},
 		},
 	})
@@ -3004,17 +3179,23 @@ func TestEngineDelegationModelPlumbedToChildPayload(t *testing.T) {
 	if payload.Model != "opus" {
 		t.Fatalf("child payload Model = %q, want trimmed %q", payload.Model, "opus")
 	}
+	if payload.Effort != "high" {
+		t.Fatalf("child payload Effort = %q, want delegation override %q", payload.Effort, "high")
+	}
 }
 
-func TestEngineDelegationRequestCopiesModel(t *testing.T) {
+func TestEngineDelegationRequestCopiesModelAndEffort(t *testing.T) {
 	engine := Engine{}
 	request := engine.delegationRequest(
 		db.Job{ID: "parent-job", Agent: "audit"},
-		JobPayload{Repo: "jerryfane/gitmoot"},
-		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go", Model: "opus"},
+		JobPayload{Repo: "jerryfane/gitmoot", Effort: "low"},
+		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go", Model: "opus", Effort: "high"},
 	)
 	if request.Model != "opus" {
 		t.Fatalf("request.Model = %q, want %q", request.Model, "opus")
+	}
+	if request.Effort != "high" {
+		t.Fatalf("request.Effort = %q, want delegation override %q", request.Effort, "high")
 	}
 }
 
@@ -3096,7 +3277,7 @@ func TestEngineDelegationRequestInheritsCockpit(t *testing.T) {
 
 func TestEngineDelegationRequestThreadsEphemeralSpec(t *testing.T) {
 	engine := Engine{}
-	spec := &EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4"}
+	spec := &EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4", Effort: "high"}
 	request := engine.delegationRequest(
 		db.Job{ID: "parent-job", Agent: "audit"},
 		JobPayload{Repo: "jerryfane/gitmoot"},
@@ -3147,7 +3328,7 @@ func TestEngineDispatchesEphemeralDelegationWithoutRegisteredAgent(t *testing.T)
 			Decision: "approved",
 			Summary:  "done",
 			Delegations: []Delegation{
-				{ID: "worker", Ephemeral: &EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4"}, Action: "review", Prompt: "hi"},
+				{ID: "worker", Ephemeral: &EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4", Effort: "high"}, Action: "review", Prompt: "hi"},
 			},
 		},
 	})
@@ -3167,7 +3348,7 @@ func TestEngineDispatchesEphemeralDelegationWithoutRegisteredAgent(t *testing.T)
 	if payload.Ephemeral == nil {
 		t.Fatalf("child payload missing ephemeral spec: %+v", payload)
 	}
-	if payload.Ephemeral.Runtime != runtime.CodexRuntime || payload.Ephemeral.Model != "gpt-5.4" {
+	if payload.Ephemeral.Runtime != runtime.CodexRuntime || payload.Ephemeral.Model != "gpt-5.4" || payload.Ephemeral.Effort != "high" {
 		t.Fatalf("child payload ephemeral spec = %+v", payload.Ephemeral)
 	}
 	// The stored payload JSON must carry the ephemeral key so downstream consumers
@@ -4510,6 +4691,18 @@ func TestCanonicalDelegationSetHashIgnoresPhase(t *testing.T) {
 	}
 	if canonicalDelegationSetHash(base) != canonicalDelegationSetHash(phased) {
 		t.Fatal("hash must ignore phase (metadata, excluded from loop detection)")
+	}
+}
+
+func TestCanonicalDelegationSetHashIncludesEphemeralEffort(t *testing.T) {
+	base := []Delegation{
+		{ID: "a", Ephemeral: &EphemeralSpec{Runtime: "codex", Model: "gpt-5.4", Effort: "low"}, Action: "review", Prompt: "step a"},
+	}
+	higherEffort := []Delegation{
+		{ID: "a", Ephemeral: &EphemeralSpec{Runtime: "codex", Model: "gpt-5.4", Effort: "high"}, Action: "review", Prompt: "step a"},
+	}
+	if canonicalDelegationSetHash(base) == canonicalDelegationSetHash(higherEffort) {
+		t.Fatal("hash must change when ephemeral effort changes, exactly like ephemeral model")
 	}
 }
 

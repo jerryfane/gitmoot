@@ -35,7 +35,7 @@ By DEFAULT, the "here" flow tracks the work: run
 `gitmoot agent prompt <agent> --record [--repo owner/repo]`, which opens a
 session job on import and returns the prompt with a header line naming its job
 id. Apply the prompt, do the work, then — this is REQUIRED — clock out with
-`gitmoot job close <id> --decision <approved|changes_requested|implemented|blocked|failed> --summary "..."`
+`gitmoot job close <id> --decision <approved|changes_requested|implemented|blocked|failed|skipped> --summary "..."`
 so the work shows in `job list`, the dashboard, and the event stream just like
 an engine-run job (no runtime is spawned; gitmoot is only the record-keeper).
 `--record` works for both a **registered agent** (repo defaults to its repo scope)
@@ -70,6 +70,9 @@ For agent persistent memory, phrases like "give this agent persistent memory",
 agent learned" map to Gitmoot's off-by-default agent memory feature (#626): an
 enrolled agent gets a repo-filtered pool of durable facts injected into its job
 prompt as a read-only "Prior learnings" reference block (never instructions).
+The block can include `[linked]` facts reached from persisted memory links, and
+non-empty blocks end with a footer pointing the agent to
+`gitmoot memory recall "<query>" --agent <agent-name>` for on-demand recall.
 Enrollment is per agent via `[agents.<name>].memory = true` plus an optional
 `[memory]` section; inspect the store read-only with `gitmoot memory list`. For
 owner-curated memory, `gitmoot memory ingest` stages Markdown as pending
@@ -172,12 +175,18 @@ self-evaluation; see the `verifier` and `decompose-and-verify` recipes and the
 individual job or delegation (via `--model` on run/ask/review/implement or the
 delegation `model` field) can pin a runtime model, with the per-job/delegation
 value overriding the agent default. When neither pins one, a job falls back to the
-runtime's configured `[runtimes.<name>].default_model` (the one behavioral registry
-field), then the runtime CLI's own default. Use `gitmoot runtime list` to inspect
-each built-in runtime's resolved metadata (capabilities, default/known models, and
-where token usage is read from); operators can override a built-in runtime's
+runtime's configured `[runtimes.<name>].default_model`, then the runtime CLI's own
+default. Codex agents, jobs, delegations, and ephemeral worker specs can likewise
+set reasoning effort with `--effort` or the `effort` field. Job/delegation effort
+overrides agent/worker effort, then `[runtimes.codex].default_effort`, and Gitmoot
+forwards the free-form value as `-c model_reasoning_effort=<value>`. Claude and
+Kimi ignore effort. Use
+`gitmoot runtime list` to inspect each built-in runtime's resolved metadata:
+capabilities, default model/effort, known models, and the token-usage source.
+Operators can override a built-in runtime's
 metadata without recompiling via a `[runtimes.<name>]` config section — `default_model`
-retargets delivery, `models`/`capabilities` stay advisory (see CLI.md
+retargets delivery and `default_effort` selects Codex effort, while
+`models`/`capabilities` stay advisory (see CLI.md
 § Runtime Metadata Registry). Use
 `gitmoot plugin doctor` when checking whether Codex, Claude Code, or Kimi Code
 can discover Gitmoot through an installed runtime plugin. Use

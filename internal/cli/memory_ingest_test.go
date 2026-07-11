@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/memory"
 )
@@ -145,6 +146,57 @@ func TestMemoryIngestSameContentDifferentRepoStagesBoth(t *testing.T) {
 	}
 }
 
+func TestMemoryIngestAutoConfirmFlagPrivateOnly(t *testing.T) {
+	home, store := memoryTestHome(t)
+	src := t.TempDir()
+	writeFixture(t, src, "note.md",
+		"The release calendar uses the blue marker for the July cutoff.\n")
+
+	code, out, errOut := runMemoryCapture(t, "ingest", src, "--home", home,
+		"--agent", "lead", "--repo", "owner/repo", "--json")
+	if code != 0 {
+		t.Fatalf("default ingest exit %d: %s", code, errOut)
+	}
+	var off memoryIngestResult
+	if err := json.Unmarshal([]byte(out), &off); err != nil {
+		t.Fatalf("parse default ingest: %v (%s)", err, out)
+	}
+	if off.AutoConfirm || off.Confirmed != 0 || confirmedCount(t, store) != 0 {
+		t.Fatalf("auto-confirm off should leave pending only, result=%+v confirmed=%d", off, confirmedCount(t, store))
+	}
+
+	homeOn, storeOn := memoryTestHome(t)
+	paths := config.PathsForHome(homeOn)
+	writeMemoryPipelineConfig(t, paths, `
+[memory]
+ingest_auto_confirm = true
+`)
+	code, out, errOut = runMemoryCapture(t, "ingest", src, "--home", homeOn,
+		"--agent", "lead", "--repo", "owner/repo", "--json")
+	if code != 0 {
+		t.Fatalf("auto-confirm ingest exit %d: %s", code, errOut)
+	}
+	var on memoryIngestResult
+	if err := json.Unmarshal([]byte(out), &on); err != nil {
+		t.Fatalf("parse auto-confirm ingest: %v (%s)", err, out)
+	}
+	if !on.AutoConfirm || on.Inserted != 1 || on.Confirmed != 1 {
+		t.Fatalf("auto-confirm result wrong: %+v", on)
+	}
+	privateRows, err := storeOn.QueryConfirmedMemories(context.Background(),
+		db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: "lead"}, "owner/repo", `"calendar" OR "cutoff"`, 10)
+	if err != nil || len(privateRows) != 1 || privateRows[0].Owner.Kind != memory.OwnerKindAgent || privateRows[0].Owner.Ref != "lead" {
+		t.Fatalf("auto-confirm should write lead private memory, rows=%+v err=%v", privateRows, err)
+	}
+	sharedRows, err := storeOn.QueryConfirmedMemoriesForShared(context.Background(), "owner/repo", `"calendar" OR "cutoff"`, 10)
+	if err != nil {
+		t.Fatalf("query shared: %v", err)
+	}
+	if len(sharedRows) != 0 {
+		t.Fatalf("auto-confirm must not write shared memory, got %+v", sharedRows)
+	}
+}
+
 // TestMemoryIngestConfirmExportRoundTrip is the P3 end-to-end: ingest → the note
 // is a pending observation → confirm --provenance-prefix promotes it (idempotently)
 // → it becomes retrievable via QueryConfirmedMemories AND appears in the vault export.
@@ -223,6 +275,206 @@ func TestMemoryIngestConfirmExportRoundTrip(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("confirmed ingested memory did not appear in the vault export")
+	}
+}
+
+func TestMemoryIngestSharedAndConfirmToSharedAuthorStamping(t *testing.T) {
+	home, store := memoryTestHome(t)
+	src := t.TempDir()
+	writeFixture(t, src, "shared.md",
+		"The release checklist lives in the shared memory pool after human review.\n")
+
+	code, out, errOut := runMemoryCapture(t, "ingest", src, "--home", home,
+		"--agent", "lead", "--repo", "acme/widget", "--shared", "--json")
+	if code != 0 {
+		t.Fatalf("shared ingest exit %d: %s", code, errOut)
+	}
+	var ingest memoryIngestResult
+	if err := json.Unmarshal([]byte(out), &ingest); err != nil {
+		t.Fatalf("parse ingest: %v (%s)", err, out)
+	}
+	if !ingest.Shared || ingest.Agent != "lead" || ingest.Inserted != 1 {
+		t.Fatalf("shared ingest result wrong: %+v", ingest)
+	}
+
+	obs := listObservations(t, home)
+	if len(obs) != 1 {
+		t.Fatalf("expected one observation, got %+v", obs)
+	}
+	if obs[0].Owner.Kind != memory.OwnerKindShared || obs[0].Owner.Ref != memory.SharedOwnerRef || obs[0].AuthorRef != "lead" {
+		t.Fatalf("shared observation should preserve author lead, got %+v", obs[0])
+	}
+
+	code, out, errOut = runMemoryCapture(t, "list", "--home", home, "--pending", "--agent", "lead", "--json")
+	if code != 0 {
+		t.Fatalf("list shared pending by author exit %d: %s", code, errOut)
+	}
+	var pending []memoryListEntry
+	if err := json.Unmarshal([]byte(out), &pending); err != nil {
+		t.Fatalf("parse pending list: %v (%s)", err, out)
+	}
+	if len(pending) != 1 || pending[0].OwnerKind != memory.OwnerKindShared || pending[0].AuthorRef != "lead" {
+		t.Fatalf("--agent lead should include shared pending rows authored by lead, got %+v", pending)
+	}
+
+	code, out, errOut = runMemoryCapture(t, "confirm", "--home", home,
+		"--provenance-prefix", "ingest:", "--agent", "lead", "--to-shared", "--yes", "--json")
+	if code != 0 {
+		t.Fatalf("confirm --to-shared exit %d: %s", code, errOut)
+	}
+	var confirm memoryConfirmResult
+	if err := json.Unmarshal([]byte(out), &confirm); err != nil {
+		t.Fatalf("parse confirm: %v (%s)", err, out)
+	}
+	if !confirm.ToShared || confirm.Confirmed != 1 {
+		t.Fatalf("confirm to shared result wrong: %+v", confirm)
+	}
+
+	rows, err := store.QueryConfirmedMemoriesForShared(context.Background(), "acme/widget", `"shared" OR "memory"`, 5)
+	if err != nil {
+		t.Fatalf("query shared: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Owner.Kind != memory.OwnerKindShared || rows[0].AuthorRef != "lead" {
+		t.Fatalf("confirmed shared row should preserve author lead, got %+v", rows)
+	}
+}
+
+func TestMemoryIngestSweepPartialFailureStillExitsZero(t *testing.T) {
+	home, _ := memoryTestHome(t)
+	paths := config.PathsForHome(home)
+	srcA := t.TempDir()
+	srcB := t.TempDir()
+	writeFixture(t, srcA, "alpha.md", "The alpha memory sweep source records release notes for the owner repo.\n")
+	writeFixture(t, srcB, "beta.md", "The beta memory sweep source records verification notes for the owner repo.\n")
+	missing := filepath.Join(t.TempDir(), "missing")
+	writeMemoryPipelineConfig(t, paths, `
+[[memory.ingest]]
+path = "`+filepath.ToSlash(srcA)+`"
+agent = "lead"
+repo = "owner/repo"
+tier = "repo"
+
+[[memory.ingest]]
+path = "`+filepath.ToSlash(missing)+`"
+agent = "lead"
+repo = "owner/repo"
+tier = "repo"
+
+[[memory.ingest]]
+path = "`+filepath.ToSlash(srcB)+`"
+agent = "lead"
+repo = "owner/repo"
+tier = "repo"
+`)
+
+	code, out, errOut := runMemoryCapture(t, "ingest", "sweep", "--home", home, "--json")
+	if code != 0 {
+		t.Fatalf("partial sweep exit %d, want 0: %s", code, errOut)
+	}
+	var result memoryIngestSweepResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse sweep: %v (%s)", err, out)
+	}
+	if result.Totals.Sources != 3 || result.Totals.Succeeded != 2 || result.Totals.Failed != 1 {
+		t.Fatalf("totals = %+v, want 3 sources / 2 succeeded / 1 failed", result.Totals)
+	}
+	if result.Totals.Inserted != 2 || result.Totals.Deduped != 0 || result.Totals.Rejected != 0 {
+		t.Fatalf("counts = %+v, want inserted=2 deduped=0 rejected=0", result.Totals)
+	}
+	if len(result.Sources) != 3 || result.Sources[1].Path != missing || result.Sources[1].Error == "" {
+		t.Fatalf("source errors not reported per source: %+v", result.Sources)
+	}
+	if obs := listObservations(t, home); len(obs) != 2 {
+		t.Fatalf("observations = %d, want two successful-source inserts: %+v", len(obs), obs)
+	}
+}
+
+func TestMemoryIngestSweepAutoConfirmsConfiguredSources(t *testing.T) {
+	home, store := memoryTestHome(t)
+	paths := config.PathsForHome(home)
+	src := t.TempDir()
+	writeFixture(t, src, "sweep.md", "The sweep source records the violet release-board handoff.\n")
+	writeMemoryPipelineConfig(t, paths, `
+[memory]
+ingest_auto_confirm = true
+
+[[memory.ingest]]
+path = "`+filepath.ToSlash(src)+`"
+agent = "lead"
+repo = "owner/repo"
+tier = "repo"
+`)
+
+	code, out, errOut := runMemoryCapture(t, "ingest", "sweep", "--home", home, "--json")
+	if code != 0 {
+		t.Fatalf("auto-confirm sweep exit %d: %s", code, errOut)
+	}
+	var result memoryIngestSweepResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse sweep: %v (%s)", err, out)
+	}
+	if result.Totals.Inserted != 1 || result.Totals.Confirmed != 1 || result.Sources[0].Confirmed != 1 {
+		t.Fatalf("auto-confirm sweep result wrong: %+v", result)
+	}
+	privateRows, err := store.QueryConfirmedMemories(context.Background(),
+		db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: "lead"}, "owner/repo", `"violet" OR "handoff"`, 10)
+	if err != nil || len(privateRows) != 1 {
+		t.Fatalf("sweep should confirm into private memory, rows=%+v err=%v", privateRows, err)
+	}
+	sharedRows, err := store.QueryConfirmedMemoriesForShared(context.Background(), "owner/repo", `"violet" OR "handoff"`, 10)
+	if err != nil {
+		t.Fatalf("query shared: %v", err)
+	}
+	if len(sharedRows) != 0 {
+		t.Fatalf("sweep auto-confirm must not write shared memory, got %+v", sharedRows)
+	}
+}
+
+func TestMemoryIngestSweepAllSourcesFailExitsNonZero(t *testing.T) {
+	home, _ := memoryTestHome(t)
+	paths := config.PathsForHome(home)
+	missing := filepath.Join(t.TempDir(), "missing")
+	writeMemoryPipelineConfig(t, paths, `
+[[memory.ingest]]
+path = "`+filepath.ToSlash(missing)+`"
+agent = "lead"
+repo = "owner/repo"
+tier = "repo"
+`)
+
+	code, out, _ := runMemoryCapture(t, "ingest", "sweep", "--home", home, "--json")
+	if code != 1 {
+		t.Fatalf("all-failed sweep exit %d, want 1 (out=%s)", code, out)
+	}
+	var result memoryIngestSweepResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse sweep: %v (%s)", err, out)
+	}
+	if result.Totals.Sources != 1 || result.Totals.Failed != 1 || len(result.Sources) != 1 || result.Sources[0].Error == "" {
+		t.Fatalf("all-failed result = %+v", result)
+	}
+}
+
+func TestMemoryIngestSweepEmptyConfigSkips(t *testing.T) {
+	home, _ := memoryTestHome(t)
+
+	code, out, errOut := runMemoryCapture(t, "ingest", "sweep", "--home", home, "--json")
+	if code != 0 {
+		t.Fatalf("empty sweep exit %d, want 0: %s", code, errOut)
+	}
+	var result memoryIngestSweepResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse sweep: %v (%s)", err, out)
+	}
+	if result.Totals.Sources != 0 || result.Skipped == "" || len(result.Sources) != 0 {
+		t.Fatalf("empty sweep result = %+v", result)
+	}
+}
+
+func writeMemoryPipelineConfig(t *testing.T, paths config.Paths, body string) {
+	t.Helper()
+	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 }
 

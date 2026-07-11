@@ -21,7 +21,10 @@ import (
 )
 
 type Engine struct {
-	Store                   *db.Store
+	Store *db.Store
+	// ProduceCheckDir is the resolved checkout cwd for trusted produce-stage
+	// deterministic checks when no disposable worktree path is present.
+	ProduceCheckDir         string
 	RequiredReviewers       []string
 	MergeGate               MergeGate
 	JobID                   func(JobRequest) string
@@ -315,6 +318,9 @@ type Engine struct {
 	// agent/job pin always wins. Nil (the default) forces nothing, so delivery is
 	// byte-identical to before #652.
 	RuntimeDefaultModel func(runtimeName string) string
+	// RuntimeDefaultEffort mirrors RuntimeDefaultModel for the runtime registry's
+	// default_effort fallback.
+	RuntimeDefaultEffort func(runtimeName string) string
 	// ResultCheckMode is the resolved [workflow] result_checks policy (#526): the
 	// deterministic binary-checklist audit run on a job's parsed gitmoot_result.
 	// It is copied onto every Mailbox the engine builds (mailbox()). The zero
@@ -470,7 +476,7 @@ func (e Engine) now() time.Time {
 // path is byte-identical. The hook maps the terminal JobState to the event_type,
 // resolves root_id from the payload, and ships a redacted event fire-and-forget.
 func (e Engine) mailbox() Mailbox {
-	mb := Mailbox{Store: e.Store, CanaryEnabled: e.CanaryEnabled, deferBlocker: e.BlockerDeferrer, RuntimeDefaultModel: e.RuntimeDefaultModel, routerContextEnabled: e.RouterContextEnabled, resultCheckMode: normalizeResultCheckMode(e.ResultCheckMode)}
+	mb := Mailbox{Store: e.Store, CanaryEnabled: e.CanaryEnabled, deferBlocker: e.BlockerDeferrer, RuntimeDefaultModel: e.RuntimeDefaultModel, RuntimeDefaultEffort: e.RuntimeDefaultEffort, routerContextEnabled: e.RouterContextEnabled, resultCheckMode: normalizeResultCheckMode(e.ResultCheckMode), produceCheckDir: e.ProduceCheckDir}
 	// Wire the off-by-default memory hooks (#626). When e.Memory is nil (every
 	// non-enrolled path) both hooks stay nil, so Run's prompt assembly and terminal
 	// path are byte-identical. The hooks themselves also no-op when the executor
@@ -1350,6 +1356,14 @@ func (e Engine) refreshJobPayload(ctx context.Context, jobID string) error {
 	return e.Store.UpdateJobPayload(ctx, jobID, encoded)
 }
 
+func (e Engine) recordImplementNoPRAdvance(ctx context.Context, jobID, decision string) error {
+	return e.Store.AddJobEventIfAbsent(ctx, db.JobEvent{
+		JobID:   jobID,
+		Kind:    "advance_skipped_no_pr",
+		Message: fmt.Sprintf("implement decision %q produced no pull request; skipping PR advancement", strings.TrimSpace(decision)),
+	})
+}
+
 func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 	if err := e.validate(); err != nil {
 		return err
@@ -1424,6 +1438,14 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 	// own way, so this only covers PR-less delegation legs; it is a no-op otherwise.
 	if job.Type == "implement" && payload.Result.Decision == "implemented" && !e.implementationNeedsFinalizer(ctx, payload) {
 		if err := e.commitDelegationLeg(ctx, job, payload); err != nil {
+			return err
+		}
+	}
+	// Non-implemented terminal decisions never enter the implementation finalizer,
+	// so a missing PR is already final. Record it before delegated-child policy
+	// handling, whose blocked/failed paths may return early after advancing the parent.
+	if job.Type == "implement" && payload.Result.Decision != "implemented" && payload.PullRequest <= 0 {
+		if err := e.recordImplementNoPRAdvance(ctx, job.ID, payload.Result.Decision); err != nil {
 			return err
 		}
 	}
@@ -1502,6 +1524,28 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 		}
 	}
 
+	if job.Type == "review" && payload.Sender == PipelineJobSender {
+		// Pipeline PR reviews are report-only: delivery and the daemon's PR-comment
+		// posting already happened, while the pipeline advancer owns decision folding.
+		// Do not enter the native review lifecycle here: changes_requested would fan
+		// out a fix job and approved could run the merge gate (and merge the PR), both
+		// violating the human-merge pipeline policy. This is the single policy seam
+		// where a future explicit `merge: auto` mode can branch.
+		events, err := e.Store.ListJobEvents(ctx, job.ID)
+		if err != nil {
+			return err
+		}
+		for _, event := range events {
+			if event.Kind == "pipeline_review_report_only" {
+				return nil
+			}
+		}
+		return e.Store.AddJobEvent(ctx, db.JobEvent{
+			JobID:   job.ID,
+			Kind:    "pipeline_review_report_only",
+			Message: "pipeline review recorded as report-only; pipeline advancement owns the verdict and human merge remains required",
+		})
+	}
 	if job.Type == "review" {
 		latest, err := e.latestReviewRound(ctx, payload)
 		if err != nil {
@@ -1577,7 +1621,7 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 			payload = finalized
 		}
 		if payload.PullRequest <= 0 {
-			return e.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "advance_skipped_no_pr", Message: "no pull request is attached; skipping PR advancement"})
+			return e.recordImplementNoPRAdvance(ctx, job.ID, payload.Result.Decision)
 		}
 		leadAgent := strings.TrimSpace(payload.LeadAgent)
 		if leadAgent == "" {
@@ -1935,6 +1979,7 @@ func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) 
 		FailurePolicy:   strings.TrimSpace(d.FailurePolicy),
 		SynthesisRule:   strings.TrimSpace(d.SynthesisRule),
 		Model:           strings.TrimSpace(d.Model),
+		Effort:          strings.TrimSpace(d.Effort),
 		Phase:           strings.TrimSpace(d.Phase),
 		// Inherit the coordinator's resolved risk tier (#650) so a high-risk lens
 		// child carries it for explainable escalation. Empty for every non-risk tree.
@@ -2046,11 +2091,11 @@ func canonicalDelegationSetHash(dels []Delegation) string {
 		deps := compactStrings(d.Deps)
 		sort.Strings(deps)
 		// For an ephemeral delegation, d.Agent is empty; fold the spec identity
-		// (runtime/model/template/role) into the hash so two distinct ephemeral
+		// (runtime/model/effort/template/role) into the hash so two distinct ephemeral
 		// specs are not mistaken for the same work by loop detection / dedup.
 		eph := ""
 		if d.Ephemeral != nil {
-			eph = strings.Join([]string{d.Ephemeral.Runtime, d.Ephemeral.Model, d.Ephemeral.Template, d.Ephemeral.Role}, "|")
+			eph = strings.Join([]string{d.Ephemeral.Runtime, d.Ephemeral.Model, d.Ephemeral.Effort, d.Ephemeral.Template, d.Ephemeral.Role}, "|")
 		}
 		fields := []string{d.ID, d.Agent, eph, d.Action, strings.TrimSpace(d.Prompt), strings.Join(deps, ",")}
 		builder.WriteString(strings.Join(fields, "\x1f"))
@@ -2428,7 +2473,10 @@ func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload Job
 	// root or no delegation requested artifacts.
 	artifactDir, err := writeDelegationArtifacts(e.ArtifactRoot, job.ID, payload.Result)
 	if err != nil {
-		return e.block(ctx, ref, fmt.Sprintf("write delegation artifacts: %v", err))
+		// #758 dispatch-path edge: an orchestrate root has no task, so e.block would
+		// strand the chain — route to a foldable finalize tail (byte-identical e.block
+		// for every other tree).
+		return e.finalizeOrBlockDispatch(ctx, job, payload, e.block(ctx, ref, fmt.Sprintf("write delegation artifacts: %v", err)))
 	}
 	if artifactDir != "" {
 		_ = e.Store.AddJobEvent(ctx, db.JobEvent{
@@ -2450,7 +2498,9 @@ func (e Engine) dispatchDelegations(ctx context.Context, job db.Job, payload Job
 		// dep-free leg has no upstream deps to inject, and a deps-bearing leg is
 		// deferred to advanceDelegations (which injects #419 upstream results).
 		if err := e.enqueueDelegation(ctx, job, payload, d, artifactDir, "", ref); err != nil {
-			return err
+			// A worktree/branch-lock allocation block on an orchestrate root routes to a
+			// foldable finalize tail (and stops the loop) instead of stranding the chain.
+			return e.finalizeOrBlockDispatch(ctx, job, payload, err)
 		}
 	}
 	return nil
@@ -2517,6 +2567,7 @@ func (e Engine) handleDelegationLoop(ctx context.Context, job db.Job, payload Jo
 		Agent:  job.Agent,
 		Action: "ask",
 		Model:  payload.Model,
+		Effort: payload.Effort,
 		// Per-job runtime override (#531): a same-coordinator continuation stays on
 		// the override runtime/ref, like Model (see maybeEnqueueContinuation).
 		RuntimeOverride:    payload.RuntimeOverride,
@@ -2607,6 +2658,7 @@ func (e Engine) handleDelegationPreflightFailure(ctx context.Context, job db.Job
 		Agent:  job.Agent,
 		Action: "ask",
 		Model:  payload.Model,
+		Effort: payload.Effort,
 		// Per-job runtime override (#531): a same-coordinator continuation stays on
 		// the override runtime/ref, like Model (see maybeEnqueueContinuation).
 		RuntimeOverride:    payload.RuntimeOverride,
@@ -2679,6 +2731,7 @@ func (e Engine) enqueueFinalizeContinuation(ctx context.Context, job db.Job, pay
 		Agent:  job.Agent,
 		Action: "ask",
 		Model:  payload.Model,
+		Effort: payload.Effort,
 		// Per-job runtime override (#531): the finalize continuation stays on the
 		// override runtime/ref, like Model (see maybeEnqueueContinuation).
 		RuntimeOverride:    payload.RuntimeOverride,
@@ -3240,7 +3293,16 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 			if continuationAlreadyEnqueued {
 				continue
 			}
-			return e.block(ctx, ref, fmt.Sprintf("delegation %q failed (failure_policy block_parent): %s", d.ID, childFailureReason(child)))
+			reason := fmt.Sprintf("delegation %q failed (failure_policy block_parent): %s", d.ID, childFailureReason(child))
+			// #758 engine edge: a pipeline-orchestrate root has no task, so e.block
+			// would set no task state and return a BlockedError that mints NO
+			// continuation — stranding the stage's chain with no foldable tail. Route
+			// it through the #305 graceful finalize continuation so the chain always
+			// ends in a settled, delegation-less tail the pipeline advancer folds.
+			if e.isPipelineOrchestrateRoot(ctx, parentJob, parentPayload) {
+				return e.enqueueFinalizeContinuation(ctx, parentJob, parentPayload, reason)
+			}
+			return e.block(ctx, ref, reason)
 		}
 	}
 
@@ -3280,7 +3342,9 @@ func (e Engine) advanceDelegations(ctx context.Context, parentJob db.Job, parent
 			// a late refusal here would strand a deferred leg whose refused
 			// sibling deps can never satisfy.
 			if err := e.enqueueDelegation(ctx, parentJob, parentPayload, d, artifactDir, upstreamContext, ref); err != nil {
-				return err
+				// A deferred-dependent dispatch block on an orchestrate root routes to a
+				// foldable finalize tail (and stops the loop) instead of stranding the chain.
+				return e.finalizeOrBlockDispatch(ctx, parentJob, parentPayload, err)
 			}
 			// Re-read children AND events so a second satisfied dependent in the
 			// same pass is not mistaken for still-pending, and a delegation
@@ -3370,7 +3434,14 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 	// succeeded. The default ("" / "summary") concatenates child summaries into
 	// the continuation prompt below.
 	if delegationSynthesisRequiresVote(parentResult.Delegations) && !delegationVoteSatisfied(parentResult.Delegations, children, childPayloads) {
-		return e.block(ctx, ref, fmt.Sprintf("delegation synthesis_rule vote failed: not all delegated children for %s were approved/succeeded", parentJob.ID))
+		reason := fmt.Sprintf("delegation synthesis_rule vote failed: not all delegated children for %s were approved/succeeded", parentJob.ID)
+		// #758: a pipeline-orchestrate root has no task; a synthesis-gate block would
+		// strand its chain with no foldable tail. Route to the finalize continuation
+		// so the tail is always foldable (byte-identical e.block for every other tree).
+		if e.isPipelineOrchestrateRoot(ctx, parentJob, parentPayload) {
+			return e.enqueueFinalizeContinuation(ctx, parentJob, parentPayload, reason)
+		}
+		return e.block(ctx, ref, reason)
 	}
 
 	// synthesis_rule "quorum": block the parent unless at least K children
@@ -3378,7 +3449,11 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 	if delegationSynthesisRequiresQuorum(parentResult.Delegations) {
 		k := delegationQuorumThreshold(parentResult.Delegations)
 		if !delegationQuorumSatisfied(parentResult.Delegations, children, childPayloads, k) {
-			return e.block(ctx, ref, fmt.Sprintf("delegation synthesis_rule quorum failed: fewer than %d delegated children for %s were approved/succeeded", k, parentJob.ID))
+			reason := fmt.Sprintf("delegation synthesis_rule quorum failed: fewer than %d delegated children for %s were approved/succeeded", k, parentJob.ID)
+			if e.isPipelineOrchestrateRoot(ctx, parentJob, parentPayload) {
+				return e.enqueueFinalizeContinuation(ctx, parentJob, parentPayload, reason)
+			}
+			return e.block(ctx, ref, reason)
 		}
 	}
 
@@ -3428,6 +3503,7 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 			Agent:  parentJob.Agent,
 			Action: "ask",
 			Model:  parentPayload.Model,
+			Effort: parentPayload.Effort,
 			// Per-job runtime override (#531): the corrective continuation stays on
 			// the override runtime/ref, like Model (see maybeEnqueueContinuation).
 			RuntimeOverride:    parentPayload.RuntimeOverride,
@@ -3526,6 +3602,7 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 			Agent:  parentJob.Agent,
 			Action: "ask",
 			Model:  parentPayload.Model,
+			Effort: parentPayload.Effort,
 			// Per-job runtime override (#531): the replan continuation stays on the
 			// override runtime/ref, like Model (see maybeEnqueueContinuation).
 			RuntimeOverride:    parentPayload.RuntimeOverride,
@@ -3586,6 +3663,7 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 		Agent:  parentJob.Agent,
 		Action: "ask",
 		Model:  parentPayload.Model,
+		Effort: parentPayload.Effort,
 		// Per-job runtime override (#531): a continuation is the SAME logical
 		// coordinator run, so it must stay on the override runtime — dropping the
 		// override here would run the continuation as the default agent, resuming
@@ -3992,6 +4070,79 @@ func continuationEnqueued(events []db.JobEvent) bool {
 
 func delegationContinuationID(parentJobID string) string {
 	return parentJobID + "/continuation"
+}
+
+// DelegationContinuationID is the exported view of the deterministic continuation
+// id used across a coordinator's continuation chain. The #758 pipeline advancer
+// (internal/cli) follows this chain from an orchestrate stage job to its terminal
+// tail purely from DB rows — it must derive the very same id the engine mints, so
+// the two stay in lockstep by construction rather than by a duplicated string.
+func DelegationContinuationID(parentJobID string) string {
+	return delegationContinuationID(parentJobID)
+}
+
+// isPipelineOrchestrateRoot reports whether parentJob belongs to a #758 pipeline
+// orchestrate stage sub-tree — i.e. the tree ROOT is a pipeline stage job carrying
+// the OrchestrateStage flag. Such a root has NO task (a pipeline orchestrate stage
+// request sets no TaskID, so its taskRef is empty), which means the tree-terminal
+// paths that normally e.block(ref) would set no task state AND mint no continuation,
+// stranding the stage's continuation chain with no foldable tail. The caller routes
+// those paths to enqueueFinalizeContinuation instead so the chain always ends in a
+// settled, delegation-less tail the pipeline advancer can fold.
+//
+// The first generation (the stage job itself) carries OrchestrateStage directly; a
+// later continuation generation does not copy the flag onto its payload, so resolve
+// the tree root and read the flag there. Best-effort: any lookup/parse failure
+// returns false, keeping the e.block path byte-identical for every non-orchestrate
+// tree (the overwhelming default).
+func (e Engine) isPipelineOrchestrateRoot(ctx context.Context, parentJob db.Job, parentPayload JobPayload) bool {
+	if parentPayload.OrchestrateStage {
+		return true
+	}
+	rootID := e.rootJobID(parentJob, parentPayload)
+	if strings.TrimSpace(rootID) == "" || rootID == parentJob.ID {
+		return false
+	}
+	root, err := e.Store.GetJob(ctx, rootID)
+	if err != nil {
+		return false
+	}
+	rootPayload, err := unmarshalPayload(root.Payload)
+	if err != nil {
+		return false
+	}
+	return rootPayload.OrchestrateStage
+}
+
+// finalizeOrBlockDispatch converts a DISPATCH-path BlockedError into a foldable
+// finalize tail for a #758 pipeline-orchestrate root, mirroring how the
+// child-completion terminal sites (block_parent, vote/quorum synthesis gates)
+// route to enqueueFinalizeContinuation. A pipeline orchestrate stage job carries
+// no task (empty taskRef), so the one-shot dispatch-path blocks — write delegation
+// artifacts, and every worktree/branch-lock allocation BlockedError bubbling up
+// from allocateAndEnqueueDelegation (implement worktree, unresolved implement deps,
+// integration worktree, read-only fan-out worktree, shared-checkout branch lock) —
+// would e.block(empty ref): set NO task state and mint NO continuation, stranding
+// the stage's chain with no foldable tail (the coordinator stays succeeded with
+// delegations>0 and orchestrateStageSettleOutcome never settles). Routing them to a
+// finalize continuation guarantees the chain always ends in a settled, delegation-
+// less tail the pipeline advancer folds. Returning it (nil on success) also STOPS
+// the dispatch loop exactly like the original BlockedError did, so no further child
+// is enqueued after the tail is minted.
+//
+// Byte-identical for every other tree: a nil err returns nil, and a non-orchestrate
+// root (isPipelineOrchestrateRoot false) returns the BlockedError unchanged — the
+// gate only ever fires for a root whose empty ref made e.block a pure no-op-state
+// BlockedError with nothing durable to preserve.
+func (e Engine) finalizeOrBlockDispatch(ctx context.Context, job db.Job, payload JobPayload, err error) error {
+	if err == nil {
+		return nil
+	}
+	var blocked BlockedError
+	if errors.As(err, &blocked) && e.isPipelineOrchestrateRoot(ctx, job, payload) {
+		return e.enqueueFinalizeContinuation(ctx, job, payload, blocked.Reason)
+	}
+	return err
 }
 
 // buildContinuationPrompt inlines each finished child's job id, agent, decision,
@@ -5128,6 +5279,7 @@ func (e Engine) ensureJobExecutorAllowed(ctx context.Context, job db.Job, payloa
 		Agent:        authorizationAgent,
 		Action:       job.Type,
 		Repo:         payload.Repo,
+		Sender:       payload.Sender,
 		Branch:       payload.Branch,
 		DelegationID: payload.DelegationID,
 		// Carry the worker spec so an ephemeral child's executor check inherits the
@@ -5168,6 +5320,14 @@ func (e Engine) ensureAgentAllowedWithBranchOwner(ctx context.Context, request J
 	}
 	if !contains(agent.Capabilities, request.Action) && !allowMissingCapability {
 		return e.block(ctx, ref, fmt.Sprintf("agent %q lacks %q capability", agent.Name, request.Action))
+	}
+	if request.Action == "produce" {
+		if request.Sender != PipelineJobSender {
+			return e.block(ctx, ref, "job action produce is reserved for pipeline stages")
+		}
+		if err := runtime.ProduceDispatchError(request.Action, runtime.Agent{Name: agent.Name, Runtime: agent.Runtime, AutonomyPolicy: agent.AutonomyPolicy}); err != nil {
+			return e.block(ctx, ref, err.Error())
+		}
 	}
 	if request.Action == "implement" {
 		// Fail-closed: an implement job whose agent grants no headless write

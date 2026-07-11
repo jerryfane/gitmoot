@@ -64,6 +64,30 @@ func TestExtractAgentResultRejectsUnsupportedDecision(t *testing.T) {
 	}
 }
 
+func TestExtractAgentResultAcceptsSkipped(t *testing.T) {
+	output := `{"gitmoot_result":{"decision":"skipped","summary":"no new replies","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`
+
+	result, err := ExtractAgentResult(output)
+	if err != nil {
+		t.Fatalf("ExtractAgentResult returned error: %v", err)
+	}
+	if result.Decision != "skipped" || result.Summary != "no new replies" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestExtractAgentResultRejectsSkippedWithDelegations(t *testing.T) {
+	output := `{"gitmoot_result":{"decision":"skipped","summary":"nothing to do","delegations":[{"id":"child","agent":"impl","action":"ask","prompt":"check anyway"}]}}`
+
+	_, err := ExtractAgentResult(output)
+	if err == nil {
+		t.Fatal("ExtractAgentResult accepted skipped with delegations")
+	}
+	if !strings.Contains(err.Error(), "decision skipped cannot be used with delegations") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestExtractAgentResultRejectsUnsupportedField(t *testing.T) {
 	output := `{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[],"unexpected_field":[]}}`
 
@@ -167,6 +191,7 @@ func TestValidateAgentResultRejectsDelegationMissingFields(t *testing.T) {
 		{"missing id", Delegation{Agent: "impl", Action: "implement", Prompt: "do"}, `delegations[0] (id "<missing>"): id is required`},
 		{"missing agent", Delegation{ID: "a", Action: "implement", Prompt: "do"}, `delegation "a" must set exactly one of agent or ephemeral`},
 		{"missing action", Delegation{ID: "a", Agent: "impl", Prompt: "do"}, `delegations[0] (id "a"): action is required`},
+		{"unsupported action", Delegation{ID: "a", Agent: "impl", Action: "produce", Prompt: "do"}, `delegations[0] (id "a"): action must be one of ask, review, implement`},
 		{"missing prompt", Delegation{ID: "a", Agent: "impl", Action: "implement"}, `delegations[0] (id "a"): prompt is required`},
 	}
 	for _, tc := range cases {
@@ -337,7 +362,7 @@ func TestValidateAgentResultRejectsArtifactsWithoutBody(t *testing.T) {
 func TestValidateAgentResultAcceptsEphemeralDelegation(t *testing.T) {
 	output := `{"gitmoot_result":{"decision":"implemented","summary":"fan out",` +
 		`"delegations":[` +
-		`{"id":"worker","ephemeral":{"runtime":"codex","model":"gpt-5.4","autonomy_policy":"workspace-write"},"action":"implement","prompt":"hi"}` +
+		`{"id":"worker","ephemeral":{"runtime":"codex","model":"gpt-5.4","effort":"high","autonomy_policy":"workspace-write"},"action":"implement","prompt":"hi","effort":"xhigh"}` +
 		`]}}`
 
 	result, err := ExtractAgentResult(output)
@@ -351,8 +376,11 @@ func TestValidateAgentResultAcceptsEphemeralDelegation(t *testing.T) {
 	if spec == nil {
 		t.Fatalf("ephemeral spec was not parsed: %+v", result.Delegations[0])
 	}
-	if spec.Runtime != "codex" || spec.Model != "gpt-5.4" {
+	if spec.Runtime != "codex" || spec.Model != "gpt-5.4" || spec.Effort != "high" {
 		t.Fatalf("ephemeral spec = %+v", spec)
+	}
+	if result.Delegations[0].Effort != "xhigh" {
+		t.Fatalf("delegation effort = %q, want %q", result.Delegations[0].Effort, "xhigh")
 	}
 	if strings.TrimSpace(result.Delegations[0].Agent) != "" {
 		t.Fatalf("ephemeral delegation should not carry an agent: %q", result.Delegations[0].Agent)

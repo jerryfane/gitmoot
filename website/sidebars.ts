@@ -57,6 +57,7 @@ const sidebars: SidebarsConfig = {
       label: 'Reference',
       items: [
         'reference/cli',
+        'reference/bridge',
         'reference/runtime-adapters',
         'reference/result-contract',
         'reference/event-stream',
@@ -76,6 +77,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Release Notes',
       items: [
+        'release-notes/v0.8.8',
         'release-notes/v0.8.7',
         'release-notes/v0.8.6',
         'release-notes/v0.8.5',

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	dashboard "github.com/jerryfane/gitmoot-dashboard"
@@ -352,6 +355,22 @@ func TestWebDataSourceKnowledge(t *testing.T) {
 		t.Fatalf("supersede edge = %s->%s, want %s->%s (newer->older)", superEdge.Source, superEdge.Target, wantNew, wantOld)
 	}
 
+	// #763 detail fields with NO cluster recompute: the graceful pre-cluster
+	// fallback. The Clusters slice is empty and every fact's Cluster field is empty,
+	// so the client degrades to its scope/category view. seedKnowledge writes no
+	// provenance, so SourceJob/SourceFile are empty too.
+	if len(k.Clusters) != 0 {
+		t.Fatalf("clusters = %d, want 0 (no recompute ⇒ pre-cluster fallback): %+v", len(k.Clusters), k.Clusters)
+	}
+	for _, f := range k.Facts {
+		if f.Cluster != "" {
+			t.Fatalf("fact %s Cluster = %q, want empty (no recompute)", f.ID, f.Cluster)
+		}
+		if f.SourceJob != "" || f.SourceFile != "" {
+			t.Fatalf("fact %s provenance = job%q file%q, want empty (seed sets none)", f.ID, f.SourceJob, f.SourceFile)
+		}
+	}
+
 	// Determinism: a second call is byte-identical.
 	k2, err := ds.Knowledge(context.Background())
 	if err != nil {
@@ -360,6 +379,205 @@ func TestWebDataSourceKnowledge(t *testing.T) {
 	if fmt.Sprintf("%+v", k) != fmt.Sprintf("%+v", k2) {
 		t.Fatalf("Knowledge not deterministic across calls")
 	}
+}
+
+func TestKnowledgeFactLinkEdges(t *testing.T) {
+	home := dashboardTestHome(t)
+	paths := config.PathsForHome(home)
+	ctx := context.Background()
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	seed := func(ref, repo, key, content string, ownerKind ...string) int64 {
+		kind := memory.OwnerKindAgent
+		if len(ownerKind) != 0 {
+			kind = ownerKind[0]
+		}
+		id, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+			Owner: db.MemoryOwner{Kind: kind, Ref: ref}, Repo: repo, Scope: memory.ScopeRepo, Key: key, Content: content,
+		})
+		if err != nil {
+			t.Fatalf("UpsertConfirmedMemory %s: %v", key, err)
+		}
+		return id
+	}
+	a := seed("researcher", "acme/widget", "a", "alpha unique fact")
+	b := seed("researcher", "acme/widget", "b", "bravo unique fact")
+	c := seed("researcher", "acme/widget", "c", "charlie unique fact")
+	d := seed("researcher", "acme/other", "d", "delta unique fact")
+	hidden := seed("hidden-role", "acme/widget", "hidden", "invisible role fact", "role")
+	if err := store.RecomputeMemoryClusters(ctx, db.MemoryClusterAssignment{
+		Clusters: []db.MemoryCluster{
+			{ClusterID: 101, Label: "one", MedoidID: a},
+			{ClusterID: 202, Label: "two", MedoidID: c},
+		},
+		Members: []db.MemoryClusterMember{
+			{MemoryID: a, ClusterID: 101},
+			{MemoryID: b, ClusterID: 101},
+			{MemoryID: c, ClusterID: 202},
+			{MemoryID: d, ClusterID: 202},
+		},
+	}); err != nil {
+		t.Fatalf("RecomputeMemoryClusters: %v", err)
+	}
+	store.Close()
+
+	raw, err := sql.Open("sqlite", paths.Database)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `DELETE FROM memory_links`); err != nil {
+		raw.Close()
+		t.Fatalf("clear generated memory links: %v", err)
+	}
+	insert := func(src, dst int64, score float64) {
+		t.Helper()
+		if _, err := raw.ExecContext(ctx, `
+INSERT INTO memory_links (src_id, dst_id, score, origin, created_at)
+VALUES (?, ?, ?, 'test', '2026-07-10T00:00:00Z')`, src, dst, score); err != nil {
+			t.Fatalf("insert memory link %d -> %d: %v", src, dst, err)
+		}
+	}
+	insert(a, b, 0.8)      // same cluster
+	insert(b, a, 0.6)      // duplicate reverse direction; lower score loses
+	insert(a, c, 0.7)      // cross cluster
+	insert(c, d, 1.4)      // cross repo; raw score squashed via s/(s+20)
+	insert(a, hidden, 0.9) // dangling: role fact is not in the Knowledge payload
+	insert(b, c, 0)        // non-positive score is skipped
+	insert(d, d, 0.5)      // self-link is skipped
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	ds := &webDataSource{home: home}
+	k, err := ds.Knowledge(ctx)
+	if err != nil {
+		t.Fatalf("Knowledge: %v", err)
+	}
+	var got []dashboard.KnowledgeEdge
+	for _, edge := range k.Edges {
+		if edge.Kind == "link" {
+			got = append(got, edge)
+		}
+	}
+	want := []dashboard.KnowledgeEdge{
+		{Source: fmt.Sprintf("fact:%d", a), Target: fmt.Sprintf("fact:%d", b), Kind: "link", Score: 0.8},
+		{Source: fmt.Sprintf("fact:%d", a), Target: fmt.Sprintf("fact:%d", c), Kind: "link", Score: 0.7},
+		{Source: fmt.Sprintf("fact:%d", c), Target: fmt.Sprintf("fact:%d", d), Kind: "link", Score: 1.4 / 21.4},
+	}
+	if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
+		t.Fatalf("link edges = %+v, want normalized/deduped/sorted %+v", got, want)
+	}
+
+	factByID := map[string]dashboard.KnowledgeFact{}
+	for _, fact := range k.Facts {
+		factByID[fact.ID] = fact
+	}
+	if factByID[want[0].Source].Cluster != factByID[want[0].Target].Cluster {
+		t.Fatalf("first link should connect facts in the same cluster: %+v", want[0])
+	}
+	if factByID[want[1].Source].Cluster == factByID[want[1].Target].Cluster {
+		t.Fatalf("second link should cross clusters: %+v", want[1])
+	}
+	if factByID[want[2].Source].Repo == factByID[want[2].Target].Repo {
+		t.Fatalf("third link should cross repos: %+v", want[2])
+	}
+
+	// The UI's repo-filtered view intersects the all-repos edge set against its
+	// visible facts. Feeding that same filtered id map to the edge mapper proves
+	// the cross-repo edge drops without special-case link logic.
+	store, err = db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	links, err := store.ListMemoryLinksAmong(ctx, []int64{a, b, c, d})
+	store.Close()
+	if err != nil {
+		t.Fatalf("ListMemoryLinksAmong: %v", err)
+	}
+	filtered := knowledgeLinkEdges(links, map[int64]string{
+		a: fmt.Sprintf("fact:%d", a),
+		b: fmt.Sprintf("fact:%d", b),
+		c: fmt.Sprintf("fact:%d", c),
+	})
+	if len(filtered) != 2 || filtered[0].Source != want[0].Source || filtered[0].Target != want[0].Target || filtered[1].Source != want[1].Source || filtered[1].Target != want[1].Target {
+		t.Fatalf("repo-filtered link edges = %+v, want only same-repo pairs %+v", filtered, want[:2])
+	}
+
+	k2, err := ds.Knowledge(ctx)
+	if err != nil {
+		t.Fatalf("Knowledge (2nd): %v", err)
+	}
+	if fmt.Sprintf("%+v", k.Edges) != fmt.Sprintf("%+v", k2.Edges) {
+		t.Fatalf("Knowledge link edge order changed across calls")
+	}
+}
+
+func TestKnowledgeSharedFactsUseAuthorAndExposeMarker(t *testing.T) {
+	home := dashboardTestHome(t)
+	store, err := db.Open(config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	id, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner:     db.MemoryOwner{Kind: memory.OwnerKindShared, Ref: memory.SharedOwnerRef},
+		AuthorRef: "researcher",
+		Repo:      "jerryfane/noted",
+		Scope:     memory.ScopeRepo,
+		Key:       "shared-runbook",
+		Content:   "Shared deployment facts keep their original author.",
+	})
+	if err != nil {
+		t.Fatalf("Upsert shared memory: %v", err)
+	}
+	store.Close()
+
+	ds := &webDataSource{home: home}
+	k, err := ds.Knowledge(ctx)
+	if err != nil {
+		t.Fatalf("Knowledge: %v", err)
+	}
+	factID := fmt.Sprintf("fact:%d", id)
+	found := false
+	for _, f := range k.Facts {
+		if f.ID == factID {
+			found = true
+			if f.Owner != "researcher" {
+				t.Fatalf("shared fact owner = %q, want author researcher", f.Owner)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("shared fact %s missing from Knowledge facts: %+v", factID, k.Facts)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/learning/knowledge", nil)
+	ds.handleLearningKnowledge(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("knowledge handler status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		Facts []struct {
+			ID     string `json:"id"`
+			Owner  string `json:"owner"`
+			Shared bool   `json:"shared"`
+		} `json:"facts"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("parse knowledge payload: %v (%s)", err, rr.Body.String())
+	}
+	for _, f := range payload.Facts {
+		if f.ID == factID {
+			if f.Owner != "researcher" || !f.Shared {
+				t.Fatalf("shared payload fact = %+v, want owner researcher shared=true", f)
+			}
+			return
+		}
+	}
+	t.Fatalf("shared fact %s missing from HTTP payload: %+v", factID, payload.Facts)
 }
 
 // TestKnowledgeClusterHierarchy seeds a store, recomputes the emergent clusters,
@@ -424,6 +642,76 @@ func TestKnowledgeClusterHierarchy(t *testing.T) {
 		t.Fatalf("db cluster repo hub = %q, want repo:acme/widget", repoOfCluster[dbHub])
 	}
 
+	// #763 cluster hubs + per-fact detail fields. seedClusterCorpus produced two
+	// communities (db / net), all owned by researcher in acme/widget, each seed
+	// carrying SourceJob "job-<key>" and no file provenance (seedConfirmed).
+	if len(k.Clusters) != 2 {
+		t.Fatalf("clusters = %d, want 2 (db + net communities): %+v", len(k.Clusters), k.Clusters)
+	}
+	factByID := map[string]dashboard.KnowledgeFact{}
+	for _, f := range k.Facts {
+		factByID[f.ID] = f
+	}
+	clusterIDs := map[string]bool{}
+	total := 0
+	for _, c := range k.Clusters {
+		if c.ID == "" || c.Label == "" {
+			t.Fatalf("cluster missing id/label: %+v", c)
+		}
+		if c.Count != 3 {
+			t.Fatalf("cluster %s count = %d, want 3", c.ID, c.Count)
+		}
+		if c.Repo != "acme/widget" {
+			t.Fatalf("cluster %s repo = %q, want acme/widget (dominant scope)", c.ID, c.Repo)
+		}
+		// Medoid, when set, is an emitted member fact of THIS cluster.
+		if c.Medoid != "" && factByID[c.Medoid].Cluster != c.ID {
+			t.Fatalf("cluster %s medoid %q is not one of its member facts", c.ID, c.Medoid)
+		}
+		clusterIDs[c.ID] = true
+		total += c.Count
+	}
+	if total != len(dbIDs)+len(netIDs) {
+		t.Fatalf("cluster member total = %d, want %d", total, len(dbIDs)+len(netIDs))
+	}
+	// Clusters sorted by id ascending (deterministic ordering for the sig-skip).
+	for i := 1; i < len(k.Clusters); i++ {
+		if k.Clusters[i-1].ID > k.Clusters[i].ID {
+			t.Fatalf("clusters not id-sorted: %+v", k.Clusters)
+		}
+	}
+	// Every fact is clustered and references a known hub (no dangling Cluster field).
+	for _, f := range k.Facts {
+		if f.Cluster == "" || !clusterIDs[f.Cluster] {
+			t.Fatalf("fact %s Cluster = %q, not a known cluster", f.ID, f.Cluster)
+		}
+	}
+	// Provenance: the source job comes from the confirmed row, with no file
+	// (seedConfirmed sets SourceJob "job-<key>" and Provenance "test").
+	first := factByID["fact:"+itoaTest(dbIDs[0])]
+	if first.SourceJob != "job-db-index" || first.SourceFile != "" {
+		t.Fatalf("fact %s provenance = job%q file%q, want job-db-index / empty", first.ID, first.SourceJob, first.SourceFile)
+	}
+	// Vault [[wikilinks]]: the similar db facts cross-reference one another, capped
+	// at five, and every link resolves to an emitted fact (no dangling reference).
+	linked := 0
+	for _, f := range k.Facts {
+		if len(f.Links) > vaultLinkK {
+			t.Fatalf("fact %s has %d links, want <= %d (cap)", f.ID, len(f.Links), vaultLinkK)
+		}
+		for _, id := range f.Links {
+			if _, ok := factByID[id]; !ok {
+				t.Fatalf("fact %s links to unknown fact %q", f.ID, id)
+			}
+		}
+		if len(f.Links) > 0 {
+			linked++
+		}
+	}
+	if linked == 0 {
+		t.Fatalf("expected at least one fact with vault [[wikilinks]], got none")
+	}
+
 	// Determinism: a second bridge call is byte-identical.
 	k2, err := ds.Knowledge(context.Background())
 	if err != nil {
@@ -431,6 +719,130 @@ func TestKnowledgeClusterHierarchy(t *testing.T) {
 	}
 	if fmt.Sprintf("%+v", k) != fmt.Sprintf("%+v", k2) {
 		t.Fatalf("Knowledge not deterministic across calls")
+	}
+}
+
+func TestKnowledgeClusterPayloadParentIDAndLeafFacts(t *testing.T) {
+	home := dashboardTestHome(t)
+	store, err := db.Open(config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	dbIDs, netIDs := seedClusterCorpus(t, store)
+	const (
+		parentID = int64(1)
+		childAID = int64(1<<52 + 51)
+		childBID = int64(1<<52 + 52)
+	)
+	assignment := db.MemoryClusterAssignment{Clusters: []db.MemoryCluster{
+		{ClusterID: parentID, Label: "systems", MedoidID: dbIDs[0]},
+		{ClusterID: childAID, ParentID: parentID, Label: "database", MedoidID: dbIDs[0]},
+		{ClusterID: childBID, ParentID: parentID, Label: "network", MedoidID: netIDs[0]},
+	}}
+	for _, id := range dbIDs {
+		assignment.Members = append(assignment.Members, db.MemoryClusterMember{MemoryID: id, ClusterID: childAID})
+	}
+	for _, id := range netIDs {
+		assignment.Members = append(assignment.Members, db.MemoryClusterMember{MemoryID: id, ClusterID: childBID})
+	}
+	if err := store.RecomputeMemoryClusters(context.Background(), assignment); err != nil {
+		t.Fatalf("seed hierarchy: %v", err)
+	}
+	store.Close()
+
+	ds := &webDataSource{home: home}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/learning/knowledge", nil)
+	ds.handleLearningKnowledge(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("knowledge HTTP status %d: %s", rr.Code, rr.Body.String())
+	}
+	var payload dashboardKnowledgeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(payload.Clusters) != 3 {
+		t.Fatalf("payload clusters = %d, want parent + two children: %+v", len(payload.Clusters), payload.Clusters)
+	}
+	parentHub := clusterHubID(parentID)
+	childHubs := map[string]bool{clusterHubID(childAID): true, clusterHubID(childBID): true}
+	for _, c := range payload.Clusters {
+		if c.ID == parentHub {
+			if c.ParentID != "" || c.Count != 6 {
+				t.Fatalf("parent payload = %+v, want no parent_id and aggregate count 6", c)
+			}
+			continue
+		}
+		if !childHubs[c.ID] || c.ParentID != parentHub || c.Count != 3 {
+			t.Fatalf("child payload = %+v, want parent_id %q and count 3", c, parentHub)
+		}
+	}
+	for _, f := range payload.Facts {
+		if !childHubs[f.Cluster] {
+			t.Fatalf("fact %s cluster = %q, want a leaf child id", f.ID, f.Cluster)
+		}
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"parent_id": "cluster:1"`)) {
+		t.Fatalf("raw payload omitted parent_id: %s", rr.Body.String())
+	}
+}
+
+func TestKnowledgeClusterPayloadRollsUpArbitraryDepth(t *testing.T) {
+	home := dashboardTestHome(t)
+	store, err := db.Open(config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	dbIDs, netIDs := seedClusterCorpus(t, store)
+	const (
+		rootID  = int64(1<<51 + 81)
+		midID   = int64(1<<51 + 82)
+		leafAID = int64(1<<52 + 83)
+		leafBID = int64(1<<52 + 84)
+	)
+	assignment := db.MemoryClusterAssignment{Clusters: []db.MemoryCluster{
+		{ClusterID: rootID, Label: "systems", MedoidID: dbIDs[0]},
+		{ClusterID: midID, ParentID: rootID, Label: "runtime", MedoidID: dbIDs[0]},
+		{ClusterID: leafAID, ParentID: midID, Label: "database", MedoidID: dbIDs[0]},
+		{ClusterID: leafBID, ParentID: midID, Label: "network", MedoidID: netIDs[0]},
+	}}
+	for _, id := range dbIDs {
+		assignment.Members = append(assignment.Members, db.MemoryClusterMember{MemoryID: id, ClusterID: leafAID})
+	}
+	for _, id := range netIDs {
+		assignment.Members = append(assignment.Members, db.MemoryClusterMember{MemoryID: id, ClusterID: leafBID})
+	}
+	if err := store.RecomputeMemoryClusters(context.Background(), assignment); err != nil {
+		t.Fatalf("seed deep hierarchy: %v", err)
+	}
+	store.Close()
+
+	ds := &webDataSource{home: home}
+	rr := httptest.NewRecorder()
+	ds.handleLearningKnowledge(rr, httptest.NewRequest("GET", "/api/learning/knowledge", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("knowledge HTTP status %d: %s", rr.Code, rr.Body.String())
+	}
+	var payload dashboardKnowledgeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	byID := map[string]dashboardKnowledgeCluster{}
+	for _, cluster := range payload.Clusters {
+		byID[cluster.ID] = cluster
+	}
+	root, middle := byID[clusterHubID(rootID)], byID[clusterHubID(midID)]
+	if root.Count != 6 || root.ParentID != "" || root.Medoid != fmt.Sprintf("fact:%d", dbIDs[0]) {
+		t.Fatalf("deep root payload = %+v", root)
+	}
+	if middle.Count != 6 || middle.ParentID != clusterHubID(rootID) {
+		t.Fatalf("deep middle payload = %+v", middle)
+	}
+	for _, leafID := range []int64{leafAID, leafBID} {
+		leaf := byID[clusterHubID(leafID)]
+		if leaf.Count != 3 || leaf.ParentID != clusterHubID(midID) {
+			t.Fatalf("deep leaf payload = %+v", leaf)
+		}
 	}
 }
 
@@ -463,7 +875,7 @@ func TestKnowledgeEdgesClusterCap(t *testing.T) {
 		idByRow[int64(i)] = fid
 		membByRow[int64(i)] = 1 // all in one cluster
 	}
-	edges := knowledgeEdges(nil, facts, idByRow, membByRow)
+	edges := knowledgeEdges(nil, facts, idByRow, membByRow, nil)
 
 	var owner, cluster int
 	for _, e := range edges {

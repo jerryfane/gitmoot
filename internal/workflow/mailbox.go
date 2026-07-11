@@ -15,6 +15,7 @@ import (
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/prompts"
 	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/jerryfane/gitmoot/internal/subprocess"
 )
 
 // maxRepairAttempts bounds how many times a malformed (missing gitmoot_result
@@ -94,6 +95,10 @@ type Mailbox struct {
 	// default, and any error/empty result) forces nothing, so delivery is
 	// byte-identical to before #652.
 	RuntimeDefaultModel func(runtimeName string) string
+	// RuntimeDefaultEffort mirrors RuntimeDefaultModel for reasoning effort. It is
+	// consulted only as the final fallback after payload.Effort and agent.Effort;
+	// nil or empty forces no runtime argument.
+	RuntimeDefaultEffort func(runtimeName string) string
 	// routerContextEnabled gates the off-by-default #530 coordinator context block.
 	// When true, Run appends a bounded (<=12 line) observed-performance table to a
 	// TOP-LEVEL (coordinator) job's prompt. When false (the default, every
@@ -106,6 +111,12 @@ type Mailbox struct {
 	// foreground path — is byte-identical. The daemon resolves the real mode
 	// (default warn) from config and wires it through Engine.ResultCheckMode.
 	resultCheckMode ResultCheckMode
+	// produceCheckDir is the resolved stage checkout used as cwd for trusted
+	// operator checks when the payload has no explicit disposable worktree.
+	produceCheckDir string
+	// produceCheckTimeout bounds each trusted check command. Zero uses the
+	// production default; tests may inject a short timeout.
+	produceCheckTimeout time.Duration
 }
 
 type JobRequest struct {
@@ -129,20 +140,20 @@ type JobRequest struct {
 	// for this job only (the agent's identity is unchanged). Used by the
 	// orchestrate/run --recipe flag to route a coordinator to a built-in recipe
 	// template's prompt without rebinding the agent.
-	TemplateOverride       *db.AgentTemplate
-	ParentJobID            string
-	DelegationID           string
-	DelegationDepth        int
-	DelegatedBy            string
-	RootJobID              string
-	Deps                   []string
-	JobTimeout             string
-	RetryCount             int
-	Fingerprint            string
-	FailurePolicy          string
-	SynthesisRule          string
-	DelegationArtifactDir  string
-	WorktreePath           string
+	TemplateOverride      *db.AgentTemplate
+	ParentJobID           string
+	DelegationID          string
+	DelegationDepth       int
+	DelegatedBy           string
+	RootJobID             string
+	Deps                  []string
+	JobTimeout            string
+	RetryCount            int
+	Fingerprint           string
+	FailurePolicy         string
+	SynthesisRule         string
+	DelegationArtifactDir string
+	WorktreePath          string
 	// ReadOnlyWorktree marks a job whose WorktreePath is a throwaway detached
 	// committed-tip worktree allocated for read-only (ask) isolation at DISPATCH
 	// time (#739) — as opposed to a delegation child's fan-out worktree (which
@@ -161,6 +172,7 @@ type JobRequest struct {
 	VerifyAttempt          int
 	DelegationFinalize     bool
 	Model                  string
+	Effort                 string
 	// RuntimeOverride, when non-empty, runs THIS job through the named runtime
 	// instead of the agent's registered default runtime (#531). The agent's
 	// stored runtime/session are untouched: the job runs on RuntimeOverrideRef
@@ -197,35 +209,47 @@ type JobRequest struct {
 	// inheriting it for back-linking) but which must NOT trigger seat elevation. Set
 	// only by the moot dispatch; never inherited by continuations/children.
 	MootSeat bool
+	// OrchestrateStage marks a #758 pipeline orchestrate stage job: the stage's agent
+	// runs as a bounded sub-tree COORDINATOR, so its delegations[] are NOT stripped by
+	// the pipeline-sender leaf strip (they fan out as children owned by this stage
+	// job). It is set ONLY from the validated orchestrate spec by the pipeline
+	// dispatch, never inferred by sender-sniffing, so every other pipeline-sender job
+	// (shell, #757 agent leaf) keeps the delegations strip byte-identically.
+	// Additive/omitempty: false leaves the enqueued payload byte-identical.
+	OrchestrateStage bool
+	WritablePaths    []string
+	Network          bool
+	Check            string
+	CheckRetries     int
 }
 
 type JobPayload struct {
-	Repo                   string         `json:"repo"`
-	Branch                 string         `json:"branch"`
-	PullRequest            int            `json:"pull_request"`
-	HeadSHA                string         `json:"head_sha,omitempty"`
-	GoalID                 string         `json:"goal_id,omitempty"`
-	TaskID                 string         `json:"task_id"`
-	TaskTitle              string         `json:"task_title"`
-	LeadAgent              string         `json:"lead_agent,omitempty"`
-	Reviewers              []string       `json:"reviewers,omitempty"`
-	ReviewRound            string         `json:"review_round,omitempty"`
-	Sender                 string         `json:"sender"`
-	Instructions           string         `json:"instructions"`
-	Constraints            []string       `json:"constraints"`
-	ParentJobID            string         `json:"parent_job_id,omitempty"`
-	DelegationID           string         `json:"delegation_id,omitempty"`
-	DelegationDepth        int            `json:"delegation_depth,omitempty"`
-	DelegatedBy            string         `json:"delegated_by,omitempty"`
-	RootJobID              string         `json:"root_job_id,omitempty"`
-	Deps                   []string       `json:"deps,omitempty"`
-	JobTimeout             string         `json:"job_timeout,omitempty"`
-	RetryCount             int            `json:"retry_count,omitempty"`
-	Fingerprint            string         `json:"fingerprint,omitempty"`
-	FailurePolicy          string         `json:"failure_policy,omitempty"`
-	SynthesisRule          string         `json:"synthesis_rule,omitempty"`
-	DelegationArtifactDir  string         `json:"delegation_artifact_dir,omitempty"`
-	WorktreePath           string         `json:"worktree_path,omitempty"`
+	Repo                  string   `json:"repo"`
+	Branch                string   `json:"branch"`
+	PullRequest           int      `json:"pull_request"`
+	HeadSHA               string   `json:"head_sha,omitempty"`
+	GoalID                string   `json:"goal_id,omitempty"`
+	TaskID                string   `json:"task_id"`
+	TaskTitle             string   `json:"task_title"`
+	LeadAgent             string   `json:"lead_agent,omitempty"`
+	Reviewers             []string `json:"reviewers,omitempty"`
+	ReviewRound           string   `json:"review_round,omitempty"`
+	Sender                string   `json:"sender"`
+	Instructions          string   `json:"instructions"`
+	Constraints           []string `json:"constraints"`
+	ParentJobID           string   `json:"parent_job_id,omitempty"`
+	DelegationID          string   `json:"delegation_id,omitempty"`
+	DelegationDepth       int      `json:"delegation_depth,omitempty"`
+	DelegatedBy           string   `json:"delegated_by,omitempty"`
+	RootJobID             string   `json:"root_job_id,omitempty"`
+	Deps                  []string `json:"deps,omitempty"`
+	JobTimeout            string   `json:"job_timeout,omitempty"`
+	RetryCount            int      `json:"retry_count,omitempty"`
+	Fingerprint           string   `json:"fingerprint,omitempty"`
+	FailurePolicy         string   `json:"failure_policy,omitempty"`
+	SynthesisRule         string   `json:"synthesis_rule,omitempty"`
+	DelegationArtifactDir string   `json:"delegation_artifact_dir,omitempty"`
+	WorktreePath          string   `json:"worktree_path,omitempty"`
 	// ReadOnlyWorktree marks a top-level read-only (ask) worktree allocated at
 	// dispatch time (#739): its WorktreePath is a throwaway detached committed-tip
 	// worktree with no DelegationID and no Branch. Additive/omitempty so a payload
@@ -246,6 +270,7 @@ type JobPayload struct {
 	VerifyAttempt          int            `json:"verify_attempt,omitempty"`
 	DelegationFinalize     bool           `json:"delegation_finalize,omitempty"`
 	Model                  string         `json:"model,omitempty"`
+	Effort                 string         `json:"effort,omitempty"`
 	RuntimeOverride        string         `json:"runtime_override,omitempty"`
 	RuntimeOverrideRef     string         `json:"runtime_override_ref,omitempty"`
 	Phase                  string         `json:"phase,omitempty"`
@@ -257,16 +282,34 @@ type JobPayload struct {
 	HumanAnswer            string         `json:"human_answer,omitempty"`
 	// ThreadID / ChatMessageID back-link a chat-promoted job (#534) to its origin
 	// message. Additive/omitempty: a non-chat job serializes byte-identically.
-	ThreadID      string       `json:"thread_id,omitempty"`
-	ChatMessageID string       `json:"chat_message_id,omitempty"`
+	ThreadID      string `json:"thread_id,omitempty"`
+	ChatMessageID string `json:"chat_message_id,omitempty"`
 	// MootSeat marks a `gitmoot moot` conversing seat (#732): the daemon elevates
 	// ONLY these jobs (codex workspace-write+network to reach the relay socket) and
 	// injects the relay env into them. Additive/omitempty so every non-seat job —
 	// including chat-task promotions and continuations that carry ThreadID — is
 	// byte-identical. Never inherited by delegation children or continuations.
 	MootSeat bool `json:"moot_seat,omitempty"`
-	RawOutputs    []string     `json:"raw_outputs,omitempty"`
-	Result        *AgentResult `json:"result,omitempty"`
+	// OrchestrateStage marks a #758 pipeline orchestrate stage job whose delegations[]
+	// survive the pipeline-sender leaf strip (they fan out as children owned by this
+	// stage job, whose own id is the sub-tree RootJobID). Set only from the validated
+	// orchestrate spec, never by sender-sniffing. Additive/omitempty so every other
+	// pipeline-sender payload — shell + #757 agent leaf — serializes byte-identically.
+	OrchestrateStage bool         `json:"orchestrate_stage,omitempty"`
+	WritablePaths    []string     `json:"writable_paths,omitempty"`
+	Network          bool         `json:"network,omitempty"`
+	Check            string       `json:"check,omitempty"`
+	CheckRetries     int          `json:"check_retries,omitempty"`
+	RawOutputs       []string     `json:"raw_outputs,omitempty"`
+	Result           *AgentResult `json:"result,omitempty"`
+	// FailureDiagnostics captures process-level crash context when the runtime
+	// session ended WITHOUT producing a gitmoot_result envelope (#806): a phase
+	// marker (launched | streaming | result-parse), the exit code or signal, a
+	// redacted stderr tail hard-capped at MaxStderrTailBytes, and the runtime
+	// session id when one is known. Additive/omitempty — a job that produced an
+	// envelope serializes byte-identically — and reset at the start of every run
+	// so a retried job never carries a previous run's crash report.
+	FailureDiagnostics *FailureDiagnostics `json:"failure_diagnostics,omitempty"`
 	// ResultChecks, when non-empty, carries the deterministic binary-checklist
 	// audit FAILURES for this job's parsed result (#526). It is the job-detail
 	// surface the dashboard and `gitmoot job show --json` read. Fully additive
@@ -368,6 +411,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		VerifyAttempt:          request.VerifyAttempt,
 		DelegationFinalize:     request.DelegationFinalize,
 		Model:                  request.Model,
+		Effort:                 request.Effort,
 		RuntimeOverride:        strings.TrimSpace(request.RuntimeOverride),
 		RuntimeOverrideRef:     strings.TrimSpace(request.RuntimeOverrideRef),
 		Phase:                  request.Phase,
@@ -381,6 +425,11 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		ThreadID:               strings.TrimSpace(request.ThreadID),
 		ChatMessageID:          strings.TrimSpace(request.ChatMessageID),
 		MootSeat:               request.MootSeat,
+		OrchestrateStage:       request.OrchestrateStage,
+		WritablePaths:          compactStrings(request.WritablePaths),
+		Network:                request.Network,
+		Check:                  strings.TrimSpace(request.Check),
+		CheckRetries:           request.CheckRetries,
 	})
 	if err != nil {
 		return db.Job{}, err
@@ -581,6 +630,10 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 	if err != nil {
 		return AgentResult{}, err
 	}
+	// A retried job must never carry a previous run's crash report (#806):
+	// reset before this run's deliveries so every payload persist below — a
+	// success terminal included — writes fresh diagnostics state.
+	payload.FailureDiagnostics = nil
 
 	if err := m.claim(ctx, job); err != nil {
 		return AgentResult{}, err
@@ -631,7 +684,7 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 		// there are zero prior artifacts to reconcile — this is its first real run.
 		prompt = blockerRetryReconciliationNotice(payload.BlockerClass, payload.BlockerAttempts) + "\n\n" + prompt
 	}
-	firstRaw, firstRefreshedRef, firstEphemeral, firstErr := m.deliver(ctx, adapter, agent, job, payload, prompt)
+	firstRaw, firstRefreshedRef, firstEphemeral, firstDiag, firstErr := m.deliver(ctx, adapter, agent, job, payload, prompt)
 	if firstErr != nil {
 		deliveryErr := DeliveryError{Err: firstErr}
 		// PRE-TERMINAL operational-blocker classification (#532 slice E): consult the
@@ -643,6 +696,10 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 		if m.tryDeferBlocker(ctx, job.ID, deliveryErr) {
 			return AgentResult{}, deferredError{cause: deliveryErr}
 		}
+		// Persist crash diagnostics (#806) before the terminal fail so `job show`
+		// and `report bug` can explain a session that died without an envelope.
+		// Best-effort: diagnostics must never change the failure path.
+		m.storeFailureDiagnostics(ctx, job.ID, &payload, firstDiag)
 		_ = m.fail(ctx, job.ID, fmt.Sprintf("delivery failed: %v", firstErr))
 		// Record an advisory failure observation (#530) so a runtime/model that
 		// repeatedly crashes at the ADAPTER level (never reaching a parsed decision)
@@ -698,6 +755,7 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 		}
 
 		lastRaw := firstRaw
+		lastDiag := firstDiag
 		for attempt := 1; attempt <= maxRepairAttempts; attempt++ {
 			// Re-check cancellation before each repair delivery so a job cancelled
 			// during the repair window is not re-asked (preserves the cancellation
@@ -710,7 +768,7 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 			}
 
 			repairPrompt := prompts.RenderRepairPrompt(lastRaw, parseErr)
-			repairRaw, repairRefreshedRef, repairEphemeral, repairErr := m.deliver(ctx, adapter, agent, job, payload, repairPrompt)
+			repairRaw, repairRefreshedRef, repairEphemeral, repairDiag, repairErr := m.deliver(ctx, adapter, agent, job, payload, repairPrompt)
 			if repairErr != nil {
 				deliveryErr := DeliveryError{Err: repairErr}
 				// Same pre-terminal seam as the first delivery, but the deferrer's
@@ -721,6 +779,9 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 				if m.tryDeferBlocker(ctx, job.ID, deliveryErr) {
 					return AgentResult{}, deferredError{cause: deliveryErr}
 				}
+				// Crash diagnostics (#806) for the repair delivery that died, mirroring
+				// the first-delivery terminal above. Best-effort.
+				m.storeFailureDiagnostics(ctx, job.ID, &payload, repairDiag)
 				_ = m.fail(ctx, job.ID, fmt.Sprintf("repair delivery failed: %v", repairErr))
 				// Advisory failure observation (#530): a hard adapter error during repair
 				// is still a runtime-level failure — count it so flaky runtimes are not
@@ -742,6 +803,7 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 			}
 			payload.RawOutputs = append(payload.RawOutputs, repairRaw)
 			lastRaw = repairRaw
+			lastDiag = repairDiag
 
 			result, parseErr = ExtractAgentResult(repairRaw)
 			if parseErr == nil {
@@ -753,12 +815,82 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 		}
 
 		if parseErr != nil {
+			// The session completed every delivery but never produced a valid
+			// envelope: record result-parse phase diagnostics (#806). The last
+			// delivery's process evidence (exit code 0, its stderr) is what
+			// explains the miss; synthesize a phase-only record when the adapter
+			// carried none (a delivery that succeeded proves a session ran).
+			if lastDiag == nil {
+				lastDiag = &FailureDiagnostics{}
+			}
+			lastDiag.Phase = FailurePhaseResultParse
+			m.storeFailureDiagnostics(ctx, job.ID, &payload, lastDiag)
 			_ = m.fail(ctx, job.ID, fmt.Sprintf("repair output malformed: %v", parseErr))
 			// Advisory failure observation (#530): output that stays malformed after all
 			// repair attempts is a runtime/model failure to honor the contract — count it
 			// so it lowers the recorded success rate instead of being invisible.
 			m.recordRoutingTelemetry(ctx, job, agent, payload, AgentResult{}, JobFailed, time.Since(runStart))
 			return AgentResult{}, parseErr
+		}
+	}
+
+	// A produce stage may declare a trusted deterministic check. Run it only after
+	// a valid envelope and before terminal persistence. Failures re-deliver to the
+	// SAME in-memory runtime session; m.deliver records every correction turn's
+	// token usage on the same job row.
+	if job.Type == "produce" && strings.TrimSpace(payload.Check) != "" {
+		for correction := 0; ; correction++ {
+			checkOutput, checkErr := runProduceCheck(ctx, payload, m.produceCheckDir, m.produceCheckTimeout)
+			if checkErr == nil {
+				break
+			}
+			if correction >= payload.CheckRetries {
+				message := fmt.Sprintf("produce check failed after %d correction attempt(s): %v", correction, checkErr)
+				if strings.TrimSpace(checkOutput) != "" {
+					message += ": " + checkOutput
+				}
+				payload.Result = &AgentResult{Decision: "failed", Summary: message}
+				if err := m.savePayload(ctx, job.ID, payload); err != nil {
+					return AgentResult{}, err
+				}
+				_ = m.addEvent(ctx, job.ID, "produce_check_failed", message)
+				if err := m.fail(ctx, job.ID, message); err != nil {
+					return AgentResult{}, err
+				}
+				return AgentResult{}, errors.New(message)
+			}
+			if err := m.ensureRunning(ctx, job.ID); err != nil {
+				return AgentResult{}, err
+			}
+			if err := m.addEvent(ctx, job.ID, "produce_check_retry", fmt.Sprintf("retrying after deterministic check failure (attempt %d of %d)", correction+1, payload.CheckRetries)); err != nil {
+				return AgentResult{}, err
+			}
+			correctionRaw, refreshedRef, ephemeral, diag, deliveryErr := m.deliver(ctx, adapter, agent, job, payload, produceCheckCorrectionPrompt(checkOutput))
+			if deliveryErr != nil {
+				m.storeFailureDiagnostics(ctx, job.ID, &payload, diag)
+				_ = m.fail(ctx, job.ID, fmt.Sprintf("produce correction delivery failed: %v", deliveryErr))
+				return AgentResult{}, DeliveryError{Err: deliveryErr}
+			}
+			if payload.RuntimeOverride == "" && !registeredFreshRef && !ephemeral {
+				m.persistRefreshedRuntimeRef(ctx, job.ID, agent, refreshedRef)
+			}
+			if refreshedRef != "" {
+				agent.RuntimeRef = refreshedRef
+			}
+			payload.RawOutputs = append(payload.RawOutputs, correctionRaw)
+			result, parseErr = ExtractAgentResult(correctionRaw)
+			if parseErr != nil {
+				message := fmt.Sprintf("produce correction output malformed: %v", parseErr)
+				payload.Result = &AgentResult{Decision: "failed", Summary: message}
+				if err := m.savePayload(ctx, job.ID, payload); err != nil {
+					return AgentResult{}, err
+				}
+				_ = m.fail(ctx, job.ID, message)
+				return AgentResult{}, parseErr
+			}
+			if err := m.savePayload(ctx, job.ID, payload); err != nil {
+				return AgentResult{}, err
+			}
 		}
 	}
 
@@ -772,7 +904,17 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 	// advancer already ignores stage delegations, and this makes stages-as-leaves
 	// hold at the engine seam too. Cheap and byte-identical for every other sender.
 	if payload.Sender == PipelineJobSender {
-		result.Delegations = nil
+		// #758: an orchestrate stage IS a bounded sub-tree ROOT — it is explicitly
+		// AUTHORIZED to fan out, so its delegations[] survive here and the engine's
+		// dispatchDelegations gives every child ParentJobID = this stage job (owned,
+		// not orphaned). The relaxation is gated STRICTLY on the OrchestrateStage
+		// payload flag, which the pipeline dispatch sets only from the validated
+		// orchestrate:true spec — NEVER by sender-sniffing — so every other
+		// pipeline-sender job (shell + #757 agent leaf) keeps the delegations strip
+		// byte-identically and can never spawn phantom children.
+		if !payload.OrchestrateStage {
+			result.Delegations = nil
+		}
 		// Same leaf enforcement for human_questions[] (#757): a healthy agent-stage
 		// result with an empty ParentJobID would otherwise drive the TOP-LEVEL
 		// ask-gate (AdvanceJob, engine.go), opening an escalation / needs-attention
@@ -783,6 +925,13 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 		// pause a human than it can spawn a child; strip it so the stage folds
 		// purely on its decision (a stage that must halt returns decision
 		// "blocked", which the advancer parks the whole run on with needs).
+		//
+		// This strip stays unconditional for EVERY pipeline-sender stage job — the
+		// #758 orchestrate coordinator included: the coordinator's own ParentJobID is
+		// empty, so its human_questions would hit the same unresolvable top-level
+		// ask-gate. Per the #758 design a CHILD's ask-gate is what pauses the tree,
+		// and a child is a non-pipeline-sender job (Sender = the coordinator agent,
+		// ParentJobID = this stage job), so this strip never touches it.
 		result.HumanQuestions = nil
 	}
 	payload.Result = &result
@@ -842,7 +991,38 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 	return result, nil
 }
 
-func (m Mailbox) deliver(ctx context.Context, adapter DeliveryAdapter, agent runtime.Agent, job db.Job, payload JobPayload, prompt string) (string, string, bool, error) {
+const maxProduceCheckOutputBytes = 8 * 1024
+const defaultProduceCheckTimeout = 2 * time.Minute
+
+func runProduceCheck(ctx context.Context, payload JobPayload, fallbackDir string, timeout time.Duration) (string, error) {
+	dir := strings.TrimSpace(payload.WorktreePath)
+	if dir == "" {
+		dir = strings.TrimSpace(fallbackDir)
+	}
+	if timeout <= 0 {
+		timeout = defaultProduceCheckTimeout
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := (subprocess.GroupRunner{MaxOutputBytes: 2 * maxProduceCheckOutputBytes}).Run(checkCtx, dir, "sh", "-c", payload.Check)
+	return sanitizeProduceCheckOutput(result.Stdout + result.Stderr), err
+}
+
+func sanitizeProduceCheckOutput(output string) string {
+	return strings.TrimSpace(tailBytes(RedactCommentText(output), maxProduceCheckOutputBytes))
+}
+
+func produceCheckCorrectionPrompt(output string) string {
+	if strings.TrimSpace(output) == "" {
+		output = "(check exited non-zero with no output)"
+	}
+	return "Your produce output failed the deterministic check. Fix and return a fresh gitmoot_result. Check output:\n\n~~~text\n" + output + "\n~~~"
+}
+
+// deliver returns the delivery's raw text, refreshed runtime ref, ephemeral
+// flag, redacted crash-diagnostics snapshot (#806, nil when no CLI process
+// ran), and error.
+func (m Mailbox) deliver(ctx context.Context, adapter DeliveryAdapter, agent runtime.Agent, job db.Job, payload JobPayload, prompt string) (string, string, bool, *FailureDiagnostics, error) {
 	delivery := runtime.Job{
 		ID:          job.ID,
 		AgentName:   agent.Name,
@@ -851,6 +1031,7 @@ func (m Mailbox) deliver(ctx context.Context, adapter DeliveryAdapter, agent run
 		Repository:  payload.Repo,
 		PullRequest: payload.PullRequest,
 		Model:       payload.Model,
+		Effort:      payload.Effort,
 	}
 	// #652: thread in the runtime's configured registry default_model as the FINAL
 	// model fallback. effectiveModel applies the precedence (job.Model > agent.Model
@@ -860,6 +1041,9 @@ func (m Mailbox) deliver(ctx context.Context, adapter DeliveryAdapter, agent run
 	// runtime's default.
 	if m.RuntimeDefaultModel != nil {
 		delivery.RuntimeDefaultModel = m.RuntimeDefaultModel(agent.Runtime)
+	}
+	if m.RuntimeDefaultEffort != nil {
+		delivery.RuntimeDefaultEffort = m.RuntimeDefaultEffort(agent.Runtime)
 	}
 	result, err := adapter.Deliver(ctx, agent, delivery)
 	// Record best-effort runtime token usage so the per-root delegation token
@@ -901,10 +1085,23 @@ func (m Mailbox) deliver(ctx context.Context, adapter DeliveryAdapter, agent run
 			_ = m.Store.UpdateJobUsage(ctx, job.ID, inTok, outTok)
 		}
 	}
+	diag := failureDiagnosticsFromSession(result.SessionDiag)
 	if strings.TrimSpace(result.Summary) != "" {
-		return result.Summary, result.RefreshedRuntimeRef, result.SessionEphemeral, err
+		return result.Summary, result.RefreshedRuntimeRef, result.SessionEphemeral, diag, err
 	}
-	return result.Raw, result.RefreshedRuntimeRef, result.SessionEphemeral, err
+	return result.Raw, result.RefreshedRuntimeRef, result.SessionEphemeral, diag, err
+}
+
+// storeFailureDiagnostics persists crash diagnostics (#806) onto the job
+// payload just before a no-envelope terminal fail. Best-effort by design: a
+// nil diag (no CLI process ran) stores nothing, and a persist error never
+// changes the failure path.
+func (m Mailbox) storeFailureDiagnostics(ctx context.Context, jobID string, payload *JobPayload, diag *FailureDiagnostics) {
+	if diag == nil {
+		return
+	}
+	payload.FailureDiagnostics = diag
+	_ = m.savePayload(ctx, jobID, *payload)
 }
 
 // persistRefreshedRuntimeRef re-pins an agent that self-healed a dead session
@@ -1100,6 +1297,7 @@ func (p JobPayload) prompt(action string) prompts.JobPrompt {
 }
 
 func validateJobRequest(request JobRequest) error {
+	action := strings.TrimSpace(request.Action)
 	switch {
 	case strings.TrimSpace(request.ID) == "":
 		return errors.New("job id is required")
@@ -1109,6 +1307,20 @@ func validateJobRequest(request JobRequest) error {
 		return errors.New("job action is required")
 	case strings.TrimSpace(request.Repo) == "":
 		return errors.New("job repo is required")
+	case action == "produce" && request.Sender != PipelineJobSender:
+		return errors.New("job action produce is reserved for pipeline stages")
+	case action == "produce" && len(compactStrings(request.WritablePaths)) == 0:
+		return errors.New("job action produce requires at least one writable path")
+	case action != "produce" && len(compactStrings(request.WritablePaths)) > 0:
+		return errors.New("job writable_paths are only valid for action produce")
+	case action != "produce" && request.Network:
+		return errors.New("job network access is only valid for action produce")
+	case action != "produce" && strings.TrimSpace(request.Check) != "":
+		return errors.New("job check is only valid for action produce")
+	case action != "produce" && request.CheckRetries > 0:
+		return errors.New("job check_retries are only valid for action produce")
+	case request.CheckRetries < 0:
+		return errors.New("job check_retries must be >= 0")
 	}
 	return validateJobRuntimeOverrideRequest(request)
 }
