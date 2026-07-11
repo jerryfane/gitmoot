@@ -20,6 +20,37 @@ func openMemTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestMemoryEvalProbeAndCorpusFingerprint(t *testing.T) {
+	ctx := context.Background()
+	store := openMemTestStore(t)
+	builder := MemoryOwner{Kind: "agent", Ref: "builder"}
+	if _, err := store.UpsertConfirmedMemory(ctx, ConfirmedMemory{
+		Owner: builder, Repo: "acme/widget", Scope: "repo", Key: "auth-refresh", Content: "refresh token expiry",
+	}); err != nil {
+		t.Fatalf("seed private: %v", err)
+	}
+	if _, err := store.UpsertConfirmedMemory(ctx, ConfirmedMemory{
+		Owner: MemoryOwner{Kind: "shared", Ref: "shared"}, Repo: "acme/widget", Scope: "repo", Key: "shared-runbook", Content: "deploy rollback runbook",
+	}); err != nil {
+		t.Fatalf("seed shared: %v", err)
+	}
+	probe, err := store.ProbeMemoryEvalLabels(ctx, builder, "acme/widget", `"refresh"`, []string{"auth-*"})
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if !probe.Exists || !probe.Active || !probe.Visible || !probe.FTSOverlap {
+		t.Fatalf("visible overlap probe = %+v", probe)
+	}
+	wrongRepo, err := store.ProbeMemoryEvalLabels(ctx, builder, "acme/other", `"refresh"`, []string{"auth-refresh"})
+	if err != nil || !wrongRepo.Active || wrongRepo.Visible || wrongRepo.FTSOverlap {
+		t.Fatalf("wrong-repo probe = %+v err=%v", wrongRepo, err)
+	}
+	fingerprint, err := store.MemoryEvalCorpusFingerprint(ctx)
+	if err != nil || fingerprint.ActiveCount != 2 || fingerprint.MaxUpdatedAt == "" {
+		t.Fatalf("fingerprint = %+v err=%v", fingerprint, err)
+	}
+}
+
 func agentOwner(ref string) MemoryOwner {
 	return MemoryOwner{Kind: "agent", Ref: ref, Version: ""}
 }

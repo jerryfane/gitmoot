@@ -499,6 +499,153 @@ func TestMemoryEvalRecallPrecision(t *testing.T) {
 	if result.MeanRecallAtK < 1.0 {
 		t.Fatalf("expected the relevant fact to be retrieved (recall@K=1.0), got %+v", result)
 	}
+	if result.SchemaVersion != 1 || result.FixtureHash == "" || result.CorpusFingerprint.ActiveCount != 2 || len(result.Cutoffs) != 2 {
+		t.Fatalf("eval report metadata/cutoffs = %+v", result)
+	}
+}
+
+func TestMemoryEvalOldFixtureContractStillParses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-fixtures.json")
+	const oldFixture = `{"cases":[{"agent":"builder","repo":"acme/widget","instructions":"find arm64","expected_keys":["ci-flake"]}]}`
+	if err := os.WriteFile(path, []byte(oldFixture), 0o600); err != nil {
+		t.Fatalf("write old fixture: %v", err)
+	}
+	fixtures, err := loadMemoryEvalFixtures(path)
+	if err != nil {
+		t.Fatalf("load old fixture: %v", err)
+	}
+	if len(fixtures.Cases) != 1 || fixtures.Cases[0].ID != "" || fixtures.Cases[0].Source != "" || len(fixtures.Cases[0].ExpectedAlternates) != 0 {
+		t.Fatalf("old fixture additive defaults = %+v", fixtures.Cases)
+	}
+}
+
+func TestMemoryEvalCheckedInFixtureSchema(t *testing.T) {
+	fixtures, err := loadMemoryEvalFixtures(filepath.Join("..", "..", "evals", "memory-retrieval-fixtures.json"))
+	if err != nil {
+		t.Fatalf("load checked-in fixtures: %v", err)
+	}
+	if len(fixtures.Cases) < 40 || len(fixtures.Cases) > 50 {
+		t.Fatalf("fixture cases = %d, want 40-50", len(fixtures.Cases))
+	}
+	seen := make(map[string]bool)
+	paraphrases := 0
+	for _, c := range fixtures.Cases {
+		if c.ID == "" || c.Source == "" || c.Category == "" || c.Note == "" || c.Agent == "" || c.Repo == "" || c.Instructions == "" || len(c.ExpectedKeys) == 0 {
+			t.Fatalf("incomplete fixture case: %+v", c)
+		}
+		if seen[c.ID] {
+			t.Fatalf("duplicate fixture id %q", c.ID)
+		}
+		seen[c.ID] = true
+		if c.Source == "paraphrase" {
+			paraphrases++
+		}
+	}
+	if paraphrases != 6 {
+		t.Fatalf("paraphrase cases = %d, want 6", paraphrases)
+	}
+}
+
+func TestMemoryEvalMissTaxonomyDecisionTree(t *testing.T) {
+	_, store := memoryTestHome(t)
+	ctx := context.Background()
+	builder := db.MemoryOwner{Kind: "agent", Ref: "builder"}
+	other := db.MemoryOwner{Kind: "agent", Ref: "other"}
+	seed := func(owner db.MemoryOwner, key, content string) int64 {
+		t.Helper()
+		id, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{Owner: owner, Repo: "acme/widget", Scope: "repo", Key: key, Content: content})
+		if err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+		return id
+	}
+	seed(builder, "vocab-key", "alpha beta durable fact")
+	seed(builder, "rank-key", "needle expected fact")
+	seed(other, "scope-key", "scopeword expected fact")
+	staleID := seed(builder, "stale-key", "stale expected fact")
+	if err := store.RetireConfirmedMemory(ctx, staleID, "test"); err != nil {
+		t.Fatalf("retire stale fixture: %v", err)
+	}
+	tests := []struct {
+		name         string
+		instructions string
+		expected     string
+		deep         []memory.Entry
+		want         string
+		wantRank     int
+	}{
+		{name: "vocabulary mismatch", instructions: "omega zeta", expected: "vocab-key", want: "vocabulary_mismatch"},
+		{name: "ranking loss", instructions: "needle", expected: "rank-key", deep: []memory.Entry{{Key: "other"}, {Key: "rank-key"}}, want: "ranking_loss", wantRank: 2},
+		{name: "scope pool exclusion", instructions: "scopeword", expected: "scope-key", want: "scope_pool_exclusion"},
+		{name: "stale label", instructions: "stale", expected: "stale-key", want: "stale_label"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := memoryEvalCase{Agent: "builder", Repo: "acme/widget", Instructions: tc.instructions, ExpectedKeys: []string{tc.expected}}
+			miss, err := classifyMemoryEvalMiss(ctx, store, c, tc.expected, tc.deep, 1)
+			if err != nil {
+				t.Fatalf("classify: %v", err)
+			}
+			if miss.Taxonomy != tc.want || miss.Rank != tc.wantRank {
+				t.Fatalf("miss = %+v, want taxonomy=%s rank=%d", miss, tc.want, tc.wantRank)
+			}
+		})
+	}
+}
+
+func TestMemoryEvalVocabularyMismatchE2E(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	if _, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: db.MemoryOwner{Kind: "agent", Ref: "builder"}, Repo: "acme/widget", Scope: "repo",
+		Key: "semantic-label", Content: "authentication refresh token expiry",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	fixtures := memoryEvalFixtures{Cases: []memoryEvalCase{{
+		ID: "semantic-probe", Source: "paraphrase", Category: "paraphrase", Note: "zero overlap",
+		Agent: "builder", Repo: "acme/widget", Instructions: "credential renewal timeout", ExpectedKeys: []string{"semantic-label"},
+	}}}
+	data, _ := json.Marshal(fixtures)
+	path := filepath.Join(t.TempDir(), "fixtures.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write fixtures: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runMemory([]string{"eval", "--home", home, "--fixtures", path, "--k", "15", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory eval exit %d: %s", code, stderr.String())
+	}
+	var result memoryEvalResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+	if len(result.PerCase) != 1 || len(result.PerCase[0].Misses) != 1 || result.PerCase[0].Misses[0].Taxonomy != "vocabulary_mismatch" {
+		t.Fatalf("vocabulary mismatch report = %+v", result)
+	}
+}
+
+func TestMemoryEvalBudgetAtRiskAxis(t *testing.T) {
+	_, store := memoryTestHome(t)
+	ctx := context.Background()
+	owner := db.MemoryOwner{Kind: "agent", Ref: "builder"}
+	for _, key := range []string{"expected-budget", "newer-distractor"} {
+		if _, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+			Owner: owner, Repo: "acme/widget", Scope: "repo", Key: key,
+			Content: "budgetneedle " + strings.Repeat("long budget payload ", 20),
+		}); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	controller := &workflow.MemoryController{Store: store, TokenBudget: 1, MaxEntries: 15}
+	cutoff, err := evaluateMemoryFixturesAtK(ctx, store, controller, []memoryEvalCase{{
+		ID: "budget", Agent: "builder", Repo: "acme/widget", Instructions: "budgetneedle", ExpectedKeys: []string{"expected-budget"}, Category: "self-retrieval",
+	}}, 5)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(cutoff.PerCase) != 1 || !cutoff.PerCase[0].Hit || !cutoff.PerCase[0].BudgetAtRisk || len(cutoff.PerCase[0].BudgetAtRiskKeys) != 1 {
+		t.Fatalf("budget-at-risk result = %+v", cutoff)
+	}
 }
 
 func TestMemoryEvalRequiresFixtures(t *testing.T) {
@@ -540,5 +687,16 @@ func TestRecallPrecisionAtK(t *testing.T) {
 	recall4, prec4 := recallPrecisionAtK(nil, nil, 5)
 	if recall4 != 1 || prec4 != 1 {
 		t.Fatalf("correct null retrieval: recall = %v prec = %v, want 1, 1", recall4, prec4)
+	}
+}
+
+func TestMemoryEvalExpectedAlternatePrefix(t *testing.T) {
+	c := memoryEvalCase{ExpectedKeys: []string{"parent-key"}, ExpectedAlternates: []string{"parent-key-*"}}
+	recall, precision, missed, hits := scoreMemoryEvalCase([]string{"parent-key-child"}, c)
+	if recall != 1 || precision != 1 || len(missed) != 0 {
+		t.Fatalf("alternate score recall=%v precision=%v missed=%v", recall, precision, missed)
+	}
+	if _, ok := hits["parent-key-child"]; !ok {
+		t.Fatalf("alternate hit keys = %v", hits)
 	}
 }

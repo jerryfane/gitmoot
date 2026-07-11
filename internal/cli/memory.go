@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -609,26 +611,72 @@ type memoryEvalFixtures struct {
 }
 
 type memoryEvalCase struct {
-	Agent        string   `json:"agent"`
-	Repo         string   `json:"repo"`
-	Instructions string   `json:"instructions"`
-	ExpectedKeys []string `json:"expected_keys"`
+	ID                 string   `json:"id,omitempty"`
+	Source             string   `json:"source,omitempty"`
+	Category           string   `json:"category,omitempty"`
+	Note               string   `json:"note,omitempty"`
+	Agent              string   `json:"agent"`
+	Repo               string   `json:"repo"`
+	Instructions       string   `json:"instructions"`
+	ExpectedKeys       []string `json:"expected_keys"`
+	ExpectedAlternates []string `json:"expected_alternates,omitempty"`
 }
 
 type memoryEvalResult struct {
-	K             int                    `json:"k"`
-	Cases         int                    `json:"cases"`
-	MeanRecallAtK float64                `json:"mean_recall_at_k"`
-	MeanPrecAtK   float64                `json:"mean_precision_at_k"`
-	PerCase       []memoryEvalCaseResult `json:"per_case"`
+	SchemaVersion     int                            `json:"schema_version"`
+	FixtureHash       string                         `json:"fixture_hash"`
+	CorpusFingerprint db.MemoryEvalCorpusFingerprint `json:"corpus_fingerprint"`
+	K                 int                            `json:"k"`
+	Cases             int                            `json:"cases"`
+	MeanRecallAtK     float64                        `json:"mean_recall_at_k"`
+	MeanPrecAtK       float64                        `json:"mean_precision_at_k"`
+	PerCase           []memoryEvalCaseResult         `json:"per_case"`
+	PerCategory       []memoryEvalCategoryResult     `json:"per_category"`
+	MissTaxonomy      map[string]int                 `json:"miss_taxonomy"`
+	Cutoffs           []memoryEvalCutoffResult       `json:"cutoffs"`
 }
 
 type memoryEvalCaseResult struct {
-	Instructions string   `json:"instructions"`
-	Expected     []string `json:"expected_keys"`
-	Retrieved    []string `json:"retrieved_keys"`
-	RecallAtK    float64  `json:"recall_at_k"`
-	PrecisionAtK float64  `json:"precision_at_k"`
+	ID                 string           `json:"id,omitempty"`
+	Source             string           `json:"source,omitempty"`
+	Category           string           `json:"category,omitempty"`
+	Note               string           `json:"note,omitempty"`
+	Instructions       string           `json:"instructions"`
+	Expected           []string         `json:"expected_keys"`
+	ExpectedAlternates []string         `json:"expected_alternates,omitempty"`
+	Retrieved          []string         `json:"retrieved_keys"`
+	Hit                bool             `json:"hit"`
+	RecallAtK          float64          `json:"recall_at_k"`
+	PrecisionAtK       float64          `json:"precision_at_k"`
+	Misses             []memoryEvalMiss `json:"misses,omitempty"`
+	BudgetAtRisk       bool             `json:"budget_at_risk"`
+	BudgetAtRiskKeys   []string         `json:"budget_at_risk_keys,omitempty"`
+}
+
+type memoryEvalMiss struct {
+	ExpectedKey string `json:"expected_key"`
+	Taxonomy    string `json:"taxonomy"`
+	Rank        int    `json:"rank,omitempty"`
+	Probe       string `json:"probe"`
+}
+
+type memoryEvalCategoryResult struct {
+	Category      string  `json:"category"`
+	Cases         int     `json:"cases"`
+	Hits          int     `json:"hits"`
+	MeanRecallAtK float64 `json:"mean_recall_at_k"`
+	MeanPrecAtK   float64 `json:"mean_precision_at_k"`
+	BudgetAtRisk  int     `json:"budget_at_risk"`
+}
+
+type memoryEvalCutoffResult struct {
+	K             int                        `json:"k"`
+	Cases         int                        `json:"cases"`
+	MeanRecallAtK float64                    `json:"mean_recall_at_k"`
+	MeanPrecAtK   float64                    `json:"mean_precision_at_k"`
+	PerCase       []memoryEvalCaseResult     `json:"per_case"`
+	PerCategory   []memoryEvalCategoryResult `json:"per_category"`
+	MissTaxonomy  map[string]int             `json:"miss_taxonomy"`
 }
 
 func runMemoryEval(args []string, stdout, stderr io.Writer) int {
@@ -645,38 +693,62 @@ func runMemoryEval(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "memory eval: --fixtures is required")
 		return 2
 	}
+	if *k <= 0 {
+		fmt.Fprintln(stderr, "memory eval: --k must be > 0")
+		return 2
+	}
 	fixtures, err := loadMemoryEvalFixtures(*fixturesPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "memory eval: %v\n", err)
 		return 1
 	}
 
-	result := memoryEvalResult{K: *k, Cases: len(fixtures.Cases)}
-	err = withStoreAndPaths(*home, func(paths config.Paths, store *db.Store) error {
-		settings, err := config.LoadMemorySettings(paths)
+	fixtureBytes, err := os.ReadFile(*fixturesPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "memory eval: %v\n", err)
+		return 1
+	}
+	fixtureSum := sha256.Sum256(fixtureBytes)
+	result := memoryEvalResult{
+		SchemaVersion: 1, FixtureHash: hex.EncodeToString(fixtureSum[:]), K: *k, Cases: len(fixtures.Cases),
+	}
+	paths, err := pathsFromFlag(*home)
+	if err != nil {
+		fmt.Fprintf(stderr, "memory eval: %v\n", err)
+		return 1
+	}
+	settings, err := config.LoadMemorySettings(paths)
+	if err != nil {
+		fmt.Fprintf(stderr, "memory eval: %v\n", err)
+		return 1
+	}
+	err = withReadOnlyStore(*home, func(store *db.Store) error {
+		controller := &workflow.MemoryController{Store: store, TokenBudget: settings.TokenBudget, MaxEntries: settings.MaxEntries}
+		ctx := context.Background()
+		fingerprint, err := store.MemoryEvalCorpusFingerprint(ctx)
 		if err != nil {
 			return err
 		}
-		controller := &workflow.MemoryController{Store: store, TokenBudget: settings.TokenBudget, MaxEntries: settings.MaxEntries}
-		ctx := context.Background()
-		var sumRecall, sumPrec float64
-		for _, c := range fixtures.Cases {
-			entries := controller.PreviewEntries(ctx, c.Agent, c.Repo, c.Instructions, *k)
-			retrieved := make([]string, 0, len(entries))
-			for _, e := range entries {
-				retrieved = append(retrieved, e.Key)
-			}
-			recall, prec := recallPrecisionAtK(retrieved, c.ExpectedKeys, *k)
-			sumRecall += recall
-			sumPrec += prec
-			result.PerCase = append(result.PerCase, memoryEvalCaseResult{
-				Instructions: c.Instructions, Expected: c.ExpectedKeys, Retrieved: retrieved,
-				RecallAtK: recall, PrecisionAtK: prec,
-			})
+		result.CorpusFingerprint = fingerprint
+		cutoffSet := map[int]struct{}{5: {}, 15: {}, *k: {}}
+		cutoffs := make([]int, 0, len(cutoffSet))
+		for cutoff := range cutoffSet {
+			cutoffs = append(cutoffs, cutoff)
 		}
-		if len(fixtures.Cases) > 0 {
-			result.MeanRecallAtK = sumRecall / float64(len(fixtures.Cases))
-			result.MeanPrecAtK = sumPrec / float64(len(fixtures.Cases))
+		sort.Ints(cutoffs)
+		for _, cutoff := range cutoffs {
+			cutoffResult, err := evaluateMemoryFixturesAtK(ctx, store, controller, fixtures.Cases, cutoff)
+			if err != nil {
+				return err
+			}
+			result.Cutoffs = append(result.Cutoffs, cutoffResult)
+			if cutoff == *k {
+				result.MeanRecallAtK = cutoffResult.MeanRecallAtK
+				result.MeanPrecAtK = cutoffResult.MeanPrecAtK
+				result.PerCase = cutoffResult.PerCase
+				result.PerCategory = cutoffResult.PerCategory
+				result.MissTaxonomy = cutoffResult.MissTaxonomy
+			}
 		}
 		return nil
 	})
@@ -691,11 +763,223 @@ func runMemoryEval(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	fmt.Fprintf(stdout, "cases=%d K=%d recall@K=%.3f precision@K=%.3f\n", result.Cases, result.K, result.MeanRecallAtK, result.MeanPrecAtK)
-	for _, c := range result.PerCase {
-		fmt.Fprintf(stdout, "  recall=%.2f prec=%.2f  %q -> %v (expected %v)\n", c.RecallAtK, c.PrecisionAtK, c.Instructions, c.Retrieved, c.Expected)
+	fmt.Fprintf(stdout, "memory retrieval eval schema=%d fixtures=%s corpus=%d@%s\n",
+		result.SchemaVersion, result.FixtureHash[:12], result.CorpusFingerprint.ActiveCount, result.CorpusFingerprint.MaxUpdatedAt)
+	for _, cutoff := range result.Cutoffs {
+		fmt.Fprintf(stdout, "K=%d cases=%d recall=%.3f precision=%.3f\n", cutoff.K, cutoff.Cases, cutoff.MeanRecallAtK, cutoff.MeanPrecAtK)
+		for _, category := range cutoff.PerCategory {
+			fmt.Fprintf(stdout, "  %-18s %2d/%2d hits recall=%.3f precision=%.3f budget-risk=%d\n",
+				category.Category, category.Hits, category.Cases, category.MeanRecallAtK, category.MeanPrecAtK, category.BudgetAtRisk)
+		}
+		if len(cutoff.MissTaxonomy) > 0 {
+			fmt.Fprintf(stdout, "  misses: vocabulary_mismatch=%d ranking_loss=%d scope_pool_exclusion=%d stale_label=%d\n",
+				cutoff.MissTaxonomy["vocabulary_mismatch"], cutoff.MissTaxonomy["ranking_loss"],
+				cutoff.MissTaxonomy["scope_pool_exclusion"], cutoff.MissTaxonomy["stale_label"])
+		}
+		for _, c := range cutoff.PerCase {
+			label := c.ID
+			if label == "" {
+				label = strings.TrimSpace(c.Instructions)
+				if len(label) > 72 {
+					label = label[:72] + "..."
+				}
+			}
+			status := "MISS"
+			if c.Hit {
+				status = "HIT"
+			}
+			fmt.Fprintf(stdout, "  %-4s %-28s recall=%.2f precision=%.2f budget-risk=%t\n",
+				status, label, c.RecallAtK, c.PrecisionAtK, c.BudgetAtRisk)
+			for _, miss := range c.Misses {
+				if miss.Rank > 0 {
+					fmt.Fprintf(stdout, "       %s: %s (rank %d)\n", miss.ExpectedKey, miss.Taxonomy, miss.Rank)
+				} else {
+					fmt.Fprintf(stdout, "       %s: %s\n", miss.ExpectedKey, miss.Taxonomy)
+				}
+			}
+		}
 	}
 	return 0
+}
+
+func evaluateMemoryFixturesAtK(ctx context.Context, store *db.Store, controller *workflow.MemoryController, cases []memoryEvalCase, k int) (memoryEvalCutoffResult, error) {
+	result := memoryEvalCutoffResult{K: k, Cases: len(cases), MissTaxonomy: map[string]int{}}
+	type categoryAccumulator struct {
+		memoryEvalCategoryResult
+		sumRecall float64
+		sumPrec   float64
+	}
+	byCategory := make(map[string]*categoryAccumulator)
+	var sumRecall, sumPrec float64
+	for _, c := range cases {
+		entries := controller.PreviewEntries(ctx, c.Agent, c.Repo, c.Instructions, k)
+		retrieved := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			retrieved = append(retrieved, entry.Key)
+		}
+		recall, precision, missed, hitKeys := scoreMemoryEvalCase(retrieved, c)
+		caseResult := memoryEvalCaseResult{
+			ID: c.ID, Source: c.Source, Category: c.Category, Note: c.Note, Instructions: c.Instructions,
+			Expected: c.ExpectedKeys, ExpectedAlternates: c.ExpectedAlternates, Retrieved: retrieved,
+			Hit: len(missed) == 0, RecallAtK: recall, PrecisionAtK: precision,
+		}
+		_, injected := memory.RenderBlock(entries, controller.TokenBudget)
+		for i, key := range retrieved {
+			if _, hit := hitKeys[key]; hit && i >= injected {
+				caseResult.BudgetAtRisk = true
+				caseResult.BudgetAtRiskKeys = append(caseResult.BudgetAtRiskKeys, key)
+			}
+		}
+		if len(missed) > 0 {
+			deep := controller.PreviewEntries(ctx, c.Agent, c.Repo, c.Instructions, 10000)
+			for _, expected := range missed {
+				miss, err := classifyMemoryEvalMiss(ctx, store, c, expected, deep, k)
+				if err != nil {
+					return memoryEvalCutoffResult{}, err
+				}
+				caseResult.Misses = append(caseResult.Misses, miss)
+				result.MissTaxonomy[miss.Taxonomy]++
+			}
+		}
+		result.PerCase = append(result.PerCase, caseResult)
+		sumRecall += recall
+		sumPrec += precision
+		category := strings.TrimSpace(c.Category)
+		if category == "" {
+			category = "uncategorized"
+		}
+		acc := byCategory[category]
+		if acc == nil {
+			acc = &categoryAccumulator{memoryEvalCategoryResult: memoryEvalCategoryResult{Category: category}}
+			byCategory[category] = acc
+		}
+		acc.Cases++
+		if caseResult.Hit {
+			acc.Hits++
+		}
+		if caseResult.BudgetAtRisk {
+			acc.BudgetAtRisk++
+		}
+		acc.sumRecall += recall
+		acc.sumPrec += precision
+	}
+	if len(cases) > 0 {
+		result.MeanRecallAtK = sumRecall / float64(len(cases))
+		result.MeanPrecAtK = sumPrec / float64(len(cases))
+	}
+	categories := make([]string, 0, len(byCategory))
+	for category := range byCategory {
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+	for _, category := range categories {
+		acc := byCategory[category]
+		acc.MeanRecallAtK = acc.sumRecall / float64(acc.Cases)
+		acc.MeanPrecAtK = acc.sumPrec / float64(acc.Cases)
+		result.PerCategory = append(result.PerCategory, acc.memoryEvalCategoryResult)
+	}
+	return result, nil
+}
+
+func scoreMemoryEvalCase(retrieved []string, c memoryEvalCase) (recall, precision float64, missed []string, hitKeys map[string]struct{}) {
+	hitKeys = make(map[string]struct{})
+	usedRetrieved := make(map[int]struct{})
+	for _, expected := range c.ExpectedKeys {
+		matched := -1
+		for i, key := range retrieved {
+			if _, used := usedRetrieved[i]; !used && memoryEvalKeyMatches(expected, key) {
+				matched = i
+				break
+			}
+		}
+		if matched >= 0 {
+			usedRetrieved[matched] = struct{}{}
+			hitKeys[retrieved[matched]] = struct{}{}
+		} else {
+			missed = append(missed, expected)
+		}
+	}
+	if len(missed) > 0 {
+		for _, alternate := range c.ExpectedAlternates {
+			matched := -1
+			for i, key := range retrieved {
+				if _, used := usedRetrieved[i]; !used && memoryEvalKeyMatches(alternate, key) {
+					matched = i
+					break
+				}
+			}
+			if matched < 0 {
+				continue
+			}
+			usedRetrieved[matched] = struct{}{}
+			hitKeys[retrieved[matched]] = struct{}{}
+			missed = missed[1:]
+			if len(missed) == 0 {
+				break
+			}
+		}
+	}
+	hits := len(c.ExpectedKeys) - len(missed)
+	if len(c.ExpectedKeys) == 0 {
+		recall = 1
+	} else {
+		recall = float64(hits) / float64(len(c.ExpectedKeys))
+	}
+	if len(retrieved) == 0 {
+		if len(c.ExpectedKeys) == 0 {
+			precision = 1
+		}
+	} else {
+		precision = float64(hits) / float64(len(retrieved))
+	}
+	return recall, precision, missed, hitKeys
+}
+
+func classifyMemoryEvalMiss(ctx context.Context, store *db.Store, c memoryEvalCase, expected string, deep []memory.Entry, k int) (memoryEvalMiss, error) {
+	labels := append([]string{expected}, c.ExpectedAlternates...)
+	query := workflow.BuildMemoryMatchQuery(c.Instructions)
+	probe, err := store.ProbeMemoryEvalLabels(ctx, db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: c.Agent}, c.Repo, query, labels)
+	if err != nil {
+		return memoryEvalMiss{}, err
+	}
+	miss := memoryEvalMiss{ExpectedKey: expected}
+	switch {
+	case !probe.Active:
+		miss.Taxonomy = "stale_label"
+		miss.Probe = "no active exact/alternate key"
+	case !probe.Visible:
+		miss.Taxonomy = "scope_pool_exclusion"
+		miss.Probe = "active fact excluded by owner/repo visibility"
+	case !probe.FTSOverlap:
+		miss.Taxonomy = "vocabulary_mismatch"
+		miss.Probe = "sanitized query MATCH missed expected fact rowid"
+	default:
+		miss.Taxonomy = "ranking_loss"
+		miss.Probe = "expected fact matched FTS but ranked below cutoff"
+		for i, entry := range deep {
+			for _, label := range labels {
+				if memoryEvalKeyMatches(label, entry.Key) {
+					miss.Rank = i + 1
+					break
+				}
+			}
+			if miss.Rank > 0 {
+				break
+			}
+		}
+		if miss.Rank > 0 && miss.Rank <= k {
+			miss.Probe = "expected fact entered deep production retrieval but was displaced before scoring"
+		}
+	}
+	return miss, nil
+}
+
+func memoryEvalKeyMatches(label, key string) bool {
+	label = strings.TrimSpace(label)
+	if strings.HasSuffix(label, "*") {
+		return strings.HasPrefix(key, strings.TrimSuffix(label, "*"))
+	}
+	return key == label
 }
 
 func loadMemoryEvalFixtures(path string) (memoryEvalFixtures, error) {
@@ -706,6 +990,18 @@ func loadMemoryEvalFixtures(path string) (memoryEvalFixtures, error) {
 	var fixtures memoryEvalFixtures
 	if err := json.Unmarshal(data, &fixtures); err != nil {
 		return memoryEvalFixtures{}, fmt.Errorf("parse fixtures: %w", err)
+	}
+	seenIDs := make(map[string]struct{})
+	for i, c := range fixtures.Cases {
+		if strings.TrimSpace(c.ID) != "" {
+			if _, duplicate := seenIDs[c.ID]; duplicate {
+				return memoryEvalFixtures{}, fmt.Errorf("fixture case %d repeats id %q", i, c.ID)
+			}
+			seenIDs[c.ID] = struct{}{}
+		}
+		if c.Source != "" && c.Source != "job" && c.Source != "incident" && c.Source != "paraphrase" && c.Source != "self" {
+			return memoryEvalFixtures{}, fmt.Errorf("fixture case %d has invalid source %q", i, c.Source)
+		}
 	}
 	return fixtures, nil
 }

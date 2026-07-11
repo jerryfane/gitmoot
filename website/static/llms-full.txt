@@ -10580,7 +10580,7 @@ Inspect, curate, and measure the store:
 gitmoot memory list [--pending|--confirmed] [--agent NAME] [--repo owner/repo] [--json]
 gitmoot memory recall "<query>" [--repo owner/repo] [--agent NAME|--shared] [--limit N] [--expand] [--json]
 gitmoot memory replay [--agent NAME] [--repo owner/repo] [--limit N] [--json]
-gitmoot memory eval --fixtures fixtures.json [--k N] [--json]
+gitmoot memory eval --fixtures evals/memory-retrieval-fixtures.json [--k N] [--json]
 gitmoot memory vault export [--out DIR] [--agent NAME] [--force] [--json]
 gitmoot memory vault import <DIR> [--dry-run|--yes] [--json]
 gitmoot memory links backfill [--dry-run] [--json]
@@ -10604,8 +10604,37 @@ it re-renders recent real jobs' prompts with and
 without the learnings block and reports the injection delta (added tokens,
 entries injected) — it measures injection *mechanics*, not outcome quality
 (running real agents twice is a later-phase gate). `memory eval` computes
-recall/precision@K of retrieval over a labeled fixtures file whose cases are
-`{agent, repo, instructions, expected_keys}`.
+recall/precision through the production `PreviewEntries` path over a labeled
+fixtures file. The versioned 44-case exam is
+`evals/memory-retrieval-fixtures.json`; it mixes verbatim real-job payloads,
+incident probes, six deliberately disjoint-vocabulary paraphrases, and
+self-retrieval sanity checks. Cases keep the original
+`{agent, repo, instructions, expected_keys}` fields and add optional `id`,
+`source`, `category`, `note`, and `expected_alternates`. An alternate ending in
+`*` accepts any current key with that prefix, which keeps labels explicit across
+lossless split-child key changes. Older fixture files still parse unchanged.
+
+Every run reports K=5 and K=15 (plus a custom `--k` cutoff when it differs) and
+preserves the original top-level metrics for the requested K. JSON output adds
+`schema_version`, a SHA-256 `fixture_hash`, an active-corpus fingerprint
+(`active_count` + `max_updated_at`), per-category metrics, per-case hits/misses,
+and budget-at-risk keys that retrieval found but the configured injection token
+budget would evict. Misses follow a deterministic read-only taxonomy:
+
+- `stale_label`: no exact/alternate key is active;
+- `scope_pool_exclusion`: the fact is active but outside the agent/repo pools;
+- `vocabulary_mismatch`: the sanitized production MATCH query does not match the
+  expected fact's own FTS row;
+- `ranking_loss`: the row matches and is visible but ranks below K; the report
+  includes its rank from a large-limit `PreviewEntries` probe.
+
+The interpretation bands are recall@15 >= 0.8: keyword retrieval is adequate;
+0.6-0.8: investigate ranking and budget; below 0.6: a separate embeddings trial
+is justified. The command is measurement-only and opens the store read-only:
+
+```sh
+gitmoot memory eval --fixtures evals/memory-retrieval-fixtures.json --k 15 --json
+```
 
 Confirmed-memory injection reads the running agent's private pool unioned with
 the reserved shared pool (`owner_kind=shared`, `owner_ref=shared`). BM25 relevance

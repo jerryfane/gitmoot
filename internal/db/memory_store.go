@@ -2085,6 +2085,109 @@ LIMIT ?`,
 	return s.ensureOwnMemoryFloor(ctx, owner, repo, matchQuery, limit, true, out)
 }
 
+// MemoryEvalLabelProbe is the read-only evidence used to classify one labeled
+// retrieval miss. Labels may be exact keys or prefix patterns ending in '*'.
+type MemoryEvalLabelProbe struct {
+	Exists     bool
+	Active     bool
+	Visible    bool
+	FTSOverlap bool
+}
+
+// ProbeMemoryEvalLabels checks label freshness, production owner/repo
+// visibility, and whether the sanitized production MATCH query hits the
+// expected fact's own FTS row. It does not rank or mutate anything.
+func (s *Store) ProbeMemoryEvalLabels(ctx context.Context, owner MemoryOwner, repo, matchQuery string, labels []string) (MemoryEvalLabelProbe, error) {
+	var probe MemoryEvalLabelProbe
+	seenIDs := make(map[int64]struct{})
+	for _, rawLabel := range labels {
+		label := strings.TrimSpace(rawLabel)
+		if label == "" {
+			continue
+		}
+		prefix := strings.HasSuffix(label, "*")
+		if prefix {
+			label = strings.TrimSuffix(label, "*") + "%"
+		}
+		op := "="
+		if prefix {
+			op = "LIKE"
+		}
+		rows, err := s.db.QueryContext(ctx, `
+SELECT id, owner_kind, owner_ref, owner_version, COALESCE(repo, ''), scope,
+	CASE WHEN superseded_by IS NULL AND retired_at = '' THEN 1 ELSE 0 END
+FROM confirmed_memories WHERE key `+op+` ? ORDER BY id`, label)
+		if err != nil {
+			return MemoryEvalLabelProbe{}, fmt.Errorf("probe memory eval label %q: %w", rawLabel, err)
+		}
+		var visibleIDs []int64
+		for rows.Next() {
+			var id int64
+			var ownerKind, ownerRef, ownerVersion, rowRepo, scope string
+			var active int
+			if err := rows.Scan(&id, &ownerKind, &ownerRef, &ownerVersion, &rowRepo, &scope, &active); err != nil {
+				_ = rows.Close()
+				return MemoryEvalLabelProbe{}, err
+			}
+			probe.Exists = true
+			if active == 0 {
+				continue
+			}
+			probe.Active = true
+			visibleOwner := (ownerKind == owner.Kind && ownerRef == owner.Ref && ownerVersion == owner.Version) ||
+				(ownerKind == memoryOwnerKindShared && ownerRef == memorySharedOwnerRef)
+			visibleRepo := scope == "general" || rowRepo == strings.TrimSpace(repo)
+			if !visibleOwner || !visibleRepo {
+				continue
+			}
+			probe.Visible = true
+			if _, duplicate := seenIDs[id]; duplicate {
+				continue
+			}
+			seenIDs[id] = struct{}{}
+			visibleIDs = append(visibleIDs, id)
+		}
+		if err := rows.Close(); err != nil {
+			return MemoryEvalLabelProbe{}, err
+		}
+		if strings.TrimSpace(matchQuery) == "" {
+			continue
+		}
+		for _, id := range visibleIDs {
+			var overlap int
+			if err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS(
+	SELECT 1 FROM confirmed_memories_fts f
+	WHERE f.rowid = ? AND f.confirmed_memories_fts MATCH ?
+)`, id, matchQuery).Scan(&overlap); err != nil {
+				return MemoryEvalLabelProbe{}, fmt.Errorf("probe memory eval FTS overlap for %q: %w", rawLabel, err)
+			}
+			if overlap != 0 {
+				probe.FTSOverlap = true
+			}
+		}
+	}
+	return probe, nil
+}
+
+// MemoryEvalCorpusFingerprint identifies the active confirmed-memory corpus
+// without hashing or exporting its contents.
+type MemoryEvalCorpusFingerprint struct {
+	ActiveCount  int    `json:"active_count"`
+	MaxUpdatedAt string `json:"max_updated_at"`
+}
+
+func (s *Store) MemoryEvalCorpusFingerprint(ctx context.Context) (MemoryEvalCorpusFingerprint, error) {
+	var fingerprint MemoryEvalCorpusFingerprint
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*), COALESCE(MAX(updated_at), '')
+FROM confirmed_memories
+WHERE superseded_by IS NULL AND retired_at = ''`).Scan(&fingerprint.ActiveCount, &fingerprint.MaxUpdatedAt); err != nil {
+		return MemoryEvalCorpusFingerprint{}, fmt.Errorf("memory eval corpus fingerprint: %w", err)
+	}
+	return fingerprint, nil
+}
+
 // QueryConfirmedMemoriesForOwnerAllRepos is the recall variant for a single
 // agent pool when the caller does not provide a repo filter. It keeps the same
 // confirmed-only, active-row, FTS5/BM25 ranking as QueryConfirmedMemories, but
