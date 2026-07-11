@@ -271,6 +271,18 @@ func groomSplitDomain(c GroomCandidate) string {
 // notes: a whole line wrapped in Markdown bold markers.
 var groomBoldHeader = regexp.MustCompile(`^\s*\*\*[^*\r\n].*\*\*\s*:?[ \t]*$`)
 
+// groomBoldLead matches the OTHER house seam shape: a line that STARTS with a
+// bold header but continues with prose on the same line
+// ("**Waveform refinement (2026-06-19, PR #241):** fixed ..."). To avoid
+// over-fragmenting at sub-field leads like "**Why:**" / "**How to apply:**",
+// a bold-lead only counts as a story seam when the bold span itself carries
+// dated/PR evidence (groomSeamEvidence) — story headers do, sub-fields don't.
+var groomBoldLead = regexp.MustCompile(`^\s*\*\*([^*\r\n]+)\*\*`)
+
+// groomSeamEvidence is the date/PR signature that promotes a bold-lead line to
+// a story seam.
+var groomSeamEvidence = regexp.MustCompile(`(?i)\d{4}-\d{2}-\d{2}|PR\s*#?\d+|#\d+`)
+
 // groomPRMarker recognizes stand-alone PR/story markers that commonly lead a
 // shipped-work paragraph. Date-led lines reuse groomDateLed below.
 var groomPRMarker = regexp.MustCompile(`(?i)^\s*(?:[-*]\s*)?(?:PR\s*#?\d+\b|#\d+\b|(?:SHIPPED|MERGED|DEPLOYED)\b[^\r\n]*#\d+\b)`)
@@ -408,7 +420,13 @@ func groomFirstNonBlankLine(unit groomTextUnit, content string) string {
 }
 
 func isGroomStrongSeam(line string) bool {
-	return groomBoldHeader.MatchString(line) || groomDateLed.MatchString(line) || groomPRMarker.MatchString(line)
+	if groomBoldHeader.MatchString(line) || groomDateLed.MatchString(line) || groomPRMarker.MatchString(line) {
+		return true
+	}
+	if m := groomBoldLead.FindStringSubmatch(line); m != nil && groomSeamEvidence.MatchString(m[1]) {
+		return true
+	}
+	return false
 }
 
 func groomSeamLabel(line string) string {
@@ -416,6 +434,10 @@ func groomSeamLabel(line string) string {
 	label = strings.TrimSuffix(label, ":")
 	if strings.HasPrefix(label, "**") && strings.HasSuffix(label, "**") && len(label) >= 4 {
 		label = strings.TrimSpace(label[2 : len(label)-2])
+	} else if m := groomBoldLead.FindStringSubmatch(label); m != nil {
+		// Bold-lead seam ("**Header:** prose..."): the header span is the label,
+		// not the whole line.
+		label = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[1]), ":"))
 	}
 	return label
 }

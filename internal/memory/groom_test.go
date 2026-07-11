@@ -385,3 +385,23 @@ func TestGroomFirstLine(t *testing.T) {
 		t.Fatalf("blank content first line = %q, want empty", got)
 	}
 }
+
+// TestSplitBrickBoldLeadInlineSeams covers the fact-80 shape that motivated
+// #832: two stories whose bold headers LEAD their lines with prose continuing
+// on the same line, and NO blank line between the stories. The headers carry
+// date/PR evidence so they are story seams; sub-field leads like "**Why:**"
+// must NOT cut.
+func TestSplitBrickBoldLeadInlineSeams(t *testing.T) {
+	content := "**Waveform refinement (2026-06-19, PR #241, main x):** fixed blocky zoom\nmore detail line\n**Per-tile focus bug fixed (2026-06-21, PR #242):** assigning a person\n**Why:** the event was overloaded\ntrailing line"
+	children := SplitBrick("editor-goalset", content)
+	if len(children) != 2 {
+		t.Fatalf("children = %d, want 2 (one per dated bold-lead story; **Why:** must not cut): %+v", len(children), children)
+	}
+	joined := children[0].Content + "\n" + children[1].Content
+	if strings.TrimSpace(joined) == "" || !strings.Contains(children[0].Content, "Waveform refinement") || !strings.Contains(children[1].Content, "Per-tile focus bug") {
+		t.Fatalf("unexpected partition: %+v", children)
+	}
+	if !strings.Contains(children[1].Content, "**Why:**") {
+		t.Fatalf("sub-field lead should stay inside story 2: %q", children[1].Content)
+	}
+}
