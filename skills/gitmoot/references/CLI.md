@@ -1740,6 +1740,10 @@ distill_successes = false   # stage deterministic success observations (#781)
 distill_max_per_job = 3     # hard cap on distilled observations per job
 distill_all_jobs = false    # when true, distill runs for every job, not only enrolled agents
 ingest_auto_confirm = false # when true, ingest/chat remember confirm to the authoring agent private pool only
+groom_split_llm = false     # default-off LLM boundary chooser after deterministic splitting
+groom_split_llm_runtime = "codex"
+groom_split_llm_model = "" # empty uses the runtime default
+groom_split_llm_max_per_run = 5
 ```
 
 All `[memory]` keys are read **per tick**. Flipping `distill_at_terminal`,
@@ -1985,21 +1989,34 @@ round-trip:
 gitmoot memory groom --propose [--out PLAN.json] [--json]
 gitmoot memory groom --yes --plan PLAN.json [--json]
 gitmoot memory groom --split [--dry-run] [--json]
+gitmoot memory groom --split-revert [--dry-run] [--parent N]... [--since RFC3339] [--json]
 ```
 
 `--split` is the automatic, approval-free lossless pass. It partitions a brick
 at byte offsets on strong story seams (bold story headers, date-led lines, and
-PR markers) or, for over-threshold content, blank-line paragraph groups. A
-candidate needs at least two substantive segments and either two strong seams
-or content over `GroomRewriteThreshold`. Children are exact parent substrings in
-deterministic order and must concatenate to the parent's trimmed coverage; any
-invariant failure falls back to a rewrite flag without writing. Child keys use
+PR markers). List items, `Why`, and `How to apply` sub-fields are never seams;
+length alone never cuts, and status/changelog content is excluded. A candidate
+needs at least two strong seams and two substantive children after repeatedly
+merging trimmed segments smaller than 200 bytes into a neighbor. Children are
+exact parent substrings in deterministic order and must concatenate to the
+parent's trimmed coverage; any invariant failure falls back to a rewrite flag
+without writing. Child keys use
 `<parent-key>-<seam-slug>` with deterministic ordinals, provenance is
-`groom-split:<parent-id>`, and owner/author/repo/scope are inherited. Apply is one
-CAS-guarded transaction: children and FTS rows are inserted, the parent leaves
-FTS and is set `superseded_by = <first-child-id>`, and children replace the
-parent in its cluster. Links are left for normal enrichment. `--dry-run` prints
-the same split plan without changing the store; a repeat run is a no-op.
+`groom-split:<parent-id>`, owner/author/repo/scope are inherited, and each child
+renders with `(split from: <parent-key>)` subject context. Apply is one CAS-guarded
+transaction: children and FTS rows are inserted, the parent leaves FTS and is set
+`superseded_by = <first-child-id>`, and children replace the parent in its cluster.
+Links are left for normal enrichment. `--dry-run` prints the same split plan
+without changing the store; a repeat run is a no-op.
+
+`--split-revert` restores all currently active groom-split parents by default;
+repeat `--parent N` to select parent ids or pass `--since RFC3339` to select recent
+splits. It first verifies that the active children in id order reconstruct the
+trimmed parent exactly. A mismatched parent is skipped whole. Valid children are
+retired with reason `groom-split-revert:<parent-id>` and removed from clusters,
+the parent is restored to FTS, and its cluster is restored from the lowest-id
+child's current cluster when available. The operation is idempotent, and
+`--dry-run` lists the same groups without writing.
 
 `--propose` reads every **active** confirmed memory (retired rows excluded),
 computes the current vault `snapshot_hash` (the same anchor `vault export`/`import`
@@ -2065,8 +2082,23 @@ ingest_sweep = "nightly"
 groom_propose = "nightly"
 ```
 
-`[memory].groom_split_llm = false` is parsed as the default-off Phase 2 gate;
-this release does not implement the lossy LLM atomizer path.
+`[memory].groom_split_llm = false` is the sole Phase 2 enable gate. When enabled,
+`memory groom --split` sends only over-threshold bricks left unsplit by the
+deterministic pass to isolated one-shot runtime sessions. The host supplies a
+closed menu of blank-line/strong-seam boundaries outside lists and fenced code;
+the model can only choose menu ids or keep the brick. Gitmoot validates strict
+JSON plus exact echoed lines, maps ids back to host byte offsets, and runs the
+same runt merge, substantive-child, coverage, store re-check, and CAS path as
+deterministic splits. The model never rewrites content.
+
+`groom_split_llm_runtime` defaults to `codex` (`codex`, `claude`, or `kimi`),
+`groom_split_llm_model = ""` uses that runtime's default model, and
+`groom_split_llm_max_per_run = 5` caps one-shot calls. Bricks over 8192 bytes are
+reported and skipped, never truncated. Valid split and no-split verdicts are
+cached by SHA-256 of trimmed content, so unchanged bricks are not billed again;
+cached split cuts are revalidated through the full lossless tail. The existing
+pipeline artifact `groom-split.json` includes per-brick decision, cut ids, model,
+cache status, and any fail-closed fallback reason.
 
 ```sh
 gitmoot pipeline run memory-groom-propose
@@ -2539,3 +2571,24 @@ POST /v1/agents/{name}/ask. Every request needs
 rate-limited (30/min) and body-capped (1MB). Containers reach the host
 bridge at http://host.docker.internal:8791 (or the docker bridge IP on
 Linux). Built for the Activepieces piece seam (issue #785).
+
+## Activepieces
+
+```bash
+gitmoot activepieces setup [--port 8080] [--url http://localhost:8080] [--yes]
+gitmoot activepieces down [--volumes]
+gitmoot activepieces templates list
+gitmoot activepieces templates import [flags] [id...]
+```
+
+`activepieces setup` bootstraps a local Activepieces 0.82.0, Postgres, and Redis
+Compose stack, starts the Gitmoot bridge when needed, installs the public
+`@gitmoot/piece-gitmoot`, creates the `gitmoot-bridge` connection, and imports
+starter webhook and IMAP/SMTP flows. `--url` skips Docker for an existing local
+Activepieces instance. Cloud Activepieces cannot reach the local bridge without
+a separately secured path back to the host.
+
+`activepieces down` preserves data volumes unless `--volumes` is set.
+`templates import` skips flow display names that already exist. The email flow
+requires a non-empty repo and sends only a queued-job acknowledgement because
+`ask_agent` is asynchronous.

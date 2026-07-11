@@ -8635,6 +8635,22 @@ ALTER TABLE agent_instances ADD COLUMN effort TEXT NOT NULL DEFAULT '';
 	`
 ALTER TABLE repos ADD COLUMN primary_checkout_path TEXT NOT NULL DEFAULT '';
 	`,
+	// #842 split-child subject inheritance. Empty context preserves every legacy
+	// confirmed memory byte-for-byte; groom splits populate it with the parent key.
+	`
+ALTER TABLE confirmed_memories ADD COLUMN context TEXT NOT NULL DEFAULT '';
+	`,
+	// #842 Phase 2 LLM split verdict cache. Content hashes pin the exact trimmed
+	// byte map, so both keep and split decisions replay without another model call.
+	`
+CREATE TABLE groom_llm_verdicts (
+	content_hash TEXT PRIMARY KEY,
+	verdict TEXT NOT NULL,
+	cuts_json TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+	`,
 	// #843 external-coordinator workflow grouping and journal. workflow_id is
 	// denormalized from the payload at every insert path; the partial index has no
 	// write cost for legacy/unlabelled jobs. Notes are append-only journal entries.

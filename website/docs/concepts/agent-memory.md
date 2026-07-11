@@ -85,6 +85,10 @@ distill_successes = false   # stage deterministic success observations
 distill_max_per_job = 3     # hard cap on distilled observations per job
 distill_all_jobs = false    # true → distill every job, not only enrolled agents
 ingest_auto_confirm = false # true → ingest/chat remember confirm to private only
+groom_split_llm = false     # default-off LLM boundary chooser after deterministic splitting
+groom_split_llm_runtime = "codex"
+groom_split_llm_model = "" # empty uses the runtime default
+groom_split_llm_max_per_run = 5
 ```
 
 Every `[memory]` key is read **per tick**, so flipping `distill_at_terminal`, `distill_successes`
@@ -374,17 +378,46 @@ future work; nothing reads `trust_mark` for a decision yet.
 gitmoot memory groom --propose [--out PLAN.json] [--json]
 gitmoot memory groom --yes --plan PLAN.json [--json]
 gitmoot memory groom --split [--dry-run] [--json]
+gitmoot memory groom --split-revert [--dry-run] [--parent N]... [--since RFC3339] [--json]
 ```
 
 `--split` partitions qualifying multi-story bricks at deterministic byte offsets.
-Strong seams are bold story headers, date-led lines, and PR markers; over-threshold
-content may also split on blank-line paragraph groups. Children are exact parent
-substrings and must concatenate to the parent's trimmed coverage, otherwise the
-operation fails closed to a rewrite flag. The transaction inserts and indexes the
-children, sets the parent `superseded_by` to the first child, removes the parent
-from FTS and cluster membership, and attaches children to the parent's cluster.
-Ownership, author, repo, and scope are inherited; links are enriched later.
-`--dry-run` writes nothing, and subsequent runs are no-ops.
+Strong seams are bold story headers, date-led lines, and PR markers. List items,
+`Why`, and `How to apply` sub-fields are excluded; length alone never creates a
+cut, and status/changelog content is not split. Segments below 200 trimmed bytes
+merge into a neighbor until stable. Children are exact parent substrings and must
+concatenate to the parent's trimmed coverage, otherwise the operation fails closed
+to a rewrite flag. The transaction inserts and indexes the children, sets the
+parent `superseded_by` to the first child, removes the parent from FTS and cluster
+membership, and attaches children to the parent's cluster. Ownership, author,
+repo, and scope are inherited, and rendered children carry `(split from:
+<parent-key>)` context; links are enriched later. `--dry-run` writes nothing, and
+subsequent runs are no-ops.
+
+When `groom_split_llm = true`, the same `--split` command considers active
+over-threshold bricks that the deterministic pass left intact. Gitmoot enumerates
+a closed boundary menu from blank-line paragraph starts and strong seams, excluding
+Markdown list items and fenced code. A fresh one-shot `codex`, `claude`, or `kimi`
+session may return only strict JSON selecting those ids or keeping the brick;
+echoed source lines must match exactly. Host-selected offsets then run through the
+same 200-byte runt merge, substantive-child, exact-coverage, store re-check, and
+CAS transaction. The model never supplies offsets or rewritten content.
+
+The runtime defaults to `codex`; an empty model uses the runtime default, and
+`groom_split_llm_max_per_run` defaults to 5. Calls time out after 90 seconds.
+Content over 8192 bytes is reported and skipped without truncation. Both split and
+no-split decisions are cached by the SHA-256 of trimmed content; cached split cuts
+are fully revalidated before replay. Any delivery, JSON, echo, menu, or lossless
+validation failure leaves the brick untouched and appears as `fallback_reason` in
+the `--split --json` output and pipeline `groom-split.json` artifact.
+
+`--split-revert` defaults to every active groom split; `--parent N` is repeatable
+and `--since RFC3339` filters recent splits. Each parent is restored only when its
+active children in id order still reconstruct the trimmed original exactly.
+Valid children are retired, never deleted, with reason
+`groom-split-revert:<parent-id>`; the parent returns to FTS and inherits the
+lowest-id child's current cluster when one exists. Changed groups are skipped
+whole, repeated runs are no-ops, and `--dry-run` only reports candidates.
 
 `--propose` reads every **active** confirmed memory (retired rows excluded),
 computes the current vault `snapshot_hash` (the same anchor `vault export`/`import`
@@ -442,8 +475,9 @@ repo = "owner/repo"
 groom_propose = "nightly"
 ```
 
-`[memory].groom_split_llm = false` is the parsed default-off Phase 2 gate. The
-lossy LLM atomizer itself is not implemented yet.
+`[memory].groom_split_llm = false` keeps Phase 2 inert by default. Enable it with
+the runtime/model/cap settings documented above; deterministic splitting always
+runs first and does not consult the flag.
 
 ```sh
 gitmoot pipeline run memory-groom-propose
