@@ -1639,13 +1639,14 @@ gitmoot pipeline remove nightly-sync
 **verbatim** plus a content hash; each run snapshots the hash and executes its
 snapshot, so editing the file later never mutates an in-flight run. It also
 auto-creates one hidden shell runner agent (`pipeline-<name>-runner`) that owns the
-**shell** stage jobs — hidden from `agent list` and disposed by `pipeline remove`. A
+**shell** stage jobs; it is hidden from `agent list` and disposed by `pipeline remove`. A
 stage may instead set `agent` + `prompt` to run a named managed agent on its own
 runtime. Four agent-stage kinds: **ask**/**review** (#757, read-only leaves);
-**implement** (#768, `action: implement` + `write: true` — mutates the repo + opens a
-PR, never auto-merges); **orchestrate** (#758, `orchestrate: true` — a sub-tree
+**implement** (#768, `action: implement` + `write: true`; mutates the repo, with only
+`implemented` promising a PR and waiting for its stamp; other configured successes
+settle immediately; never auto-merges); **orchestrate** (#758, `orchestrate: true`; a sub-tree
 coordinator that fans out owned children and folds the synthesis); and **gate** (#768,
-`gate: pr_merged` + `source:`, no `agent` — a jobless waiter that folds when the source
+`gate: pr_merged` + `source:`, no `agent`; a jobless waiter that folds when the source
 implement stage's PR merges). A read-only stage's `needs` result summaries are prepended
 to its prompt, and a repo-bound read-only agent stage runs in its own detached
 read-only worktree so same-repo stages parallelize without touching the live checkout.
@@ -1675,8 +1676,8 @@ is a succeeded job but folds as a stage **failure** by default):
 
 `skipped` means the stage itself had no work and advances by default with a
 `[skipped: no work]` summary marker. An explicit `success_decisions` list is
-strict: omitting `skipped` makes it fail. A `pr_merged` gate whose source skipped
-parks blocked because no PR can exist for that run.
+strict: omitting `skipped` makes it fail. A `pr_merged` gate whose terminal succeeded
+source opened no PR parks blocked because there is nothing to wait for.
 
 `pipeline run` prints only the run id (script-stable), ignores the `enabled` flag but
 still needs a `repo` and refuses to start while a run is active. `pipeline show

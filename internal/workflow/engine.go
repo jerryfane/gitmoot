@@ -1356,6 +1356,14 @@ func (e Engine) refreshJobPayload(ctx context.Context, jobID string) error {
 	return e.Store.UpdateJobPayload(ctx, jobID, encoded)
 }
 
+func (e Engine) recordImplementNoPRAdvance(ctx context.Context, jobID, decision string) error {
+	return e.Store.AddJobEventIfAbsent(ctx, db.JobEvent{
+		JobID:   jobID,
+		Kind:    "advance_skipped_no_pr",
+		Message: fmt.Sprintf("implement decision %q produced no pull request; skipping PR advancement", strings.TrimSpace(decision)),
+	})
+}
+
 func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 	if err := e.validate(); err != nil {
 		return err
@@ -1430,6 +1438,14 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 	// own way, so this only covers PR-less delegation legs; it is a no-op otherwise.
 	if job.Type == "implement" && payload.Result.Decision == "implemented" && !e.implementationNeedsFinalizer(ctx, payload) {
 		if err := e.commitDelegationLeg(ctx, job, payload); err != nil {
+			return err
+		}
+	}
+	// Non-implemented terminal decisions never enter the implementation finalizer,
+	// so a missing PR is already final. Record it before delegated-child policy
+	// handling, whose blocked/failed paths may return early after advancing the parent.
+	if job.Type == "implement" && payload.Result.Decision != "implemented" && payload.PullRequest <= 0 {
+		if err := e.recordImplementNoPRAdvance(ctx, job.ID, payload.Result.Decision); err != nil {
 			return err
 		}
 	}
@@ -1605,7 +1621,7 @@ func (e Engine) AdvanceJob(ctx context.Context, jobID string) error {
 			payload = finalized
 		}
 		if payload.PullRequest <= 0 {
-			return e.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "advance_skipped_no_pr", Message: "no pull request is attached; skipping PR advancement"})
+			return e.recordImplementNoPRAdvance(ctx, job.ID, payload.Result.Decision)
 		}
 		leadAgent := strings.TrimSpace(payload.LeadAgent)
 		if leadAgent == "" {

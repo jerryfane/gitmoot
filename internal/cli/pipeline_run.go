@@ -1347,17 +1347,16 @@ func orchestrateStageTimeout(stage pipeline.Stage) (time.Duration, error) {
 // implementStageSettleOutcome is the #768 MUTATING implement stage's per-kind settle
 // predicate (Model A: fold-on-PR-opened). Like the default job-decision path it settles
 // only once the stage job is TERMINAL and folds by decision (implemented is already a
-// DefaultSuccessDecision) — with ONE added guard: a SUCCESS fold is held back until the
-// job payload carries an opened PullRequest (> 0). That closes the race where the
-// implement job reaches its terminal success state a beat before the
-// ImplementationFinalizer stamps the opened PR onto the payload; without it a downstream
-// stage could advance believing a PR exists when it does not yet. A skipped decision
-// folds IMMEDIATELY because no work means no PR can exist; blocked/failed decisions do
-// the same, and a stage whose job times out folds failed via the same decision path. On a
-// successful fold the opened PR number is appended to the stage summary so it flows to
-// downstream stages through the #757 upstream-context injection (which renders the stage
-// summary). It reproduces the default kind's JobID guard + queued->running funnel reflect
-// byte-for-byte for the not-terminal path.
+// DefaultSuccessDecision). Only the `implemented` decision promises a PR, so it alone is
+// held back until the job payload carries an opened PullRequest (> 0). That closes the
+// race where the implement job reaches terminal success a beat before the
+// ImplementationFinalizer stamps the opened PR onto the payload; every other configured
+// success decision folds immediately because no PR is promised. Blocked/failed decisions
+// do the same, and a stage whose job times out folds failed via the same decision path.
+// On a successful fold the opened PR number (or, for a non-implemented success, a clear
+// no-PR note) is appended to the stage summary so it flows to downstream stages through
+// the #757 upstream-context injection. It reproduces the default kind's JobID guard +
+// queued->running funnel reflect byte-for-byte for the not-terminal path.
 func implementStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, spec pipeline.Spec, stage pipeline.Stage, stageRow db.PipelineRunStage) (settled bool, state, summary string, needs []string, nextRow *db.PipelineRunStage, err error) {
 	if strings.TrimSpace(stageRow.JobID) == "" {
 		return false, "", "", nil, nil, nil
@@ -1375,17 +1374,23 @@ func implementStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDe
 		return false, "", "", nil, nil, nil
 	}
 	state, summary, needs = foldPipelineStageOutcome(spec.EffectiveSuccessDecisions(stage), job)
-	if payload, perr := workflow.ParseJobPayload(job.Payload); perr == nil && payload.Result != nil && strings.TrimSpace(payload.Result.Decision) == "skipped" {
-		// A skipped implement job promises that there was no work to turn into a PR.
-		// Fold immediately instead of entering the fold-on-PR-opened wait. This is
-		// intentionally decision-specific; other successful decisions retain the
-		// existing PR gate (including the separately tracked approved case, #817).
-		return true, state, summary, needs, nil, nil
-	}
+	payload, payloadErr := workflow.ParseJobPayload(job.Payload)
 	if state == pipeline.StageSucceeded {
+		decision := ""
 		pr := 0
-		if payload, perr := workflow.ParseJobPayload(job.Payload); perr == nil {
+		if payloadErr == nil {
 			pr = payload.PullRequest
+			if payload.Result != nil {
+				decision = strings.TrimSpace(payload.Result.Decision)
+			}
+		}
+		if decision != "" && decision != "implemented" {
+			if pr > 0 {
+				summary = appendPipelineImplementPR(summary, pr)
+			} else if decision != "skipped" {
+				summary = appendPipelineImplementNoPR(summary, decision)
+			}
+			return true, state, summary, needs, nil, nil
 		}
 		if pr <= 0 {
 			// The job settled successfully but no PR is stamped on the payload. Two cases,
@@ -1449,6 +1454,58 @@ func appendPipelineImplementPR(summary string, pr int) string {
 	return summary + " " + marker
 }
 
+func appendPipelineImplementNoPR(summary, decision string) string {
+	summary = strings.TrimSpace(summary)
+	marker := fmt.Sprintf("(no PR opened; decision %s)", strings.TrimSpace(decision))
+	if strings.Contains(summary, marker) {
+		return summary
+	}
+	if summary == "" {
+		return marker
+	}
+	return summary + " " + marker
+}
+
+func pipelineSourceStagePR(ctx context.Context, store *db.Store, source db.PipelineRunStage) (pr int, finalNoPR bool, err error) {
+	if source.State != pipeline.StageSucceeded {
+		return 0, false, nil
+	}
+	jobID := strings.TrimSpace(source.JobID)
+	if jobID != "" {
+		job, jobErr := store.GetJob(ctx, jobID)
+		if jobErr == nil {
+			// A present job row is authoritative. Never consult agent-authored summary
+			// text while its structured payload is available.
+			if !workflow.IsSettledJobState(job.State) {
+				return 0, false, nil
+			}
+			payload, payloadErr := workflow.ParseJobPayload(job.Payload)
+			if payloadErr != nil {
+				return 0, false, payloadErr
+			}
+			if payload.PullRequest > 0 {
+				return payload.PullRequest, false, nil
+			}
+			if payload.Result == nil {
+				return 0, false, nil
+			}
+			if strings.TrimSpace(payload.Result.Decision) != "implemented" {
+				return 0, true, nil
+			}
+			finalNoPR, eventErr := implementJobSettledNoPR(ctx, store, job.ID)
+			return 0, finalNoPR, eventErr
+		}
+		if !errors.Is(jobErr, sql.ErrNoRows) {
+			return 0, false, jobErr
+		}
+	}
+
+	// A deleted/GC'd source job is the only case where the structured payload is
+	// unavailable. Fall back to Gitmoot's persisted stage-summary PR marker so an
+	// old run can still observe its PR; live job rows never take this spoofable path.
+	return parsePipelineImplementPR(source.Summary), false, nil
+}
+
 // gateStageSettleOutcome is the #768 Phase 2 JOBLESS gate stage's per-kind settle
 // predicate. A gate mints no worker job (pipelineStageMintsJob is false), so it enters
 // the settle pass in the StageQueued state with no JobID and NEVER calls GetJob. It
@@ -1456,9 +1513,9 @@ func appendPipelineImplementPR(summary string, pr int) string {
 // holds:
 //
 //   - pr_merged: the PR opened by the upstream SOURCE (implement) stage has MERGED.
-//     The PR number is recovered from the source stage row's summary (where
-//     implementStageSettleOutcome stamped "(opened PR #<n>)"), and merge is read from
-//     the polled pull_requests state (deps.store) — the same store row the daemon's PR
+//     The PR number comes from the source job's structured payload; only a deleted/GC'd
+//     job falls back to the stage summary marker. Merge is read from the polled
+//     pull_requests state (deps.store) — the same store row the daemon's PR
 //     poller / merge-gate keeps current, so this needs no live GitHub call. On merged:
 //     settled=true, state=success. This is the STORE/state path the design prefers; a
 //     bounded GitHub poll would be threaded into pipelineStageSettleDeps as the fallback.
@@ -1472,19 +1529,22 @@ func appendPipelineImplementPR(summary string, pr int) string {
 // re-arming the timer). A gate with no timeout waits indefinitely (cheaply — no job).
 // While in flight it reflects the one-time queued->running funnel transition via nextRow.
 func gateStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDeps, spec pipeline.Spec, stage pipeline.Stage, stageRow db.PipelineRunStage) (settled bool, state, summary string, needs []string, nextRow *db.PipelineRunStage, err error) {
-	// Recover the PR the upstream source stage opened (parsed from its folded summary,
-	// where the implement stage stamped "(opened PR #<n>)"). A missing source row or an
-	// unparseable PR keeps the gate waiting (fail-open) until the timeout parks it.
+	// Classify the upstream source from its structured job payload first. Summary text
+	// is only a compatibility fallback when the source job row has been deleted/GC'd.
 	pr := 0
 	if source := strings.TrimSpace(stage.Source); source != "" {
 		if srcRow, ok, gerr := deps.store.GetPipelineRunStage(ctx, deps.run.ID, source); gerr != nil {
 			return false, "", "", nil, nil, gerr
 		} else if ok {
-			if srcRow.State == pipeline.StageSucceeded && pipelineSummaryIsSkipped(srcRow.Summary) {
-				need := "source stage skipped: no PR will exist for this run"
-				return true, pipeline.StageBlocked, fmt.Sprintf("gate %s cannot pass: source stage %q skipped", stage.Gate, source), []string{need}, nil, nil
+			var finalNoPR bool
+			pr, finalNoPR, gerr = pipelineSourceStagePR(ctx, deps.store, srcRow)
+			if gerr != nil {
+				return false, "", "", nil, nil, gerr
 			}
-			pr = parsePipelineImplementPR(srcRow.Summary)
+			if finalNoPR {
+				need := "source stage succeeded without opening a PR; nothing to wait for"
+				return true, pipeline.StageBlocked, fmt.Sprintf("gate %s cannot pass: source stage %q succeeded without opening a PR", stage.Gate, source), []string{need}, nil, nil
+			}
 		}
 	}
 
@@ -1564,17 +1624,14 @@ func pipelineGateWaitDescription(predicate string, pr int) string {
 }
 
 // parsePipelineImplementPR recovers the PR number an implement stage stamped onto its
-// summary via appendPipelineImplementPR ("(opened PR #<n>)"). It returns 0 when no such
-// marker is present or the number is not a positive int — the inverse of the stamping so
-// a gate can read the structured PR back out of the upstream stage row's summary (Phase 1
-// deliberately added no schema column). Deterministic and allocation-light.
+// summary via appendPipelineImplementPR ("(opened PR #<n>)"). It is a compatibility
+// fallback used only when the source job row and its structured payload are unavailable.
+// It returns 0 when no marker is present or the number is not a positive int.
 //
-// It matches the LAST occurrence of the marker, not the first: appendPipelineImplementPR
-// always APPENDS the trusted "(opened PR #<n>)" at the very END of the summary, while the
-// leading text is the agent's untrusted free-text decision summary — which could itself
-// contain a literal "(opened PR #<k>)" naming an unrelated PR. Reading the last match
-// binds the gate to the marker gitmoot stamped, never to a number the agent spoofed into
-// its prose.
+// It matches the LAST occurrence of the marker, not the first: the normal implemented
+// path appends Gitmoot's trusted marker after the agent's untrusted free-text summary.
+// When the source job is gone this fallback is necessarily best-effort; live job rows
+// always use their structured PullRequest field instead.
 func parsePipelineImplementPR(summary string) int {
 	const prefix = "(opened PR #"
 	idx := strings.LastIndex(summary, prefix)
@@ -1610,7 +1667,7 @@ func foldPipelineStageOutcome(successDecisions []string, job db.Job) (state, sum
 	// The skipped marker is reserved for Gitmoot-authored fold metadata. Strip every
 	// leading agent-authored occurrence before deciding the outcome; only a genuine
 	// successful skipped decision may reapply exactly one marker below. This keeps
-	// downstream context honest and makes the gate's marker-first check trustworthy.
+	// downstream context honest; gate PR classification uses the structured source job.
 	summary = stripPipelineSkippedSummaryMarker(payload.Result.Summary)
 	switch {
 	case containsPipelineDecision(successDecisions, decision):
@@ -1643,8 +1700,8 @@ func stripPipelineSkippedSummaryMarker(summary string) string {
 }
 
 // prependPipelineSkippedSummary stamps the trusted no-work marker onto a successful
-// skipped fold. The marker lives on the persisted stage row, so downstream context
-// and jobless gates can distinguish a no-work success without a new stage state.
+// skipped fold. The marker lives on the persisted stage row so downstream context can
+// distinguish a no-work success without a new stage state.
 func prependPipelineSkippedSummary(summary string) string {
 	summary = strings.TrimSpace(summary)
 	if summary == "" {

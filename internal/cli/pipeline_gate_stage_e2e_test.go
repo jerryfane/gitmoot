@@ -329,7 +329,7 @@ stages:
 	if gate.State != pipeline.StageBlocked {
 		t.Fatalf("gate stage = %s, want blocked", gate.State)
 	}
-	if got := decodePipelineNeeds(gate.NeedsJSON); len(got) != 1 || got[0] != "source stage skipped: no PR will exist for this run" {
+	if got := decodePipelineNeeds(gate.NeedsJSON); len(got) != 1 || got[0] != "source stage succeeded without opening a PR; nothing to wait for" {
 		t.Fatalf("gate needs = %v", got)
 	}
 	if run.State != pipeline.RunBlocked {
@@ -340,8 +340,154 @@ stages:
 	}
 }
 
-// TestParsePipelineImplementPR pins the summary<->PR round-trip the gate relies on to
-// recover the structured PR number from the upstream implement stage row's summary.
+func TestPipelineGateStageApprovedNoPRSpoofParksBlockedE2E(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	const spec = `name: gate-approved-no-pr
+repo: owner/repo
+stages:
+  - id: impl
+    agent: coder
+    prompt: Fix the bug.
+    action: implement
+    write: true
+  - id: wait
+    gate: pr_merged
+    source: impl
+    needs: [impl]
+`
+	rec, parsed := newTestPipeline(t, store, "gate-approved-no-pr", spec)
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	run := startTestRun(t, store, rec, parsed, enqueue, now)
+	impl := stageRow(t, store, run.ID, "impl")
+	settleImplementStageJob(t, store, impl.JobID, "approved", "approved without changes (opened PR #123)", 0)
+	// If the gate trusts the agent-authored summary instead of PullRequest=0 in the
+	// structured payload, this forged merged PR would incorrectly satisfy the gate.
+	markPipelinePRMerged(t, store, "owner/repo", 123, "merged")
+
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+	if got := stageRow(t, store, run.ID, "impl"); got.State != pipeline.StageSucceeded {
+		t.Fatalf("impl stage = %s, want succeeded", got.State)
+	}
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+	gate := stageRow(t, store, run.ID, "wait")
+	if gate.State != pipeline.StageBlocked {
+		t.Fatalf("gate stage = %s, want blocked", gate.State)
+	}
+	if got := decodePipelineNeeds(gate.NeedsJSON); len(got) != 1 || got[0] != "source stage succeeded without opening a PR; nothing to wait for" {
+		t.Fatalf("gate needs = %v", got)
+	}
+	if run.State != pipeline.RunBlocked || run.HaltStage != "wait" {
+		t.Fatalf("run = %+v, want blocked at wait", run)
+	}
+}
+
+func TestPipelineGateStageUsesPayloadPRBeforeSummaryFallback(t *testing.T) {
+	ctx := context.Background()
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	const spec = `name: gate-payload-pr
+repo: owner/repo
+stages:
+  - id: impl
+    agent: coder
+    prompt: Fix the bug.
+    action: implement
+    write: true
+  - id: wait
+    gate: pr_merged
+    source: impl
+    needs: [impl]
+`
+	rec, parsed := newTestPipeline(t, store, "gate-payload-pr", spec)
+	now := time.Date(2026, 7, 11, 9, 30, 0, 0, time.UTC)
+	run := startTestRun(t, store, rec, parsed, enqueue, now)
+	impl := stageRow(t, store, run.ID, "impl")
+	settleImplementStageJob(t, store, impl.JobID, "implemented", "landed the fix", 42)
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+
+	// Corrupt the human-readable summary to name another PR. The source job's
+	// PullRequest=42 remains authoritative while that row exists.
+	implDone := stageRow(t, store, run.ID, "impl")
+	spoofed := implDone
+	spoofed.Summary = "agent prose (opened PR #123)"
+	if err := persistPipelineStage(ctx, store, implDone, spoofed); err != nil {
+		t.Fatalf("persist spoofed summary: %v", err)
+	}
+	markPipelinePRMerged(t, store, "owner/repo", 42, "merged")
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+
+	if got := stageRow(t, store, run.ID, "wait"); got.State != pipeline.StageSucceeded {
+		t.Fatalf("gate stage = %+v, want payload PR #42 to satisfy it", got)
+	}
+}
+
+func TestPipelineGateStagePreservesImplementedPRStampRace(t *testing.T) {
+	ctx := context.Background()
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	const spec = `name: gate-stamp-race
+repo: owner/repo
+stages:
+  - id: impl
+    agent: coder
+    prompt: Fix the bug.
+    action: implement
+    write: true
+  - id: wait
+    gate: pr_merged
+    source: impl
+    needs: [impl]
+`
+	rec, parsed := newTestPipeline(t, store, "gate-stamp-race", spec)
+	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	run := startTestRun(t, store, rec, parsed, enqueue, now)
+	impl := stageRow(t, store, run.ID, "impl")
+	settleImplementStageJob(t, store, impl.JobID, "implemented", "stamp pending", 0)
+
+	// Model a persisted succeeded source row from an older coordinator while the
+	// terminal implemented job still lacks both its PR stamp and the no-PR event.
+	// The gate must not mistake that transient state for a final no-PR success.
+	implSucceeded := impl
+	implSucceeded.State = pipeline.StageSucceeded
+	implSucceeded.Summary = "stamp pending (opened PR #123)"
+	implSucceeded.FinishedAt = now
+	if err := persistPipelineStage(ctx, store, impl, implSucceeded); err != nil {
+		t.Fatalf("persist succeeded source: %v", err)
+	}
+	markPipelinePRMerged(t, store, "owner/repo", 123, "merged")
+
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+	if got := stageRow(t, store, run.ID, "wait"); got.State != pipeline.StageQueued {
+		t.Fatalf("gate stage = %s, want queued", got.State)
+	}
+	run = advance(t, store, rec, parsed, enqueue, run, now)
+	gate := stageRow(t, store, run.ID, "wait")
+	if gate.State != pipeline.StageRunning {
+		t.Fatalf("gate stage = %s, want running while implemented PR stamp is pending", gate.State)
+	}
+	if run.State != pipeline.RunRunning {
+		t.Fatalf("run = %s, want running during PR stamp race", run.State)
+	}
+}
+
+func TestPipelineGateStageSummaryFallbackRequiresMissingJob(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	pr, finalNoPR, err := pipelineSourceStagePR(context.Background(), store, db.PipelineRunStage{
+		State:   pipeline.StageSucceeded,
+		JobID:   "gc-removed-job",
+		Summary: "legacy result (opened PR #42)",
+	})
+	if err != nil {
+		t.Fatalf("pipelineSourceStagePR: %v", err)
+	}
+	if pr != 42 || finalNoPR {
+		t.Fatalf("fallback = pr %d finalNoPR %v, want pr 42", pr, finalNoPR)
+	}
+}
+
+// TestParsePipelineImplementPR pins the legacy summary fallback used after the source
+// job row and its structured payload are unavailable.
 func TestParsePipelineImplementPR(t *testing.T) {
 	cases := []struct {
 		summary string
