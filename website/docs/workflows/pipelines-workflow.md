@@ -167,7 +167,7 @@ is **exactly one** of `cmd`, `agent`, or `gate`. There are five agent-stage kind
 | ---- | ----------- | ------------ |
 | **ask / review** (#757/#813) | `action: ask\|review` (review may add `source:`) | Read-only leaf; optionally reviews one upstream implement PR at its exact head. |
 | **implement** (#768) | `action: implement` + `write: true` | Mutates the repo; `implemented` folds on PR-opened, while other configured successes settle without promising a PR. The implement job never merges. |
-| **produce** (#814) | `action: produce` + `write: true` + `writes:` | Codex-only data writer; never creates repo/branch/task/PR state. |
+| **produce** (#814/#825) | `action: produce` + `write: true` + `writes:` | Sandboxed data writer: Codex, plus Claude/Kimi on Landlock-capable Linux; never creates repo/branch/task/PR state. |
 | **orchestrate** (#758) | `orchestrate: true` | Sub-tree coordinator — fans out owned children, waits, folds the synthesis. |
 | **gate** (#768) | `gate: pr_merged` + `source:` (no `agent`) | Jobless waiter — human merge by default; reviewed auto-merge is an explicit double-key opt-in. |
 
@@ -310,19 +310,32 @@ payload, or other operator-owned data rather than code:
     prompt: Reconcile and atomically replace tonight's export.
 ```
 
-This MVP is **Codex-only**. Dispatch refuses Claude, Kimi, Kimi CLI, and shell,
-and also refuses read-only/auto agents. Each `writes:` entry must be absolute and
-cleaned. At `pipeline add`, Gitmoot resolves symlinks and rejects `/`, its home,
-every managed checkout, and paths containing any of those protected roots.
-The worker repeats the same check immediately before delivery, so retargeting a
-previously-safe symlink fails before the runtime starts.
+Codex keeps its existing native sandbox. Claude and modern Kimi are also supported
+on Linux when `gitmoot sandbox probe` reports supported: Gitmoot re-execs the runtime
+under a strict Landlock ruleset before it starts. Non-Linux and unsupported kernels
+keep the explicit Codex-only refusal; Kimi CLI and shell remain unsupported. Produce
+also refuses read-only/auto agents. Each `writes:` entry must be absolute and cleaned.
+At `pipeline add`, Gitmoot resolves symlinks and rejects `/`, its home, every managed
+checkout, and paths containing any of those protected roots. The worker repeats the
+same check immediately before delivery, so retargeting a previously-safe symlink
+fails before the runtime starts.
 
-The paths become Codex `--add-dir` arguments. They are **additive grants, not an
-exhaustive allowlist**: workspace-write's workdir, `/tmp`, and `$TMPDIR` remain
-writable. Produce runs from a disposable detached worktree and carries no branch,
-task, or PR fields. Allocation fails closed instead of falling back to the managed
-checkout. A danger-full-access agent is allowed, but receives no
-add-dir/network arguments because that sandbox is already unrestricted.
+The paths become additive runtime `--add-dir` arguments. For Claude/Kimi, Landlock
+is the hard boundary: writes are limited to the declared existing directories, the
+disposable workdir, `/tmp`/`$TMPDIR`, runtime-owned state, and standard CLI device
+files; reads and execution remain broadly available for auth/config. Runtime state is
+writable by design: Claude receives `$HOME/.claude` and the empirically used
+`$XDG_CACHE_HOME/claude-cli-nodejs` cache, with
+`CLAUDE_CONFIG_DIR=$HOME/.claude`; Kimi receives `$HOME/.kimi-code`. Apart from
+those runtime-owned locations and device nodes, declared data paths, the disposable
+workdir, and temp roots are the only writable filesystem locations. Codex remains unchanged: its
+workspace-write defaults stay writable, and danger-full-access receives no
+add-dir/network arguments. Produce runs from a disposable detached worktree and
+carries no branch, task, or PR fields. Allocation fails closed instead of falling
+back to the managed checkout.
+
+Landlock does **not** govern network access in this feature. Network policy remains
+the selected runtime CLI's responsibility.
 
 After a valid result, `check` runs as trusted operator configuration in the stage
 cwd with the daemon environment. On failure, redacted output capped at 8 KiB is

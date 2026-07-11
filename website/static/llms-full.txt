@@ -2665,7 +2665,7 @@ are four agent-stage kinds, all sharing the mechanics in this section:
 | ---- | ----------- | ------------ |
 | **ask** / **review** (#757) | `agent` + `action: ask\|review` | Read-only leaf: looks + decides, never mutates. |
 | **implement** (#768) | `agent` + `action: implement` + `write: true` | Mutates the repo + opens a PR (fold-on-PR-opened). See [Implement stages](#implement-stages). |
-| **produce** (#814) | `agent` + `action: produce` + `write: true` + `writes:` | Codex-only leaf that writes data outside protected Gitmoot/repo paths; never creates a branch, task, commit, or PR. |
+| **produce** (#814/#825) | `agent` + `action: produce` + `write: true` + `writes:` | Sandboxed data writer: Codex everywhere it is supported, plus Claude/Kimi on Landlock-capable Linux; never creates a branch, task, commit, or PR. |
 | **orchestrate** (#758) | `agent` + `orchestrate: true` | Sub-tree coordinator: fans out owned children, waits for the tree, folds the synthesis. See [Orchestrate stages](#orchestrate-stages). |
 | **gate** (#768) | `gate:` (no `agent`) | Jobless waiter: folds when an external predicate holds (e.g. a PR merges). See [Gate stages](#gate-stages). |
 
@@ -2726,10 +2726,13 @@ Agent stages fold by `decision` and advance/park exactly like shell stages.
 
 ### Produce stages
 
-`action: produce` is the data-writing agent stage. It is deliberately **Codex-only**
-in this MVP: dispatch refuses Claude, Kimi, Kimi CLI, and shell with an error naming
-the runtime. The bound agent must advertise the `produce` capability and use a
-`workspace-write` or `danger-full-access` policy; read-only/auto agents are refused.
+`action: produce` is the data-writing agent stage. Codex keeps its existing native
+sandbox. On Linux hosts where `gitmoot sandbox probe` reports supported, Claude and
+modern Kimi are also accepted: Gitmoot re-execs the runtime under a strict Landlock
+ruleset before it starts. On non-Linux or unsupported kernels, Claude/Kimi retain the
+explicit Codex-only refusal; Kimi CLI and shell are always refused. The bound agent
+must advertise the `produce` capability and use a `workspace-write` or
+`danger-full-access` policy; read-only/auto agents are refused.
 
 ```yaml
   - id: publish-dataset
@@ -2744,15 +2747,28 @@ the runtime. The bound agent must advertise the `produce` capability and use a
     prompt: Reconcile and atomically replace tonight's dataset export.
 ```
 
-Each declared path becomes a Codex `--add-dir` grant. These grants are
-**additive, not an exhaustive allowlist**: Codex workspace-write's default writable
-roots (the workdir, `/tmp`, and `$TMPDIR`) remain writable. A produce stage runs from
-a disposable detached worktree so accidental repo writes land in throwaway state;
-its request never carries branch/task/PR fields and Gitmoot never pushes that cwd.
-Unlike read-only ask/review isolation, produce worktree allocation fails closed and
-records a failed stage job rather than falling back to the managed checkout.
-Danger-full-access agents are allowed, but receive no add-dir/network arguments
-because that sandbox is already unrestricted.
+Each declared path becomes an additive runtime `--add-dir` grant. For Claude/Kimi,
+that polite CLI hint is backed by the kernel-enforced Landlock allowlist: writes are
+limited to the declared directories, the disposable workdir, `/tmp`/`$TMPDIR`, the
+runtime's own state, and the standard `/dev` files needed by CLI children; reads and
+execution remain broadly available for runtime auth/config. Runtime state is writable
+by design: Claude receives `$HOME/.claude` plus its empirically used
+`$XDG_CACHE_HOME/claude-cli-nodejs` cache (and Gitmoot sets
+`CLAUDE_CONFIG_DIR=$HOME/.claude`); Kimi receives `$HOME/.kimi-code`. Apart from
+those runtime-owned locations and device nodes, the declared data paths, disposable
+workdir, and temp roots are the only writable filesystem locations. Declared
+directories must exist when delivery begins. Codex stays exactly as before: its own
+workspace-write defaults remain
+writable, and danger-full-access receives no add-dir/network arguments. A produce
+stage runs from a disposable detached worktree so accidental repo writes land in
+throwaway state; its request never carries branch/task/PR fields and Gitmoot never
+pushes that cwd. Unlike read-only ask/review isolation, produce worktree allocation
+fails closed and records a failed stage job rather than falling back to the managed
+checkout.
+
+Landlock governs filesystem access only in this feature. It does **not** implement
+the stage's network policy; network behavior remains whatever the selected runtime
+and its CLI policy enforce.
 
 The worker repeats the same symlink resolution and protected-root containment check
 immediately before delivery. If a path was retargeted after `pipeline add`, the job
@@ -8458,6 +8474,24 @@ A `[runtimes.<name>]` section can only tweak a **built-in** runtime's metadata; 
 cannot add a new first-class runtime (that requires a code change). An unknown
 runtime name is a config error surfaced by `gitmoot runtime list`.
 
+## Runtime Launch Sandbox
+
+```sh
+gitmoot sandbox probe
+```
+
+`sandbox probe` prints whether this Linux host can enforce Gitmoot's strict
+Landlock launch sandbox and includes the detected ABI. The probe runs the real
+hidden re-exec shim and verifies both an allowed write and a denied outside write;
+unsupported kernels return non-zero. Claude/Kimi `produce` pipeline stages require
+this probe to pass and otherwise retain the explicit Codex-only refusal. Codex
+produce remains on its own native sandbox. Landlock confines filesystem writes but
+does not govern network access; network policy remains the runtime CLI's. Wrapped
+Claude may write its runtime-owned `$HOME/.claude` state and
+`$XDG_CACHE_HOME/claude-cli-nodejs` cache; wrapped Kimi may write its runtime-owned
+`$HOME/.kimi-code` state. Apart from runtime state/cache and standard device nodes,
+only declared data paths, the disposable workdir, and temp roots are writable.
+
 ## Repo And Daemon Status
 
 ```sh
@@ -10481,16 +10515,25 @@ its `needs` stages' result summaries are prepended to the prompt, and a repo-bou
 agent stage runs in its own detached read-only worktree so same-repo agent stages
 parallelize without touching the live checkout.
 
-`action: produce` (#814) is a Codex-only pipeline leaf for writing operator-owned
-data, never repo/branch/task/PR state. It requires `write: true`, one or more absolute
+`action: produce` (#814/#825) is a sandboxed pipeline leaf for writing operator-owned
+data, never repo/branch/task/PR state. Codex uses its native sandbox; Claude and
+modern Kimi require a successful `gitmoot sandbox probe` and are re-execed under
+strict Landlock. Non-Linux/unsupported hosts keep the Codex-only refusal. It requires
+`write: true`, one or more absolute
 cleaned `writes:` paths, a `produce`-capable writable agent, and optionally
 `network: true`, `check: <cmd>`, and `check_retries: N`. `pipeline add` resolves
 symlinks and rejects targets overlapping `/`, the Gitmoot home, or a managed checkout.
 The worker repeats that same canonicalization immediately before delivery to close
-symlink-retargeting races. Declared paths are additive `--add-dir` grants: the
-workdir, `/tmp`, and `$TMPDIR` remain writable under Codex workspace-write. A
-danger-full-access agent receives no add-dir/network arguments because it is already
-unrestricted. Checks re-ask the same session with
+symlink-retargeting races. Declared paths are additive `--add-dir` grants. For
+Claude/Kimi, Landlock limits writes to those existing directories plus the workdir,
+temp roots, standard device nodes, and runtime-owned state: `$HOME/.claude` plus
+`$XDG_CACHE_HOME/claude-cli-nodejs` for Claude, and `$HOME/.kimi-code` for Kimi.
+Gitmoot sets `CLAUDE_CONFIG_DIR=$HOME/.claude` so Claude's mutable config stays inside
+that state grant. Apart from runtime state/cache and device nodes, declared data paths,
+the disposable workdir, and temp roots are the only writable locations. Codex behavior
+is unchanged. Landlock does not govern network access.
+A Codex danger-full-access agent receives no add-dir/network arguments because it is
+already unrestricted. Checks re-ask the same session with
 redacted/capped output; stage retries must reconcile partial data idempotently.
 Gitmoot cleans only the disposable cwd, never the declared data directories.
 
@@ -11818,10 +11861,16 @@ runtime (claude / codex). Four kinds:
   settle immediately without promising a PR. The implement job never merges. Scheduled
   pipelines also need pipeline-level `allow_scheduled_writes: true`.
 - **produce** (#814) — `action: produce` + `write: true` + absolute cleaned
-  `writes:`. Codex-only data writer; never branch/task/PR state. Optional
+  `writes:`. Codex uses its native sandbox; Claude/modern Kimi are supported when
+  `gitmoot sandbox probe` confirms strict Landlock enforcement. Unsupported hosts
+  retain the Codex-only refusal. Never branch/task/PR state. Optional
   `network: true`, `check`, and bounded same-session `check_retries`. Declared paths
-  are additive grants (workdir, `/tmp`, and `$TMPDIR` remain writable), protected
-  Gitmoot/checkouts are rejected after symlink resolution at add and delivery time,
+  are additive grants (workdir, `/tmp`, and `$TMPDIR` remain writable). Runtime-owned
+  state is writable by design: `$HOME/.claude` plus
+  `$XDG_CACHE_HOME/claude-cli-nodejs` for Claude and `$HOME/.kimi-code` for Kimi;
+  apart from that state/cache and device nodes, only declared paths, workdir, and temp
+  roots are writable. Protected Gitmoot/checkouts are rejected after symlink
+  resolution at add and delivery time, Landlock governs filesystem writes rather than network access,
   retries must be
   idempotent, and Gitmoot never cleans operator-owned data directories.
 - **orchestrate** (#758) — `orchestrate: true`. Sub-tree **coordinator** (the one

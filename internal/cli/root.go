@@ -31,6 +31,7 @@ var rootCommands = []command{
 	{name: "daemon", summary: "run the local PR watcher", run: runDaemon},
 	{name: "agent", summary: "manage registered agents", run: runAgent},
 	{name: "runtime", summary: "inspect runtime metadata (models, capabilities, usage)", run: runRuntime},
+	{name: "sandbox", summary: "probe kernel-enforced runtime sandbox support", run: runSandbox},
 	{name: "orchestrate", summary: "Orchestrate work across agents (a coordinator that fans out delegations)", run: runOrchestrate},
 	{name: "plugin", summary: "build and inspect Gitmoot agent plugins", run: runPlugin},
 	{name: "events", summary: "show local repo events", run: runEvents},
@@ -58,6 +59,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	name := args[0]
+	if name == "sandbox-exec" {
+		return runSandboxExec(args[1:], stdout, stderr)
+	}
 	for _, cmd := range rootCommands {
 		if cmd.name == name {
 			return cmd.run(args[1:], stdout, stderr)

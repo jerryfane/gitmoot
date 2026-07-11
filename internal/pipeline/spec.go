@@ -229,7 +229,7 @@ const (
 	// action switch below, so an orchestrate stage is never mistaken for a leaf
 	// ask/review. Appended as a sibling kind; the existing cases are untouched.
 	StageKindOrchestrate
-	// StageKindAgentProduce is a data-writing, Codex-only agent leaf. It receives
+	// StageKindAgentProduce is a data-writing, sandboxed agent leaf. It receives
 	// additive writable-path grants, never a branch/task/PR, and folds by decision.
 	StageKindAgentProduce
 )
