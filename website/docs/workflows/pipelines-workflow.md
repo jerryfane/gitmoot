@@ -166,10 +166,10 @@ is **exactly one** of `cmd`, `agent`, or `gate`. There are five agent-stage kind
 | Kind | Declared by | What it does |
 | ---- | ----------- | ------------ |
 | **ask / review** (#757/#813) | `action: ask\|review` (review may add `source:`) | Read-only leaf; optionally reviews one upstream implement PR at its exact head. |
-| **implement** (#768) | `action: implement` + `write: true` | Mutates the repo; `implemented` folds on PR-opened, while other configured successes settle without promising a PR. Never auto-merges. |
+| **implement** (#768) | `action: implement` + `write: true` | Mutates the repo; `implemented` folds on PR-opened, while other configured successes settle without promising a PR. The implement job never merges. |
 | **produce** (#814) | `action: produce` + `write: true` + `writes:` | Codex-only data writer; never creates repo/branch/task/PR state. |
 | **orchestrate** (#758) | `orchestrate: true` | Sub-tree coordinator — fans out owned children, waits, folds the synthesis. |
-| **gate** (#768) | `gate: pr_merged` + `source:` (no `agent`) | Jobless waiter — folds when an upstream implement stage's PR merges. |
+| **gate** (#768) | `gate: pr_merged` + `source:` (no `agent`) | Jobless waiter — human merge by default; reviewed auto-merge is an explicit double-key opt-in. |
 
 ```yaml
 stages:
@@ -215,11 +215,51 @@ is detached at that exact head and checkout validation confirms it; this binding
 never inferred from summary text. Pipeline reviews are **report-only**: the verdict
 still appears as a PR comment and folds through `success_decisions`, but
 `changes_requested` does not dispatch a native fix and `approved` does not run the
-native merge gate. Human merge remains required. Declaring the binding sets
+native merge gate. Human merge remains required unless a separately double-keyed
+`merge: auto` gate is present. Declaring the binding sets
 `SkipNativeReviewFanout` on the implement request so Gitmoot does not also enqueue
 native reviewers. If the source produced no PR (a no-op or any successful
 non-`implemented` decision), the review
 folds blocked immediately with `source stage produced no PR; nothing to review`.
+
+### Opt-in auto-merge gates
+
+Human merge is the unchanged default. A pipeline may instead let its jobless gate
+perform the squash merge by declaring both keys and a source-bound robot review:
+
+```yaml
+allow_auto_merge: true
+stages:
+  - id: review
+    agent: reviewer
+    action: review
+    prompt: "Review the implementation PR."
+    source: fix
+    needs: [fix]
+    success_decisions: [approved]
+  - id: merge
+    gate: pr_merged
+    merge: auto
+    source: fix
+    needs: [fix, review]
+```
+
+`merge: auto` is valid only on a gate and registration requires top-level
+`allow_auto_merge: true` plus at least one review bound to the same implement
+source. Every bound review in the spec must fold succeeded with decision
+`approved`. The pipeline advancer—not the report-only review job—then verifies the
+live PR head still equals the reviewed structured `HeadSHA`, waits for GitHub
+mergeability and at least one external CI status/check, atomically claims the
+write, and makes one squash attempt. Pending checks keep waiting within the gate
+timeout. Check-run `skipped` and `neutral` count as passing, matching the native
+merge gate; failures block. Zero external statuses/checks always block pipeline
+auto-merge—even when `[merge_gate] require_external_ci` is false—so unattended
+merge never synthesizes a no-CI success. Head drift, unmergeability/conflict, or a
+merge API failure also folds the gate blocked; merge errors are not retried. A
+scheduled auto-merge flow requires both `allow_auto_merge: true` and the existing
+`allow_scheduled_writes: true`. The source job records an atomic
+`pipeline_auto_merge_claim` before the write and `pipeline_auto_merge_confirmed`
+after GitHub confirms it; racing scans that lose the claim do not call merge.
 
 An agent stage runs the named agent on **its own registered runtime** (claude /
 codex — no per-job shell override):

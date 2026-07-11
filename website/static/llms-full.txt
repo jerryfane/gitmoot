@@ -2625,6 +2625,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `schedule.jitter`           | pipeline     | no       | Random `[0, jitter]` added to each `next_due` to de-thunder (`>= 0`). |
 | `success_decisions`         | pipeline     | no       | Decisions that mark a stage succeeded. Default `["approved","implemented","skipped"]`. Any value must be one of `approved`, `implemented`, `changes_requested`, `skipped` - `blocked`/`failed` are park states and are rejected. An explicit list is strict: omitting `skipped` requires real work and makes a skipped result fail. |
 | `allow_scheduled_writes`    | pipeline     | no       | Safety flag. A **mutating** `implement` or `produce` stage on a **scheduled** pipeline is rejected unless this is `true`. Manual runs do not need it. Default `false`. |
+| `allow_auto_merge`          | pipeline     | no       | Pipeline-level half of the auto-merge double key. Required with a gate's `merge: auto`; default `false`. It does not replace `allow_scheduled_writes` on scheduled pipelines. |
 | `stages[].id`               | stage        | yes      | Unique, name-safe stage id. Appears verbatim in the stage job's fingerprint and deterministic id. |
 | `stages[].cmd`              | stage        | cond.    | Shell command run verbatim via `sh -c` (see the stage contract below). A stage is **exactly one** of `cmd`, `agent`, or `gate`. |
 | `stages[].agent`            | stage        | cond.    | Name of a managed gitmoot agent to run this stage (instead of a shell `cmd`). Must be a name-safe token; `pipeline add` warns (does not block) if the agent does not exist yet, but it must exist before the stage runs. Mutually exclusive with `cmd`/`gate`. The stage kind depends on `action`/`write`/`orchestrate` — see [Agent stages](#agent-stages). |
@@ -2637,6 +2638,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `stages[].check_retries`    | stage        | no       | Produce-only count of same-session correction turns after a non-zero `check` (`>= 0`, default `0`). |
 | `stages[].orchestrate`      | stage        | no       | `true` makes an agent stage a **sub-tree coordinator** (#758): its `delegations[]` fan out as owned children and the stage waits for the whole tree, then folds the synthesis. Agent stage only; `action` must be `ask`. |
 | `stages[].gate`             | stage        | cond.    | Makes this a **jobless gate stage** (#768): it runs no worker and folds when an external predicate holds. Only `pr_merged` today. Exclusive with `cmd`/`agent`. Requires `source`. |
+| `stages[].merge`            | stage        | no       | Gate-only merge authority. Omit for the unchanged human-merge default; `auto` lets the pipeline advancer squash-merge after all safety conditions hold. |
 | `stages[].source`           | stage        | cond.    | The upstream `implement` stage whose PR to bind. Required on a `gate`; optional on `action: review`; rejected on shell/ask/implement/orchestrate stages. It must be one of the stage's own `needs`. |
 | `stages[].needs`            | stage        | no       | Ids of sibling stages that must **succeed** before this stage is enqueued. Must reference known stages, never the stage itself, and form no cycle. |
 | `stages[].timeout`          | stage        | no       | Per-stage job timeout (positive Go duration). |
@@ -2799,12 +2801,14 @@ stages:
   attempt-independent branch `gitmoot/pipe-<run>-<stage>` (reusing the implement
   dispatch's fail-closed guards). A **retry** lands in the *same* branch/PR — never a
   duplicate — and fails closed if that worktree is dirty or has a live process.
-- **Folds on PR-opened.** A `success` decision folds only once the job carries an
-  opened PR. The first-class `skipped` decision bypasses that wait because there is
-  no work to turn into a PR. The opened PR number is appended to the stage summary so a
-  downstream stage sees it via upstream-context injection.
-- **Never auto-merges.** The pipeline **opens** the PR; a human or your CI does the
-  merge. See [Gate stages](#gate-stages) to make a later stage wait for that merge.
+- **`implemented` folds on PR-opened.** Only `implemented` promises a PR, so that
+  decision waits until the job carries the opened PR stamp (or the engine confirms a
+  terminal no-PR no-op). Other configured success decisions, including `approved` and
+  `skipped`, settle immediately without a PR. The stage summary records the opened PR
+  number or the terminal no-PR outcome for downstream context.
+- **Does not merge by itself.** The implement stage only opens the PR. The default
+  gate still waits for a human merge; a separately double-keyed `merge: auto` gate
+  may merge after review and CI (see [Gate stages](#gate-stages)).
 - **Declared review suppresses native fan-out.** When an implement stage has a
   downstream `action: review` stage with `source` pointing to it, its job carries
   `SkipNativeReviewFanout`. Gitmoot does not also enqueue the ordinary native
@@ -2826,8 +2830,8 @@ the implement stage just opened. `source` must also appear in the review stage's
   still posted as a PR comment and folded by the pipeline's `success_decisions`, but
   `changes_requested` does not dispatch a native fix job and `approved` does not run
   the native merge gate. Human merge remains the default.
-- If the succeeded implement stage produced no PR (a permanent no-op or a first-class
-  `skipped` result), the review stage immediately folds `blocked` with
+- If the succeeded implement stage produced no PR (a permanent no-op or any successful
+  non-`implemented` decision), the review stage immediately folds `blocked` with
   `source stage produced no PR; nothing to review`; no unbound review job is sent.
 
 ### Gate stages
@@ -2858,8 +2862,59 @@ stages:
   **fails open** (keeps waiting while unmerged), and is bounded by the stage `timeout`.
 - A PR that is **closed without merging**, or a **timeout**, parks the run `blocked`
   (a gate is a wait, not a failure — so a retry budget can't re-arm the timer).
-- A source stage that succeeded via `skipped` also parks the gate `blocked`
-  immediately: no PR will exist for that run.
+- A source stage that succeeds without opening a PR also parks the gate `blocked`
+  immediately with `source stage succeeded without opening a PR; nothing to wait for`.
+  Only `implemented` promises the PR that this gate can watch.
+
+#### Opt-in auto-merge
+
+The default is and remains **human merge**. To let the pipeline advancer perform
+the squash merge, spell both keys and declare at least one source-bound review:
+
+```yaml
+allow_auto_merge: true
+stages:
+  - id: fix
+    agent: fixer
+    action: implement
+    write: true
+    prompt: "Apply the change."
+  - id: review
+    agent: reviewer
+    action: review
+    source: fix
+    needs: [fix]
+    prompt: "Review the implementation PR."
+    success_decisions: [approved]
+  - id: merge
+    gate: pr_merged
+    merge: auto
+    source: fix
+    needs: [fix, review]
+```
+
+- `merge: auto` is valid only on a gate and requires top-level
+  `allow_auto_merge: true`. A scheduled pipeline still needs
+  `allow_scheduled_writes: true` for its implement stage, so scheduled auto-merge
+  requires **both** top-level keys.
+- Registration rejects an auto-merge gate unless at least one `action: review`
+  stage binds to the same implement `source`. Before merging, the advancer requires
+  **every** such review stage to have folded `succeeded` with decision `approved`.
+  `changes_requested` parks the run and never merges.
+- The source PR and reviewed head come from structured job payloads, never summary
+  prose. The live PR head must still equal that reviewed `HeadSHA`; drift parks the
+  gate `blocked` and names the mismatch.
+- GitHub must report the PR mergeable and at least one external CI status/check.
+  Pending checks keep the jobless gate waiting within its stage timeout. Check-run
+  `skipped`/`neutral` outcomes count as passing, matching the native merge gate;
+  failed checks park it `blocked`. Zero external statuses/checks always park
+  pipeline auto-merge `blocked`, even when `[merge_gate] require_external_ci` is
+  false—the unattended path never synthesizes no-CI success.
+- Unmergeable/conflicting PRs, head drift, and merge API errors park it `blocked`;
+  a merge API failure is tried once and never retry-spammed.
+- The source job timeline atomically records `pipeline_auto_merge_claim` before
+  the write and `pipeline_auto_merge_confirmed` afterward, carrying pipeline/run,
+  stage, PR, and head SHA. Racing scans that lose the claim never call merge.
 
 ### Orchestrate stages
 
@@ -3112,8 +3167,9 @@ implement` requires an explicit `write: true` double-key (and `write: true` is v
 only on an implement stage), so a typo or prompt injection cannot flip a read-only
 pipeline into a writing one; a mutating stage on a **scheduled** pipeline is rejected
 unless the pipeline sets `allow_scheduled_writes: true`; the bound agent's own
-capability/policy still applies; and the pipeline **never merges its own PR** — it
-opens the PR and leaves the merge to a human or CI.
+capability/policy still applies; and the implement job never merges its own PR. The
+default gate leaves merge to a human or CI; only the separately double-keyed,
+review-required `merge: auto` gate grants merge authority to the advancer.
 
 ## Not yet supported (deferred)
 
@@ -10384,10 +10440,11 @@ stages:                     # the DAG, keyed by unique id and wired by needs
     prompt: "Triage the scored data; block if a human is needed."
     needs: [score]          #   upstream results are prepended to the prompt
   # other agent-stage kinds:
-  #   implement (#768): action: implement + write: true → mutates repo + opens a PR (never auto-merges)
+  #   implement (#768): action: implement + write: true → mutates repo + opens a PR
   #   bound review (#813): action: review + source: <impl stage> -> reviews that PR/head, report-only
   #   orchestrate (#758): orchestrate: true → sub-tree coordinator (fans out owned children, folds synthesis)
-  #   gate (#768): gate: pr_merged + source: <impl stage> (no agent) → jobless, folds when that PR merges
+  #   gate (#768): gate: pr_merged + source: <impl stage> (no agent) → jobless; human merge is default
+  #   auto-merge gate: add merge: auto plus top-level allow_auto_merge: true; requires source-bound review
   - id: deploy
     cmd: "rclone copy out/ r2:bucket"
     needs: [triage]
@@ -10447,6 +10504,20 @@ fix job and never run the native merge gate. Declaring this review also sets
 reviewer jobs. If the source permanently produces no PR (no-op or `skipped`), the
 review folds blocked immediately with `source stage produced no PR; nothing to
 review` and no unbound review is dispatched.
+
+The `pr_merged` gate remains a human-merge waiter by default. Opt-in
+`merge: auto` is gate-only and also requires top-level `allow_auto_merge: true`
+plus at least one review stage bound to the same implement source. The advancer,
+not the report-only review job, performs one squash attempt only after every bound
+review folded `approved`, the live PR head still equals the reviewed payload
+`HeadSHA`, GitHub reports mergeable, and checks pass. Pending checks keep waiting;
+head drift, conflicts/unmergeability, or a merge API error fold the gate blocked.
+Merge errors are not retried. Scheduled pipelines need both `allow_auto_merge` and
+the existing `allow_scheduled_writes` key. Omitting `merge` preserves human merge.
+Pending checks wait; skipped/neutral check-runs pass; failures block; and zero
+external statuses/checks always block regardless of `require_external_ci`. The
+source job atomically records `pipeline_auto_merge_claim` before the write and
+`pipeline_auto_merge_confirmed` after GitHub confirms it.
 
 `pipeline install-defaults` installs the built-in memory pipelines
 `memory-ingest-sweep` and `memory-groom-propose`. The daemon also runs this
@@ -11726,24 +11797,26 @@ printf '%s' '{"gitmoot_result":{"decision":"blocked","summary":"secret missing",
 `skipped` is the default-on success decision for a stage whose task had no work.
 The persisted summary is prefixed with `[skipped: no work]`, so downstream agent
 stages receive the honest outcome. An explicit `success_decisions` list that
-omits `skipped` is strict and folds it failed. If an implement source skips, a
-downstream `pr_merged` gate parks blocked instead of waiting for a PR that cannot
-exist. The result still uses the existing succeeded stage state; the `SKIPPED`
+omits `skipped` is strict and folds it failed. Only `implemented` promises a PR from
+an implement stage; other configured success decisions settle immediately. If an
+implement source succeeds without a PR, a downstream `pr_merged` gate parks blocked
+instead of waiting forever. The result still uses the existing succeeded stage state; the `SKIPPED`
 funnel state remains reserved for downstream stages that never ran.
 
 ### Agent stages (#757 / #768 / #758)
 
-A stage may run a **named managed agent** instead of a shell command — a stage is
+A stage may run a **named managed agent** instead of a shell command; a stage is
 exactly one of `cmd`, `agent`, or `gate`. An agent stage runs on its **own** registered
 runtime (claude / codex). Four kinds:
 
 - **ask / review** (#757) — read-only **leaf** (`action: ask|review`); `delegations[]`
   and `human_questions[]` stripped. A review may add `source: <implement stage>`
   (#813) to bind to that stage's PR and exact head SHA.
-- **implement** (#768) — `action: implement` + `write: true`. MUTATES the repo + opens a
-  PR on a deterministic `gitmoot/pipe-<run>-<stage>` branch (retry reuses it, never
-  duplicates), folds **on PR-opened**, **never auto-merges**. Scheduled pipelines also
-  need pipeline-level `allow_scheduled_writes: true`.
+- **implement** (#768): `action: implement` + `write: true`. MUTATES the repo on a
+  deterministic `gitmoot/pipe-<run>-<stage>` branch (retry reuses it, never duplicates).
+  The `implemented` decision folds **on PR-opened**; other configured success decisions
+  settle immediately without promising a PR. The implement job never merges. Scheduled
+  pipelines also need pipeline-level `allow_scheduled_writes: true`.
 - **produce** (#814) — `action: produce` + `write: true` + absolute cleaned
   `writes:`. Codex-only data writer; never branch/task/PR state. Optional
   `network: true`, `check`, and bounded same-session `check_retries`. Declared paths
@@ -11756,7 +11829,8 @@ runtime (claude / codex). Four kinds:
   continuation chain, folds the tail. `retry: 0`.
 - **gate** (#768) — `gate: pr_merged` + `source: <upstream implement stage>`, no
   `agent`. Jobless waiter: folds succeeded when the source PR merges; parks `blocked`
-  on close-unmerged or timeout. The composable *wait-for-merge*.
+  on close-unmerged or timeout. Human merge is the default. Add gate-level
+  `merge: auto` plus top-level `allow_auto_merge: true` for reviewed auto-merge.
 
 ```yaml
 stages:
@@ -11801,9 +11875,24 @@ succeeded implement job and runs in a detached worktree pinned to that head. It 
 report-only: the verdict is posted to the PR and folded by the pipeline, but it does
 not dispatch a native fix job or run the native merge gate. The declared binding
 also sets `SkipNativeReviewFanout` on `fix`, preventing duplicate reviewer fan-out;
-pipelines without the declaration keep native behavior. A permanent no-PR source
-(no-op or `skipped`) blocks the review immediately with `source stage produced no
+pipelines without the declaration keep native behavior. Any terminal succeeded no-PR
+source (a no-op or a non-`implemented` success decision) blocks the review immediately with `source stage produced no
 PR; nothing to review` instead of dispatching an unbound job or waiting.
+
+For opt-in auto-merge, add `merge: auto` to the `pr_merged` gate and
+`allow_auto_merge: true` at pipeline level. Registration refuses this mode without
+at least one review bound to the same implement source. The advancer requires every
+such review to fold succeeded with decision `approved`, verifies the live PR head
+still equals the reviewed structured `HeadSHA`, then requires GitHub mergeability
+and passing checks before one squash attempt. Pending checks wait within the gate
+timeout; head drift, unmergeability/conflict, and merge API errors fold blocked, and
+merge errors are not retried. The review job remains report-only. Scheduled flows
+also require `allow_scheduled_writes: true`; both top-level safety keys are required.
+Without `merge: auto`, human merge remains unchanged.
+Pending checks wait; skipped/neutral check-runs pass; failures block; and zero
+external statuses/checks always block regardless of `require_external_ci`. The
+source job event timeline atomically records `pipeline_auto_merge_claim` before
+the write and `pipeline_auto_merge_confirmed` after GitHub confirms it.
 
 `pipeline add` warns (does not block) when an agent stage names an agent that does
 not exist yet; create it before the stage runs. The
