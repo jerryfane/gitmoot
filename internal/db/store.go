@@ -8673,4 +8673,15 @@ CREATE TABLE workflow_notes (
 );
 CREATE INDEX idx_workflow_notes_wid ON workflow_notes(workflow_id, created_at, id);
 	`,
+	// #854 operational-status staleness verdict cache. This is deliberately
+	// separate from the split cache: its enum and lifecycle are independent.
+	`
+CREATE TABLE groom_stale_verdicts (
+	content_hash TEXT PRIMARY KEY,
+	verdict TEXT NOT NULL,
+	residue TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+	`,
 }

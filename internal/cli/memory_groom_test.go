@@ -496,6 +496,203 @@ func TestGroomLLMContractValidation(t *testing.T) {
 	}
 }
 
+func TestGroomStaleContractValidation(t *testing.T) {
+	content := "The stale baton also says only one submission may be in flight per team."
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr string
+	}{
+		{name: "expired", raw: `{"verdict":"expired","residue":""}`, want: "expired"},
+		{name: "surrounding prose", raw: `result: {"verdict":"still_relevant","residue":""} done`, want: "still_relevant"},
+		{name: "durable residue", raw: `{"verdict":"contains_durable_residue","residue":"only one submission may be in flight per team"}`, want: "contains_durable_residue"},
+		{name: "unknown verdict", raw: `{"verdict":"maybe","residue":""}`, wantErr: "unknown verdict"},
+		{name: "missing residue", raw: `{"verdict":"expired"}`, wantErr: "must include"},
+		{name: "expired with residue", raw: `{"verdict":"expired","residue":"keeper"}`, wantErr: "empty residue"},
+		{name: "residue without quote", raw: `{"verdict":"contains_durable_residue","residue":"invented"}`, wantErr: "exact content quote"},
+		{name: "unknown field", raw: `{"verdict":"expired","residue":"","extra":1}`, wantErr: "unknown field"},
+		{name: "garbage", raw: `not json`, wantErr: "no complete JSON object"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reply, err := parseGroomStaleReply(tc.raw)
+			if err == nil {
+				err = validateGroomStaleReply(reply, content)
+			}
+			if tc.wantErr == "" {
+				if err != nil || reply.Verdict != tc.want {
+					t.Fatalf("reply=%+v err=%v, want %s", reply, err, tc.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error=%v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestGroomStaleExpiredStubAutoRetiresIdempotently(t *testing.T) {
+	home, store := memoryTestHome(t)
+	writeGroomLLMConfig(t, home, true)
+	owner := db.MemoryOwner{Kind: "agent", Ref: "lead"}
+	id := seedConfirmed(t, store, owner, "acme/widget", "repo", "stale-expired", groomStaleFixture(t, "154"))
+	logPath := installGroomCodexStub(t, `{"verdict":"expired","residue":""}`)
+
+	code, stdout, stderr := runGroom(t, "--home", home, "--split", "--json")
+	if code != 0 {
+		t.Fatalf("stale split exit %d: %s", code, stderr)
+	}
+	var output groomSplitOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("parse stale split output: %v (%s)", err, stdout)
+	}
+	if output.Detected != 0 || output.Applied != 0 || len(output.Stale) != 1 || output.Stale[0].Verdict != "expired" || output.Stale[0].Action != "auto_retire" || output.Stale[0].Cached || len(output.StaleRetired) != 1 || output.StaleRetired[0] != id {
+		t.Fatalf("stale expired output = %+v", output)
+	}
+	if calls := groomStubCalls(t, logPath); calls != 1 {
+		t.Fatalf("expired stub calls = %d, want 1", calls)
+	}
+	active, err := store.ListConfirmedMemoriesForVault(context.Background(), "")
+	if err != nil || len(active) != 0 {
+		t.Fatalf("active after stale retire = %+v err=%v", active, err)
+	}
+	raw, err := sql.Open("sqlite", config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer raw.Close()
+	var reason string
+	if err := raw.QueryRow(`SELECT retired_reason FROM confirmed_memories WHERE id = ?`, id).Scan(&reason); err != nil || !strings.HasPrefix(reason, "groom-stale:") {
+		t.Fatalf("retired reason=%q err=%v", reason, err)
+	}
+	var ftsCount int
+	if err := raw.QueryRow(`SELECT count(*) FROM confirmed_memories_fts WHERE rowid = ?`, id).Scan(&ftsCount); err != nil || ftsCount != 0 {
+		t.Fatalf("fts count=%d err=%v", ftsCount, err)
+	}
+	if code, stdout, stderr = runGroom(t, "--home", home, "--split", "--json"); code != 0 {
+		t.Fatalf("stale rerun exit %d: %s", code, stderr)
+	}
+	if calls := groomStubCalls(t, logPath); calls != 1 {
+		t.Fatalf("retired candidate was billed again: %d calls", calls)
+	}
+}
+
+func TestGroomStaleResidueStubProposesExtraction(t *testing.T) {
+	home, store := memoryTestHome(t)
+	writeGroomLLMConfig(t, home, true)
+	content := groomStaleFixture(t, "158")
+	id := seedConfirmed(t, store, db.MemoryOwner{Kind: "agent", Ref: "lead"}, "acme/widget", "repo", "stale-residue", content)
+	const residue = "only one submission may be in flight per team"
+	logPath := installGroomCodexStub(t, `{"verdict":"contains_durable_residue","residue":"`+residue+`"}`)
+	planPath := filepath.Join(t.TempDir(), "stale-plan.json")
+
+	code, stdout, stderr := runGroom(t, "--home", home, "--propose", "--out", planPath, "--json")
+	if code != 0 {
+		t.Fatalf("stale propose exit %d: %s", code, stderr)
+	}
+	var summary struct {
+		groomPlan
+		Out string `json:"out"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &summary); err != nil {
+		t.Fatalf("parse stale proposal: %v (%s)", err, stdout)
+	}
+	if len(summary.Stale) != 1 || summary.Stale[0].Candidate.ID != id || summary.Stale[0].Verdict != "contains_durable_residue" || summary.Stale[0].Action != "propose_extract" || summary.Stale[0].Residue != residue {
+		t.Fatalf("stale residue plan = %+v", summary.Stale)
+	}
+	if calls := groomStubCalls(t, logPath); calls != 1 {
+		t.Fatalf("residue stub calls = %d, want 1", calls)
+	}
+	active, _ := store.ListConfirmedMemoriesForVault(context.Background(), "")
+	if len(active) != 1 || active[0].ID != id {
+		t.Fatalf("residue candidate was mutated: %+v", active)
+	}
+
+	code, stdout, stderr = runGroom(t, "--home", home, "--split", "--json")
+	if code != 0 {
+		t.Fatalf("cached residue split exit %d: %s", code, stderr)
+	}
+	var output groomSplitOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil || len(output.Stale) != 1 || !output.Stale[0].Cached || len(output.StaleRetired) != 0 {
+		t.Fatalf("cached residue output=%+v err=%v", output, err)
+	}
+	if calls := groomStubCalls(t, logPath); calls != 1 {
+		t.Fatalf("cached residue was billed again: %d calls", calls)
+	}
+}
+
+func TestGroomStaleGarbageAndLLMOffProposeOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		answer  string
+		calls   int
+		want    string
+	}{
+		{name: "garbage", enabled: true, answer: "garbage response", calls: 1, want: "no complete JSON object"},
+		{name: "LLM off", enabled: false, answer: `{"verdict":"expired","residue":""}`, calls: 0, want: "disabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, store := memoryTestHome(t)
+			writeGroomLLMConfig(t, home, tc.enabled)
+			id := seedConfirmed(t, store, db.MemoryOwner{Kind: "agent", Ref: "lead"}, "acme/widget", "repo", "stale-fallback", groomStaleFixture(t, "164"))
+			logPath := installGroomCodexStub(t, tc.answer)
+			code, stdout, stderr := runGroom(t, "--home", home, "--split", "--json")
+			if code != 0 {
+				t.Fatalf("fallback split exit %d: %s", code, stderr)
+			}
+			var output groomSplitOutput
+			if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+				t.Fatalf("parse fallback output: %v (%s)", err, stdout)
+			}
+			if len(output.Stale) != 1 || output.Stale[0].Candidate.ID != id || output.Stale[0].Verdict != "unknown" || output.Stale[0].Action != "propose_review" || !strings.Contains(output.Stale[0].FallbackReason, tc.want) || len(output.StaleRetired) != 0 {
+				t.Fatalf("fallback output = %+v", output)
+			}
+			if calls := groomStubCalls(t, logPath); calls != tc.calls {
+				t.Fatalf("stub calls = %d, want %d", calls, tc.calls)
+			}
+			active, _ := store.ListConfirmedMemoriesForVault(context.Background(), "")
+			if len(active) != 1 || active[0].ID != id {
+				t.Fatalf("fallback candidate was mutated: %+v", active)
+			}
+		})
+	}
+}
+
+func TestGroomStaleMasterSwitchDisablesPass(t *testing.T) {
+	home, store := memoryTestHome(t)
+	writeGroomLLMConfig(t, home, true)
+	appendConfig(t, config.PathsForHome(home), "\n[memory]\ngroom_stale = false\n")
+	seedConfirmed(t, store, db.MemoryOwner{Kind: "agent", Ref: "lead"}, "acme/widget", "repo", "stale-disabled", groomStaleFixture(t, "154"))
+	logPath := installGroomCodexStub(t, `{"verdict":"expired","residue":""}`)
+
+	code, stdout, stderr := runGroom(t, "--home", home, "--split", "--json")
+	if code != 0 {
+		t.Fatalf("disabled stale pass exit %d: %s", code, stderr)
+	}
+	var output map[string]any
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("parse disabled stale output: %v", err)
+	}
+	if _, present := output["stale"]; present {
+		t.Fatalf("disabled stale pass changed output: %s", stdout)
+	}
+	if calls := groomStubCalls(t, logPath); calls != 0 {
+		t.Fatalf("disabled stale pass made %d runtime calls", calls)
+	}
+}
+
+func groomStaleFixture(t *testing.T, id string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "memory", "testdata", "groom", id+".md"))
+	if err != nil {
+		t.Fatalf("read stale fixture %s: %v", id, err)
+	}
+	return strings.TrimSuffix(string(body), "\n")
+}
+
 func TestGroomLLMPathStubSplitsBrick(t *testing.T) {
 	home, store := memoryTestHome(t)
 	writeGroomLLMConfig(t, home, true)
