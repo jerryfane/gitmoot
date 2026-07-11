@@ -102,7 +102,7 @@ are four agent-stage kinds, all sharing the mechanics in this section:
 | ---- | ----------- | ------------ |
 | **ask** / **review** (#757) | `agent` + `action: ask\|review` | Read-only leaf: looks + decides, never mutates. |
 | **implement** (#768) | `agent` + `action: implement` + `write: true` | Mutates the repo + opens a PR (fold-on-PR-opened). See [Implement stages](#implement-stages). |
-| **produce** (#814) | `agent` + `action: produce` + `write: true` + `writes:` | Codex-only leaf that writes data outside protected Gitmoot/repo paths; never creates a branch, task, commit, or PR. |
+| **produce** (#814/#825) | `agent` + `action: produce` + `write: true` + `writes:` | Sandboxed data writer: Codex everywhere it is supported, plus Claude/Kimi on Landlock-capable Linux; never creates a branch, task, commit, or PR. |
 | **orchestrate** (#758) | `agent` + `orchestrate: true` | Sub-tree coordinator: fans out owned children, waits for the tree, folds the synthesis. See [Orchestrate stages](#orchestrate-stages). |
 | **gate** (#768) | `gate:` (no `agent`) | Jobless waiter: folds when an external predicate holds (e.g. a PR merges). See [Gate stages](#gate-stages). |
 
@@ -163,10 +163,13 @@ Agent stages fold by `decision` and advance/park exactly like shell stages.
 
 ### Produce stages
 
-`action: produce` is the data-writing agent stage. It is deliberately **Codex-only**
-in this MVP: dispatch refuses Claude, Kimi, Kimi CLI, and shell with an error naming
-the runtime. The bound agent must advertise the `produce` capability and use a
-`workspace-write` or `danger-full-access` policy; read-only/auto agents are refused.
+`action: produce` is the data-writing agent stage. Codex keeps its existing native
+sandbox. On Linux hosts where `gitmoot sandbox probe` reports supported, Claude and
+modern Kimi are also accepted: Gitmoot re-execs the runtime under a strict Landlock
+ruleset before it starts. On non-Linux or unsupported kernels, Claude/Kimi retain the
+explicit Codex-only refusal; Kimi CLI and shell are always refused. The bound agent
+must advertise the `produce` capability and use a `workspace-write` or
+`danger-full-access` policy; read-only/auto agents are refused.
 
 ```yaml
   - id: publish-dataset
@@ -181,15 +184,28 @@ the runtime. The bound agent must advertise the `produce` capability and use a
     prompt: Reconcile and atomically replace tonight's dataset export.
 ```
 
-Each declared path becomes a Codex `--add-dir` grant. These grants are
-**additive, not an exhaustive allowlist**: Codex workspace-write's default writable
-roots (the workdir, `/tmp`, and `$TMPDIR`) remain writable. A produce stage runs from
-a disposable detached worktree so accidental repo writes land in throwaway state;
-its request never carries branch/task/PR fields and Gitmoot never pushes that cwd.
-Unlike read-only ask/review isolation, produce worktree allocation fails closed and
-records a failed stage job rather than falling back to the managed checkout.
-Danger-full-access agents are allowed, but receive no add-dir/network arguments
-because that sandbox is already unrestricted.
+Each declared path becomes an additive runtime `--add-dir` grant. For Claude/Kimi,
+that polite CLI hint is backed by the kernel-enforced Landlock allowlist: writes are
+limited to the declared directories, the disposable workdir, `/tmp`/`$TMPDIR`, the
+runtime's own state, and the standard `/dev` files needed by CLI children; reads and
+execution remain broadly available for runtime auth/config. Runtime state is writable
+by design: Claude receives `$HOME/.claude` plus its empirically used
+`$XDG_CACHE_HOME/claude-cli-nodejs` cache (and Gitmoot sets
+`CLAUDE_CONFIG_DIR=$HOME/.claude`); Kimi receives `$HOME/.kimi-code`. Apart from
+those runtime-owned locations and device nodes, the declared data paths, disposable
+workdir, and temp roots are the only writable filesystem locations. Declared
+directories must exist when delivery begins. Codex stays exactly as before: its own
+workspace-write defaults remain
+writable, and danger-full-access receives no add-dir/network arguments. A produce
+stage runs from a disposable detached worktree so accidental repo writes land in
+throwaway state; its request never carries branch/task/PR fields and Gitmoot never
+pushes that cwd. Unlike read-only ask/review isolation, produce worktree allocation
+fails closed and records a failed stage job rather than falling back to the managed
+checkout.
+
+Landlock governs filesystem access only in this feature. It does **not** implement
+the stage's network policy; network behavior remains whatever the selected runtime
+and its CLI policy enforce.
 
 The worker repeats the same symlink resolution and protected-root containment check
 immediately before delivery. If a path was retargeted after `pipeline add`, the job

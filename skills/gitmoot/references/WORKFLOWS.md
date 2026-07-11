@@ -1007,10 +1007,16 @@ runtime (claude / codex). Four kinds:
   settle immediately without promising a PR. It **never auto-merges**. Scheduled
   pipelines also need pipeline-level `allow_scheduled_writes: true`.
 - **produce** (#814) — `action: produce` + `write: true` + absolute cleaned
-  `writes:`. Codex-only data writer; never branch/task/PR state. Optional
+  `writes:`. Codex uses its native sandbox; Claude/modern Kimi are supported when
+  `gitmoot sandbox probe` confirms strict Landlock enforcement. Unsupported hosts
+  retain the Codex-only refusal. Never branch/task/PR state. Optional
   `network: true`, `check`, and bounded same-session `check_retries`. Declared paths
-  are additive grants (workdir, `/tmp`, and `$TMPDIR` remain writable), protected
-  Gitmoot/checkouts are rejected after symlink resolution at add and delivery time,
+  are additive grants (workdir, `/tmp`, and `$TMPDIR` remain writable). Runtime-owned
+  state is writable by design: `$HOME/.claude` plus
+  `$XDG_CACHE_HOME/claude-cli-nodejs` for Claude and `$HOME/.kimi-code` for Kimi;
+  apart from that state/cache and device nodes, only declared paths, workdir, and temp
+  roots are writable. Protected Gitmoot/checkouts are rejected after symlink
+  resolution at add and delivery time, Landlock governs filesystem writes rather than network access,
   retries must be
   idempotent, and Gitmoot never cleans operator-owned data directories.
 - **orchestrate** (#758) — `orchestrate: true`. Sub-tree **coordinator** (the one
