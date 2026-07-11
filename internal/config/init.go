@@ -148,6 +148,9 @@ path = ""
 # distill_max_per_job = 3
 # distill_all_jobs = false
 # ingest_auto_confirm = false
+# cluster_fanout = 12
+# cluster_fanout_keep = 9
+# cluster_depth_cap = 4
 #
 # Built-in memory pipeline inputs are optional. The daemon and
 # gitmoot pipeline install-defaults register memory-ingest-sweep and

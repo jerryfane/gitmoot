@@ -11,8 +11,11 @@ import (
 // and max-entries cap are the initial values from the RFC body; they are meant
 // to be calibrated empirically by the Phase-1 measurement harness.
 const (
-	DefaultMemoryTokenBudget = 1500
-	DefaultMemoryMaxEntries  = 15
+	DefaultMemoryTokenBudget       = 1500
+	DefaultMemoryMaxEntries        = 15
+	DefaultMemoryClusterFanout     = 12
+	DefaultMemoryClusterFanoutKeep = 9
+	DefaultMemoryClusterDepthCap   = 4
 	// DefaultMemoryDistillMaxPerJob caps how many pending observations the
 	// deterministic distill-at-terminal producers (#737 P4.1) may stage per job.
 	// It is only consulted when distill_at_terminal or distill_successes is enabled.
@@ -66,6 +69,12 @@ type MemorySettings struct {
 	// pending human gate. Shared memory remains explicit through confirm/promote
 	// commands even when this is enabled.
 	IngestAutoConfirm bool
+	// ClusterFanout bounds rendered sibling entries per repo scope. FanoutKeep is
+	// the strict hysteresis boundary below which a prior grouping dissolves, and
+	// ClusterDepthCap bounds recursive grouping/splitting.
+	ClusterFanout     int
+	ClusterFanoutKeep int
+	ClusterDepthCap   int
 }
 
 // DefaultMemorySettings returns the off-by-default resolved settings.
@@ -79,6 +88,9 @@ func DefaultMemorySettings() MemorySettings {
 		DistillMaxPerJob:  DefaultMemoryDistillMaxPerJob,
 		DistillAllJobs:    false,
 		IngestAutoConfirm: false,
+		ClusterFanout:     DefaultMemoryClusterFanout,
+		ClusterFanoutKeep: DefaultMemoryClusterFanoutKeep,
+		ClusterDepthCap:   DefaultMemoryClusterDepthCap,
 	}
 }
 
@@ -162,6 +174,24 @@ func LoadMemorySettings(paths Paths) (MemorySettings, error) {
 				return MemorySettings{}, fmt.Errorf("parse [memory].ingest_auto_confirm: %w", err)
 			}
 			settings.IngestAutoConfirm = parsed
+		case "cluster_fanout":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].cluster_fanout: %w", err)
+			}
+			settings.ClusterFanout = parsed
+		case "cluster_fanout_keep":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].cluster_fanout_keep: %w", err)
+			}
+			settings.ClusterFanoutKeep = parsed
+		case "cluster_depth_cap":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return MemorySettings{}, fmt.Errorf("parse [memory].cluster_depth_cap: %w", err)
+			}
+			settings.ClusterDepthCap = parsed
 		}
 	}
 	if err := validateMemorySettings(settings); err != nil {
@@ -179,6 +209,15 @@ func validateMemorySettings(s MemorySettings) error {
 	}
 	if s.DistillMaxPerJob < 0 {
 		return fmt.Errorf("memory.distill_max_per_job must be >= 0, got %d", s.DistillMaxPerJob)
+	}
+	if s.ClusterFanout < 2 {
+		return fmt.Errorf("memory.cluster_fanout must be >= 2, got %d", s.ClusterFanout)
+	}
+	if s.ClusterFanoutKeep < 1 || s.ClusterFanoutKeep >= s.ClusterFanout {
+		return fmt.Errorf("memory.cluster_fanout_keep must be >= 1 and < cluster_fanout, got %d", s.ClusterFanoutKeep)
+	}
+	if s.ClusterDepthCap < 1 || s.ClusterDepthCap > DefaultMemoryClusterDepthCap {
+		return fmt.Errorf("memory.cluster_depth_cap must be between 1 and %d, got %d", DefaultMemoryClusterDepthCap, s.ClusterDepthCap)
 	}
 	return nil
 }

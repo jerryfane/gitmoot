@@ -32,6 +32,9 @@ func TestLoadMemorySettingsDefaults(t *testing.T) {
 	if settings.IngestAutoConfirm {
 		t.Fatalf("ingest_auto_confirm must default false")
 	}
+	if settings.ClusterFanout != 12 || settings.ClusterFanoutKeep != 9 || settings.ClusterDepthCap != 4 {
+		t.Fatalf("cluster hierarchy defaults = %+v", settings)
+	}
 }
 
 func TestLoadMemorySettingsParsesDistillKnobs(t *testing.T) {
@@ -84,6 +87,9 @@ disabled = true
 token_budget = 800
 max_entries = 7
 ingest_auto_confirm = true
+cluster_fanout = 10
+cluster_fanout_keep = 7
+cluster_depth_cap = 3
 `), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -91,7 +97,7 @@ ingest_auto_confirm = true
 	if err != nil {
 		t.Fatalf("LoadMemorySettings: %v", err)
 	}
-	if !settings.Disabled || settings.TokenBudget != 800 || settings.MaxEntries != 7 || !settings.IngestAutoConfirm {
+	if !settings.Disabled || settings.TokenBudget != 800 || settings.MaxEntries != 7 || !settings.IngestAutoConfirm || settings.ClusterFanout != 10 || settings.ClusterFanoutKeep != 7 || settings.ClusterDepthCap != 3 {
 		t.Fatalf("parsed = %+v", settings)
 	}
 }
