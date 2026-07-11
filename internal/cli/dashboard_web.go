@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -102,6 +103,7 @@ type webDataSource struct {
 }
 
 var _ dashboard.DataSource = (*webDataSource)(nil)
+var _ dashboard.WorkflowDataSource = (*webDataSource)(nil)
 
 // Runs lists every orchestration run (delegation tree) rooted at an originating
 // job, newest activity first. It reuses buildDashboardSnapshot so the run list
@@ -178,6 +180,7 @@ func (d *webDataSource) State(ctx context.Context, runID string) (dashboard.Stat
 
 		out.RunID = target
 		out.Title = runTitle(payloadByID[target], jobByID[target])
+		out.Workflow = strings.TrimSpace(payloadByID[target].WorkflowID)
 		for _, j := range tree {
 			events, _ := store.ListJobEvents(ctx, j.ID)
 			deps, action := resolveDelegationEdges(j, payloadByID, childrenByParent)
@@ -186,6 +189,209 @@ func (d *webDataSource) State(ctx context.Context, runID string) (dashboard.Stat
 		return nil
 	})
 	return out, err
+}
+
+const (
+	dashboardWorkflowMaxRuns  = 50
+	dashboardWorkflowMaxNotes = 200
+)
+
+// Workflow returns one label's complete run forest and append-only note
+// journal. Jobs are payload-scoped by the indexed workflow_id projection; run
+// pagination is applied only after complete trees have been assembled.
+func (d *webDataSource) Workflow(ctx context.Context, label string, q dashboard.WorkflowQuery) (dashboard.WorkflowView, error) {
+	out := dashboard.WorkflowView{Runs: []dashboard.WorkflowRun{}, Notes: []dashboard.WorkflowNoteView{}}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return out, dashboard.ErrWorkflowNotFound
+	}
+	q.MaxRuns = cappedWorkflowLimit(q.MaxRuns, dashboardWorkflowMaxRuns)
+	q.MaxNotes = cappedWorkflowLimit(q.MaxNotes, dashboardWorkflowMaxNotes)
+
+	err := withStore(d.home, func(store *db.Store) error {
+		summary, err := store.WorkflowSummary(ctx, label)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return dashboard.ErrWorkflowNotFound
+			}
+			return err
+		}
+		jobs, err := store.ListWorkflowGraphJobs(ctx, label)
+		if err != nil {
+			return err
+		}
+		notes, err := store.ListWorkflowNotes(ctx, label, 0)
+		if err != nil {
+			return err
+		}
+
+		out.Summary = dashboard.WorkflowSummary{
+			Label: label, Jobs: summary.JobCount, Queued: summary.Queued,
+			Running: summary.Running, Succeeded: summary.Succeeded,
+			Failed: summary.Failed, Blocked: summary.Blocked,
+			Cancelled: summary.Cancelled, Notes: summary.NoteCount,
+			TokensIn: summary.InputTokens, TokensOut: summary.OutputTokens,
+			FirstAt: parseJobTimeMillis(summary.FirstAt), LastAt: parseJobTimeMillis(summary.LastAt),
+		}
+
+		runs := buildDashboardWorkflowRuns(jobs, agentRuntimeMap(ctx, store))
+		runStart := workflowRunCursorStart(runs, strings.TrimSpace(q.RunCursor))
+		runEnd := runStart + q.MaxRuns
+		if runEnd > len(runs) {
+			runEnd = len(runs)
+		}
+		out.Runs = append(out.Runs, runs[runStart:runEnd]...)
+		if runEnd < len(runs) && runEnd > runStart {
+			out.NextRunCursor = runs[runEnd-1].RunID
+		}
+
+		noteViews := make([]dashboard.WorkflowNoteView, 0, len(notes))
+		for _, note := range notes {
+			noteViews = append(noteViews, dashboard.WorkflowNoteView{
+				ID: note.ID, Author: note.Author, Body: note.Body, Repo: note.Repo,
+				CreatedAt: parseJobTimeMillis(note.CreatedAt),
+			})
+		}
+		noteStart := workflowNoteCursorStart(noteViews, strings.TrimSpace(q.NoteCursor))
+		noteEnd := noteStart + q.MaxNotes
+		if noteEnd > len(noteViews) {
+			noteEnd = len(noteViews)
+		}
+		out.Notes = append(out.Notes, noteViews[noteStart:noteEnd]...)
+		if noteEnd < len(noteViews) && noteEnd > noteStart {
+			out.NextNoteCursor = dashboardWorkflowNoteCursor(noteViews[noteEnd-1])
+		}
+		out.Truncated = out.NextRunCursor != "" || out.NextNoteCursor != ""
+		return nil
+	})
+	return out, err
+}
+
+func cappedWorkflowLimit(value, cap int) int {
+	if value <= 0 || value > cap {
+		return cap
+	}
+	return value
+}
+
+func workflowRunCursorStart(runs []dashboard.WorkflowRun, cursor string) int {
+	if cursor == "" {
+		return 0
+	}
+	for i := range runs {
+		if runs[i].RunID == cursor {
+			return i + 1
+		}
+	}
+	return len(runs)
+}
+
+func dashboardWorkflowNoteCursor(note dashboard.WorkflowNoteView) string {
+	return strconv.FormatInt(note.CreatedAt, 10) + ":" + strconv.FormatInt(note.ID, 10)
+}
+
+func workflowNoteCursorStart(notes []dashboard.WorkflowNoteView, cursor string) int {
+	if cursor == "" {
+		return 0
+	}
+	for i := range notes {
+		if dashboardWorkflowNoteCursor(notes[i]) == cursor {
+			return i + 1
+		}
+	}
+	return len(notes)
+}
+
+// buildDashboardWorkflowRuns groups a label-bounded projection by its
+// denormalized root_id and maps each row into the compact, event-free dashboard
+// contract. The input query is ordered by created_at,id, so run and node order
+// remain deterministic without another store read.
+func buildDashboardWorkflowRuns(jobs []db.Job, runtimeByAgent map[string]string) []dashboard.WorkflowRun {
+	if len(jobs) == 0 {
+		return []dashboard.WorkflowRun{}
+	}
+	payloadByID := make(map[string]workflow.JobPayload, len(jobs))
+	jobByID := make(map[string]db.Job, len(jobs))
+	childrenByParent := map[string][]db.Job{}
+	byRoot := map[string][]db.Job{}
+	var rootOrder []string
+	for _, job := range jobs {
+		payload, _ := workflow.ParseJobPayload(job.Payload)
+		payloadByID[job.ID] = payload
+		jobByID[job.ID] = job
+		parentID := strings.TrimSpace(job.ParentJobID)
+		if parentID == "" {
+			parentID = strings.TrimSpace(payload.ParentJobID)
+		}
+		if parentID != "" {
+			childrenByParent[parentID] = append(childrenByParent[parentID], job)
+		}
+		rootID := strings.TrimSpace(job.RootID)
+		if rootID == "" {
+			rootID = job.ID
+		}
+		if _, ok := byRoot[rootID]; !ok {
+			rootOrder = append(rootOrder, rootID)
+		}
+		byRoot[rootID] = append(byRoot[rootID], job)
+	}
+
+	runs := make([]dashboard.WorkflowRun, 0, len(rootOrder))
+	for _, rootID := range rootOrder {
+		tree := byRoot[rootID]
+		root, ok := jobByID[rootID]
+		if !ok {
+			root = tree[0]
+		}
+		states := make([]string, 0, len(tree))
+		nodes := make([]dashboard.WorkflowNode, 0, len(tree))
+		for _, job := range tree {
+			payload := payloadByID[job.ID]
+			deps, action := resolveDelegationEdges(job, payloadByID, childrenByParent)
+			if len(payload.Deps) > 0 {
+				deps = resolveWorkflowPayloadDeps(job, payload, childrenByParent)
+			}
+			node := dashboard.WorkflowNode{
+				ID: job.ID, ParentID: strings.TrimSpace(job.ParentJobID), Deps: deps,
+				Title: nodeTitle(payload, job, action), Agent: job.Agent,
+				Runtime: resolveJobRuntime(job, payload, runtimeByAgent),
+				Model:   strings.TrimSpace(payload.Model), State: mapNodeState(job.State),
+				StartedAt: parseJobTimeMillis(job.CreatedAt),
+			}
+			if node.ParentID == "" {
+				node.ParentID = strings.TrimSpace(payload.ParentJobID)
+			}
+			if node.Model == "" && payload.Ephemeral != nil {
+				node.Model = strings.TrimSpace(payload.Ephemeral.Model)
+			}
+			if workflow.IsFinalJobState(strings.TrimSpace(job.State)) {
+				node.EndedAt = parseJobTimeMillis(job.UpdatedAt)
+			}
+			nodes = append(nodes, node)
+			states = append(states, job.State)
+		}
+		runs = append(runs, dashboard.WorkflowRun{
+			RunID: rootID, Title: runTitle(payloadByID[root.ID], root),
+			State: aggregateRunState(states), Nodes: nodes,
+		})
+	}
+	return runs
+}
+
+func resolveWorkflowPayloadDeps(job db.Job, payload workflow.JobPayload, childrenByParent map[string][]db.Job) []string {
+	parentID := strings.TrimSpace(job.ParentJobID)
+	if parentID == "" {
+		parentID = strings.TrimSpace(payload.ParentJobID)
+	}
+	delegationJobs := delegationJobIDs(childrenByParent[parentID])
+	deps := make([]string, 0, len(payload.Deps))
+	for _, dep := range payload.Deps {
+		dep = strings.TrimSpace(dep)
+		if id := delegationJobs[dep]; id != "" {
+			deps = append(deps, id)
+		}
+	}
+	return deps
 }
 
 // Job returns a single node by job id, resolving its delegation deps against the
@@ -661,9 +867,15 @@ func (d *webDataSource) Graph(ctx context.Context, repo string) (dashboard.Graph
 			return repoByID[id] == filter
 		}
 
-		// Job nodes + collect the hubs referenced by visible jobs.
+		// Job nodes + collect the hubs referenced by visible jobs. Workflow
+		// rollups are accumulated in this same ListJobs pass so the galaxy never
+		// performs a second global jobs scan.
 		repoHubs := map[string]bool{}
 		agentHubs := map[string]bool{}
+		type workflowRollup struct {
+			jobs, tokensIn, tokensOut int
+		}
+		workflowHubs := map[string]*workflowRollup{}
 		for _, j := range jobs {
 			if !visible(j.ID) {
 				continue
@@ -693,6 +905,16 @@ func (d *webDataSource) Graph(ctx context.Context, repo string) (dashboard.Graph
 			if agent != "" {
 				agentHubs[agent] = true
 			}
+			if label := strings.TrimSpace(j.WorkflowID); label != "" {
+				rollup := workflowHubs[label]
+				if rollup == nil {
+					rollup = &workflowRollup{}
+					workflowHubs[label] = rollup
+				}
+				rollup.jobs++
+				rollup.tokensIn += j.InputTokens
+				rollup.tokensOut += j.OutputTokens
+			}
 		}
 
 		// Hub nodes (sorted, appended after the job nodes).
@@ -702,6 +924,23 @@ func (d *webDataSource) Graph(ctx context.Context, repo string) (dashboard.Graph
 		}
 		for _, a := range sortedSetKeys(agentHubs) {
 			out.Nodes = append(out.Nodes, dashboard.GraphNode{ID: "agent::" + a, Type: "agent", Label: a, Agent: a})
+		}
+		workflowLabels := make([]string, 0, len(workflowHubs))
+		for label := range workflowHubs {
+			workflowLabels = append(workflowLabels, label)
+		}
+		sort.Strings(workflowLabels)
+		noteCounts, err := store.WorkflowNoteCounts(ctx, workflowLabels)
+		if err != nil {
+			return err
+		}
+		for _, label := range workflowLabels {
+			rollup := workflowHubs[label]
+			out.Nodes = append(out.Nodes, dashboard.GraphNode{
+				ID: "workflow::" + label, Type: "workflow", Label: label,
+				JobCount: rollup.jobs, NoteCount: noteCounts[label],
+				TokensIn: rollup.tokensIn, TokensOut: rollup.tokensOut,
+			})
 		}
 
 		// Delegation (parent) links + repo/agent spokes.
@@ -719,6 +958,9 @@ func (d *webDataSource) Graph(ctx context.Context, repo string) (dashboard.Graph
 			}
 			if a := strings.TrimSpace(j.Agent); a != "" {
 				out.Links = append(out.Links, dashboard.GraphLink{Source: j.ID, Target: "agent::" + a, Kind: "agent"})
+			}
+			if label := strings.TrimSpace(j.WorkflowID); label != "" {
+				out.Links = append(out.Links, dashboard.GraphLink{Source: j.ID, Target: "workflow::" + label, Kind: "workflow"})
 			}
 		}
 
