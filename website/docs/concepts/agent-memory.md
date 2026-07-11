@@ -155,7 +155,7 @@ All of the following are read-only:
 gitmoot memory list [--pending|--confirmed] [--agent NAME] [--repo owner/repo]
 gitmoot memory recall "<query>" [--repo owner/repo] [--agent NAME|--shared] [--limit N] [--expand]
 gitmoot memory replay [--agent NAME] [--repo owner/repo] [--limit N]
-gitmoot memory eval --fixtures fixtures.json [--k N]
+gitmoot memory eval --fixtures evals/memory-retrieval-fixtures.json [--k N] [--json]
 ```
 
 `memory list` shows confirmed memories and pending observations. `memory recall`
@@ -173,8 +173,22 @@ or embedding search remains future work; current retrieval is SQLite FTS5 plus
 persisted links.
 `memory replay` is an offline A/B: it re-renders recent real jobs' prompts with and without the
 learnings block and reports the injection delta (added tokens, entries injected)
-— it measures injection *mechanics*, not outcome quality. `memory eval` computes
-recall/precision@K of retrieval over a labeled fixtures file.
+— it measures injection *mechanics*, not outcome quality. `memory eval` scores
+the production `PreviewEntries` retrieval path against the versioned 44-case
+`evals/memory-retrieval-fixtures.json` exam. It includes verbatim real-job
+instructions, known incidents, six deliberately disjoint-vocabulary paraphrases,
+and self-retrieval sanity checks. The original fixture fields remain valid;
+optional `id`, `source`, `category`, `note`, and `expected_alternates` fields add
+provenance and key-stability labels without breaking old fixture files.
+
+Each run reports K=5 and K=15, per-category results, budget-at-risk hits, a
+fixture SHA-256, and an active-corpus count/max-update fingerprint. A deterministic
+miss taxonomy distinguishes `stale_label`, `scope_pool_exclusion`,
+`vocabulary_mismatch` (the sanitized query misses the expected fact's own FTS
+row), and `ranking_loss` (visible FTS match below K, with actual rank). Interpret
+recall@15 >= 0.8 as keyword retrieval adequate, 0.6-0.8 as a ranking/budget
+investigation, and below 0.6 as evidence for a separate embeddings trial. The
+runner is read-only and adds no alternate retrieval implementation.
 
 ## Vault view (a derived, disposable Obsidian view)
 
