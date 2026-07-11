@@ -166,7 +166,7 @@ is **exactly one** of `cmd`, `agent`, or `gate`. There are five agent-stage kind
 | Kind | Declared by | What it does |
 | ---- | ----------- | ------------ |
 | **ask / review** (#757/#813) | `action: ask\|review` (review may add `source:`) | Read-only leaf; optionally reviews one upstream implement PR at its exact head. |
-| **implement** (#768) | `action: implement` + `write: true` | Mutates the repo + opens a PR (fold-on-PR-opened); never auto-merges. |
+| **implement** (#768) | `action: implement` + `write: true` | Mutates the repo; `implemented` folds on PR-opened, while other configured successes settle without promising a PR. Never auto-merges. |
 | **produce** (#814) | `action: produce` + `write: true` + `writes:` | Codex-only data writer; never creates repo/branch/task/PR state. |
 | **orchestrate** (#758) | `orchestrate: true` | Sub-tree coordinator — fans out owned children, waits, folds the synthesis. |
 | **gate** (#768) | `gate: pr_merged` + `source:` (no `agent`) | Jobless waiter — folds when an upstream implement stage's PR merges. |
@@ -217,7 +217,8 @@ still appears as a PR comment and folds through `success_decisions`, but
 `changes_requested` does not dispatch a native fix and `approved` does not run the
 native merge gate. Human merge remains required. Declaring the binding sets
 `SkipNativeReviewFanout` on the implement request so Gitmoot does not also enqueue
-native reviewers. If the source produced no PR (no-op or `skipped`), the review
+native reviewers. If the source produced no PR (a no-op or any successful
+non-`implemented` decision), the review
 folds blocked immediately with `source stage produced no PR; nothing to review`.
 
 An agent stage runs the named agent on **its own registered runtime** (claude /
@@ -225,12 +226,14 @@ codex — no per-job shell override):
 
 - **kinds** — `ask`/`review` are read-only **leaves** (`delegations[]` and
   `human_questions[]` are stripped, so no fan-out and no human-pause). `implement`
-  mutates + opens a PR on a deterministic `gitmoot/pipe-<run>-<stage>` branch (retry
-  reuses it), requires `write: true`, and never auto-merges. `orchestrate` is a
+  mutates on a deterministic `gitmoot/pipe-<run>-<stage>` branch (retry reuses it),
+  requires `write: true`, and never auto-merges. Only its `implemented` decision
+  promises a PR and waits for the PR-opened stamp; other configured success decisions
+  settle immediately. `orchestrate` is a
   coordinator (the one non-leaf): it fans out owned children, waits for the sub-tree
   via the continuation chain, then folds the tail. `gate` runs no job and folds when
   `pr_merged` holds on its `source` PR (parks `blocked` on close-unmerged, timeout,
-  or a source that succeeded via `skipped` because no PR can exist).
+  or any terminal succeeded source that opened no PR).
 - **agent existence is warned, not blocked** — `pipeline add` warns for any referenced
   agent that does not exist yet but still adds the pipeline (so a spec can be bundled
   ahead of provisioning its agents); create the agent (`gitmoot agent …`) before the

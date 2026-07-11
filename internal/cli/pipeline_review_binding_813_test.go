@@ -208,6 +208,7 @@ func TestPipelineSourceReviewNoPRParksBlocked(t *testing.T) {
 		addEvent bool
 	}{
 		{name: "terminal no-op", decision: "implemented", addEvent: true},
+		{name: "approved without PR", decision: "approved"},
 		{name: "skipped no work", decision: "skipped"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

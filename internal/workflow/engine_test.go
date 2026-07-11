@@ -726,6 +726,15 @@ func TestEngineAdvanceImplementDispatchesReviewers(t *testing.T) {
 	}
 	assertTaskState(t, store, "task-7", TaskReviewing)
 	mustJob(t, store, "review-audit-task-7-review-1")
+	events, err := store.ListJobEvents(ctx, "implement-job")
+	if err != nil {
+		t.Fatalf("ListJobEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.Kind == "advance_skipped_no_pr" {
+			t.Fatalf("implemented job with PR recorded no-PR event: %+v", events)
+		}
+	}
 }
 
 func TestEngineAdvanceImplementDefaultsLeadAgent(t *testing.T) {
@@ -776,21 +785,131 @@ func TestEngineAdvanceImplementSkipsPullRequestFlowWhenNoPullRequest(t *testing.
 		Result:    &AgentResult{Decision: "implemented", Summary: "done locally"},
 	})
 
-	err := engine.AdvanceJob(ctx, "implement-job")
-
-	if err != nil {
-		t.Fatalf("AdvanceJob returned error: %v", err)
+	for i := 0; i < 2; i++ {
+		if err := engine.AdvanceJob(ctx, "implement-job"); err != nil {
+			t.Fatalf("AdvanceJob call %d returned error: %v", i+1, err)
+		}
 	}
 	events, err := store.ListJobEvents(ctx, "implement-job")
 	if err != nil {
 		t.Fatalf("ListJobEvents returned error: %v", err)
 	}
+	count := 0
 	for _, event := range events {
 		if event.Kind == "advance_skipped_no_pr" {
-			return
+			count++
 		}
 	}
-	t.Fatalf("events = %+v, want advance_skipped_no_pr", events)
+	if count != 1 {
+		t.Fatalf("advance_skipped_no_pr count = %d, want 1; events=%+v", count, events)
+	}
+}
+
+func TestEngineAdvanceImplementTerminalDecisionsRecordNoPROnce(t *testing.T) {
+	for _, decision := range []string{"approved", "changes_requested", "blocked", "failed"} {
+		t.Run(decision, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEngineStore(t)
+			seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+			engine := testEngine(store)
+			insertCompletedJob(t, store, db.Job{
+				ID:    "implement-job",
+				Agent: "lead",
+				Type:  "implement",
+			}, JobPayload{
+				Repo:      "jerryfane/gitmoot",
+				Branch:    "task-817",
+				TaskID:    "task-817",
+				TaskTitle: "Terminal implement decision",
+				Result:    &AgentResult{Decision: decision, Summary: "terminal without PR"},
+			})
+			if decision == "blocked" || decision == "failed" {
+				if err := store.UpdateJobState(ctx, "implement-job", string(stateForDecision(decision))); err != nil {
+					t.Fatalf("UpdateJobState: %v", err)
+				}
+			}
+
+			for i := 0; i < 2; i++ {
+				err := engine.AdvanceJob(ctx, "implement-job")
+				if decision == "blocked" || decision == "failed" {
+					var blocked BlockedError
+					if !errors.As(err, &blocked) {
+						t.Fatalf("AdvanceJob call %d error = %v, want BlockedError", i+1, err)
+					}
+				} else if err != nil {
+					t.Fatalf("AdvanceJob call %d: %v", i+1, err)
+				}
+			}
+
+			events, err := store.ListJobEvents(ctx, "implement-job")
+			if err != nil {
+				t.Fatalf("ListJobEvents: %v", err)
+			}
+			count := 0
+			for _, event := range events {
+				if event.Kind != "advance_skipped_no_pr" {
+					continue
+				}
+				count++
+				if !strings.Contains(event.Message, decision) {
+					t.Fatalf("event message %q does not identify decision %q", event.Message, decision)
+				}
+			}
+			if count != 1 {
+				t.Fatalf("advance_skipped_no_pr count = %d, want 1; events=%+v", count, events)
+			}
+		})
+	}
+}
+
+func TestEngineAdvanceImplementNoPREventConcurrent(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	engine := testEngine(store)
+	insertCompletedJob(t, store, db.Job{
+		ID:    "implement-job",
+		Agent: "lead",
+		Type:  "implement",
+	}, JobPayload{
+		Repo:   "jerryfane/gitmoot",
+		Branch: "task-817",
+		Result: &AgentResult{Decision: "approved", Summary: "terminal without PR"},
+	})
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- engine.AdvanceJob(ctx, "implement-job")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent AdvanceJob: %v", err)
+		}
+	}
+
+	events, err := store.ListJobEvents(ctx, "implement-job")
+	if err != nil {
+		t.Fatalf("ListJobEvents: %v", err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Kind == "advance_skipped_no_pr" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("advance_skipped_no_pr count = %d, want 1; events=%+v", count, events)
+	}
 }
 
 func TestEngineAdvanceImplementDoesNotFinalizeWithoutTaskWorktree(t *testing.T) {

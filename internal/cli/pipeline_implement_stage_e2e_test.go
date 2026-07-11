@@ -295,6 +295,51 @@ stages:
 	}
 }
 
+// TestPipelineImplementStageNonImplementedSuccessBypassesPRWaitE2E proves only
+// `implemented` promises a PR. Other configured success decisions settle immediately
+// without the engine marker, so an old approved/changes_requested job cannot wedge a
+// pipeline while waiting for a stamp that will never arrive.
+func TestPipelineImplementStageNonImplementedSuccessBypassesPRWaitE2E(t *testing.T) {
+	for _, decision := range []string{"approved", "changes_requested"} {
+		t.Run(decision, func(t *testing.T) {
+			store := pipelineAdvanceStore(t)
+			enqueue := testStageEnqueuer(store)
+			specYAML := `name: non-implemented-success
+repo: owner/repo
+success_decisions: [approved, implemented, changes_requested, skipped]
+stages:
+  - id: impl
+    agent: coder
+    prompt: Fix the bug.
+    action: implement
+    write: true
+  - id: notify
+    agent: rev
+    prompt: Announce.
+    needs: [impl]
+`
+			rec, parsed := newTestPipeline(t, store, "non-implemented-success", specYAML)
+			now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+			run := startTestRun(t, store, rec, parsed, enqueue, now)
+			impl := stageRow(t, store, run.ID, "impl")
+
+			settleImplementStageJob(t, store, impl.JobID, decision, "terminal without PR", 0)
+			run = advance(t, store, rec, parsed, enqueue, run, now)
+
+			implDone := stageRow(t, store, run.ID, "impl")
+			if implDone.State != pipeline.StageSucceeded {
+				t.Fatalf("impl stage = %s, want succeeded immediately", implDone.State)
+			}
+			if !strings.Contains(implDone.Summary, "no PR opened; decision "+decision) {
+				t.Fatalf("impl summary = %q, want clear no-PR decision note", implDone.Summary)
+			}
+			if got := stageRow(t, store, run.ID, "notify"); got.State != pipeline.StageQueued || got.JobID == "" {
+				t.Fatalf("notify stage = %+v, want queued without a PR wait", got)
+			}
+		})
+	}
+}
+
 // TestPipelineImplementStageSkippedHonorsStrictSuccessDecisionsE2E proves a
 // strict implement stage that omits skipped folds failed immediately with no PR,
 // rather than entering the fold-on-PR-opened wait.

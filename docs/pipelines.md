@@ -238,10 +238,11 @@ stages:
   attempt-independent branch `gitmoot/pipe-<run>-<stage>` (reusing the implement
   dispatch's fail-closed guards). A **retry** lands in the *same* branch/PR — never a
   duplicate — and fails closed if that worktree is dirty or has a live process.
-- **Folds on PR-opened.** A `success` decision folds only once the job carries an
-  opened PR. The first-class `skipped` decision bypasses that wait because there is
-  no work to turn into a PR. The opened PR number is appended to the stage summary so a
-  downstream stage sees it via upstream-context injection.
+- **`implemented` folds on PR-opened.** Only `implemented` promises a PR, so that
+  decision waits until the job carries the opened PR stamp (or the engine confirms a
+  terminal no-PR no-op). Other configured success decisions, including `approved` and
+  `skipped`, settle immediately without a PR. The stage summary records the opened PR
+  number or the terminal no-PR outcome for downstream context.
 - **Never auto-merges.** The pipeline **opens** the PR; a human or your CI does the
   merge. See [Gate stages](#gate-stages) to make a later stage wait for that merge.
 - **Declared review suppresses native fan-out.** When an implement stage has a
@@ -265,8 +266,8 @@ the implement stage just opened. `source` must also appear in the review stage's
   still posted as a PR comment and folded by the pipeline's `success_decisions`, but
   `changes_requested` does not dispatch a native fix job and `approved` does not run
   the native merge gate. Human merge remains the default.
-- If the succeeded implement stage produced no PR (a permanent no-op or a first-class
-  `skipped` result), the review stage immediately folds `blocked` with
+- If the succeeded implement stage produced no PR (a permanent no-op or any successful
+  non-`implemented` decision), the review stage immediately folds `blocked` with
   `source stage produced no PR; nothing to review`; no unbound review job is sent.
 
 ### Gate stages
@@ -297,8 +298,9 @@ stages:
   **fails open** (keeps waiting while unmerged), and is bounded by the stage `timeout`.
 - A PR that is **closed without merging**, or a **timeout**, parks the run `blocked`
   (a gate is a wait, not a failure — so a retry budget can't re-arm the timer).
-- A source stage that succeeded via `skipped` also parks the gate `blocked`
-  immediately: no PR will exist for that run.
+- A source stage that succeeds without opening a PR also parks the gate `blocked`
+  immediately with `source stage succeeded without opening a PR; nothing to wait for`.
+  Only `implemented` promises the PR that this gate can watch.
 
 ### Orchestrate stages
 

@@ -986,24 +986,26 @@ printf '%s' '{"gitmoot_result":{"decision":"blocked","summary":"secret missing",
 `skipped` is the default-on success decision for a stage whose task had no work.
 The persisted summary is prefixed with `[skipped: no work]`, so downstream agent
 stages receive the honest outcome. An explicit `success_decisions` list that
-omits `skipped` is strict and folds it failed. If an implement source skips, a
-downstream `pr_merged` gate parks blocked instead of waiting for a PR that cannot
-exist. The result still uses the existing succeeded stage state; the `SKIPPED`
+omits `skipped` is strict and folds it failed. Only `implemented` promises a PR from
+an implement stage; other configured success decisions settle immediately. If an
+implement source succeeds without a PR, a downstream `pr_merged` gate parks blocked
+instead of waiting forever. The result still uses the existing succeeded stage state; the `SKIPPED`
 funnel state remains reserved for downstream stages that never ran.
 
 ### Agent stages (#757 / #768 / #758)
 
-A stage may run a **named managed agent** instead of a shell command — a stage is
+A stage may run a **named managed agent** instead of a shell command; a stage is
 exactly one of `cmd`, `agent`, or `gate`. An agent stage runs on its **own** registered
 runtime (claude / codex). Four kinds:
 
 - **ask / review** (#757) — read-only **leaf** (`action: ask|review`); `delegations[]`
   and `human_questions[]` stripped. A review may add `source: <implement stage>`
   (#813) to bind to that stage's PR and exact head SHA.
-- **implement** (#768) — `action: implement` + `write: true`. MUTATES the repo + opens a
-  PR on a deterministic `gitmoot/pipe-<run>-<stage>` branch (retry reuses it, never
-  duplicates), folds **on PR-opened**, **never auto-merges**. Scheduled pipelines also
-  need pipeline-level `allow_scheduled_writes: true`.
+- **implement** (#768): `action: implement` + `write: true`. MUTATES the repo on a
+  deterministic `gitmoot/pipe-<run>-<stage>` branch (retry reuses it, never duplicates).
+  The `implemented` decision folds **on PR-opened**; other configured success decisions
+  settle immediately without promising a PR. It **never auto-merges**. Scheduled
+  pipelines also need pipeline-level `allow_scheduled_writes: true`.
 - **produce** (#814) — `action: produce` + `write: true` + absolute cleaned
   `writes:`. Codex-only data writer; never branch/task/PR state. Optional
   `network: true`, `check`, and bounded same-session `check_retries`. Declared paths
@@ -1061,8 +1063,8 @@ succeeded implement job and runs in a detached worktree pinned to that head. It 
 report-only: the verdict is posted to the PR and folded by the pipeline, but it does
 not dispatch a native fix job or run the native merge gate. The declared binding
 also sets `SkipNativeReviewFanout` on `fix`, preventing duplicate reviewer fan-out;
-pipelines without the declaration keep native behavior. A permanent no-PR source
-(no-op or `skipped`) blocks the review immediately with `source stage produced no
+pipelines without the declaration keep native behavior. Any terminal succeeded no-PR
+source (a no-op or a non-`implemented` success decision) blocks the review immediately with `source stage produced no
 PR; nothing to review` instead of dispatching an unbound job or waiting.
 
 `pipeline add` warns (does not block) when an agent stage names an agent that does

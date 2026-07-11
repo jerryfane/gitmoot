@@ -3086,6 +3086,18 @@ func (s *Store) AddJobEvent(ctx context.Context, event JobEvent) error {
 	return err
 }
 
+// AddJobEventIfAbsent atomically inserts one event for a job/kind pair. The
+// existence check and insert share one SQLite statement, so concurrent callers
+// cannot both pass a check-then-insert window.
+func (s *Store) AddJobEventIfAbsent(ctx context.Context, event JobEvent) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO job_events(job_id, kind, message)
+		SELECT ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM job_events WHERE job_id = ? AND kind = ?
+		)`, event.JobID, event.Kind, event.Message, event.JobID, event.Kind)
+	return err
+}
+
 // UpsertLatestJobEvent keeps one mutable latest-only row for a job/event kind.
 // The write is guarded by jobs.state='running' in the same transaction, so a
 // delayed best-effort progress tick that races terminalization becomes a no-op.
