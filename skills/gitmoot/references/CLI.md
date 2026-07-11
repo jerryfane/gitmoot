@@ -955,6 +955,9 @@ gitmoot workflow note release-42 "The staging rollout completed." --author opera
 
 `workflow list` reports per-state counts, note count, first/last activity, and
 best-effort token totals. `workflow show` merges jobs and notes chronologically.
+The read-only web dashboard shows labels as Galaxy hubs, adds a workflow link
+to labeled run strips, and serves complete run trees plus notes at
+`/workflows/<label>`.
 Labels may be reused; timestamps expose the reuse. `workflow note` stores body
 and author verbatim (10 KiB and 128-byte limits) and rejects labels with no jobs.
 `workflow show --json` returns those verbatim bytes; plain-text output strips

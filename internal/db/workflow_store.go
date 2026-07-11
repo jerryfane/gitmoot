@@ -78,6 +78,18 @@ FROM jobs INDEXED BY idx_jobs_workflow_id
 WHERE workflow_id != '' AND workflow_id = ?
 ORDER BY created_at, id LIMIT ?`
 
+// ListWorkflowGraphJobsSQL is the workflow dashboard's bounded payload
+// projection. Unlike the scalar CLI list above, the workflow forest needs each
+// labeled job's payload to render titles, dependency edges, runtime overrides,
+// and models. The workflow_id predicate keeps that payload scan scoped to one
+// indexed label instead of materializing payloads globally.
+const ListWorkflowGraphJobsSQL = `SELECT id, agent, type, state, payload, parent_job_id,
+	delegation_id, delegation_depth, root_id, workflow_id, input_tokens, output_tokens,
+	created_at, updated_at
+FROM jobs INDEXED BY idx_jobs_workflow_id
+WHERE workflow_id != '' AND workflow_id = ?
+ORDER BY created_at, id`
+
 const CountJobsByWorkflowSQL = `SELECT COUNT(*) FROM jobs INDEXED BY idx_jobs_workflow_id
 WHERE workflow_id != '' AND workflow_id = ?`
 
@@ -212,6 +224,60 @@ func (s *Store) ListJobsByWorkflow(ctx context.Context, workflowID string, limit
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+// ListWorkflowGraphJobs returns every job carrying workflowID, including the
+// payload and denormalized root needed to assemble complete run trees. The
+// query is intentionally label-bounded and uses idx_jobs_workflow_id.
+func (s *Store) ListWorkflowGraphJobs(ctx context.Context, workflowID string) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, ListWorkflowGraphJobsSQL, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jobs []Job
+	for rows.Next() {
+		var job Job
+		if err := rows.Scan(&job.ID, &job.Agent, &job.Type, &job.State, &job.Payload,
+			&job.ParentJobID, &job.DelegationID, &job.DelegationDepth, &job.RootID,
+			&job.WorkflowID, &job.InputTokens, &job.OutputTokens, &job.CreatedAt,
+			&job.UpdatedAt); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
+
+// WorkflowNoteCounts returns note totals for the requested workflow labels in
+// one grouped indexed query. Missing labels are omitted from the result map.
+func (s *Store) WorkflowNoteCounts(ctx context.Context, workflowIDs []string) (map[string]int, error) {
+	out := make(map[string]int, len(workflowIDs))
+	if len(workflowIDs) == 0 {
+		return out, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(workflowIDs)), ",")
+	args := make([]any, len(workflowIDs))
+	for i, workflowID := range workflowIDs {
+		args[i] = workflowID
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT workflow_id, COUNT(*)
+FROM workflow_notes INDEXED BY idx_workflow_notes_wid
+WHERE workflow_id IN (`+placeholders+`)
+GROUP BY workflow_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var workflowID string
+		var count int
+		if err := rows.Scan(&workflowID, &count); err != nil {
+			return nil, err
+		}
+		out[workflowID] = count
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) CountJobsByWorkflow(ctx context.Context, workflowID string) (int, error) {

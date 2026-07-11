@@ -12,6 +12,11 @@ gitmoot workflow note release-42 "Canary passed." --author operator --remember
 gitmoot workflow show release-42
 ```
 
+The read-only web dashboard clusters labeled jobs around workflow hubs in
+Galaxy. Labeled run strips and hubs open `/workflows/<label>`, which combines
+complete run trees, state totals, best-effort token totals, and the shared note
+journal.
+
 Journal text and authors are stored verbatim. JSON keeps them verbatim, while
 terminal text output sanitizes escapes/control bytes and caps each field to one
 line. `--remember` uses low-trust prefiltering,

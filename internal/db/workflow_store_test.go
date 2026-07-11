@@ -88,6 +88,7 @@ func TestWorkflowProductionQueriesUseIndexes(t *testing.T) {
 		{"list", ListWorkflowSummariesSQL, nil, "idx_jobs_workflow_id"},
 		{"show-summary", WorkflowSummarySQL, []any{"release-42", "release-42", "release-42"}, "idx_jobs_workflow_id"},
 		{"show-jobs", ListJobsByWorkflowSQL, []any{"release-42", 100}, "idx_jobs_workflow_id"},
+		{"dashboard-graph-jobs", ListWorkflowGraphJobsSQL, []any{"release-42"}, "idx_jobs_workflow_id"},
 		{"show-notes", ListWorkflowNotesSQL, []any{"release-42", 100}, "idx_workflow_notes_wid"},
 		{"filter", CountJobsByWorkflowSQL, []any{"release-42"}, "idx_jobs_workflow_id"},
 		{"repo-inference", WorkflowReposSQL, []any{"release-42"}, "idx_jobs_workflow_id"},
@@ -112,6 +113,61 @@ func TestWorkflowProductionQueriesUseIndexes(t *testing.T) {
 				t.Fatalf("plan does not use %s: %s", tc.index, plan.String())
 			}
 		})
+	}
+}
+
+func TestListWorkflowGraphJobsReturnsBoundedPayloadAndRootProjection(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	rootPayload := `{"workflow_id":"release-42","repo":"acme/widget","task_title":"root"}`
+	childPayload := `{"workflow_id":"release-42","repo":"acme/widget","root_job_id":"root","parent_job_id":"root","deps":["prep"]}`
+	if err := store.CreateJob(ctx, Job{ID: "root", Agent: "lead", Type: "orchestrate", State: "running", Payload: rootPayload}); err != nil {
+		t.Fatalf("CreateJob(root): %v", err)
+	}
+	if err := store.CreateJob(ctx, Job{ID: "child", Agent: "worker", Type: "implement", State: "queued", Payload: childPayload, ParentJobID: "root", DelegationID: "ship", DelegationDepth: 1}); err != nil {
+		t.Fatalf("CreateJob(child): %v", err)
+	}
+	seedWorkflowJob(t, store, "other", "other-label", "succeeded", "acme/other", 1, 1)
+
+	jobs, err := store.ListWorkflowGraphJobs(ctx, "release-42")
+	if err != nil {
+		t.Fatalf("ListWorkflowGraphJobs: %v", err)
+	}
+	if len(jobs) != 2 || jobs[0].ID != "child" && jobs[0].ID != "root" {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	byID := map[string]Job{}
+	for _, job := range jobs {
+		byID[job.ID] = job
+	}
+	if byID["root"].Payload != rootPayload || byID["root"].RootID != "root" {
+		t.Fatalf("root projection = %+v", byID["root"])
+	}
+	if byID["child"].Payload != childPayload || byID["child"].RootID != "root" || byID["child"].ParentJobID != "root" {
+		t.Fatalf("child projection = %+v", byID["child"])
+	}
+	if _, ok := byID["other"]; ok {
+		t.Fatalf("projection leaked another workflow: %+v", jobs)
+	}
+	if !strings.Contains(ListWorkflowGraphJobsSQL, "payload") || !strings.Contains(ListWorkflowGraphJobsSQL, "workflow_id != ''") {
+		t.Fatalf("projection must read payload only behind the partial-index predicate: %s", ListWorkflowGraphJobsSQL)
+	}
+}
+
+func TestWorkflowNoteCountsGroupsRequestedLabels(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	for _, label := range []string{"release-42", "release-42", "other"} {
+		if _, err := store.InsertWorkflowNote(ctx, WorkflowNote{WorkflowID: label, Body: "note"}); err != nil {
+			t.Fatalf("InsertWorkflowNote(%s): %v", label, err)
+		}
+	}
+	counts, err := store.WorkflowNoteCounts(ctx, []string{"release-42", "missing"})
+	if err != nil {
+		t.Fatalf("WorkflowNoteCounts: %v", err)
+	}
+	if counts["release-42"] != 2 || counts["missing"] != 0 {
+		t.Fatalf("counts = %v", counts)
 	}
 }
 

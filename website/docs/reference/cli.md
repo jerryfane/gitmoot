@@ -858,9 +858,12 @@ gitmoot workflow note release-42 "The staging rollout completed." --author opera
 ```
 
 List/show include state counts, notes, first/last activity, and best-effort token
-totals. Notes store bodies and authors verbatim. `--remember` stages low-trust
-memory in the shared pool by default; `--agent NAME` selects a registered
-agent's private pool. A single repo is inferred, otherwise `--repo` is required.
+totals. Notes store bodies and authors verbatim. The read-only web dashboard
+also renders labels as Galaxy hubs and links labeled runs to
+`/workflows/<label>` for their complete run forest, rollups, and journal.
+`--remember` stages low-trust memory in the shared pool by default; `--agent
+NAME` selects a registered agent's private pool. A single repo is inferred,
+otherwise `--repo` is required.
 The note and observation are atomic, and prefilter rejection writes neither.
 JSON returns note bytes verbatim; plain-text show output strips terminal escape
 sequences, maps control characters to spaces except tabs, and caps each field.
