@@ -1141,6 +1141,31 @@ downstream agent stage acts on upstream output as real dataflow. A repo-bound
 ask/review agent stage runs in its own detached read-only worktree (#739), so
 same-repo agent stages parallelize and never touch the live checkout.
 
+A dependent `cmd` stage receives the same settled upstream results through a data
+channel, not shell interpolation. All pipeline shell stages get
+`GITMOOT_PIPELINE_NAME`, `GITMOOT_PIPELINE_RUN_ID`, and
+`GITMOOT_PIPELINE_STAGE_ID`; stages with `needs` also get
+`GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE`. That variable names a fresh readable
+`0600` JSON tempfile for the duration of the delivery. Gitmoot persists the JSON
+content (not the path), recreates identical bytes on retry/restart, and removes the
+file after every exit path. Root stages have no context-file variable.
+
+The v1 shape is
+`{"schema_version":1,"complete":true,"stages":{"extract":{"id":"extract","state":"succeeded","summary":"...","summary_truncated":false}}}`.
+Each summary's marshaled JSON string is capped at 16 KiB with rune-safe
+truncation, and the final marshaled document at 64 KiB. `complete:false` means a
+summary was truncated or an expected stage was
+omitted, so scripts can fail closed:
+
+```sh
+jq -e '.schema_version == 1 and .complete == true' \
+  "$GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE" >/dev/null
+jq -r '.stages.extract.summary' "$GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE"
+```
+
+Summaries are untrusted data flowing to your trusted script: parse them as data,
+never evaluate them as shell, and do not put credentials in summaries.
+
 Produce batches use the existing result decisions: `implemented` = complete,
 `changes_requested` = partial (only advances when opted into `success_decisions`),
 `blocked` = needs a human, and `skipped` = no work. `pipeline show` reports a

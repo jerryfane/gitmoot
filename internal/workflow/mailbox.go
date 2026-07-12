@@ -185,9 +185,15 @@ type JobRequest struct {
 	// the engine never persists a refreshed session ref for an overridden job.
 	RuntimeOverride    string
 	RuntimeOverrideRef string
-	// ShellEnv carries pipeline trigger inputs as exact KEY=value entries to a
-	// shell runtime job. It is empty for every non-pipeline and non-shell job.
-	ShellEnv               []string
+	// ShellEnv carries pipeline trigger inputs and stage metadata as exact
+	// KEY=value entries to a shell runtime job. It is empty for every non-pipeline
+	// and non-shell job.
+	ShellEnv []string
+	// ShellUpstreamContext carries the persisted JSON CONTENT supplied to a
+	// dependent pipeline shell stage. Delivery writes it to a fresh temporary
+	// file; paths are deliberately never persisted. Additive/omitempty: empty
+	// leaves ordinary and root shell jobs byte-identical.
+	ShellUpstreamContext   string
 	Phase                  string
 	Cockpit                bool
 	CockpitSession         string
@@ -283,6 +289,7 @@ type JobPayload struct {
 	RuntimeOverride        string         `json:"runtime_override,omitempty"`
 	RuntimeOverrideRef     string         `json:"runtime_override_ref,omitempty"`
 	ShellEnv               []string       `json:"shell_env,omitempty"`
+	ShellUpstreamContext   string         `json:"shell_upstream_context,omitempty"`
 	Phase                  string         `json:"phase,omitempty"`
 	Cockpit                bool           `json:"cockpit,omitempty"`
 	CockpitSession         string         `json:"cockpit_session,omitempty"`
@@ -426,6 +433,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		RuntimeOverride:        strings.TrimSpace(request.RuntimeOverride),
 		RuntimeOverrideRef:     strings.TrimSpace(request.RuntimeOverrideRef),
 		ShellEnv:               append([]string(nil), request.ShellEnv...),
+		ShellUpstreamContext:   request.ShellUpstreamContext,
 		Phase:                  request.Phase,
 		Cockpit:                request.Cockpit,
 		CockpitSession:         strings.TrimSpace(request.CockpitSession),
@@ -1036,15 +1044,16 @@ func produceCheckCorrectionPrompt(output string) string {
 // ran), and error.
 func (m Mailbox) deliver(ctx context.Context, adapter DeliveryAdapter, agent runtime.Agent, job db.Job, payload JobPayload, prompt string) (string, string, bool, *FailureDiagnostics, error) {
 	delivery := runtime.Job{
-		ID:          job.ID,
-		AgentName:   agent.Name,
-		Action:      job.Type,
-		Prompt:      prompt,
-		Repository:  payload.Repo,
-		PullRequest: payload.PullRequest,
-		Model:       payload.Model,
-		Effort:      payload.Effort,
-		ShellEnv:    append([]string(nil), payload.ShellEnv...),
+		ID:                   job.ID,
+		AgentName:            agent.Name,
+		Action:               job.Type,
+		Prompt:               prompt,
+		Repository:           payload.Repo,
+		PullRequest:          payload.PullRequest,
+		Model:                payload.Model,
+		Effort:               payload.Effort,
+		ShellEnv:             append([]string(nil), payload.ShellEnv...),
+		ShellUpstreamContext: payload.ShellUpstreamContext,
 	}
 	// #652: thread in the runtime's configured registry default_model as the FINAL
 	// model fallback. effectiveModel applies the precedence (job.Model > agent.Model

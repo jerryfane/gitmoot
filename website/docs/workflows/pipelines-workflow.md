@@ -135,6 +135,37 @@ entries. Values are never interpolated into shell source, so newlines and UTF-8
 remain data. The full canonical payload lives in the SQLite run row; shell env and
 agent prompt projections also live in normal job data.
 
+### Shell-stage upstream context
+
+Every pipeline shell stage receives exact `GITMOOT_PIPELINE_NAME`,
+`GITMOOT_PIPELINE_RUN_ID`, and `GITMOOT_PIPELINE_STAGE_ID` environment entries.
+A stage with `needs` also receives `GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE`, which
+names a readable `0600` JSON tempfile. It exists only during delivery and is
+removed after success, failure, timeout, or cancellation. Gitmoot persists the
+content rather than the path, so retries and restarts recreate identical bytes at
+a fresh path. Root stages do not receive the context-file variable, and the
+existing `sh -c` argv contract is unchanged.
+
+```json
+{"schema_version":1,"complete":true,"stages":{"extract":{"id":"extract","state":"succeeded","summary":"three records","summary_truncated":false}}}
+```
+
+Map-key ordering makes the JSON deterministic. Each summary's marshaled JSON
+string is capped at 16 KiB with rune-safe truncation, and the final marshaled file
+at 64 KiB. `summary_truncated:true` marks a
+per-stage truncation; `complete:false` means a summary was truncated or an expected
+stage was omitted, allowing consumers to fail closed:
+
+```sh
+jq -e '.schema_version == 1 and .complete == true' \
+  "$GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE" >/dev/null
+summary=$(jq -r '.stages.extract.summary' \
+  "$GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE")
+```
+
+Summaries are untrusted data flowing into your trusted script. Parse them as data,
+never evaluate them as shell source, and do not put credentials in summaries.
+
 A triggered pipeline containing an `implement` or `produce` stage must set
 `allow_triggered_writes: true`, in addition to each stage's `write: true`. This is
 independent of `allow_scheduled_writes` when a pipeline has both trigger and schedule.
