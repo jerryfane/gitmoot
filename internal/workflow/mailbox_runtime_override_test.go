@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -121,6 +122,101 @@ func TestMailboxRunThreadsShellEnvironment(t *testing.T) {
 	}
 	if len(adapter.shellEnvs) != 1 || !reflect.DeepEqual(adapter.shellEnvs[0], env) {
 		t.Fatalf("delivered shell env = %#v", adapter.shellEnvs)
+	}
+}
+
+func TestMailboxShellUpstreamContextPersistsAcrossReopenAndDelivery(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "gitmoot.db")
+	store, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextJSON := "{\"schema_version\":1,\"complete\":true,\"stages\":{\"source\":{\"summary\":\"first\\n第二\"}}}"
+	request := JobRequest{
+		ID: "job-shell-context", Agent: "runner", Action: "ask", Repo: "owner/repo",
+		RuntimeOverride: runtime.ShellRuntime, RuntimeOverrideRef: "printf ok",
+		ShellUpstreamContext: contextJSON,
+	}
+	job, err := (Mailbox{Store: store}).Enqueue(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(job.Payload, "gitmoot-pipeline-upstream-") {
+		t.Fatalf("payload persisted a temporary path: %s", job.Payload)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	reopened, err := store.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := ParseJobPayload(reopened.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.ShellUpstreamContext != contextJSON {
+		t.Fatalf("reopened context = %q, want byte-identical %q", payload.ShellUpstreamContext, contextJSON)
+	}
+
+	adapter := &fakeDelivery{outputs: []string{`{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`}}
+	agent := runtime.Agent{Name: "runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "owner/repo", Role: "runner"}
+	if _, err := (Mailbox{Store: store}).Run(ctx, job.ID, agent, adapter); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(adapter.shellUpstreamContexts, []string{contextJSON}) {
+		t.Fatalf("delivered contexts = %#v", adapter.shellUpstreamContexts)
+	}
+
+	plain, err := (Mailbox{Store: store}).Enqueue(ctx, JobRequest{ID: "job-shell-plain", Agent: "runner", Action: "ask", Repo: "owner/repo", RuntimeOverride: runtime.ShellRuntime, RuntimeOverrideRef: "printf ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.Payload, "shell_upstream_context") {
+		t.Fatalf("omitempty field present on unlabeled job: %s", plain.Payload)
+	}
+}
+
+func TestMailboxShellUpstreamContextFailureRedactsPersistedTempPath(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mailbox := Mailbox{Store: store}
+	secretTempPrefix := filepath.Join(t.TempDir(), "operator-private-temp")
+	t.Setenv("TMPDIR", secretTempPrefix) // Deliberately absent: CreateTemp must fail.
+	if _, err := mailbox.Enqueue(ctx, JobRequest{
+		ID: "job-shell-context-redaction", Agent: "runner", Action: "ask", Repo: "owner/repo",
+		RuntimeOverride: runtime.ShellRuntime, RuntimeOverrideRef: "printf ok",
+		ShellUpstreamContext: `{"schema_version":1,"complete":true,"stages":{}}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent := runtime.Agent{Name: "runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "owner/repo", Role: "runner"}
+	if _, err := mailbox.Run(ctx, "job-shell-context-redaction", agent, runtime.ShellAdapter{}); err == nil {
+		t.Fatal("Run succeeded with an unavailable temp directory")
+	} else if strings.Contains(err.Error(), secretTempPrefix) {
+		t.Fatalf("returned delivery error leaked temp prefix: %v", err)
+	}
+	events, err := store.ListJobEvents(ctx, "job-shell-context-redaction")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted strings.Builder
+	for _, event := range events {
+		persisted.WriteString(event.Message)
+		persisted.WriteByte('\n')
+	}
+	if strings.Contains(persisted.String(), secretTempPrefix) || strings.Contains(persisted.String(), "gitmoot-pipeline-upstream-") {
+		t.Fatalf("persisted failure leaked temporary path:\n%s", persisted.String())
+	}
+	if !strings.Contains(persisted.String(), "upstream context file: <redacted>: create failed") {
+		t.Fatalf("persisted failure lacks redacted context:\n%s", persisted.String())
 	}
 }
 
