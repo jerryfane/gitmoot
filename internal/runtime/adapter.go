@@ -101,9 +101,14 @@ type Job struct {
 	PullRequest int
 	Model       string
 	Effort      string
-	// ShellEnv is an exact list of KEY=value entries injected into shell-stage
-	// subprocesses. Other runtimes ignore it; ordinary shell jobs leave it empty.
+	// ShellEnv is an exact list of KEY=value trigger inputs and stage metadata
+	// injected into shell-stage subprocesses. Other runtimes ignore it; ordinary
+	// shell jobs leave it empty.
 	ShellEnv []string
+	// ShellUpstreamContext is persisted JSON content for a dependent pipeline
+	// shell stage. Shell delivery writes it to a fresh 0600 temporary file and
+	// injects only that path into the subprocess environment.
+	ShellUpstreamContext string
 	// RuntimeDefaultModel is the runtime's configured registry default_model
 	// (#652), threaded in by the dispatch layer from the HOME-AWARE resolved runtime
 	// registry (built-in defaults overlaid with [runtimes.<name>] config). It is the
@@ -1269,14 +1274,31 @@ func (a ShellAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 		return Result{}, errors.New("shell runtime cannot mint a fresh session; provide an explicit session command")
 	}
 	runner := a.runner()
+	env := append([]string(nil), job.ShellEnv...)
+	if job.ShellUpstreamContext != "" {
+		contextFile, err := os.CreateTemp("", "gitmoot-pipeline-upstream-*.json")
+		if err != nil {
+			return Result{}, upstreamContextFileError("create", err)
+		}
+		contextPath := contextFile.Name()
+		defer os.Remove(contextPath)
+		if _, err := contextFile.WriteString(job.ShellUpstreamContext); err != nil {
+			_ = contextFile.Close()
+			return Result{}, upstreamContextFileError("write", err)
+		}
+		if err := contextFile.Close(); err != nil {
+			return Result{}, upstreamContextFileError("close", err)
+		}
+		env = append(env, "GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE="+contextPath)
+	}
 	var result subprocess.Result
 	var err error
-	if len(job.ShellEnv) > 0 {
+	if len(env) > 0 {
 		envRunner, ok := runner.(subprocess.EnvRunner)
 		if !ok {
 			return Result{}, errors.New("shell runtime runner does not support environment injection")
 		}
-		result, err = envRunner.RunEnv(ctx, a.Dir, job.ShellEnv, "sh", "-c", agent.RuntimeRef, "gitmoot", job.Prompt)
+		result, err = envRunner.RunEnv(ctx, a.Dir, env, "sh", "-c", agent.RuntimeRef, "gitmoot", job.Prompt)
 	} else {
 		result, err = runner.Run(ctx, a.Dir, "sh", "-c", agent.RuntimeRef, "gitmoot", job.Prompt)
 	}
@@ -1286,6 +1308,23 @@ func (a ShellAdapter) Deliver(ctx context.Context, agent Agent, job Job) (Result
 		return Result{Raw: result.Stdout + result.Stderr, SessionDiag: newSessionDiag(result, err, "")}, commandError(result, err)
 	}
 	return Result{Raw: result.Stdout, Summary: strings.TrimSpace(result.Stdout), SessionDiag: newSessionDiag(result, nil, "")}, nil
+}
+
+// upstreamContextFileError removes the generated temporary path before an error
+// crosses the adapter boundary. Mailbox persists delivery failures in job history,
+// so wrapping the original *os.PathError would leak a host tempdir and filename.
+// Keep only its underlying errno so errors.Is remains useful without retaining the
+// path-bearing error value or string.
+func upstreamContextFileError(op string, err error) error {
+	cause := err
+	for {
+		var pathErr *os.PathError
+		if !errors.As(cause, &pathErr) || pathErr.Err == nil {
+			break
+		}
+		cause = pathErr.Err
+	}
+	return fmt.Errorf("upstream context file: <redacted>: %s failed: %w", op, cause)
 }
 
 func (a ShellAdapter) Health(ctx context.Context, agent Agent) error {

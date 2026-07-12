@@ -2322,6 +2322,18 @@ exact `GITMOOT_TRIGGER_<UPPERCASE_KEY>` exec environment entries, never shell-so
 interpolation. The full canonical payload is retained in the SQLite run row; job
 env/prompt projections follow normal job-data retention.
 
+Every pipeline shell stage also receives `GITMOOT_PIPELINE_NAME`,
+`GITMOOT_PIPELINE_RUN_ID`, and `GITMOOT_PIPELINE_STAGE_ID`. A dependent shell
+stage receives `GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE`, naming a delivery-scoped
+`0600` JSON tempfile with v1 `schema_version`, `complete`, and a `stages` map of
+settled state/summary records. Each summary's marshaled JSON string is capped at
+16 KiB with rune-safe truncation, and the final marshaled file at 64 KiB;
+`complete:false` or `summary_truncated:true`
+signals partial data. The content is persisted and re-created at a fresh path for
+retries; the file is removed after delivery. Treat summaries as untrusted data,
+never shell source, and keep credentials out of them. A strict consumer can start
+with `jq -e '.schema_version == 1 and .complete == true' "$GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE"`.
+
 `action: produce` (#814/#825) is a sandboxed pipeline leaf for writing operator-owned
 data, never repo/branch/task/PR state. Codex uses its native sandbox; Claude and
 modern Kimi require a successful `gitmoot sandbox probe` and are re-execed under

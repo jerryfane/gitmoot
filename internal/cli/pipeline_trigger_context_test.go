@@ -68,12 +68,21 @@ func TestPipelineTriggerContextReachesEveryAgentStageAndShellUsesEnv(t *testing.
 
 	shell := pipeline.Stage{ID: "shell", Cmd: "printf ok"}
 	req := pipelineStageJobRequest(rec, shell, run, 0, "", pipelineStagePRBinding{}, false)
-	wantEnv := []string{"GITMOOT_TRIGGER_BODY=first\n第二", "GITMOOT_TRIGGER_SUBJECT=Snowman ☃"}
+	wantEnv := []string{
+		"GITMOOT_TRIGGER_BODY=first\n第二",
+		"GITMOOT_TRIGGER_SUBJECT=Snowman ☃",
+		"GITMOOT_PIPELINE_NAME=mail",
+		"GITMOOT_PIPELINE_RUN_ID=prun-1",
+		"GITMOOT_PIPELINE_STAGE_ID=shell",
+	}
 	if !reflect.DeepEqual(req.ShellEnv, wantEnv) {
 		t.Fatalf("shell env = %#v, want %#v", req.ShellEnv, wantEnv)
 	}
 	if req.RuntimeOverrideRef != shell.Cmd {
 		t.Fatalf("payload was interpolated into shell source: %q", req.RuntimeOverrideRef)
+	}
+	if req.ShellUpstreamContext != "" {
+		t.Fatalf("root shell stage upstream context = %q, want empty", req.ShellUpstreamContext)
 	}
 
 	empty := pipelineStageJobRequest(rec, stages[0], db.PipelineRun{ID: "prun-empty", PayloadJSON: "{}"}, 0, "", pipelineStagePRBinding{}, false)

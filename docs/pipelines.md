@@ -151,6 +151,45 @@ environment entries are also retained in the stage job payload, and agent prompt
 context is retained with normal job data. Treat mapped email content as stored
 Gitmoot data and apply the same database/log retention controls.
 
+### Shell-stage upstream context
+
+Every pipeline `cmd` stage receives metadata as exact exec environment entries:
+`GITMOOT_PIPELINE_NAME`, `GITMOOT_PIPELINE_RUN_ID`, and
+`GITMOOT_PIPELINE_STAGE_ID`. When the stage has `needs`, Gitmoot also sets
+`GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE` to a readable `0600` temporary JSON file.
+The file exists only while that delivery is running and is removed after success,
+failure, timeout, or cancellation. Its JSON content, not its temporary path, is
+persisted in the job payload, so restart/retry delivery recreates identical bytes
+at a fresh path. Root stages have no context-file variable. The existing
+`sh -c <cmd> gitmoot <prompt>` argv contract is unchanged.
+
+The versioned schema is:
+
+```json
+{"schema_version":1,"complete":true,"stages":{"extract":{"id":"extract","state":"succeeded","summary":"three records","summary_truncated":false}}}
+```
+
+Stage ids are map keys and JSON bytes are deterministic. Each summary's marshaled
+JSON string is capped at 16 KiB (shrunk on a UTF-8 rune boundary); the final
+marshaled file is capped at 64 KiB. A
+truncated summary sets its `summary_truncated` flag. `complete` is `false` whenever
+any summary was truncated or any expected upstream stage was omitted by the total
+cap, so consumers can fail closed instead of silently processing partial data.
+
+For example, a trusted script can require a complete v1 document before reading a
+summary:
+
+```sh
+jq -e '.schema_version == 1 and .complete == true' \
+  "$GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE" >/dev/null
+summary=$(jq -r '.stages.extract.summary' \
+  "$GITMOOT_PIPELINE_UPSTREAM_CONTEXT_FILE")
+```
+
+Upstream summaries are **untrusted data flowing into your trusted script**. Parse
+them as data; never evaluate them as shell source, and do not put credentials in
+stage summaries.
+
 ### Agent stages
 
 A stage may run a **named managed gitmoot agent** instead of a shell command. There
@@ -693,9 +732,9 @@ These are intentionally out of scope for v1 and tracked as follow-ups:
 - Approval gates / secret stores / an approval UI for a blocked stage (#682) — v1
   ships the manual `pipeline resume` seam.
 - Auto-filing a bug for a failed stage (`show` prints the command; you run it).
-- Arbitrary per-stage env/workdir. (`GITMOOT_TRIGGER_*` inputs for shell stages,
-  agent trigger context, and upstream stage output flowing into a
-  downstream stage's prompt **are** supported — see [Agent stages](#agent-stages).)
+- Arbitrary per-stage env/workdir. (`GITMOOT_TRIGGER_*` inputs, pipeline metadata,
+  the shell upstream-context file, agent trigger context, and upstream stage output
+  flowing into a downstream agent prompt **are** supported.)
 - Gate predicates beyond `pr_merged`, and a `gate` folding on PR-**merged** built into
   the implement stage itself (use a separate `gate` stage).
 - Matrix / dynamic stages, more than one concurrent run per pipeline, pipelines
