@@ -987,6 +987,7 @@ the [PR comment workflow](../workflows/pr-comment-workflow.md).
 gitmoot job list --repo owner/repo   # add --json for machine-readable rows
 gitmoot job show <job-id>            # add --json for the full job + why-stuck detail
 gitmoot job watch <job-id>
+gitmoot job watch <job-id> --transcript [--log-path <path>] [--runtime codex|claude|kimi|kimi-cli|shell]
 gitmoot job events <job-id>
 gitmoot job run <job-id>
 gitmoot job retry <job-id>
@@ -998,6 +999,23 @@ gitmoot job kill <root-job-id>
 gitmoot lock list --repo owner/repo
 gitmoot lock show owner/repo <branch>
 ```
+
+`job watch --transcript` follows a cockpit tee log from offset zero and renders
+redacted, bounded human-readable runtime output until the job settles, then
+drains the file to EOF. It is incompatible with `--json`. Without `--log-path`,
+Gitmoot derives the job-mode path under `<home>/logs/jobs/`; if that file is not
+available, it prints `transcript unavailable; showing job events` and uses the
+normal event watcher. `--log-path` and `--runtime` are primarily cockpit wiring
+flags, but remain usable for diagnosis. When `--runtime` is omitted, the job's
+runtime override wins over the registered agent runtime.
+
+Fidelity follows each runtime's actual output contract: Codex JSONL renders
+live; Kimi stream-json is turn-buffered and kimi-code 0.19.2 reports no usage;
+Claude emits only its final JSON envelope, so its transcript remains quiet until
+completion; shell output passes through as redacted raw lines. Usage is labeled
+`latest reported usage` because resumed Codex counts can be session-cumulative.
+Malformed or unknown lines degrade individually to redacted capped raw output
+without stopping later lines.
 
 ### Resumable gates (make `blocked` + `needs` actionable)
 

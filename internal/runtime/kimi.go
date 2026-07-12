@@ -321,29 +321,9 @@ func kimiPermissionArgs(agent Agent) []string {
 	return args
 }
 
-type kimiStreamEvent struct {
-	Role      string          `json:"role"`
-	Type      string          `json:"type"`
-	Content   json.RawMessage `json:"content"`
-	SessionID string          `json:"session_id"`
-	// Usage carries best-effort token counts when Kimi's stream emits a usage or
-	// result event (#338 Part B). The field set mirrors the common LLM-CLI shape
-	// (input_tokens/output_tokens). It is nil/zero on events that carry no usage,
-	// so a runtime that never reports usage simply contributes 0 to the budget.
-	Usage *kimiUsage `json:"usage"`
-}
-
-type kimiContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
 // kimiUsage holds the best-effort token counts extracted from a Kimi stream-json
 // usage/result event. Counts default to 0 when the stream omits usage.
-type kimiUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-}
+type kimiUsage = StreamUsage
 
 // parseKimiStreamJSON reads Kimi's --output-format stream-json JSONL output and
 // returns the concatenated assistant content, the session id from the resume hint
@@ -370,8 +350,8 @@ func parseKimiStreamJSON(output string) (string, string, kimiUsage, error) {
 		if line == "" {
 			continue
 		}
-		var event kimiStreamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
+		event, err := ExtractKimiStreamEvent(line)
+		if err != nil {
 			continue
 		}
 		if event.Usage != nil {
@@ -379,7 +359,7 @@ func parseKimiStreamJSON(output string) (string, string, kimiUsage, error) {
 		}
 		switch event.Role {
 		case "assistant":
-			if content := kimiEventContentText(event.Content); content != "" {
+			if content := event.ContentText; content != "" {
 				contentParts = append(contentParts, content)
 			}
 		case "meta":
@@ -395,24 +375,7 @@ func parseKimiStreamJSON(output string) (string, string, kimiUsage, error) {
 }
 
 func kimiEventContentText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var text string
-	if err := json.Unmarshal(raw, &text); err == nil {
-		return text
-	}
-	var parts []kimiContentPart
-	if err := json.Unmarshal(raw, &parts); err != nil {
-		return ""
-	}
-	var b strings.Builder
-	for _, part := range parts {
-		if part.Type == "text" {
-			b.WriteString(part.Text)
-		}
-	}
-	return b.String()
+	return extractKimiContentText(raw)
 }
 
 func isKimiSessionID(ref string) bool {

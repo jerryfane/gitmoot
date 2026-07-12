@@ -954,6 +954,14 @@ its progress; children inherit the cockpit setting from their parent, so one
 `--cockpit` on the root lights up the whole orchestra. The same panes are visible
 in the terminal (open the Herdr workspace) and on Telegram via the herdres bridge.
 
+The pane reads the cockpit-only tee log through `job watch --transcript`; this
+does not alter runtime invocation, result parsing, or the pipeline progress
+stream. Codex JSONL is readable live. Kimi stream-json is turn-buffered (and
+kimi-code 0.19.2 emits no usage). Claude currently emits one final JSON envelope,
+so its pane remains quiet until completion and then shows final text and usage.
+Shell output is redacted raw passthrough. Unknown or malformed lines fail open
+one line at a time; a fatal renderer exit falls back externally to `tail -F`.
+
 A cockpit pane is a **view, not the job**: closing a pane (in the terminal or
 from Telegram) tears down the visible surface but does NOT cancel the underlying
 job — the child keeps running and its result is still synthesized. To stop work,

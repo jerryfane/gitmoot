@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jerryfane/gitmoot/internal/cockpit"
 	"github.com/jerryfane/gitmoot/internal/config"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/runtime"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
@@ -229,6 +233,148 @@ func TestRunJobWatchJSON(t *testing.T) {
 	}
 	if decoded.Job.ID != "job-watch-json" || decoded.Job.State != string(workflow.JobFailed) || len(decoded.Events) != 1 || decoded.Events[0].Kind != string(workflow.JobFailed) {
 		t.Fatalf("decoded watch output = %+v", decoded)
+	}
+}
+
+func TestRunJobWatchTranscriptRejectsJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"job", "watch", "job", "--transcript", "--json"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--transcript is incompatible with --json") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunJobWatchTranscriptFallsBackWhenDerivedLogMissing(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	seedCLIJob(t, store, db.Job{
+		ID:      "job-no-transcript",
+		Agent:   "audit",
+		Type:    "ask",
+		State:   string(workflow.JobSucceeded),
+		Payload: mustJobPayload(t, workflow.JobPayload{Repo: "owner/repo"}),
+	}, "succeeded")
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"job", "watch", "job-no-transcript", "--home", home, "--transcript", "--poll", "1ms"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"transcript unavailable; showing job events", "succeeded\tsucceeded", "state: succeeded"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("fallback output missing %q: %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunJobWatchTranscriptRendersExplicitShellLog(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	seedCLIJob(t, store, db.Job{
+		ID:      "job-transcript",
+		Agent:   "audit",
+		Type:    "ask",
+		State:   string(workflow.JobSucceeded),
+		Payload: mustJobPayload(t, workflow.JobPayload{Repo: "owner/repo"}),
+	}, "succeeded")
+	store.Close()
+	logPath := filepath.Join(home, "cockpit shell.log")
+	if err := os.WriteFile(logPath, []byte("working\ndone without newline"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"job", "watch", "job-transcript", "--home", home, "--transcript", "--log-path", logPath, "--runtime", runtime.ShellRuntime, "--poll", "1ms"}, &stdout, &stderr)
+	if code != 0 || stdout.String() != "working\ndone without newline\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestResolveTranscriptRuntimeOrder(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if err := store.UpsertAgent(context.Background(), db.Agent{Name: "audit", Runtime: runtime.ClaudeRuntime}); err != nil {
+		t.Fatal(err)
+	}
+	job := db.Job{ID: "runtime-order", Agent: "audit"}
+	payload := workflow.JobPayload{RuntimeOverride: runtime.CodexRuntime}
+	got, err := resolveTranscriptRuntime(context.Background(), store, job, payload, "")
+	if err != nil || got != runtime.CodexRuntime {
+		t.Fatalf("payload override runtime = %q, err=%v", got, err)
+	}
+	got, err = resolveTranscriptRuntime(context.Background(), store, job, payload, runtime.KimiRuntime)
+	if err != nil || got != runtime.KimiRuntime {
+		t.Fatalf("explicit runtime = %q, err=%v", got, err)
+	}
+	got, err = resolveTranscriptRuntime(context.Background(), store, job, workflow.JobPayload{}, "")
+	if err != nil || got != runtime.ClaudeRuntime {
+		t.Fatalf("agent runtime = %q, err=%v", got, err)
+	}
+}
+
+func TestJobWatchTranscriptShellNoLLME2E(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("HERDR_SOCKET_PATH", filepath.Join(t.TempDir(), "absent-herdr.sock"))
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if err := store.UpsertAgent(context.Background(), db.Agent{Name: "shell-seat", Runtime: runtime.ShellRuntime}); err != nil {
+		t.Fatal(err)
+	}
+	payload := workflow.JobPayload{Repo: "owner/repo", RawOutputs: []string{"sentinel-result"}}
+	seedCLIJob(t, store, db.Job{
+		ID:      "job-shell-e2e",
+		Agent:   "shell-seat",
+		Type:    "ask",
+		State:   string(workflow.JobRunning),
+		Payload: mustJobPayload(t, payload),
+	}, "running")
+	logPath := filepath.Join(config.PathsForHome(home).Logs, "jobs", cockpit.SafeLogName("job-shell-e2e")+".log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("shell started\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	writerDone := make(chan error, 1)
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+		if err == nil {
+			_, err = file.WriteString("{corrupted runtime bytes\nshell done")
+			if closeErr := file.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		if err == nil {
+			err = store.UpdateJobState(context.Background(), "job-shell-e2e", string(workflow.JobSucceeded))
+		}
+		writerDone <- err
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"job", "watch", "job-shell-e2e", "--home", home, "--transcript", "--poll", "1ms"}, &stdout, &stderr)
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"shell started", "{corrupted runtime bytes", "shell done"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("live transcript missing %q: %q", want, stdout.String())
+		}
+	}
+	job, err := store.GetJob(context.Background(), "job-shell-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := daemonJobPayload(job)
+	if err != nil || len(decoded.RawOutputs) != 1 || decoded.RawOutputs[0] != "sentinel-result" {
+		t.Fatalf("job result payload changed: payload=%+v err=%v", decoded, err)
 	}
 }
 

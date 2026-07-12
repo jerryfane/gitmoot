@@ -128,6 +128,7 @@ type JobMeta struct {
 	JobID     string
 	RootJobID string
 	Agent     string
+	Runtime   string
 	Action    string
 	Branch    string
 	Worktree  string
@@ -519,17 +520,18 @@ func (a *paneAdapter) workspaceRoot() string {
 	return a.meta.JobID
 }
 
-// watchCommand is the pane payload. In P1 (Task 6), when the daemon tees the
-// child's live stdout/stderr into a per-job log (meta.LogPath set), the pane
-// tails that file so real output appears live: `tail -n +1 -F <log>` (-n +1
-// replays from the start so output written before the pane attached is not lost;
-// -F keeps following across the truncate-on-start and any rotation). With no log
-// (LogPath empty — herdr unavailable on the wrapping path, or a log that could
-// not be created) it falls back to the P0 `gitmoot job watch` command, so
-// behavior is unchanged.
+// watchCommand is the pane payload. When a cockpit tee log is available, the
+// pane runs the human-readable transcript renderer. An external tail fallback
+// covers fatal renderer exits and panics. Without a log, the original event
+// watcher remains the best-effort fallback.
 func (a *paneAdapter) watchCommand() string {
 	if a.meta.LogPath != "" {
-		return fmt.Sprintf("tail -n +1 -F %s", shellQuote(a.meta.LogPath))
+		path := shellQuote(a.meta.LogPath)
+		cmd := fmt.Sprintf("%s job watch %s --transcript --log-path %s --runtime %s", a.cockpit.gitmootBin, a.meta.JobID, path, a.meta.Runtime)
+		if a.cockpit.home != "" {
+			cmd += fmt.Sprintf(" --home %s", a.cockpit.home)
+		}
+		return cmd + fmt.Sprintf(" || exec tail -n +1 -F %s", path)
 	}
 	cmd := fmt.Sprintf("%s job watch %s", a.cockpit.gitmootBin, a.meta.JobID)
 	if a.cockpit.home != "" {
