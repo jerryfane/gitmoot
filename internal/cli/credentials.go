@@ -69,9 +69,11 @@ func curatedJobRunner(home string, runtimeName string) (subprocess.Runner, error
 		if err != nil {
 			return nil, fmt.Errorf("create GitHub credential scratch: %w", err)
 		}
-		if err := os.Chmod(scratch, 0o700); err != nil {
-			_ = os.RemoveAll(scratch)
-			return nil, fmt.Errorf("chmod GitHub credential scratch: %w", err)
+		// Only the random path name is reserved here; the runner recreates the
+		// directory 0700 for each subprocess and removes it afterwards. Removing
+		// it now means an adapter that is built but never run leaks nothing.
+		if err := os.RemoveAll(scratch); err != nil {
+			return nil, fmt.Errorf("reset GitHub credential scratch: %w", err)
 		}
 	}
 	baseEnv := curatedRuntimeBaseEnv(cfg, runtimeName, os.Environ(), scratch)

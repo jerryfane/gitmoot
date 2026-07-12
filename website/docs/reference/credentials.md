@@ -43,7 +43,10 @@ Runtime-specific additions are:
 variables such as `GOCACHE` are not in the base list. Add non-secret operational
 variables with `env_passthrough`. Each entry is an exact name or a single
 trailing-`*` prefix glob, such as `GOCACHE` or `NPM_*`. Names containing `=` or
-NUL and non-trailing `*` forms are rejected.
+NUL and non-trailing `*` forms are rejected. A bare `*` entry is legal and
+passes every ambient variable through (except denied GitHub credentials) --
+that keeps GitHub denial while giving up the rest of the curation boundary,
+so treat it as a deliberate escape hatch, not a default.
 
 ## GitHub denial and opt-out
 

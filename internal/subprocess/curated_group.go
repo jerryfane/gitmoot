@@ -41,10 +41,12 @@ func (r CuratedGroupRunner) LookPath(file string) (string, error) {
 }
 
 func (r CuratedGroupRunner) run(ctx context.Context, dir string, extraEnv []string, out io.Writer, command string, args ...string) (Result, error) {
+	// Cleanup is registered before prepare so a partial prepare failure still
+	// removes whatever was created instead of leaking scratch directories.
+	defer r.cleanupScratch()
 	if err := r.prepareScratch(); err != nil {
 		return Result{Command: command, Args: args}, err
 	}
-	defer r.cleanupScratch()
 	env := make([]string, 0, len(r.BaseEnv)+len(extraEnv))
 	env = append(env, r.BaseEnv...)
 	env = append(env, extraEnv...)
