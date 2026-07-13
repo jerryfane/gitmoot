@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/creachadair/tomledit v0.0.29
-	github.com/jerryfane/gitmoot-dashboard v0.0.0-20260713150550-e58f7ee28975
+	github.com/jerryfane/gitmoot-dashboard v0.0.0-20260713163639-05d0475c1fdc
 	github.com/landlock-lsm/go-landlock v0.9.0
 	github.com/muesli/termenv v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
