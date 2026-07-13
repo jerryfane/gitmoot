@@ -57,6 +57,18 @@ type DashboardAutoWorkflow struct {
 	Repos   []string
 }
 
+const dashboardChangeCursorSQL = `SELECT
+	COALESCE((SELECT MAX(id) FROM job_events), 0),
+	COALESCE((SELECT MAX(id) FROM workflow_notes), 0)`
+
+// DashboardChangeCursor returns the two monotonic row ids that invalidate
+// dashboard views. Both maxima are read in one statement so a poll is one cheap
+// SQLite round trip and an empty store has the stable cursor components 0, 0.
+func (s *Store) DashboardChangeCursor(ctx context.Context) (jobEventID, workflowNoteID int64, err error) {
+	err = s.db.QueryRowContext(ctx, dashboardChangeCursorSQL).Scan(&jobEventID, &workflowNoteID)
+	return jobEventID, workflowNoteID, err
+}
+
 func (s *Store) ListDashboardTasks(ctx context.Context, mergedSince string) ([]DashboardTaskRow, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.title, t.repo_full_name, t.state,
 		COALESCE((SELECT bl.owner FROM branch_locks bl
