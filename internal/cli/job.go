@@ -8,12 +8,16 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jerryfane/gitmoot/internal/cockpit"
 	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/jerryfane/gitmoot/internal/transcript"
 	"github.com/jerryfane/gitmoot/internal/workflow"
 )
 
@@ -59,7 +63,7 @@ func printJobUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot job list [--repo owner/repo] [--state state] [--workflow label] [--json]")
 	fmt.Fprintln(w, "  gitmoot job show <id> [--json]")
 	fmt.Fprintln(w, "  gitmoot job events <id>")
-	fmt.Fprintln(w, "  gitmoot job watch <id> [--poll 1s] [--json]")
+	fmt.Fprintln(w, "  gitmoot job watch <id> [--poll 1s] [--json] [--transcript [--log-path path] [--runtime runtime]]")
 	fmt.Fprintln(w, "  gitmoot job run <id>")
 	fmt.Fprintln(w, "  gitmoot job retry <id>")
 	fmt.Fprintln(w, "  gitmoot job gates <id> [--json]")
@@ -332,6 +336,9 @@ func runJobWatch(args []string, stdout, stderr io.Writer) int {
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	poll := fs.Duration("poll", time.Second, "poll interval")
 	jsonOutput := fs.Bool("json", false, "print final job and events as JSON")
+	transcriptOutput := fs.Bool("transcript", false, "render the cockpit tee log as a human-readable transcript")
+	logPath := fs.String("log-path", "", "cockpit-internal transcript log path")
+	runtimeName := fs.String("runtime", "", "cockpit-internal transcript runtime")
 	jobID, ok := parseSingleJobID(fs, args, stderr, "job watch")
 	if !ok {
 		return parseSingleJobIDExitCode(args)
@@ -340,8 +347,19 @@ func runJobWatch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "job watch poll interval must be positive")
 		return 2
 	}
+	if *transcriptOutput && *jsonOutput {
+		fmt.Fprintln(stderr, "job watch: --transcript is incompatible with --json")
+		return 2
+	}
+	if *transcriptOutput {
+		return runJobTranscriptWatch(jobID, *home, *logPath, *runtimeName, *poll, stdout, stderr)
+	}
+	return runJobEventWatch(jobID, *home, *poll, *jsonOutput, stdout, stderr)
+}
+
+func runJobEventWatch(jobID, home string, poll time.Duration, jsonOutput bool, stdout, stderr io.Writer) int {
 	var output jobWatchOutput
-	if err := withStore(*home, func(store *db.Store) error {
+	if err := withStore(home, func(store *db.Store) error {
 		nextEvent := 0
 		for {
 			job, err := store.GetJob(context.Background(), jobID)
@@ -355,7 +373,7 @@ func runJobWatch(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				return err
 			}
-			if !*jsonOutput {
+			if !jsonOutput {
 				for nextEvent < len(events) {
 					event := events[nextEvent]
 					fmt.Fprintf(stdout, "%s\t%s\n", event.Kind, event.Message)
@@ -366,13 +384,13 @@ func runJobWatch(args []string, stdout, stderr io.Writer) int {
 				output = jobWatchOutput{Job: job, Events: events}
 				return nil
 			}
-			time.Sleep(*poll)
+			time.Sleep(poll)
 		}
 	}); err != nil {
 		fmt.Fprintf(stderr, "job watch: %v\n", err)
 		return 1
 	}
-	if *jsonOutput {
+	if jsonOutput {
 		if err := writeJSON(stdout, output); err != nil {
 			fmt.Fprintf(stderr, "job watch: %v\n", err)
 			return 1
@@ -381,6 +399,95 @@ func runJobWatch(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "state: %s\n", output.Job.State)
 	return 0
+}
+
+func runJobTranscriptWatch(jobID, home, requestedLogPath, requestedRuntime string, poll time.Duration, stdout, stderr io.Writer) int {
+	logPath := strings.TrimSpace(requestedLogPath)
+	if logPath == "" {
+		paths, err := pathsFromFlag(home)
+		if err != nil {
+			fmt.Fprintf(stderr, "job watch transcript: %v\n", err)
+			return 1
+		}
+		logPath = filepath.Join(paths.Logs, "jobs", cockpit.SafeLogName(jobID)+".log")
+		if _, err := os.Stat(logPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintln(stdout, "transcript unavailable; showing job events")
+				return runJobEventWatch(jobID, home, poll, false, stdout, stderr)
+			}
+			fmt.Fprintf(stderr, "job watch transcript: stat log: %v\n", err)
+			return 1
+		}
+	}
+
+	var translator transcript.Translator
+	renderer := transcript.NewRenderer(stdout)
+	err := withStore(home, func(store *db.Store) error {
+		job, err := store.GetJob(context.Background(), jobID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("job %q not found", jobID)
+			}
+			return err
+		}
+		payload, err := daemonJobPayload(job)
+		if err != nil {
+			return err
+		}
+		runtimeName, err := resolveTranscriptRuntime(context.Background(), store, job, payload, requestedRuntime)
+		if err != nil {
+			return err
+		}
+		translator, err = transcript.NewTranslator(runtimeName)
+		if err != nil {
+			return err
+		}
+		return transcript.Follow(context.Background(), logPath, transcript.FollowOptions{
+			PollInterval: poll,
+			Settled: func(ctx context.Context) (bool, error) {
+				current, err := store.GetJob(ctx, jobID)
+				if err != nil {
+					return false, err
+				}
+				return workflow.IsSettledJobState(current.State), nil
+			},
+		}, func(line string) error {
+			return renderer.Render(translator.Translate(line)...)
+		})
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "job watch transcript: %v\n", err)
+		return 1
+	}
+	if err := renderer.Render(translator.Flush()...); err != nil {
+		fmt.Fprintf(stderr, "job watch transcript: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func resolveTranscriptRuntime(ctx context.Context, store *db.Store, job db.Job, payload workflow.JobPayload, requested string) (string, error) {
+	if runtimeName := strings.TrimSpace(requested); runtimeName != "" {
+		return runtimeName, nil
+	}
+	if runtimeName := strings.TrimSpace(payload.RuntimeOverride); runtimeName != "" {
+		return runtimeName, nil
+	}
+	agent, err := store.GetAgent(ctx, job.Agent)
+	if err == nil {
+		if runtimeName := strings.TrimSpace(agent.Runtime); runtimeName != "" {
+			return runtimeName, nil
+		}
+	}
+	if payload.Ephemeral != nil {
+		if runtimeName := strings.TrimSpace(payload.Ephemeral.Runtime); runtimeName != "" {
+			return runtimeName, nil
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve runtime for agent %q: %w", job.Agent, err)
+	}
+	return "", fmt.Errorf("resolve runtime for agent %q: runtime is empty", job.Agent)
 }
 
 func runJobRun(args []string, stdout, stderr io.Writer) int {

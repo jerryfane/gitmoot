@@ -5808,6 +5808,7 @@ func cockpitJobMeta(job db.Job, payload workflow.JobPayload, agent runtime.Agent
 		JobID:     job.ID,
 		RootJobID: root,
 		Agent:     agent.Name,
+		Runtime:   agent.Runtime,
 		Action:    job.Type,
 		Branch:    payload.Branch,
 		Worktree:  checkout,
@@ -5845,9 +5846,14 @@ func (w jobWorker) cockpitTeeAdapter(agent runtime.Agent, checkout string, jobID
 	// the live tail silently falls back to the P0 pane. A flat slug keeps it one
 	// file in this dir (no deep per-job dir trees).
 	logPath := filepath.Join(dir, cockpit.SafeLogName(jobID)+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		writeLine(w.Stdout, "job %s cockpit log create failed: %v", jobID, err)
+		return nil, "", nil
+	}
+	if err := logFile.Chmod(0o600); err != nil {
+		_ = logFile.Close()
+		writeLine(w.Stdout, "job %s cockpit log chmod failed: %v", jobID, err)
 		return nil, "", nil
 	}
 	return w.cockpitTeeOnFile(agent, checkout, jobID, logPath, logFile, additionalOutput...)
@@ -5859,7 +5865,7 @@ func (w jobWorker) cockpitTeeAdapter(agent runtime.Agent, checkout string, jobID
 // the file and returns nils so the caller falls back to the P0 pane.
 func (w jobWorker) cockpitTeeOnFile(agent runtime.Agent, checkout, jobID, logPath string, logFile *os.File, additionalOutput ...io.Writer) (workflow.DeliveryAdapter, string, *os.File) {
 	outputs := append([]io.Writer{logFile}, additionalOutput...)
-	adapter, err := buildRuntimeAdapter(agent, checkout, subprocess.TeeRunner{Inner: subprocess.GroupRunner{}, Out: runtimeOutputWriter(outputs...)})
+	adapter, err := buildRuntimeAdapter(w.ConfigHome, agent, checkout, subprocess.TeeRunner{Inner: subprocess.GroupRunner{}, Out: runtimeOutputWriter(outputs...)})
 	if err != nil {
 		// Unsupported runtime: this should never happen (AdapterFactory already
 		// built one above), but stay fail-open rather than leak the open file.
@@ -5901,9 +5907,14 @@ func (w jobWorker) cockpitSeatLogAdapter(cp *cockpit.Cockpit, agent runtime.Agen
 		writeLine(w.Stdout, "job %s cockpit seat log dir create failed: %v", jobID, err)
 		return nil, "", nil
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		writeLine(w.Stdout, "job %s cockpit seat log open failed: %v", jobID, err)
+		return nil, "", nil
+	}
+	if err := logFile.Chmod(0o600); err != nil {
+		_ = logFile.Close()
+		writeLine(w.Stdout, "job %s cockpit seat log chmod failed: %v", jobID, err)
 		return nil, "", nil
 	}
 	return w.cockpitTeeOnFile(agent, checkout, jobID, logPath, logFile, additionalOutput...)
@@ -6834,11 +6845,11 @@ func (w jobWorker) refreshImplementedPayloadForRetry(ctx context.Context, job db
 }
 
 func (w jobWorker) defaultAdapter(agent runtime.Agent, checkout string) (workflow.DeliveryAdapter, error) {
-	return buildRuntimeAdapter(agent, checkout, nil)
+	return buildRuntimeAdapter(w.ConfigHome, agent, checkout, nil)
 }
 
 func (w jobWorker) outputAdapter(agent runtime.Agent, checkout string, out io.Writer) (workflow.DeliveryAdapter, error) {
-	return buildRuntimeAdapter(agent, checkout, subprocess.TeeRunner{Inner: subprocess.GroupRunner{}, Out: runtimeOutputWriter(out)})
+	return buildRuntimeAdapter(w.ConfigHome, agent, checkout, subprocess.TeeRunner{Inner: subprocess.GroupRunner{}, Out: runtimeOutputWriter(out)})
 }
 
 // buildSeatAwareAdapter builds the job's runtime adapter, injecting the #732 chat
@@ -6885,7 +6896,7 @@ func (w jobWorker) buildSeatAwareAdapter(agent *runtime.Agent, checkout string, 
 	// Elevate ONLY now that the seat will get a working relay env (see the coupling
 	// rationale above). Mutates the caller's agent so RunJob delivers with ChatSeat.
 	agent.ChatSeat = true
-	adapter, err := buildRuntimeAdapter(*agent, checkout, subprocess.EnvInjectingRunner{Env: relayEnv})
+	adapter, err := buildRuntimeAdapter(w.ConfigHome, *agent, checkout, subprocess.EnvInjectingRunner{Env: relayEnv})
 	if err != nil {
 		agent.ChatSeat = false
 		w.RelayServer.ReleaseSeat(token)
@@ -6894,14 +6905,18 @@ func (w jobWorker) buildSeatAwareAdapter(agent *runtime.Agent, checkout string, 
 	return adapter, token, nil
 }
 
-// buildRuntimeAdapter constructs the concrete runtime adapter for a job. A nil
-// runner leaves the adapter's Runner unset, so it falls through to the
-// process-group GroupRunner{} via the adapter's runner() — byte-identical to the
-// non-cockpit path. The cockpit path (Task 6) passes a non-nil tee runner so the
-// child's stdout/stderr is also streamed live into the per-job log the pane
-// tails; the tee preserves group-kill (its inner is GroupRunner{}) and returns
-// the same buffered Result, so result capture, locks, and signals are unchanged.
-func buildRuntimeAdapter(agent runtime.Agent, checkout string, runner subprocess.Runner) (workflow.DeliveryAdapter, error) {
+// buildRuntimeAdapter constructs the concrete runtime adapter for a job. With
+// credential curation off, a nil runner remains nil and the adapter falls through
+// to GroupRunner exactly as before. With curation on, runtimeJobRunner installs
+// the curated process-group base beneath any tee, relay, or Landlock wrapper. The
+// wrappers still append their environment last and preserve result capture,
+// cancellation, and live output.
+func buildRuntimeAdapter(home string, agent runtime.Agent, checkout string, runner subprocess.Runner) (workflow.DeliveryAdapter, error) {
+	var err error
+	runner, err = runtimeJobRunner(home, agent.Runtime, runner)
+	if err != nil {
+		return nil, err
+	}
 	if len(agent.WritablePaths) > 0 && (agent.Runtime == runtime.ClaudeRuntime || agent.Runtime == runtime.KimiRuntime) {
 		paths, env, err := produceRuntimeSandboxGrants(agent.Runtime, agent.WritablePaths)
 		if err != nil {
@@ -6926,7 +6941,7 @@ func buildRuntimeAdapter(agent runtime.Agent, checkout string, runner subprocess
 }
 
 func (w jobWorker) defaultStartAdapter(runtimeName string, checkout string) (runtime.Adapter, error) {
-	return runtimeStartAdapter(newRuntimeFactory(), runtimeName, checkout)
+	return runtimeAdapterFor(w.ConfigHome, runtimeName, checkout)
 }
 
 func (w jobWorker) defaultWorkflow(checkout string) workflow.Engine {

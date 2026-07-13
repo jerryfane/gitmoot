@@ -42,6 +42,7 @@ func (d *webDataSource) Pipelines(ctx context.Context) ([]dashboard.PipelineSumm
 				Name:       p.Name,
 				Repo:       p.Repo,
 				Enabled:    p.Enabled,
+				Mode:       pipelineDisplayMode(p),
 				Interval:   p.Interval,
 				Jitter:     p.Jitter,
 				StageCount: pipelineStageCount(p.SpecYAML),
@@ -161,6 +162,14 @@ func (d *webDataSource) PipelineRun(ctx context.Context, id string) (dashboard.P
 				if len(spec.Needs) > 0 {
 					stage.Deps = append([]string(nil), spec.Needs...)
 				}
+				// #873 display metadata, under the same spec gate as cmd/deps: the
+				// stage kind badge and (when the agent is registered) its runtime.
+				stage.Kind = pipelineStageKindName(spec)
+				if name := strings.TrimSpace(spec.Agent); name != "" {
+					if agent, aerr := store.GetAgent(ctx, name); aerr == nil {
+						stage.AgentRuntime = strings.TrimSpace(agent.Runtime)
+					}
+				}
 			}
 			if row.State == pipeline.StageRunning {
 				if event, ok := progressByJobID[row.JobID]; ok {
@@ -213,13 +222,20 @@ func (d *webDataSource) PipelineDetail(ctx context.Context, name string) (dashbo
 		spec, specParsed := pipeline.Spec{}, false
 		if loaded, lerr := pipeline.Load([]byte(rec.SpecYAML)); lerr == nil {
 			spec, specParsed = loaded, true
+			// Agent runtimes resolve best-effort so the declared preview can label
+			// agent stages even for a pipeline that has never run (#873).
+			agents := pipelineStageAgents(ctx, store, rec)
 			out.Declared = make([]dashboard.PipelineStage, 0, len(spec.Stages))
 			for _, s := range spec.Stages {
 				stage := dashboard.PipelineStage{
 					ID:    s.ID,
 					State: pipeline.StagePending,
+					Kind:  pipelineStageKindName(s),
 					Cmd:   s.Cmd,
 					Retry: s.Retry,
+				}
+				if agent, ok := agents[strings.TrimSpace(s.Agent)]; ok {
+					stage.AgentRuntime = strings.TrimSpace(agent.Runtime)
 				}
 				if len(s.Needs) > 0 {
 					stage.Deps = append([]string(nil), s.Needs...)

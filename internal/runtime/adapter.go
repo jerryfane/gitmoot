@@ -84,6 +84,9 @@ type Agent struct {
 	// marshaled to the wire. Empty means "fall back to RepoScope" (unchanged
 	// legacy behavior for callers that never set it).
 	WorkingDir string
+	// ConfigHome is the raw --home value used only when constructing a runtime
+	// adapter for one-shot/SkillOpt deliveries. It is in-memory only.
+	ConfigHome string
 	// WritablePaths are additive runtime workspace grants for an action: produce
 	// pipeline stage. Codex enforces them itself; Claude/Kimi receive matching
 	// --add-dir hints while Gitmoot's Landlock wrapper provides hard enforcement.
@@ -1190,19 +1193,6 @@ func (a ClaudeAdapter) claudeSessionMissingError(agent Agent, result subprocess.
 		agent.Name, ClaudeSessionMissingMessage, claudeCommandError(result, err))
 }
 
-// claudeJSONResult mirrors the relevant fields of the Claude Code
-// --output-format json result envelope. The CLI emits a single JSON object whose
-// "result" holds the assistant's final text and whose "usage" object carries the
-// token counts. We read only what the budget and summary need and ignore the rest
-// (cost, session id, tool stats, …) so unrelated schema additions are harmless.
-type claudeJSONResult struct {
-	Result string `json:"result"`
-	Usage  struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
-}
-
 // parseClaudeJSONResult extracts the assistant summary and best-effort token
 // usage from a Claude Code --output-format json envelope. It returns ("", 0, 0)
 // when stdout is not the JSON envelope (e.g. the --output-format json fallback to
@@ -1210,8 +1200,8 @@ type claudeJSONResult struct {
 // the token budget. Usage capture is best-effort: a missing "usage" object leaves
 // the counts at 0 rather than erroring.
 func parseClaudeJSONResult(stdout string) (summary string, inputTokens int, outputTokens int) {
-	var payload claudeJSONResult
-	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+	payload, err := ExtractClaudeResultEnvelope(stdout)
+	if err != nil {
 		return "", 0, 0
 	}
 	return payload.Result, payload.Usage.InputTokens, payload.Usage.OutputTokens
@@ -1414,11 +1404,6 @@ func parseCodexErrorMessage(output string) string {
 // input_tokens already includes cached_input_tokens, so we read only the billed
 // input/output totals and deliberately ignore cached_input_tokens and
 // reasoning_output_tokens — the per-root delegation token budget sums those two.
-type codexUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-}
-
 // parseCodexJSONResult extracts the deliverable text and best-effort token usage
 // from codex `exec --json` JSONL output. It joins the .text of every
 // item.completed agent_message event with a blank line (the agent's full reply,
@@ -1440,21 +1425,14 @@ func parseCodexJSONResult(output string) (raw string, inputTokens int, outputTok
 		if line == "" {
 			continue
 		}
-		var event struct {
-			Type string `json:"type"`
-			Item struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"item"`
-			Usage codexUsage `json:"usage"`
-		}
-		if json.Unmarshal([]byte(line), &event) != nil {
+		event, err := ExtractCodexStreamEvent(line)
+		if err != nil {
 			continue
 		}
 		switch event.Type {
 		case "item.completed":
-			if event.Item.Type == "agent_message" {
-				messages = append(messages, event.Item.Text)
+			if event.ItemType == "agent_message" {
+				messages = append(messages, event.Text)
 			}
 		case "turn.completed":
 			inputTokens = event.Usage.InputTokens

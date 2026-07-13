@@ -115,6 +115,51 @@ A `[runtimes.<name>]` section can only tweak a **built-in** runtime's metadata; 
 cannot add a new first-class runtime (that requires a code change). An unknown
 runtime name is a config error surfaced by `gitmoot runtime list`.
 
+## Runtime Ambient Credential Hygiene
+
+Runtime-child environment curation is off by default. Enable it in
+`config.toml`:
+
+```toml
+[credentials]
+env_curation = true
+env_passthrough = ["GOCACHE", "NPM_*"]
+github = "deny"
+```
+
+With `env_curation = false`, runtime subprocesses inherit the full foreground or
+daemon environment exactly as before. With it enabled, the base allowlist is:
+`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TMP`, `TEMP`, `TZ`,
+`LANG`, `LANGUAGE`, `TERM`, `COLORTERM`, `NO_COLOR`, all `LC_*` names,
+`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`GOTOOLCHAIN`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`,
+`GIT_COMMITTER_EMAIL`, and `GITMOOT_HOME`.
+
+Codex additionally receives `CODEX_HOME`. Claude receives the transitional P1
+exceptions `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CONFIG_DIR`. Kimi, legacy `kimi-cli`, and
+shell add nothing. Gitmoot-owned relay, shell-stage, pipeline, and upstream-file
+variables are appended after the base and remain available.
+
+`env_passthrough` accepts exact names or a single trailing-`*` prefix glob.
+Names containing `=` or NUL and non-trailing `*` forms are invalid. The base
+deliberately excludes `SSH_AUTH_SOCK`, proxy variables, GitHub variables, and
+toolchain caches such as `GOCACHE`; pass through required non-secret operational
+variables explicitly.
+
+With curation enabled, `github = "deny"` is the default. All ambient `GH_*` and
+`GITHUB_*` values are omitted, including the four token variables. Gitmoot sets
+`GH_PROMPT_DISABLED=1` and gives each delivery a fresh empty `0700`
+`GH_CONFIG_DIR`, removed when the runtime exits on success, failure, timeout, or
+cancellation. `github = "inherit"` is the explicit opt-out: ambient `GH_*` and
+`GITHUB_*` variables pass through and Gitmoot adds neither GitHub variable.
+
+This is ambient credential hygiene/denial, not egress confinement or a proxy.
+There are no placeholder tokens or proxy changes. Credential files visible on
+disk remain readable under the current Landlock read-only `/` policy; SSH keys,
+SSH agents, credential helpers, and direct network access are untouched. Proxy
+enforcement is P2 and narrower Landlock read rules are P3.
+
 ## Runtime Launch Sandbox
 
 ```sh
@@ -1088,6 +1133,7 @@ PR-comment-only).
 gitmoot job list --repo owner/repo   # add --json for machine-readable rows
 gitmoot job show <job-id>            # add --json for the full job + why-stuck detail
 gitmoot job watch <job-id>
+gitmoot job watch <job-id> --transcript [--log-path <path>] [--runtime codex|claude|kimi|kimi-cli|shell]
 gitmoot job events <job-id>
 gitmoot job retry <job-id>
 gitmoot job gates <job-id>                                         # list resumable gates; add --json
@@ -1098,6 +1144,29 @@ gitmoot job kill <root-job-id>
 gitmoot lock list --repo owner/repo
 gitmoot lock show owner/repo <branch>
 ```
+
+`job watch --transcript` follows a cockpit tee log from offset zero and renders
+redacted, bounded human-readable runtime output until the job settles, then
+drains the file to EOF. It is incompatible with `--json`. Without `--log-path`,
+Gitmoot derives the job-mode path under `<home>/logs/jobs/`; if that file is not
+available, it prints `transcript unavailable; showing job events` and uses the
+normal event watcher. `--log-path` and `--runtime` are primarily cockpit wiring
+flags, but remain usable for diagnosis. When `--runtime` is omitted, the job's
+runtime override wins over the registered agent runtime.
+
+Fidelity follows each runtime's actual output contract: Codex JSONL renders
+live; Kimi stream-json is turn-buffered and kimi-code 0.19.2 reports no usage;
+Claude emits only its final JSON envelope, so its transcript remains quiet until
+completion; shell output passes through as redacted raw lines. Usage is labeled
+`latest reported usage` because resumed Codex counts can be session-cumulative.
+Malformed or unknown lines degrade individually to redacted capped raw output
+without stopping later lines.
+
+Verified Codex command/file-change events and Kimi function tool calls/results
+render as typed compact lines; unrecognized shapes keep the generic/raw
+fail-open path. Render-time redaction is a per-line best-effort defense in depth:
+a secret split across physical lines may be only partially masked, and the raw
+cockpit log plus the external `tail -F` fallback remain unredacted.
 
 ### Resumable gates (make `blocked` + `needs` actionable)
 

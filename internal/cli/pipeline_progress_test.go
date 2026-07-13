@@ -6,12 +6,14 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jerryfane/gitmoot/internal/db"
 	"github.com/jerryfane/gitmoot/internal/pipeline"
 	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/jerryfane/gitmoot/internal/transcript"
 )
 
 func TestPipelineProgressLineTrackerSanitizesRedactsCapsAndIgnoresEmpty(t *testing.T) {
@@ -81,12 +83,33 @@ func TestCockpitAndProgressShareRuntimeOutput(t *testing.T) {
 		t.Fatal("expected cockpit log")
 	}
 	defer logFile.Close()
+	var settled atomic.Bool
+	lines := make(chan string, 4)
+	followDone := make(chan error, 1)
+	go func() {
+		followDone <- transcript.Follow(context.Background(), logPath, transcript.FollowOptions{
+			PollInterval: time.Millisecond,
+			Settled:      func(context.Context) (bool, error) { return settled.Load(), nil },
+		}, func(line string) error {
+			lines <- line
+			return nil
+		})
+	}()
 	if _, err := adapter.Deliver(context.Background(), agent, runtime.Job{Prompt: "go"}); err != nil {
 		t.Fatal(err)
 	}
+	settled.Store(true)
+	if err := <-followDone; err != nil {
+		t.Fatal(err)
+	}
+	close(lines)
+	var followed []string
+	for line := range lines {
+		followed = append(followed, line)
+	}
 	logged, err := os.ReadFile(logPath)
-	if err != nil || !strings.Contains(string(logged), "shared-line") || tracker.LastLine() != "shared-line" {
-		t.Fatalf("cockpit=%q tracker=%q err=%v", logged, tracker.LastLine(), err)
+	if err != nil || !strings.Contains(string(logged), "shared-line") || tracker.LastLine() != "shared-line" || strings.Join(followed, "\n") != "shared-line" {
+		t.Fatalf("cockpit=%q tracker=%q follower=%q err=%v", logged, tracker.LastLine(), followed, err)
 	}
 }
 

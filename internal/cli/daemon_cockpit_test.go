@@ -122,14 +122,14 @@ func TestMaybeWrapCockpitDecision(t *testing.T) {
 func TestCockpitJobMetaPaneKeyMode(t *testing.T) {
 	job := db.Job{ID: "job-42", Type: "implement", Agent: "lead"}
 	payload := workflow.JobPayload{RootJobID: "root-1", Branch: "feat/x", DelegationDepth: 2}
-	agent := runtime.Agent{Name: "lead"}
+	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime}
 	checkout := "/tmp/worktree"
 
 	jobMeta := cockpitJobMeta(job, payload, agent, checkout, "job")
 	if jobMeta.PaneKey != "job-42" {
 		t.Fatalf("job-mode PaneKey = %q, want job id", jobMeta.PaneKey)
 	}
-	if jobMeta.JobID != "job-42" || jobMeta.RootJobID != "root-1" || jobMeta.Agent != "lead" ||
+	if jobMeta.JobID != "job-42" || jobMeta.RootJobID != "root-1" || jobMeta.Agent != "lead" || jobMeta.Runtime != runtime.ShellRuntime ||
 		jobMeta.Action != "implement" || jobMeta.Branch != "feat/x" || jobMeta.Worktree != checkout ||
 		jobMeta.Depth != 2 {
 		t.Fatalf("unexpected meta: %+v", jobMeta)
@@ -268,8 +268,12 @@ func TestCockpitTeeAdapterCreatesLogAndTees(t *testing.T) {
 	if logPath != wantPath {
 		t.Fatalf("logPath = %q, want %q", logPath, wantPath)
 	}
-	if _, err := os.Stat(wantPath); err != nil {
+	info, err := os.Stat(wantPath)
+	if err != nil {
 		t.Fatalf("log file not created: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("log permissions = %o, want 600", got)
 	}
 
 	// The adapter must carry a TeeRunner whose Out is the log file (the seam that
@@ -328,6 +332,9 @@ func TestCockpitTeeAdapterTruncatesExistingLog(t *testing.T) {
 	}
 	if strings.Contains(string(logged), "STALE") {
 		t.Fatalf("log was not truncated: %q", string(logged))
+	}
+	if info, err := os.Stat(logPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("existing log permissions were not tightened: info=%v err=%v", info, err)
 	}
 }
 
@@ -712,5 +719,8 @@ func TestCockpitLogAdapterPicksLogPerMode(t *testing.T) {
 	}
 	if !strings.Contains(seatLog, filepath.Join("logs", "seats")) {
 		t.Fatalf("seat-mode log %q is not under logs/seats", seatLog)
+	}
+	if info, err := os.Stat(seatLog); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("seat log permissions: info=%v err=%v", info, err)
 	}
 }
