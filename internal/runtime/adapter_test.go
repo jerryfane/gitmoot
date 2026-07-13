@@ -1920,6 +1920,59 @@ func TestCodexCommandError(t *testing.T) {
 	})
 }
 
+func TestClaudeCommandError(t *testing.T) {
+	const rateLimitEnvelope = `{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"duration_ms":755,"duration_api_ms":0,"num_turns":1,"result":"You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.","stop_reason":"stop_sequence","session_id":"fe533d2b-f742-440c-afa6-43608e4e0ba2","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","fast_mode_state":"off","uuid":"2af6cf4c-c4cb-44ae-9fa2-db6fdcf705b3"}`
+	runErr := errors.New("exit status 1")
+
+	tests := []struct {
+		name        string
+		result      subprocess.Result
+		want        []string
+		doesNotWant []string
+	}{
+		{
+			name:        "extracts captured 429 failure",
+			result:      subprocess.Result{Stdout: rateLimitEnvelope},
+			want:        []string{"You've reached your Fable 5 limit", "429"},
+			doesNotWant: []string{`{"type":"result"`},
+		},
+		{
+			name:   "successful envelope falls back",
+			result: subprocess.Result{Stdout: `{"type":"result","is_error":false,"result":"done"}`, Stderr: "stderr fallback"},
+			want:   []string{"stderr fallback"},
+		},
+		{
+			name:   "non json stdout falls back",
+			result: subprocess.Result{Stdout: "plain runtime failure"},
+			want:   []string{"plain runtime failure"},
+		},
+		{
+			name: "jsonl uses last result line",
+			result: subprocess.Result{Stdout: `{"type":"result","is_error":true,"api_error_status":500,"result":"first failure"}` + "\n" +
+				`{"type":"system","message":"retrying"}` + "\n" +
+				`{"type":"result","is_error":true,"api_error_status":503,"result":"last failure"}` + "\n"},
+			want:        []string{"last failure", "503"},
+			doesNotWant: []string{"first failure", `{"type":"result"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := claudeCommandError(tt.result, runErr).Error()
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("error = %q, want substring %q", got, want)
+				}
+			}
+			for _, unwanted := range tt.doesNotWant {
+				if strings.Contains(got, unwanted) {
+					t.Fatalf("error = %q, must not contain %q", got, unwanted)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateAgentAcceptsKimiRuntimes(t *testing.T) {
 	for _, runtimeName := range []string{KimiRuntime, KimiCLIRuntime} {
 		agent := Agent{Name: "audit", Role: "reviewer", Runtime: runtimeName, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "jerryfane/gitmoot"}
