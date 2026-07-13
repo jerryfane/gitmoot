@@ -1,9 +1,49 @@
 # Dashboard Views
 
-The web dashboard has nine views, reachable from the left nav rail (or the mobile
+The web dashboard has fourteen views, reachable from the left nav rail (or the mobile
 bottom tab bar). Each is described below with its screenshot. See
 [Dashboard Overview](./overview.md) for launching, routes, refresh cadences, and
 security.
+
+## Overview
+
+Route: `/`
+
+Overview is the operator-first landing page. It combines local Gitmoot state into
+five compact blocks without making GitHub requests or scanning job payloads on
+each refresh:
+
+- **Needs you** collects stalled workflows, pull-request tasks awaiting merge,
+  and blocked jobs. Stalled workflow cards include the coordinator pane,
+  session id, and last journal note needed to resume in the right place.
+- **Live fleet activity** groups running and queued jobs by explicit workflow,
+  with unlabeled work summarized separately and the total queued count visible.
+- **Today** is a rolling 24-hour summary of terminal jobs, token usage, an hourly
+  completion histogram, and the five most recently finished jobs.
+- **Scheduled** shows enabled interval pipelines, their latest status, and the
+  next run computed from the durable schedule state.
+- **Fleet** lists registered agents with runtime, running state, and jobs started
+  in the rolling 24-hour window.
+
+The page is read-only and polls every 12 seconds. Groom proposals appear only
+when Gitmoot has a cheap persisted proposal source; the server does not walk
+artifact directories during a dashboard request.
+
+## Tasks
+
+Route: `/tasks`
+
+Tasks is a read-only lifecycle board backed by Gitmoot's task registry. Internal
+states are projected into **planned**, **implementing**, **PR open**, **blocked**,
+and **merged** columns; review, changes-requested, and ready-to-merge tasks remain
+in PR open, while awaiting-human tasks appear as blocked. Merged history is
+limited server-side to the last seven days.
+
+Cards carry the task title, repository, assigned branch-lock owner when one is
+known, pull-request number, last-update age, and a blocked reason. The CI dot is
+hidden when Gitmoot has no locally persisted CI conclusion; opening Tasks never
+causes a per-request GitHub API call. Search and repo/agent filters are applied
+client-side to the deterministic server ordering.
 
 ## Graph
 
@@ -150,7 +190,9 @@ Workflows are labeled campaigns of related work driven by a coordinator: jobs
 dispatched with `--workflow <label>` plus the journal written with
 `gitmoot workflow note`. Labels may carry one namespace slash
 (`fable/dashboard-redesign`) — by convention the coordinator's herdr pane name
-namespaces the campaign; unattended sources use reserved namespaces.
+namespaces the campaign. Unlabeled pipeline stages and other runs are also
+summarized without payload scans as synthetic `pipeline/<name>` and
+`adhoc/<agent>` entries; these are marked unattended in the index.
 
 The **index** groups every known workflow by derived lifecycle: **stalled**
 pinned on top ("needs a look"), then **active**, then recently **settled**.

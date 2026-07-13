@@ -104,6 +104,8 @@ type webDataSource struct {
 
 var _ dashboard.DataSource = (*webDataSource)(nil)
 var _ dashboard.WorkflowDataSource = (*webDataSource)(nil)
+var _ dashboard.OverviewDataSource = (*webDataSource)(nil)
+var _ dashboard.TasksDataSource = (*webDataSource)(nil)
 
 // Runs lists every orchestration run (delegation tree) rooted at an originating
 // job, newest activity first. It reuses buildDashboardSnapshot so the run list
