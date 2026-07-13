@@ -1461,8 +1461,21 @@ func isCodexJSONUnsupported(result subprocess.Result) bool {
 		strings.Contains(text, "invalid")
 }
 
+// claudeCommandError prefers the human-readable result from Claude's JSON
+// failure envelope over the raw stdout blob. The original process error stays
+// wrapped, and auth failures retain their existing typed classification.
 func claudeCommandError(result subprocess.Result, err error) error {
-	return ClassifyClaudeCommandError(result, err)
+	base := commandError(result, err)
+	if envelope, parseErr := ExtractClaudeResultEnvelope(result.Stdout); parseErr == nil && envelope.Type == "result" && envelope.IsError {
+		if resultMessage := strings.TrimSpace(envelope.Result); resultMessage != "" {
+			detail := "claude: " + resultMessage
+			if envelope.APIErrorStatus != 0 {
+				detail += fmt.Sprintf(" (api_error_status %d)", envelope.APIErrorStatus)
+			}
+			base = fmt.Errorf("%s: %w", detail, err)
+		}
+	}
+	return classifyClaudeCommandError(result, base)
 }
 
 // classifyClaudeProbeError classifies the error from an ISOLATED doctor live
@@ -1484,7 +1497,10 @@ func classifyClaudeProbeError(result subprocess.Result, err error) error {
 }
 
 func ClassifyClaudeCommandError(result subprocess.Result, err error) error {
-	base := commandError(result, err)
+	return claudeCommandError(result, err)
+}
+
+func classifyClaudeCommandError(result subprocess.Result, base error) error {
 	if !isClaudeAuthFailure(result) {
 		return base
 	}

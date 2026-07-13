@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bufio"
 	"encoding/json"
 	"strings"
 )
@@ -95,25 +96,47 @@ func ExtractCodexStreamEvent(line string) (CodexStreamEvent, error) {
 	return event, nil
 }
 
-// ClaudeResultEnvelope is the verified subset of Claude Code's single final
+// ClaudeResultEnvelope is the verified subset of Claude Code's final
 // --output-format json envelope.
 type ClaudeResultEnvelope struct {
-	Type   string
-	Result string
-	Usage  StreamUsage
+	Type           string      `json:"type"`
+	Result         string      `json:"result"`
+	Usage          StreamUsage `json:"usage"`
+	IsError        bool        `json:"is_error"`
+	APIErrorStatus int         `json:"api_error_status"`
 }
 
-// ExtractClaudeResultEnvelope owns Claude's final-envelope wire format.
+// ExtractClaudeResultEnvelope owns Claude's final-envelope wire format. Claude
+// normally emits one JSON object, but some versions/modes emit JSONL; in that
+// case the last parseable result envelope is authoritative.
 func ExtractClaudeResultEnvelope(stdout string) (ClaudeResultEnvelope, error) {
-	var wire struct {
-		Type   string      `json:"type"`
-		Result string      `json:"result"`
-		Usage  StreamUsage `json:"usage"`
+	var envelope ClaudeResultEnvelope
+	wholeOutputErr := json.Unmarshal([]byte(stdout), &envelope)
+	if wholeOutputErr == nil {
+		return envelope, nil
 	}
-	if err := json.Unmarshal([]byte(stdout), &wire); err != nil {
-		return ClaudeResultEnvelope{}, err
+
+	scanner := bufio.NewScanner(strings.NewReader(stdout))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	found := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var candidate ClaudeResultEnvelope
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Type == "result" {
+			envelope = candidate
+			found = true
+		}
 	}
-	return ClaudeResultEnvelope{Type: wire.Type, Result: wire.Result, Usage: wire.Usage}, nil
+	if scanErr := scanner.Err(); scanErr != nil {
+		return ClaudeResultEnvelope{}, scanErr
+	}
+	if found {
+		return envelope, nil
+	}
+	return ClaudeResultEnvelope{}, wholeOutputErr
 }
 
 // KimiStreamEvent is the verified subset of one Kimi stream-json line.

@@ -318,6 +318,34 @@ func TestPinDashboardBlockedDoesNotStampEndedAt(t *testing.T) {
 	}
 }
 
+func TestEventLabelFailureMessageCap(t *testing.T) {
+	message := strings.Repeat("x", 300)
+	tests := []struct {
+		name  string
+		event db.JobEvent
+		want  string
+	}{
+		{
+			name:  "failed event retains 300 byte message",
+			event: db.JobEvent{Kind: "failed", Message: message},
+			want:  "failed: " + message,
+		},
+		{
+			name:  "non failed event keeps 120 byte cap",
+			event: db.JobEvent{Kind: "worker_error", Message: message},
+			want:  "worker_error: " + message[:120] + "…",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := eventLabel(tt.event); got != tt.want {
+				t.Fatalf("eventLabel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestNodeTitleDescriptive covers the descriptive-title preference order beyond
 // the plain task-title case: a humanized delegation id and an instructions line.
 func TestNodeTitleDescriptive(t *testing.T) {

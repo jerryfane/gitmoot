@@ -2242,7 +2242,10 @@ func eventLabel(e db.JobEvent) string {
 	if msg == "" {
 		return kind
 	}
-	const maxMsg = 120
+	maxMsg := 120
+	if kind == "failed" {
+		maxMsg = 600
+	}
 	if len(msg) > maxMsg {
 		msg = msg[:maxMsg] + "…"
 	}
