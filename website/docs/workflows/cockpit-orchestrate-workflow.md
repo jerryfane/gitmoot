@@ -22,6 +22,21 @@ the coordinator splits a workspace for the run, each subagent gets a pane labele
 the job runs. Children inherit the cockpit setting from their parent, so a single
 `--cockpit` on the root lights up the whole orchestra.
 
+Each pane renders the cockpit-only tee log through `gitmoot job watch
+--transcript`. Codex JSONL is readable live. Kimi stream-json is turn-buffered,
+and kimi-code 0.19.2 emits no usage. Claude currently emits one final JSON
+envelope, so its pane remains quiet until completion and then shows final text
+and usage. Shell output is redacted raw passthrough. Unknown or malformed lines
+degrade individually to redacted bounded raw output; a fatal renderer exit or
+panic falls back externally to `tail -F`. The tee bytes, runtime result parsing,
+and pipeline progress stream are unchanged.
+
+Verified Codex command/file-change events and Kimi function tool calls/results
+use typed compact lines; other shapes retain the generic/raw path. Render-time
+redaction is per-line best-effort defense in depth: a secret split across
+physical lines may be only partially masked, and the raw log plus external tail
+fallback remain unredacted.
+
 **Auto-detect:** if you run `gitmoot orchestrate` from inside a Herdr session
 (`HERDR_ENV` set), the cockpit turns on automatically — no `--cockpit` needed. An
 explicit flag still works anywhere; `cockpit_mode = off` (below) is the host-level

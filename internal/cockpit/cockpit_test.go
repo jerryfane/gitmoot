@@ -260,6 +260,7 @@ func sampleMeta() JobMeta {
 		JobID:     "abcdef0123456789",
 		RootJobID: "root00001111",
 		Agent:     "builder",
+		Runtime:   runtime.CodexRuntime,
 		Action:    "implement",
 		Branch:    "feat/x",
 		Worktree:  "/tmp/wt",
@@ -469,7 +470,7 @@ func TestWrapDeliverArgsCarryVerifiedFields(t *testing.T) {
 	assertContains("pane report-agent w1:p2 --source custom:gitmoot --agent gm-abcdef01 --state working")
 	assertContains("--state idle")
 	// pane run carries the job-watch command.
-	assertContains("pane run w1:p2 gitmoot job watch abcdef0123456789")
+	assertContains("pane run w1:p2 gitmoot job watch 'abcdef0123456789'")
 	// teardown releases then closes.
 	assertContains("pane release-agent w1:p2 --source custom:gitmoot --agent gm-abcdef01")
 	assertContains("pane close w1:p2")
@@ -499,16 +500,13 @@ func TestWrapDeliverFallsBackToDerivedRootPaneWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestWatchCommandTailsLogWhenLogPathSet(t *testing.T) {
-	// With a per-job LogPath (P1, Task 6) the pane tails the streamed log instead
-	// of running `gitmoot job watch`. -n +1 replays from the start; -F follows
-	// across the truncate-on-start and rotation.
+func TestWatchCommandRendersLogWithExternalTailFallback(t *testing.T) {
 	a := &paneAdapter{
 		cockpit: &Cockpit{gitmootBin: "gitmoot", home: "/home/g"},
-		meta:    JobMeta{JobID: "abcdef0123456789", LogPath: "/home/g/logs/jobs/abcdef0123456789.log"},
+		meta:    JobMeta{JobID: "abcdef0123456789", Runtime: runtime.CodexRuntime, LogPath: "/home/g/logs/jobs/abcdef0123456789.log"},
 	}
 	got := a.watchCommand()
-	want := "tail -n +1 -F '/home/g/logs/jobs/abcdef0123456789.log'"
+	want := "gitmoot job watch 'abcdef0123456789' --transcript --log-path '/home/g/logs/jobs/abcdef0123456789.log' --runtime 'codex' --home '/home/g' || exec tail -n +1 -F '/home/g/logs/jobs/abcdef0123456789.log'"
 	if got != want {
 		t.Fatalf("watchCommand = %q, want %q", got, want)
 	}
@@ -522,7 +520,7 @@ func TestWatchCommandFallsBackToJobWatchWhenNoLogPath(t *testing.T) {
 		meta:    JobMeta{JobID: "abcdef0123456789"},
 	}
 	got := a.watchCommand()
-	want := "gitmoot job watch abcdef0123456789 --home /home/g"
+	want := "gitmoot job watch 'abcdef0123456789' --home '/home/g'"
 	if got != want {
 		t.Fatalf("watchCommand = %q, want %q", got, want)
 	}
@@ -533,9 +531,20 @@ func TestWatchCommandShellQuotesLogPathWithSpaces(t *testing.T) {
 	// literal argument so tail receives the whole path.
 	a := &paneAdapter{
 		cockpit: &Cockpit{gitmootBin: "gitmoot"},
-		meta:    JobMeta{JobID: "x", LogPath: "/home/my logs/jobs/x.log"},
+		meta:    JobMeta{JobID: "x", Runtime: runtime.ShellRuntime, LogPath: "/home/my logs/jobs/x.log"},
 	}
-	if got, want := a.watchCommand(), "tail -n +1 -F '/home/my logs/jobs/x.log'"; got != want {
+	if got, want := a.watchCommand(), "gitmoot job watch 'x' --transcript --log-path '/home/my logs/jobs/x.log' --runtime 'shell' || exec tail -n +1 -F '/home/my logs/jobs/x.log'"; got != want {
+		t.Fatalf("watchCommand = %q, want %q", got, want)
+	}
+}
+
+func TestWatchCommandShellQuotesJobRuntimeAndHome(t *testing.T) {
+	a := &paneAdapter{
+		cockpit: &Cockpit{gitmootBin: "gitmoot", home: "/home/git moot"},
+		meta:    JobMeta{JobID: "job; echo nope", Runtime: "shell; echo nope", LogPath: "/tmp/job.log"},
+	}
+	want := "gitmoot job watch 'job; echo nope' --transcript --log-path '/tmp/job.log' --runtime 'shell; echo nope' --home '/home/git moot' || exec tail -n +1 -F '/tmp/job.log'"
+	if got := a.watchCommand(); got != want {
 		t.Fatalf("watchCommand = %q, want %q", got, want)
 	}
 }
@@ -552,11 +561,11 @@ func TestWrapDeliverPaneRunTailsLogPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	joined := strings.Join(fr.calls, "\n")
-	if want := "pane run w1:p2 tail -n +1 -F '/tmp/logs/jobs/abcdef0123456789.log'"; !strings.Contains(joined, want) {
-		t.Fatalf("expected pane run to tail the log; want %q; calls:\n%s", want, joined)
+	if want := "pane run w1:p2 gitmoot job watch 'abcdef0123456789' --transcript --log-path '/tmp/logs/jobs/abcdef0123456789.log' --runtime 'codex' || exec tail -n +1 -F '/tmp/logs/jobs/abcdef0123456789.log'"; !strings.Contains(joined, want) {
+		t.Fatalf("expected pane run to render the log; want %q; calls:\n%s", want, joined)
 	}
-	if strings.Contains(joined, "job watch") {
-		t.Fatalf("pane should tail the log, not run job watch; calls:\n%s", joined)
+	if !strings.Contains(joined, "|| exec tail") {
+		t.Fatalf("pane command missing external tail fallback; calls:\n%s", joined)
 	}
 }
 
@@ -719,6 +728,7 @@ func seatMeta(jobID, paneKey string) JobMeta {
 		JobID:     jobID,
 		RootJobID: "root-seat",
 		Agent:     "builder",
+		Runtime:   runtime.CodexRuntime,
 		Action:    "implement",
 		Branch:    "feat/x",
 		Worktree:  "/tmp/wt",

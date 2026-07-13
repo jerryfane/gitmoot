@@ -5808,6 +5808,7 @@ func cockpitJobMeta(job db.Job, payload workflow.JobPayload, agent runtime.Agent
 		JobID:     job.ID,
 		RootJobID: root,
 		Agent:     agent.Name,
+		Runtime:   agent.Runtime,
 		Action:    job.Type,
 		Branch:    payload.Branch,
 		Worktree:  checkout,
@@ -5845,9 +5846,14 @@ func (w jobWorker) cockpitTeeAdapter(agent runtime.Agent, checkout string, jobID
 	// the live tail silently falls back to the P0 pane. A flat slug keeps it one
 	// file in this dir (no deep per-job dir trees).
 	logPath := filepath.Join(dir, cockpit.SafeLogName(jobID)+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		writeLine(w.Stdout, "job %s cockpit log create failed: %v", jobID, err)
+		return nil, "", nil
+	}
+	if err := logFile.Chmod(0o600); err != nil {
+		_ = logFile.Close()
+		writeLine(w.Stdout, "job %s cockpit log chmod failed: %v", jobID, err)
 		return nil, "", nil
 	}
 	return w.cockpitTeeOnFile(agent, checkout, jobID, logPath, logFile, additionalOutput...)
@@ -5901,9 +5907,14 @@ func (w jobWorker) cockpitSeatLogAdapter(cp *cockpit.Cockpit, agent runtime.Agen
 		writeLine(w.Stdout, "job %s cockpit seat log dir create failed: %v", jobID, err)
 		return nil, "", nil
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		writeLine(w.Stdout, "job %s cockpit seat log open failed: %v", jobID, err)
+		return nil, "", nil
+	}
+	if err := logFile.Chmod(0o600); err != nil {
+		_ = logFile.Close()
+		writeLine(w.Stdout, "job %s cockpit seat log chmod failed: %v", jobID, err)
 		return nil, "", nil
 	}
 	return w.cockpitTeeOnFile(agent, checkout, jobID, logPath, logFile, additionalOutput...)
