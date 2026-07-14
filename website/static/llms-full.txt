@@ -6567,6 +6567,10 @@ pane, session id), and a stalled workflow shows a go-here card with the pane,
 the session id, and a copyable resume command — the dashboard tells you where
 to intervene; it never intervenes itself. Coordinators should set the summary
 at kickoff with `gitmoot workflow note ... --summary "<one sentence>"`.
+Inside Herdr, omitted pane/session/workdir flags are detected from the current
+pane. The resume command is shown only when the stored session id is a full
+UUID; legacy shortened values remain visible in the workflow index but cannot
+produce a broken command.
 
 ## Brain
 
@@ -10237,7 +10241,7 @@ gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo -
 gitmoot job list --workflow fable/dashboard-redesign
 gitmoot workflow list
 gitmoot workflow show fable/dashboard-redesign --limit 100
-gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --pane wave-2 --session <session-id> --workdir /work/dashboard --summary "Coordinate and ship the dashboard redesign."
+gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --summary "Coordinate and ship the dashboard redesign."
 ```
 
 `workflow list` reports per-state counts, note count, first/last activity, and
@@ -10248,7 +10252,14 @@ while queued/running, `recent` when no work is live but activity occurred within
 30 minutes, `stalled` when failed/blocked with an unacknowledged failure and quiet
 for 30 minutes to 24 hours, and `settled` otherwise. The optional
 `--pane`, `--session`, and `--workdir` note flags persist the latest coordinator
-handoff shown on that page; author defaults to the newest note author.
+handoff shown on that page. When those flags are omitted inside Herdr
+(`HERDR_SOCKET_PATH` or `HERDR_ENV=1`), `workflow note` reads the current pane
+label, full runtime session UUID, and working directory automatically. Explicit
+flags always win; `--no-auto` skips detection for scripted callers. Detection
+is fail-open and never prevents a note, and it does not infer `--author`.
+Dashboard resume commands require a full UUID; legacy short session values stay
+visible in the workflow index as context but are not rendered into a broken
+command. Author defaults to the newest note author.
 Coordinators should set a one-line human summary at kickoff with `--summary`.
 Omitting that flag preserves the stored summary, a non-empty value replaces it,
 and `--summary ""` clears it. Summary input is stored verbatim and limited to
@@ -12177,6 +12188,13 @@ At kickoff, coordinators should set a short human-readable summary with
 workflow index and detail views. Omitting the flag preserves it; a new non-empty
 value replaces it; `--summary ""` clears it. Summaries are stored verbatim with
 a 300-byte limit.
+
+When `workflow note` runs inside Herdr and `--pane`, `--session`, or `--workdir`
+is omitted, it fills each omitted value from `herdr pane current --current`.
+The pane label, full agent session UUID, and pane working directory become the
+latest handoff; explicit flags always win. Use `--no-auto` to disable this for a
+script. Lookup failures are ignored so the note still lands, and author is never
+inferred. The dashboard only builds a resume command from a full UUID.
 
 In `gitmoot dashboard --web`, labeled jobs cluster around workflow hubs in
 Galaxy; a labeled run links to `/workflows/<label>`, which shows the complete
