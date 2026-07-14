@@ -18,6 +18,7 @@ import (
 const (
 	defaultMemoryIngestSweepPipeline  = "memory-ingest-sweep"
 	defaultMemoryGroomProposePipeline = "memory-groom-propose"
+	defaultMemoryPipelineGroup        = "Gitmoot System"
 	defaultMemoryPipelineBinEnv       = "GITMOOT_PIPELINE_BIN"
 )
 
@@ -127,8 +128,9 @@ func defaultMemoryPipelineRepo(ctx context.Context, store *db.Store, settings co
 
 func renderMemoryIngestSweepPipeline(settings config.MemoryPipelineSettings, paths config.Paths, rawHome string, repo string) defaultPipelineDefinition {
 	spec := pipeline.Spec{
-		Name: defaultMemoryIngestSweepPipeline,
-		Repo: repo,
+		Name:  defaultMemoryIngestSweepPipeline,
+		Repo:  repo,
+		Group: defaultMemoryPipelineGroup,
 		Stages: []pipeline.Stage{
 			{ID: "sweep", Cmd: memoryIngestSweepStageCommand(paths, rawHome)},
 			{ID: "summarize", Cmd: memoryIngestSummaryStageCommand(paths), Needs: []string{"sweep"}},
@@ -143,8 +145,9 @@ func renderMemoryIngestSweepPipeline(settings config.MemoryPipelineSettings, pat
 
 func renderMemoryGroomProposePipeline(settings config.MemoryPipelineSettings, paths config.Paths, rawHome string, repo string) defaultPipelineDefinition {
 	spec := pipeline.Spec{
-		Name: defaultMemoryGroomProposePipeline,
-		Repo: repo,
+		Name:  defaultMemoryGroomProposePipeline,
+		Repo:  repo,
+		Group: defaultMemoryPipelineGroup,
 		Stages: []pipeline.Stage{
 			{ID: "split", Cmd: memoryGroomSplitStageCommand(paths, rawHome)},
 			{ID: "propose", Cmd: memoryGroomProposeStageCommand(paths, rawHome), Needs: []string{"split"}},

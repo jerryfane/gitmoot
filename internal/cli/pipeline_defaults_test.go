@@ -50,6 +50,30 @@ func TestPipelineInstallDefaultsIdempotentAndPreservesUserEdits(t *testing.T) {
 	}
 }
 
+func TestPipelineInstallDefaultsUseGitmootSystemGroup(t *testing.T) {
+	home, _, store := heartbeatLoopE2EHome(t)
+	checkout := createDaemonWorkerGitCheckout(t, "main")
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	runInstallDefaults(t, home)
+
+	for _, name := range []string{defaultMemoryIngestSweepPipeline, defaultMemoryGroomProposePipeline} {
+		rec, ok, err := store.GetPipeline(context.Background(), name)
+		if err != nil || !ok {
+			t.Fatalf("GetPipeline %s: ok=%v err=%v", name, ok, err)
+		}
+		spec, err := pipeline.Load([]byte(rec.SpecYAML))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		if spec.Group != defaultMemoryPipelineGroup {
+			t.Fatalf("%s group = %q, want %q", name, spec.Group, defaultMemoryPipelineGroup)
+		}
+		if !strings.Contains(rec.SpecYAML, "group: "+defaultMemoryPipelineGroup) {
+			t.Fatalf("%s stored spec missing group:\n%s", name, rec.SpecYAML)
+		}
+	}
+}
+
 func TestPipelineInstallDefaultsSchedulesFromMemoryPipelineSettings(t *testing.T) {
 	home, paths, store := heartbeatLoopE2EHome(t)
 	checkout := createDaemonWorkerGitCheckout(t, "main")

@@ -497,6 +497,7 @@ type pipelineStageJSON struct {
 type pipelineJSON struct {
 	Name                string              `json:"name"`
 	Repo                string              `json:"repo,omitempty"`
+	Group               string              `json:"group"`
 	Enabled             bool                `json:"enabled"`
 	Mode                string              `json:"mode"`
 	Interval            string              `json:"interval,omitempty"`
@@ -543,7 +544,8 @@ func runPipelineList(args []string, stdout, stderr io.Writer) int {
 		return encodePipelineJSON(stdout, stderr, out)
 	}
 	for _, p := range pipelines {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, enabledLabel(p.Enabled), pipelineListInterval(p, pipelineUpstreamMissing(p, knownPipelines)), firstNonEmpty(p.Repo, "-"), firstNonEmpty(p.LastStatus, "-"), firstNonEmpty(triggerBindingState(p.TriggerBinding), "-"))
+		group, _ := resolvedPipelineGroup(p)
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, enabledLabel(p.Enabled), pipelineListInterval(p, pipelineUpstreamMissing(p, knownPipelines)), firstNonEmpty(p.Repo, "-"), firstNonEmpty(group, "-"), firstNonEmpty(p.LastStatus, "-"), firstNonEmpty(triggerBindingState(p.TriggerBinding), "-"))
 	}
 	return 0
 }
@@ -791,9 +793,11 @@ func runPipelineRemove(args []string, stdout, stderr io.Writer) int {
 // enumerate the stage DAG; a parse failure degrades to no stages rather than
 // failing the command.
 func pipelineToJSON(record db.Pipeline, withStages bool, agents map[string]db.Agent, upstreamMissing ...bool) pipelineJSON {
+	group, _ := resolvedPipelineGroup(record)
 	out := pipelineJSON{
 		Name:                record.Name,
 		Repo:                record.Repo,
+		Group:               group,
 		Enabled:             record.Enabled,
 		Mode:                pipelineDisplayMode(record, upstreamMissing...),
 		Interval:            record.Interval,
@@ -842,6 +846,16 @@ func pipelineToJSON(record db.Pipeline, withStages bool, agents map[string]db.Ag
 		}
 	}
 	return out
+}
+
+// resolvedPipelineGroup is the single display-resolution rule for pipeline
+// groups. An explicit spec group wins; existing specs fall back to their repo.
+// The bool reports that the repo fallback was used so text display can label it.
+func resolvedPipelineGroup(record db.Pipeline) (string, bool) {
+	if spec, err := pipeline.Load([]byte(record.SpecYAML)); err == nil && spec.Group != "" {
+		return spec.Group, false
+	}
+	return strings.TrimSpace(record.Repo), true
 }
 
 func pipelineDisplayMode(record db.Pipeline, upstreamMissing ...bool) string {
@@ -1018,6 +1032,12 @@ func pipelinePromptPreview(prompt string) string {
 func printPipeline(stdout io.Writer, record db.Pipeline, agents map[string]db.Agent, upstreamMissing ...bool) {
 	writeLine(stdout, "name: %s", record.Name)
 	writeLine(stdout, "repo: %s", firstNonEmpty(record.Repo, "-"))
+	group, defaulted := resolvedPipelineGroup(record)
+	group = firstNonEmpty(group, "-")
+	if defaulted {
+		group += " (default)"
+	}
+	writeLine(stdout, "group: %s", group)
 	writeLine(stdout, "enabled: %t", record.Enabled)
 	writeLine(stdout, "mode: %s", pipelineDisplayMode(record, upstreamMissing...))
 	writeLine(stdout, "interval: %s", firstNonEmpty(record.Interval, "-"))

@@ -68,6 +68,9 @@ type Spec struct {
 	// Repo is the optional managed repo (owner/repo) the stages run against. It is
 	// carried onto the run's stage jobs and the runner agent's repo scope.
 	Repo string `yaml:"repo,omitempty"`
+	// Group is optional display metadata used to organize pipelines independently
+	// of their repo. Empty means callers should fall back to Repo for display.
+	Group string `yaml:"group,omitempty"`
 	// Schedule, when present, drives interval-based auto-runs (heartbeat idiom: an
 	// interval plus optional jitter; no cron in v1).
 	Schedule *Schedule `yaml:"schedule,omitempty"`
