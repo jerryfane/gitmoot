@@ -34,6 +34,7 @@ func TestOpenMigratesSchema(t *testing.T) {
 		"seen_comments",
 		"jobs",
 		"job_events",
+		"task_events",
 		"branch_locks",
 		"lock_events",
 		"resource_locks",
@@ -2999,7 +3000,20 @@ func TestPollIntervalInheritanceMigrationPreservesExplicitValues(t *testing.T) {
 	}
 	defer raw.Close()
 	store := &Store{db: raw}
-	for version, migration := range migrations[:len(migrations)-1] {
+	// Locate the poll-interval inheritance migration by content rather than by
+	// slice position so later appended migrations cannot silently retarget this
+	// test at an unrelated entry.
+	pollIdx := -1
+	for i, migration := range migrations {
+		if strings.Contains(migration, "poll_interval = ''") {
+			pollIdx = i
+			break
+		}
+	}
+	if pollIdx < 0 {
+		t.Fatal("poll interval inheritance migration not found")
+	}
+	for version, migration := range migrations[:pollIdx] {
 		if err := store.applyMigration(ctx, version+1, migration); err != nil {
 			t.Fatalf("applyMigration(%d): %v", version+1, err)
 		}
@@ -3010,7 +3024,7 @@ func TestPollIntervalInheritanceMigrationPreservesExplicitValues(t *testing.T) {
 			t.Fatalf("insert %s: %v", value, err)
 		}
 	}
-	if err := store.applyMigration(ctx, len(migrations), migrations[len(migrations)-1]); err != nil {
+	if err := store.applyMigration(ctx, pollIdx+1, migrations[pollIdx]); err != nil {
 		t.Fatalf("apply poll interval migration: %v", err)
 	}
 	for repo, want := range map[string]string{

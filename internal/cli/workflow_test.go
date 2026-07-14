@@ -798,6 +798,117 @@ func TestRecoverTaskImplementationFinalizesDirtyWorktree(t *testing.T) {
 	if job.State != string(workflow.JobSucceeded) {
 		t.Fatalf("recovery job state = %q, want succeeded", job.State)
 	}
+	recoveredTask, err := store.GetTask(ctx, "task-001")
+	if err != nil || recoveredTask.State != string(workflow.TaskPullRequestOpen) {
+		t.Fatalf("recovered task = %+v err=%v, want pr_open", recoveredTask, err)
+	}
+	taskEvents, err := store.ListTaskEvents(ctx, "task-001")
+	if err != nil || len(taskEvents) != 1 || taskEvents[0].Kind != "task_recovered" || taskEvents[0].ToState != string(workflow.TaskPullRequestOpen) {
+		t.Fatalf("recovery task events = %+v err=%v", taskEvents, err)
+	}
+}
+
+type observingTaskRecoverGitHub struct {
+	stubTaskRecoverGitHub
+	store    *db.Store
+	taskID   string
+	sawState string
+}
+
+func (s *observingTaskRecoverGitHub) EnsurePullRequest(ctx context.Context, input github.CreatePullRequestInput) (github.PullRequest, error) {
+	task, err := s.store.GetTask(ctx, s.taskID)
+	if err != nil {
+		return github.PullRequest{}, err
+	}
+	s.sawState = task.State
+	return s.stubTaskRecoverGitHub.EnsurePullRequest(ctx, input)
+}
+
+func TestRecoverDismissedTaskWithArtifactsTransitionsThroughImplementingToPROpen(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	remoteDir := filepath.Join(home, "remote.git")
+	repoDir := filepath.Join(home, "repo")
+	runGit(t, home, "init", "--bare", remoteDir)
+	runGit(t, home, "clone", remoteDir, repoDir)
+	runGit(t, repoDir, "config", "user.email", "gitmoot@example.com")
+	runGit(t, repoDir, "config", "user.name", "Gitmoot Test")
+	writeFile(t, filepath.Join(repoDir, "README.md"), "main\n")
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "commit", "-m", "initial")
+	runGit(t, repoDir, "branch", "-m", "main")
+	runGit(t, repoDir, "push", "-u", "origin", "main")
+
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	if err := store.UpsertRepo(ctx, db.Repo{Owner: "owner", Name: "repo", DefaultBranch: "main", RemoteURL: remoteDir, CheckoutPath: repoDir, PollInterval: "30s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertAgent(ctx, db.Agent{Name: "lead", Runtime: "shell", RuntimeRef: "true", RepoScope: "owner/repo", Capabilities: []string{"implement"}, AutonomyPolicy: "workspace-write", HealthStatus: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := workflow.TaskWorktreePath(home, "owner/repo", "task-dismissed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "worktree", "add", "-b", "feature/dismissed", worktree, "main")
+	writeFile(t, filepath.Join(worktree, "feature.txt"), "recovered work\n")
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-dismissed", RepoFullName: "owner/repo", State: string(workflow.TaskDismissed), Branch: "feature/dismissed", WorktreePath: worktree}); err != nil {
+		t.Fatal(err)
+	}
+	gh := &observingTaskRecoverGitHub{store: store, taskID: "task-dismissed"}
+	if _, err := recoverTaskImplementation(ctx, store, "task-dismissed", "owner/repo", "lead", false, gh); err != nil {
+		t.Fatalf("recoverTaskImplementation: %v", err)
+	}
+	if gh.sawState != string(workflow.TaskImplementing) {
+		t.Fatalf("state during finalization = %q, want implementing", gh.sawState)
+	}
+	task, _ := store.GetTask(ctx, "task-dismissed")
+	if task.State != string(workflow.TaskPullRequestOpen) {
+		t.Fatalf("final task state = %s", task.State)
+	}
+	events, _ := store.ListTaskEvents(ctx, task.ID)
+	if len(events) != 2 || events[0].FromState != string(workflow.TaskDismissed) || events[0].ToState != string(workflow.TaskImplementing) || events[1].ToState != string(workflow.TaskPullRequestOpen) {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
+func TestRecoverDismissedBranchlessTaskRestoresPlanned(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	if err := store.UpsertTask(context.Background(), db.Task{ID: "task-empty", RepoFullName: "owner/repo", State: string(workflow.TaskDismissed)}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"task", "recover", "task-empty", "--home", home}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "restored task-empty to planned") || !strings.Contains(stdout.String(), "task run task-empty") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	store = openCLIJobStore(t, home)
+	defer store.Close()
+	task, _ := store.GetTask(context.Background(), "task-empty")
+	events, _ := store.ListTaskEvents(context.Background(), "task-empty")
+	if task.State != string(workflow.TaskPlanned) || len(events) != 1 || events[0].Kind != "task_recovered" || events[0].ToState != string(workflow.TaskPlanned) {
+		t.Fatalf("task=%+v events=%+v", task, events)
+	}
+}
+
+func TestRunTaskRecoverRequiresOwnerForArtifacts(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	if err := store.UpsertTask(context.Background(), db.Task{
+		ID: "task-artifacts", RepoFullName: "owner/repo", State: string(workflow.TaskDismissed),
+		Branch: "feature/artifacts", WorktreePath: filepath.Join(home, "worktree"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"task", "recover", "task-artifacts", "--home", home}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "task recover requires --owner") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
 }
 
 func TestRecoverTaskImplementationFinalizesCleanCommittedWorktree(t *testing.T) {
@@ -974,17 +1085,38 @@ func TestRecoverTaskImplementationBlocksActiveJobAndWrongLockOwner(t *testing.T)
 	if err := store.CreateJob(ctx, db.Job{ID: "active-implement", Agent: "lead", Type: "implement", State: string(workflow.JobRunning), Payload: string(activePayload)}); err != nil {
 		t.Fatalf("CreateJob returned error: %v", err)
 	}
-	if _, err := recoverTaskImplementation(ctx, store, "task-001", "owner/repo", "lead", false, &stubTaskRecoverGitHub{}); err == nil || !strings.Contains(err.Error(), "active implement job") {
-		t.Fatalf("recover with active job err = %v, want active implement job", err)
+	if _, err := recoverTaskImplementation(ctx, store, "task-001", "owner/repo", "lead", false, &stubTaskRecoverGitHub{}); err == nil || !strings.Contains(err.Error(), "live job active-implement") {
+		t.Fatalf("recover with active job err = %v, want live job", err)
 	}
-	if err := store.UpdateJobState(ctx, "active-implement", string(workflow.JobFailed)); err != nil {
+	if err := store.UpdateJobState(ctx, "active-implement", string(workflow.JobSucceeded)); err != nil {
 		t.Fatalf("UpdateJobState returned error: %v", err)
+	}
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: "active-implement", Kind: "advance_started"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverTaskImplementation(ctx, store, "task-001", "owner/repo", "lead", false, &stubTaskRecoverGitHub{}); err == nil || !strings.Contains(err.Error(), "live job active-implement") {
+		t.Fatalf("recover during pending advancement err = %v, want live job", err)
+	}
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: "active-implement", Kind: "advance_completed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateJobState(ctx, "active-implement", string(workflow.JobCancelled)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: "active-implement", Kind: string(workflow.JobCancelled), Message: "cancel requested from running"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverTaskImplementation(ctx, store, "task-001", "owner/repo", "lead", false, &stubTaskRecoverGitHub{}); err == nil || !strings.Contains(err.Error(), "live job active-implement") {
+		t.Fatalf("recover during unsettled cancellation err = %v, want live job", err)
+	}
+	if err := store.AddJobEvent(ctx, db.JobEvent{JobID: "active-implement", Kind: "cancel_settled"}); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := store.CreateLock(ctx, db.BranchLock{RepoFullName: "owner/repo", Branch: "task-001-bootstrap", Owner: "other"}); err != nil {
 		t.Fatalf("CreateLock returned error: %v", err)
 	}
 	if _, err := recoverTaskImplementation(ctx, store, "task-001", "owner/repo", "lead", false, &stubTaskRecoverGitHub{}); err == nil || !strings.Contains(err.Error(), "locked by other") {
-		t.Fatalf("recover with wrong lock owner err = %v, want locked by other", err)
+		t.Fatalf("recover after cancellation settled err = %v, want locked by other (liveness cleared)", err)
 	}
 }
 

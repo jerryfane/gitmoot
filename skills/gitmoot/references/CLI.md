@@ -1115,11 +1115,26 @@ Start a task in its dedicated branch worktree and inspect task state:
 gitmoot task run task-001 --repo owner/repo --owner lead --base main
 gitmoot task list --repo owner/repo
 gitmoot task list --repo owner/repo --state implementing --json
+gitmoot task dismiss task-001 --reason "abandoned experiment"
+gitmoot task events task-001 --json
 ```
 
 `task run` stores the deterministic task worktree path under
 `$GITMOOT_HOME/worktrees/<owner>--<repo>/<task-id>/` and leaves the registered
 checkout on its current branch.
+
+`task dismiss` is an explicit terminal action for stale `implementing` or
+`blocked` tasks. It refuses planned, PR/review/merge, awaiting-human, unknown,
+or otherwise machine-owned states; any live queued/running job, unsettled
+post-delivery advancement, unsettled running cancellation, or live process in
+the task worktree also blocks dismissal. The default reason is `dismissed by
+operator`. Success preserves the branch and worktree, releases the branch lock
+best-effort, and appends `task_dismissed_manual` to `task events`. Repeating the
+command is an exit-0 no-op with `changed:false` in JSON.
+
+`task events <id>` prints the append-only task lifecycle trail. Automatic stale
+dismissals use `task_dismissed_auto`; explicit recovery and retry use
+`task_recovered` and `task_recovered_job_retry`.
 
 ### Recover A Dead Implement
 
@@ -1134,9 +1149,11 @@ gitmoot task recover task-001 --owner lead
 gitmoot task recover task-001 --owner lead --repo owner/repo --skip-native-review-fanout --json
 ```
 
-`--owner <agent>` is required (a registered implement-capable agent, attributed
-as the recovery lead). `--repo owner/repo` is optional — it falls back to the
-task's stored repo and is only required when the task carries none.
+`--owner <agent>` is required when recovering preserved branch/worktree
+artifacts (a registered implement-capable agent, attributed as the recovery
+lead). A dismissed task with no branch returns directly to `planned`, so that
+path does not require `--owner`. `--repo owner/repo` is optional — it falls back
+to the task's stored repo and is only required when the task carries none.
 `--skip-native-review-fanout` persists that flag before the PR is opened;
 `--json` prints the machine-readable recovery result.
 
@@ -1145,6 +1162,14 @@ untracked non-ignored files), pushes the task branch, and opens or adopts the
 task's PR — the exact finalize steps the dead implementer never reached. If the
 worktree is already clean it recovers the commit already ahead of the base
 (and refuses when there is nothing ahead to recover).
+
+Recovery is also the only task-level escape hatch from `dismissed`. A dismissed
+task with a preserved branch and worktree first moves to `implementing`, then to
+`pr_open` after finalization. A branchless auto-dismissed task instead returns to
+`planned` and prints guidance to use `task run`. Ordinary `task run`, branch or
+worktree allocation, review continuation, and task-state advancement never
+resurrect a dismissed task implicitly. Retrying one of its jobs explicitly
+restores the task first and records `task_recovered_job_retry`.
 
 Two refusals guard `task recover` (and the `task run` / `agent implement`
 restart that points to it):
