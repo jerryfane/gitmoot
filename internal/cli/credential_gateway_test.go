@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,25 @@ import (
 	"github.com/jerryfane/gitmoot/internal/credgw"
 	"github.com/jerryfane/gitmoot/internal/runtime"
 )
+
+// gatewayLogSink collects gateway/auth logs. The gateway logs from its request
+// goroutines, so reads from the test goroutine must be synchronized.
+type gatewayLogSink struct {
+	mu    sync.Mutex
+	lines strings.Builder
+}
+
+func (s *gatewayLogSink) Logf(format string, args ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprintf(&s.lines, format, args...)
+}
+
+func (s *gatewayLogSink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lines.String()
+}
 
 func TestRuntimeJobRunnerModelGatewayInjectsPlaceholderWithCurationOnAndOff(t *testing.T) {
 	for _, curation := range []bool{false, true} {
@@ -209,9 +229,9 @@ model_gateway_allow_hosts = [%q]
 	previousAuthLogf := runtimeAuthLogf
 	modelGatewayRegistry = credgw.NewRegistry()
 	modelGatewayUpstreamURL = upstream.URL
-	var logs strings.Builder
-	modelGatewayLogf = func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) }
-	runtimeAuthLogf = func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) }
+	var logs gatewayLogSink
+	modelGatewayLogf = logs.Logf
+	runtimeAuthLogf = logs.Logf
 	t.Cleanup(func() {
 		closeModelGatewayHome(paths.Home)
 		modelGatewayRegistry = previousRegistry

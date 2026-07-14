@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -18,6 +19,25 @@ const (
 	testRealCredential = "sk-ant-oat01-real-credential-abcdefghijklmnopqrstuvwxyz"
 	testRequestBody    = "request-body-must-not-be-logged"
 )
+
+// logSink collects gateway logs. The gateway logs from its request goroutines,
+// so reads from the test goroutine must be synchronized.
+type logSink struct {
+	mu    sync.Mutex
+	lines strings.Builder
+}
+
+func (s *logSink) Logf(format string, args ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprintf(&s.lines, format, args...)
+}
+
+func (s *logSink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lines.String()
+}
 
 func TestGatewayPlaceholderLifecycleAndCredentialCustody(t *testing.T) {
 	var upstreamAuthorization string
@@ -31,8 +51,8 @@ func TestGatewayPlaceholderLifecycleAndCredentialCustody(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	var logs strings.Builder
-	gateway, err := Start(func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) })
+	var logs logSink
+	gateway, err := Start(logs.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
