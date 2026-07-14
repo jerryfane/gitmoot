@@ -189,6 +189,9 @@ func (d Daemon) PollOnce(ctx context.Context) error {
 			firstErr = err
 		}
 	}
+	if err := d.reconcilePROpenTasks(ctx, pulls); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	if err := d.reconcileExternallyMergedTasks(ctx, openPullNumbers); err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -327,6 +330,60 @@ func (d Daemon) logf(format string, args ...any) {
 		return
 	}
 	log.Printf(format, args...)
+}
+
+// reconcilePROpenTasks promotes implementing/blocked tasks whose branch carries
+// an open same-repo pull request back to pr_open (#920). It is a catch-up for
+// missed or mis-sequenced PR-open events: without it a wedged task hides its PR
+// from every "needs you" surface, which filters on pr_open. The promotion mirrors
+// what HandlePullRequestOpened would have recorded and cannot trigger a merge —
+// the merge gate acts only on ready_to_merge tasks. Fork heads are skipped:
+// HeadRef text can collide with a local branch name without being that branch.
+func (d Daemon) reconcilePROpenTasks(ctx context.Context, pulls []github.PullRequest) error {
+	if len(pulls) == 0 {
+		return nil
+	}
+	tasks, err := d.Store.ListTasksByRepo(ctx, d.Repo.FullName())
+	if err != nil {
+		return err
+	}
+	byBranch := map[string][]db.Task{}
+	for _, task := range tasks {
+		if task.State != string(workflow.TaskImplementing) && task.State != string(workflow.TaskBlocked) {
+			continue
+		}
+		branch := strings.TrimSpace(task.Branch)
+		if branch == "" {
+			continue
+		}
+		byBranch[branch] = append(byBranch[branch], task)
+	}
+	if len(byBranch) == 0 {
+		return nil
+	}
+	var firstErr error
+	for _, pull := range pulls {
+		headRepo := strings.TrimSpace(pull.HeadRepoFullName)
+		if headRepo != "" && headRepo != d.Repo.FullName() {
+			continue
+		}
+		for _, task := range byBranch[strings.TrimSpace(pull.HeadRef)] {
+			changed, _, err := d.Store.TransitionTaskStateWithEvent(ctx, task.ID,
+				[]string{string(workflow.TaskImplementing), string(workflow.TaskBlocked)},
+				string(workflow.TaskPullRequestOpen), "task_pr_open_auto",
+				fmt.Sprintf("open PR #%d found for branch %s", pull.Number, pull.HeadRef))
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if changed {
+				d.logf("task %s promoted %s -> pr_open: open PR #%d on %s", task.ID, task.State, pull.Number, pull.HeadRef)
+			}
+		}
+	}
+	return firstErr
 }
 
 // reconcileExternallyMergedTasks advances PR lifecycle tasks whose PR was
