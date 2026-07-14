@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var triggerConnectionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
@@ -28,6 +30,7 @@ func ValidTriggerPayloadKey(key string) bool {
 func (s *Spec) normalize() {
 	s.Name = strings.TrimSpace(s.Name)
 	s.Repo = strings.TrimSpace(s.Repo)
+	s.Group = strings.TrimSpace(s.Group)
 	if s.Schedule != nil {
 		s.Schedule.Interval = strings.TrimSpace(s.Schedule.Interval)
 		s.Schedule.Jitter = strings.TrimSpace(s.Schedule.Jitter)
@@ -85,6 +88,14 @@ func (s Spec) Validate() error {
 	}
 	if !validToken(s.Name) {
 		return fmt.Errorf("pipeline name %q must be a name-safe token (letters, digits, '-', '_')", s.Name)
+	}
+	if utf8.RuneCountInString(s.Group) > 100 {
+		return fmt.Errorf("pipeline %q group must be at most 100 characters", s.Name)
+	}
+	for _, r := range s.Group {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("pipeline %q group must not contain control characters", s.Name)
+		}
 	}
 	if len(s.Stages) == 0 {
 		return fmt.Errorf("pipeline %q has no stages", s.Name)

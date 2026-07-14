@@ -49,6 +49,42 @@ func TestLoadValidSpec(t *testing.T) {
 	}
 }
 
+func TestLoadGroupValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		groupLine string
+		wantGroup string
+		wantErr   string
+	}{
+		{name: "set and trimmed", groupLine: `group: "  Release Trains  "`, wantGroup: "Release Trains"},
+		{name: "unset", wantGroup: ""},
+		{name: "too long", groupLine: "group: " + strings.Repeat("g", 101), wantErr: "at most 100 characters"},
+		{name: "control character", groupLine: `group: "Release\u0007Trains"`, wantErr: "must not contain control characters"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := "name: grouped\nrepo: owner/repo\n"
+			if tt.groupLine != "" {
+				raw += tt.groupLine + "\n"
+			}
+			raw += "stages: [{id: run, cmd: echo}]\n"
+			spec, err := Load([]byte(raw))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if spec.Group != tt.wantGroup {
+				t.Fatalf("Group = %q, want %q", spec.Group, tt.wantGroup)
+			}
+		})
+	}
+}
+
 func TestLoadEmailTriggerDefaultsAndValidation(t *testing.T) {
 	loaded, err := Load([]byte("name: mail\nrepo: jerryfane/gitmoot\ntrigger:\n  kind: email\nstages:\n  - {id: run, cmd: echo}\n"))
 	if err != nil {

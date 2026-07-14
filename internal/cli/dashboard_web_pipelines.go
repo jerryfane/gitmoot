@@ -39,9 +39,11 @@ func (d *webDataSource) Pipelines(ctx context.Context) ([]dashboard.PipelineSumm
 		out = make([]dashboard.PipelineSummary, 0, len(rows))
 		knownPipelines := pipelineNameSet(rows)
 		for _, p := range rows {
+			group, _ := resolvedPipelineGroup(p)
 			summary := dashboard.PipelineSummary{
 				Name:       p.Name,
 				Repo:       p.Repo,
+				Group:      group,
 				Enabled:    p.Enabled,
 				Mode:       pipelineDisplayMode(p, pipelineUpstreamMissing(p, knownPipelines)),
 				Interval:   p.Interval,

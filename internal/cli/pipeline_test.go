@@ -94,7 +94,7 @@ func TestPipelineAddListShowEnableDisableRemove(t *testing.T) {
 		t.Fatalf("list exit=%d stderr=%s", code, errOut)
 	}
 	columns := strings.Split(strings.TrimSpace(out), "\t")
-	if len(columns) != 6 || columns[0] != "deploy-flow" || columns[1] != "enabled" || columns[2] != "24h" {
+	if len(columns) != 7 || columns[0] != "deploy-flow" || columns[1] != "enabled" || columns[2] != "24h" || columns[3] != "jerryfane/gitmoot" || columns[4] != "jerryfane/gitmoot" {
 		t.Fatalf("list stdout=%q", out)
 	}
 
@@ -102,7 +102,7 @@ func TestPipelineAddListShowEnableDisableRemove(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("show exit=%d stderr=%s", code, errOut)
 	}
-	if !strings.Contains(out, "enabled: true") || !strings.Contains(out, "interval: 24h") ||
+	if !strings.Contains(out, "group: jerryfane/gitmoot (default)") || !strings.Contains(out, "enabled: true") || !strings.Contains(out, "interval: 24h") ||
 		!strings.Contains(out, "score\t[SHELL]\tcmd: ./score.sh\tneeds=source") ||
 		!strings.Contains(out, "deploy\t[SHELL]\tcmd: ./deploy.sh\tneeds=score") {
 		t.Fatalf("show stdout=%q", out)
@@ -171,6 +171,36 @@ func TestPipelineDisplayMode(t *testing.T) {
 	}
 }
 
+func TestResolvedPipelineGroup(t *testing.T) {
+	tests := []struct {
+		name        string
+		record      db.Pipeline
+		want        string
+		wantDefault bool
+	}{
+		{
+			name:        "explicit group",
+			record:      db.Pipeline{Repo: "owner/repo", SpecYAML: "name: grouped\nrepo: owner/repo\ngroup: Product Operations\nstages: [{id: run, cmd: echo}]\n"},
+			want:        "Product Operations",
+			wantDefault: false,
+		},
+		{
+			name:        "repo fallback",
+			record:      db.Pipeline{Repo: "owner/repo", SpecYAML: "name: plain\nrepo: owner/repo\nstages: [{id: run, cmd: echo}]\n"},
+			want:        "owner/repo",
+			wantDefault: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, defaulted := resolvedPipelineGroup(tt.record)
+			if got != tt.want || defaulted != tt.wantDefault {
+				t.Fatalf("resolvedPipelineGroup() = %q,%v, want %q,%v", got, defaulted, tt.want, tt.wantDefault)
+			}
+		})
+	}
+}
+
 func TestPipelineShowSelfDescribingStagesAndTriggerListInterval(t *testing.T) {
 	home := t.TempDir()
 	if err := withStore(home, func(store *db.Store) error {
@@ -184,6 +214,7 @@ func TestPipelineShowSelfDescribingStagesAndTriggerListInterval(t *testing.T) {
 
 	displaySpec := writeSpec(t, `name: display-flow
 repo: owner/repo
+group: Product Operations
 stages:
   - id: shell
     cmd: |
@@ -225,6 +256,7 @@ stages:
 	}
 	out := stdout.String()
 	for _, want := range []string{
+		"group: Product Operations",
 		"mode: manual",
 		"shell\t[SHELL]\tcmd: echo first; echo this-command-is-deliberately-long",
 		"registered\t[AGENT ask]\tdisplay-agent (codex/gpt-test effort=high)\ttimeout=10m\tretry=2\tneeds=shell",
@@ -275,7 +307,7 @@ stages:
 	foundTrigger := false
 	for _, row := range rows {
 		columns := strings.Split(row, "\t")
-		if len(columns) != 6 {
+		if len(columns) != 7 {
 			t.Fatalf("pipeline list changed column count: row=%q", row)
 		}
 		if columns[0] == "mail-flow" {
@@ -283,9 +315,17 @@ stages:
 			if columns[2] != "email" {
 				t.Fatalf("trigger pipeline interval column = %q, want email", columns[2])
 			}
+			if columns[4] != "owner/repo" {
+				t.Fatalf("trigger pipeline group column = %q, want repo fallback", columns[4])
+			}
 		}
-		if columns[0] == "display-flow" && columns[2] != "-" {
-			t.Fatalf("manual pipeline interval column = %q, want -", columns[2])
+		if columns[0] == "display-flow" {
+			if columns[2] != "-" {
+				t.Fatalf("manual pipeline interval column = %q, want -", columns[2])
+			}
+			if columns[4] != "Product Operations" {
+				t.Fatalf("explicit pipeline group column = %q, want Product Operations", columns[4])
+			}
 		}
 	}
 	if !foundTrigger {
@@ -305,6 +345,7 @@ func TestPipelineShowJSON(t *testing.T) {
 	}
 	var decoded struct {
 		Name     string `json:"name"`
+		Group    string `json:"group"`
 		Enabled  bool   `json:"enabled"`
 		SpecHash string `json:"spec_hash"`
 		Stages   []struct {
@@ -316,7 +357,7 @@ func TestPipelineShowJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode show json: %v (%s)", err, stdout.String())
 	}
-	if decoded.Name != "deploy-flow" || decoded.Enabled || decoded.SpecHash == "" {
+	if decoded.Name != "deploy-flow" || decoded.Group != "jerryfane/gitmoot" || decoded.Enabled || decoded.SpecHash == "" {
 		t.Fatalf("unexpected json header: %+v", decoded)
 	}
 	if len(decoded.Stages) != 3 || decoded.Stages[2].ID != "deploy" || len(decoded.Stages[2].Needs) != 1 {
@@ -336,13 +377,14 @@ func TestPipelineListJSON(t *testing.T) {
 	}
 	var decoded []struct {
 		Name     string `json:"name"`
+		Group    string `json:"group"`
 		Enabled  bool   `json:"enabled"`
 		Interval string `json:"interval"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode list json: %v (%s)", err, stdout.String())
 	}
-	if len(decoded) != 1 || decoded[0].Name != "deploy-flow" || !decoded[0].Enabled || decoded[0].Interval != "24h" {
+	if len(decoded) != 1 || decoded[0].Name != "deploy-flow" || decoded[0].Group != "jerryfane/gitmoot" || !decoded[0].Enabled || decoded[0].Interval != "24h" {
 		t.Fatalf("unexpected list json: %+v", decoded)
 	}
 }
