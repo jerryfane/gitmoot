@@ -1071,8 +1071,9 @@ gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --pa
 best-effort token totals. `workflow show` merges jobs and notes chronologically.
 The read-only web dashboard shows labels as Galaxy hubs and provides a Workflows
 index plus a mission-log detail at `/workflows/<label>`. Workflows are `active`
-while queued/running or touched within 30 minutes, `stalled` when failed/blocked
-and quiet for 30 minutes to 24 hours, and `settled` otherwise. The optional
+while queued/running, `recent` when no work is live but activity occurred within
+30 minutes, `stalled` when failed/blocked with an unacknowledged failure and quiet
+for 30 minutes to 24 hours, and `settled` otherwise. The optional
 `--pane`, `--session`, and `--workdir` note flags persist the latest coordinator
 handoff shown on that page; author defaults to the newest note author.
 Coordinators should set a one-line human summary at kickoff with `--summary`.
