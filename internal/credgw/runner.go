@@ -8,7 +8,14 @@ import (
 	"github.com/jerryfane/gitmoot/internal/subprocess"
 )
 
-const anthropicBaseURLEnv = "ANTHROPIC_BASE_URL"
+const (
+	anthropicBaseURLEnv = "ANTHROPIC_BASE_URL"
+	// claudeConfigDirEnv points the Claude CLI at a config directory. The gateway
+	// sets it to a store WITHOUT a cached credential so the child authenticates
+	// from the injected placeholder instead of ~/.claude/.credentials.json, which
+	// Claude otherwise prefers over CLAUDE_CODE_OAUTH_TOKEN (#936).
+	claudeConfigDirEnv = "CLAUDE_CONFIG_DIR"
+)
 
 type Lease struct {
 	gateway     *Gateway
@@ -45,13 +52,20 @@ func WithLease(ctx context.Context, lease *Lease) context.Context {
 	})
 }
 
-// Runner injects only the loopback route and per-job placeholder. The real
-// credential remains in the gateway's in-memory lease entry.
+// Runner injects the loopback route, the per-job placeholder, and — so the child
+// cannot fall back to a cached credential store — a credential-free
+// CLAUDE_CONFIG_DIR. The real credential remains in the gateway's in-memory lease
+// entry.
 type Runner struct {
 	Inner      subprocess.Runner
 	Gateway    *Gateway
 	Credential Credential
 	Policy     Policy
+	// ChildConfigDir, when set, is injected as CLAUDE_CONFIG_DIR. It must be a
+	// Claude config directory that contains no .credentials.json, or the child
+	// will authenticate from the cached credential and ignore the placeholder
+	// (#936). Empty leaves CLAUDE_CONFIG_DIR untouched (pre-#936 behavior).
+	ChildConfigDir string
 }
 
 func (r *Runner) NewLease(jobID string) (*Lease, error) {
@@ -88,6 +102,10 @@ func (r *Runner) runEnv(ctx context.Context, dir string, env []string, command s
 		"ANTHROPIC_API_KEY=",
 		"ANTHROPIC_AUTH_TOKEN=",
 		anthropicBaseURLEnv + "=" + r.Gateway.URL(),
+	}
+	if r.ChildConfigDir != "" {
+		// Last, so it wins over any CLAUDE_CONFIG_DIR the caller passed in env.
+		gatewayEnv = append(gatewayEnv, claudeConfigDirEnv+"="+r.ChildConfigDir)
 	}
 	merged := append(append([]string{}, env...), gatewayEnv...)
 	inner, ok := r.inner().(subprocess.EnvRunner)
