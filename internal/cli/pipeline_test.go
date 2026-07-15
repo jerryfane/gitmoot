@@ -107,6 +107,9 @@ func TestPipelineAddListShowEnableDisableRemove(t *testing.T) {
 		!strings.Contains(out, "deploy\t[SHELL]\tcmd: ./deploy.sh\tneeds=score") {
 		t.Fatalf("show stdout=%q", out)
 	}
+	if strings.Contains(out, "description:") {
+		t.Fatalf("show emitted an unset description: %q", out)
+	}
 
 	// The hidden shell runner agent exists but is filtered out of `agent list`.
 	out, _, _ = run("agent", "list")
@@ -215,6 +218,9 @@ func TestPipelineShowSelfDescribingStagesAndTriggerListInterval(t *testing.T) {
 	displaySpec := writeSpec(t, `name: display-flow
 repo: owner/repo
 group: Product Operations
+description: |
+  Coordinates product operations.
+  Preserves the declared stage order.
 stages:
   - id: shell
     cmd: |
@@ -257,6 +263,7 @@ stages:
 	out := stdout.String()
 	for _, want := range []string{
 		"group: Product Operations",
+		"description:\n  Coordinates product operations.\n  Preserves the declared stage order.\n",
 		"mode: manual",
 		"shell\t[SHELL]\tcmd: echo first; echo this-command-is-deliberately-long",
 		"registered\t[AGENT ask]\tdisplay-agent (codex/gpt-test effort=high)\ttimeout=10m\tretry=2\tneeds=shell",

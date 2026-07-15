@@ -21,6 +21,7 @@ import (
 // prove nothing rewrites the stored command.
 const diamondSpecYAML = `name: listing-refresh
 repo: jerryfane/noted
+description: Keeps the listing index fresh for readers.
 stages:
   - id: zfetch
     cmd: ./scripts/fetch.sh
@@ -543,6 +544,9 @@ func TestWebDataSourcePipelineDetailNeverRun(t *testing.T) {
 	}
 	if detail.Name != "listing-refresh" {
 		t.Fatalf("detail.Name = %q, want listing-refresh", detail.Name)
+	}
+	if detail.Description != "Keeps the listing index fresh for readers." {
+		t.Fatalf("detail.Description = %q, want raw spec description", detail.Description)
 	}
 	if detail.Runs == nil || len(detail.Runs) != 0 {
 		t.Fatalf("detail.Runs = %+v, want non-nil empty slice (never run)", detail.Runs)

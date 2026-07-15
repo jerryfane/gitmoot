@@ -85,6 +85,43 @@ func TestLoadGroupValidation(t *testing.T) {
 	}
 }
 
+func TestLoadDescriptionValidation(t *testing.T) {
+	tests := []struct {
+		name            string
+		descriptionYAML string
+		wantDescription string
+		wantErr         string
+	}{
+		{name: "set and trimmed", descriptionYAML: `description: "  Explains this pipeline.  "`, wantDescription: "Explains this pipeline."},
+		{name: "unset", wantDescription: ""},
+		{name: "multiline", descriptionYAML: "description: |\n  First line.\n  Second line.", wantDescription: "First line.\nSecond line."},
+		{name: "too long", descriptionYAML: "description: " + strings.Repeat("d", 501), wantErr: "at most 500 characters"},
+		{name: "control character", descriptionYAML: `description: "First\u0007second"`, wantErr: "must not contain control characters other than newline"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := "name: described\nrepo: owner/repo\n"
+			if tt.descriptionYAML != "" {
+				raw += tt.descriptionYAML + "\n"
+			}
+			raw += "stages: [{id: run, cmd: echo}]\n"
+			spec, err := Load([]byte(raw))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if spec.Description != tt.wantDescription {
+				t.Fatalf("Description = %q, want %q", spec.Description, tt.wantDescription)
+			}
+		})
+	}
+}
+
 func TestLoadEmailTriggerDefaultsAndValidation(t *testing.T) {
 	loaded, err := Load([]byte("name: mail\nrepo: jerryfane/gitmoot\ntrigger:\n  kind: email\nstages:\n  - {id: run, cmd: echo}\n"))
 	if err != nil {

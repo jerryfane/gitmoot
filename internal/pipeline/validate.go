@@ -31,6 +31,7 @@ func (s *Spec) normalize() {
 	s.Name = strings.TrimSpace(s.Name)
 	s.Repo = strings.TrimSpace(s.Repo)
 	s.Group = strings.TrimSpace(s.Group)
+	s.Description = strings.TrimSpace(s.Description)
 	if s.Schedule != nil {
 		s.Schedule.Interval = strings.TrimSpace(s.Schedule.Interval)
 		s.Schedule.Jitter = strings.TrimSpace(s.Schedule.Jitter)
@@ -95,6 +96,14 @@ func (s Spec) Validate() error {
 	for _, r := range s.Group {
 		if unicode.IsControl(r) {
 			return fmt.Errorf("pipeline %q group must not contain control characters", s.Name)
+		}
+	}
+	if utf8.RuneCountInString(s.Description) > 500 {
+		return fmt.Errorf("pipeline %q description must be at most 500 characters", s.Name)
+	}
+	for _, r := range s.Description {
+		if unicode.IsControl(r) && r != '\n' {
+			return fmt.Errorf("pipeline %q description must not contain control characters other than newline", s.Name)
 		}
 	}
 	if len(s.Stages) == 0 {
