@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // KillDelegationTree is the operator kill switch (#341). It marks the delegation

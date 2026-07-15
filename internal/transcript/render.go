@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 const (

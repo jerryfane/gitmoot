@@ -18,9 +18,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jerryfane/gitmoot/internal/cli/tui"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/cli/tui"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
 )
 
 // skillOptTrainRunTUICapable reports whether the train run TUI may launch: both

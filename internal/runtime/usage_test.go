@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // TestClaudeDeliverCapturesUsage pins the best-effort #338 Part B token capture
@@ -18,7 +18,7 @@ func TestClaudeDeliverCapturesUsage(t *testing.T) {
 		`"usage":{"input_tokens":1234,"output_tokens":567,"cache_read_input_tokens":10}}`
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err != nil {
@@ -45,7 +45,7 @@ func TestClaudeDeliverNoUsageStaysZero(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := &fakeRunner{results: []subprocess.Result{{Stdout: tt.stdout}}}
 			adapter := ClaudeAdapter{Runner: runner}
-			agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+			agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 			result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 			if err != nil {
@@ -78,7 +78,7 @@ func TestKimiDeliverCapturesUsage(t *testing.T) {
 		`{"role":"meta","type":"result","usage":{"input_tokens":800,"output_tokens":200}}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiAdapter{Runner: runner, Dir: "/repo"}
-	agent := Agent{Name: "audit", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "audit", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err != nil {
@@ -98,7 +98,7 @@ func TestKimiDeliverNoUsageStaysZero(t *testing.T) {
 	stdout := `{"role":"assistant","content":"answer"}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiAdapter{Runner: runner, Dir: "/repo"}
-	agent := Agent{Name: "audit", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "audit", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err != nil {
@@ -157,7 +157,7 @@ func TestCodexDeliverCapturesUsage(t *testing.T) {
 	}
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: codexUsageTranscript}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: ref, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: ref, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"})
 	if err != nil {
@@ -185,7 +185,7 @@ func TestCodexDeliverCapturesUsage(t *testing.T) {
 func TestCodexDeliverSingleUseSessionCapturesUsage(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: codexUsageTranscript}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "impl-x-ephemeral-abc", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot", SingleUseSession: true}
+	agent := Agent{Name: "impl-x-ephemeral-abc", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot", SingleUseSession: true}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"})
 	if err != nil {
@@ -214,7 +214,7 @@ func TestCodexDeliverSingleUseSessionCapturesUsage(t *testing.T) {
 func TestCodexDeliverResumeReportsCumulativeUsage(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: codexUsageTranscript}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"})
 	if err != nil {
@@ -271,7 +271,7 @@ func TestCodexDeliverJoinsAgentMessages(t *testing.T) {
 	}
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: ref, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: ref, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"})
 	if err != nil {
@@ -293,7 +293,7 @@ func TestCodexDeliverNoUsageEventStaysZero(t *testing.T) {
 		`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"})
 	if err != nil {
@@ -315,7 +315,7 @@ func TestCodexDeliverFailsOpenOnNonJSONL(t *testing.T) {
 	const plain = "codex finished the task. plenty of tokens used but none reported."
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: plain}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"})
 	if err != nil {
@@ -343,7 +343,7 @@ func TestCodexDeliverReRunsWithoutJSONWhenRejected(t *testing.T) {
 		errs: []error{errors.New("exit status 2"), nil},
 	}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "impl", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"})
 	if err != nil {

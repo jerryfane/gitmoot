@@ -5,9 +5,9 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 const agentPermissionBlockedMessage = "This Gitmoot worker does not have write permissions, so implementation was not started. Set --policy danger-full-access for full headless implementation (file writes plus go/git/gh via Bash), or --policy workspace-write for edits-only (acceptEdits; does NOT unblock Bash, so go/git/gh stay blocked). Then start or subscribe a writable worker and rerun."

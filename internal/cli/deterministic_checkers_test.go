@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // checkerDiffStub is a diffFileLister that returns canned PullRequestFile patches so
@@ -58,7 +58,7 @@ var _ subprocess.Runner = (*fakeCheckerRunner)(nil)
 // canonicalImplementPayload is the implement job payload the dispatcher checks
 // against (a real merged PR on a real repo).
 func canonicalImplementPayload() workflow.JobPayload {
-	return workflow.JobPayload{Repo: "jerryfane/gitmoot", PullRequest: 7}
+	return workflow.JobPayload{Repo: "gitmoot/gitmoot", PullRequest: 7}
 }
 
 // smallDiffFiles is a tight (well-under-cap) diff: a few changed lines.
@@ -98,7 +98,7 @@ func TestDiffSizeAlwaysProducesADimension(t *testing.T) {
 		t.Fatalf("a tight diff must score 1.0, got %v", score)
 	}
 	// HeadSHA / repo / PR carried through for the harvester's per-PR keying.
-	if outcome.HeadSHA != "head123" || outcome.Repo != "jerryfane/gitmoot" || outcome.PullRequest != 7 {
+	if outcome.HeadSHA != "head123" || outcome.Repo != "gitmoot/gitmoot" || outcome.PullRequest != 7 {
 		t.Fatalf("outcome context not carried through: %+v", outcome)
 	}
 }

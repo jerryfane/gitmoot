@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // TestEngineKilledRootEnqueuesFinalizeAndDispatchesZero pins the #341 operator
@@ -15,13 +15,13 @@ import (
 func TestEngineKilledRootEnqueuesFinalizeAndDispatchesZero(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "root", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "killed tree", Delegations: []Delegation{
 			{ID: "d0", Agent: "w", Action: "ask", Prompt: "work"},
 			{ID: "d1", Agent: "w", Action: "ask", Prompt: "work"},
@@ -59,12 +59,12 @@ func TestEngineKilledRootEnqueuesFinalizeAndDispatchesZero(t *testing.T) {
 func TestEngineUnkilledRootDispatches(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "live", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "live tree", Delegations: []Delegation{
 			{ID: "d0", Agent: "w", Action: "ask", Prompt: "work"},
 		}},
@@ -86,9 +86,9 @@ func TestEngineUnkilledRootDispatches(t *testing.T) {
 func TestKillDelegationTreeMarksRootAndErrorsOnMissing(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	insertCompletedJob(t, store, db.Job{ID: "root", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "tree"},
 	})
 
@@ -121,13 +121,13 @@ func TestKillDelegationTreeMarksRootAndErrorsOnMissing(t *testing.T) {
 func TestKillDelegationTreeResolvesChildToRoot(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	insertCompletedJob(t, store, db.Job{ID: "root", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "tree"},
 	})
 	insertCompletedJob(t, store, db.Job{ID: "root/delegation/c1", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Sender: "coord", RootJobID: "root", DelegationID: "d1",
+		Repo: "gitmoot/gitmoot", Sender: "coord", RootJobID: "root", DelegationID: "d1",
 		Result: &AgentResult{Decision: "approved", Summary: "child"},
 	})
 
@@ -159,12 +159,12 @@ func TestKillDelegationTreeResolvesChildToRoot(t *testing.T) {
 func TestKillDelegationTreeReleasesLocksAndTerminalizesQueuedChildren(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	// Root coordinator (self-roots; succeeded).
 	insertCompletedJob(t, store, db.Job{ID: "root", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "tree"},
 	})
 
@@ -181,16 +181,16 @@ func TestKillDelegationTreeReleasesLocksAndTerminalizesQueuedChildren(t *testing
 
 	// QUEUED child leg — must be cancelled.
 	mustCreateJob("root/delegation/c1", string(JobQueued), JobPayload{
-		Repo: "jerryfane/gitmoot", Sender: "w", RootJobID: "root", DelegationID: "d1",
+		Repo: "gitmoot/gitmoot", Sender: "w", RootJobID: "root", DelegationID: "d1",
 	})
 	// RUNNING child leg — must stay running (graceful).
 	mustCreateJob("root/delegation/c2", string(JobRunning), JobPayload{
-		Repo: "jerryfane/gitmoot", Sender: "w", RootJobID: "root", DelegationID: "d2",
+		Repo: "gitmoot/gitmoot", Sender: "w", RootJobID: "root", DelegationID: "d2",
 	})
 	// QUEUED continuation (DelegationID == "") — must stay queued to drive the
 	// #305 graceful finalize.
 	mustCreateJob("root/continuation", string(JobQueued), JobPayload{
-		Repo: "jerryfane/gitmoot", Sender: "w", RootJobID: "root", DelegationID: "",
+		Repo: "gitmoot/gitmoot", Sender: "w", RootJobID: "root", DelegationID: "",
 	})
 
 	// Acquire locks owned by the root and two child legs.

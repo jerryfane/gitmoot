@@ -10,7 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // Snapshot is the TUI-facing view of local gitmoot state, mirroring the cli

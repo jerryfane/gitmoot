@@ -10,9 +10,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/daemon"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/daemon"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 func runSetup(args []string, stdout, stderr io.Writer) int {

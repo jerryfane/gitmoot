@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // deliverOneShotRuntimePrompt starts a fresh throwaway runtime conversation and

@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // liveABChampionAdapter is the champion-side DeliveryAdapter (the one
@@ -106,7 +106,7 @@ func liveABFixture(t *testing.T, championPulls int) (string, *db.Store, localAge
 		ID:           "ask-planner-bot",
 		Agent:        "planner-bot",
 		Action:       "ask",
-		Repo:         "jerryfane/gitmoot",
+		Repo:         "gitmoot/gitmoot",
 		Instructions: "Plan the migration.",
 		Sender:       "local",
 	})
@@ -569,8 +569,8 @@ func TestMaybeRunLiveABJSONOutputIsNoop(t *testing.T) {
 	_, store, request, agent, job, challengerID := liveABFixture(t, 100)
 	request.JSONOutput = true // `agent ask --json`
 	withLiveABPolicy(t, 1.0, 1)
-	withLiveABSampler(t, 0.0)       // would hit
-	withLiveABInteractive(t, true)  // even on a TTY, --json must stay byte-clean
+	withLiveABSampler(t, 0.0)      // would hit
+	withLiveABInteractive(t, true) // even on a TTY, --json must stay byte-clean
 	var challengerCalls []string
 	withLiveABChallengerDeliver(t, &challengerCalls, "Challenger answer.", nil)
 	champ := &liveABChampionAdapter{summary: "Champion answer."}
@@ -599,8 +599,8 @@ func TestMaybeRunLiveABJSONOutputIsNoop(t *testing.T) {
 func TestMaybeRunLiveABNonInteractiveIsNoop(t *testing.T) {
 	_, store, request, agent, job, challengerID := liveABFixture(t, 100)
 	withLiveABPolicy(t, 1.0, 1)
-	withLiveABSampler(t, 0.0)        // would hit
-	withLiveABInteractive(t, false)  // piped / non-tty session
+	withLiveABSampler(t, 0.0)       // would hit
+	withLiveABInteractive(t, false) // piped / non-tty session
 	var challengerCalls []string
 	withLiveABChallengerDeliver(t, &challengerCalls, "Challenger answer.", nil)
 	champ := &liveABChampionAdapter{summary: "Champion answer."}

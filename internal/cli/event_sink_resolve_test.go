@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 // Regression for #446: the daemon resolves the [events] policy from the ALREADY-

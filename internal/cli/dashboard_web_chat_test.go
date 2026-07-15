@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	dashboard "github.com/jerryfane/gitmoot-dashboard"
+	dashboard "github.com/gitmoot/gitmoot-dashboard"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // chatSeed captures the thread ids a seeded chat store produced so the assertions
@@ -63,7 +63,7 @@ func seedChatStore(t *testing.T, home string) chatSeed {
 	}
 
 	// Busy thread: jerry (@codex-b @ghost), researcher (refs), codex-b (long job_result).
-	busy := mk("release-room", "jerryfane/gitmoot")
+	busy := mk("release-room", "gitmoot/gitmoot")
 	m1 := send(busy.ID, db.ChatKindChat, db.ChatAuthorKindHuman, "jerry",
 		"@codex-b can you inspect the runtime adapter seam? @ghost too", nil)
 	if err := store.AddChatMentions(ctx, []db.ChatMention{
@@ -75,8 +75,8 @@ func seedChatStore(t *testing.T, home string) chatSeed {
 	send(busy.ID, db.ChatKindChat, db.ChatAuthorKindAgent, "researcher",
 		"Compared the options; a fixed schema wins for V1.",
 		[]db.ChatRef{
-			{Kind: "pr", Repo: "jerryfane/gitmoot", ID: "742", URL: "https://github.com/jerryfane/gitmoot/pull/742"},
-			{Kind: "job", Repo: "jerryfane/gitmoot", ID: "job-adapter-01"},
+			{Kind: "pr", Repo: "gitmoot/gitmoot", ID: "742", URL: "https://github.com/gitmoot/gitmoot/pull/742"},
+			{Kind: "job", Repo: "gitmoot/gitmoot", ID: "job-adapter-01"},
 			{Kind: "artifact", URL: "file:///etc/passwd"}, // non-http url must be dropped
 		})
 	longBody := "decision: implemented\nsummary: added the adapter manifest (manifest.go + schema test) with a fixed schema of {kind, body, refs[]} and no runtime negotiation whatsoever."
@@ -115,7 +115,7 @@ func TestWebDataSourceChatThreads(t *testing.T) {
 	// Busy thread: rollup, unread mention (only the resolved one), participants
 	// (authors ∪ resolved mentions; @ghost excluded), snippet cap, last message.
 	busy := byID[seed.busy]
-	if busy.Repo != "jerryfane/gitmoot" || busy.State != "open" || busy.Slug != "release-room" {
+	if busy.Repo != "gitmoot/gitmoot" || busy.State != "open" || busy.Slug != "release-room" {
 		t.Fatalf("busy identity = %+v", busy)
 	}
 	if busy.MessageCount != 3 {
@@ -212,7 +212,7 @@ func TestWebDataSourceChatThreadDetail(t *testing.T) {
 	for _, r := range refMsg.Refs {
 		byKind[r.Kind] = r
 	}
-	if byKind["pr"].URL != "https://github.com/jerryfane/gitmoot/pull/742" {
+	if byKind["pr"].URL != "https://github.com/gitmoot/gitmoot/pull/742" {
 		t.Fatalf("pr ref url = %q, want the https link", byKind["pr"].URL)
 	}
 	if byKind["job"].URL != "" {

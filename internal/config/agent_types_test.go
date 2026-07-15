@@ -167,7 +167,7 @@ max_background = 1
 
 [agents.repo-maintainer.heartbeats.daily]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 prompt = "Review open issues and PRs."
 max_concurrent = 1

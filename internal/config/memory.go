@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // Default read-path knobs for agent persistent memory (#626). The token budget

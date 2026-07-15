@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 func TestInspectClaudeAuthEnvMasksReadiness(t *testing.T) {

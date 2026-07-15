@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 var runtimeAuthEnvVars = []string{

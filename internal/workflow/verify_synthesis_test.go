@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // seedVerifyCoordinator inserts a completed coordinator job whose delegations are
@@ -14,7 +14,7 @@ import (
 // caller pre-seed the carried VerifyAttempt (and other fields) on the parent.
 func seedVerifyCoordinator(t *testing.T, store *db.Store, payload JobPayload) {
 	t.Helper()
-	payload.Repo = "jerryfane/gitmoot"
+	payload.Repo = "gitmoot/gitmoot"
 	payload.Branch = "task-005"
 	payload.TaskID = "task-5"
 	payload.TaskTitle = "Parent"
@@ -37,9 +37,9 @@ func seedVerifyCoordinator(t *testing.T, store *db.Store, payload JobPayload) {
 func TestEngineVerifySynthesisPassesEnqueuesNormalContinuation(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	seedVerifyCoordinator(t, store, JobPayload{})
@@ -92,9 +92,9 @@ func TestEngineVerifySynthesisPassesEnqueuesNormalContinuation(t *testing.T) {
 func TestEngineVerifyVerdictFailedEnqueuesBoundedReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	seedVerifyCoordinator(t, store, JobPayload{})
@@ -148,9 +148,9 @@ func TestEngineVerifyVerdictFailedEnqueuesBoundedReplan(t *testing.T) {
 func TestEngineVerifyReplanAttemptCapRoutesToFinalize(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Pre-seed the parent at the default cap (2): a further failure must finalize.
@@ -196,9 +196,9 @@ func TestEngineVerifyReplanAttemptCapRoutesToFinalize(t *testing.T) {
 func TestEngineVerifyContinuationSlotIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	seedVerifyCoordinator(t, store, JobPayload{})
@@ -251,9 +251,9 @@ func TestEngineVerifyContinuationSlotIdempotent(t *testing.T) {
 func TestEngineVerifyReplanAttemptCapConfigurable(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MaxVerifyReplanAttempts = 1
 
@@ -324,7 +324,7 @@ func TestEngineVerifyMissingChildFailsVerdict(t *testing.T) {
 func seedDepsBoundVerifyCoordinator(t *testing.T, store *db.Store, producerPolicy string) {
 	t.Helper()
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -350,9 +350,9 @@ func seedDepsBoundVerifyCoordinator(t *testing.T, store *db.Store, producerPolic
 func TestEngineVerifyLegNeverRanUnderContinueDoesNotReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	seedDepsBoundVerifyCoordinator(t, store, "continue")
@@ -402,9 +402,9 @@ func TestEngineVerifyLegNeverRanUnderContinueDoesNotReplan(t *testing.T) {
 func TestEngineVerifyLegNeverRanUnderEscalateDoesNotReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "producer", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "verifier", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "producer", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "verifier", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	seedDepsBoundVerifyCoordinator(t, store, "escalate")

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // TestDaemonRunSelfRegistrationSurfacesRunningDaemon is the #505 gap-3 regression:

@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/jerryfane/gitmoot/internal/cli/style"
+	"github.com/gitmoot/gitmoot/internal/cli/style"
 )
 
 // sessionRow is one rendered line on the Sessions page. Generated background

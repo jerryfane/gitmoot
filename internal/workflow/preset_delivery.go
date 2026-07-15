@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // presetDeliveryInputs are the pure decision inputs for whether a job prompt

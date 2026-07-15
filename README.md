@@ -5,8 +5,8 @@
 <div align="center">
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-black.svg?style=flat-square)](./LICENSE)
-[![GitHub release](https://img.shields.io/github/v/release/jerryfane/gitmoot?include_prereleases&color=black&style=flat-square)](https://github.com/jerryfane/gitmoot/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/jerryfane/gitmoot/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/jerryfane/gitmoot/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/gitmoot/gitmoot?include_prereleases&color=black&style=flat-square)](https://github.com/gitmoot/gitmoot/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/gitmoot/gitmoot/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/gitmoot/gitmoot/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/Docs-gitmoot.io-blue?style=flat-square)](https://gitmoot.io/docs/intro)
 [![LLM index](https://img.shields.io/badge/llms.txt-agents_start_here-8A2BE2?style=flat-square)](https://gitmoot.io/llms.txt)
 [![Go](https://img.shields.io/badge/go-single_static_binary-00ADD8?style=flat-square&logo=go&logoColor=white)](./go.mod)
@@ -133,7 +133,7 @@ More workflows: **[coordinator recipes](https://gitmoot.io/docs/workflows/coordi
 
 ## What's Next
 
-The roadmap lives in the open: follow the [open issues](https://github.com/jerryfane/gitmoot/issues) to see what's coming and weigh in on what matters to you.
+The roadmap lives in the open: follow the [open issues](https://github.com/gitmoot/gitmoot/issues) to see what's coming and weigh in on what matters to you.
 
 ## Documentation
 
@@ -157,8 +157,8 @@ go vet ./...
 
 GitHub Actions enforces build, vet, and tests, plus the race detector on the core packages, on every push to `main` and every pull request.
 
-<a href="https://github.com/jerryfane/gitmoot/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=jerryfane/gitmoot" />
+<a href="https://github.com/gitmoot/gitmoot/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=gitmoot/gitmoot" />
 </a>
 
 ## Acknowledgements

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/agenttemplate"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/agenttemplate"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 func TestMailboxEnqueueCreatesQueuedJobAndEvent(t *testing.T) {
@@ -25,7 +25,7 @@ func TestMailboxEnqueueCreatesQueuedJobAndEvent(t *testing.T) {
 		ID:          "job-1",
 		Agent:       "audit",
 		Action:      "review",
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-005",
 		PullRequest: 5,
 		TaskID:      "task-5",
@@ -44,7 +44,7 @@ func TestMailboxEnqueueCreatesQueuedJobAndEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJob returned error: %v", err)
 	}
-	if stored.Payload == "" || !strings.Contains(stored.Payload, `"repo":"jerryfane/gitmoot"`) {
+	if stored.Payload == "" || !strings.Contains(stored.Payload, `"repo":"gitmoot/gitmoot"`) {
 		t.Fatalf("payload = %q", stored.Payload)
 	}
 	events, err := store.ListJobEvents(ctx, "job-1")
@@ -213,7 +213,7 @@ func TestMailboxEnqueuePersistsDelegationMetadata(t *testing.T) {
 		ID:              "job-child",
 		Agent:           "audit",
 		Action:          "ask",
-		Repo:            "jerryfane/gitmoot",
+		Repo:            "gitmoot/gitmoot",
 		Branch:          "task-005",
 		ParentJobID:     "job-parent",
 		DelegationID:    "delegation-1",
@@ -252,7 +252,7 @@ func TestMailboxEnqueuePersistsEphemeralSpec(t *testing.T) {
 		ID:           "job-ephemeral",
 		Agent:        "worker-ephemeral-abc123",
 		Action:       "review",
-		Repo:         "jerryfane/gitmoot",
+		Repo:         "gitmoot/gitmoot",
 		ParentJobID:  "job-parent",
 		DelegationID: "worker",
 		Ephemeral:    &EphemeralSpec{Runtime: "codex", Model: "gpt-5.4", Effort: "high"},
@@ -296,7 +296,7 @@ func TestMailboxClaimStampsRunnerBootID(t *testing.T) {
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
 
-	job, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-claim", Agent: "audit", Action: "ask", Repo: "jerryfane/gitmoot"})
+	job, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-claim", Agent: "audit", Action: "ask", Repo: "gitmoot/gitmoot"})
 	if err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestMailboxEnqueuePersistsModel(t *testing.T) {
 		ID:     "job-model",
 		Agent:  "audit",
 		Action: "review",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Model:  "opus",
 	}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
@@ -369,7 +369,7 @@ func TestMailboxEnqueueOmitsEmptyModel(t *testing.T) {
 		ID:     "job-no-model",
 		Agent:  "audit",
 		Action: "review",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestMailboxEnqueuePersistsPhase(t *testing.T) {
 		ID:     "job-phase",
 		Agent:  "audit",
 		Action: "review",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Phase:  "design",
 	}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
@@ -423,7 +423,7 @@ func TestMailboxEnqueueOmitsEmptyPhase(t *testing.T) {
 		ID:     "job-no-phase",
 		Agent:  "audit",
 		Action: "review",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
@@ -441,12 +441,12 @@ func TestMailboxRunDeliversModelAndEffortOverrides(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"implemented","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot", Model: "opus", Effort: "high"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot", Model: "opus", Effort: "high"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -475,11 +475,11 @@ func TestMailboxRunThreadsRuntimeDefaultModel(t *testing.T) {
 		}
 		return ""
 	}}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{okDeliveryResult}}
 
 	// No agent Model, no job Model: the registry default_model must be threaded in.
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -502,10 +502,10 @@ func TestMailboxRunThreadsRuntimeDefaultEffort(t *testing.T) {
 		}
 		return ""
 	}}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.CodexRuntime, RuntimeRef: "last", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.CodexRuntime, RuntimeRef: "last", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{okDeliveryResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -526,10 +526,10 @@ func TestMailboxRunNilRuntimeDefaultHookByteIdentical(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{okDeliveryResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -554,7 +554,7 @@ func TestMailboxDeliverDeltasCumulativeUsage(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "planner", Runtime: runtime.CodexRuntime, RuntimeRef: "019f3041-cfed-7e82-8766-b5ca75cf92da", RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	agent := runtime.Agent{Name: "planner", Runtime: runtime.CodexRuntime, RuntimeRef: "019f3041-cfed-7e82-8766-b5ca75cf92da", RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{
 		outputs:      []string{okDeliveryResult, okDeliveryResult},
 		inputTokens:  []int{1000, 1500},
@@ -562,7 +562,7 @@ func TestMailboxDeliverDeltasCumulativeUsage(t *testing.T) {
 		cumulative:   []bool{true, true},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-a", Agent: "planner", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-a", Agent: "planner", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue job-a: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-a", agent, adapter); err != nil {
@@ -576,7 +576,7 @@ func TestMailboxDeliverDeltasCumulativeUsage(t *testing.T) {
 		t.Fatalf("job-a usage = (%d, %d), want (1000, 100) — full cumulative on a fresh session baseline", jobA.InputTokens, jobA.OutputTokens)
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-b", Agent: "planner", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-b", Agent: "planner", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue job-b: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-b", agent, adapter); err != nil {
@@ -601,7 +601,7 @@ func TestMailboxDeliverRecordsNonCumulativeVerbatim(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: "fresh-thread-xyz", RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: "fresh-thread-xyz", RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{
 		outputs:      []string{okDeliveryResult, okDeliveryResult},
 		inputTokens:  []int{3000, 2000},
@@ -617,7 +617,7 @@ func TestMailboxDeliverRecordsNonCumulativeVerbatim(t *testing.T) {
 		{"job-c", 3000, 300},
 		{"job-d", 2000, 200},
 	} {
-		if _, err := mailbox.Enqueue(ctx, JobRequest{ID: tc.id, Agent: "impl", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+		if _, err := mailbox.Enqueue(ctx, JobRequest{ID: tc.id, Agent: "impl", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 			t.Fatalf("Enqueue %s: %v", tc.id, err)
 		}
 		if _, err := mailbox.Run(ctx, tc.id, agent, adapter); err != nil {
@@ -643,14 +643,14 @@ func TestMailboxDeliverCumulativeAmbiguousRefContributesZero(t *testing.T) {
 			ctx := context.Background()
 			store := openTestStore(t)
 			mailbox := Mailbox{Store: store}
-			agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: ref, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+			agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: ref, RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 			adapter := &fakeDelivery{
 				outputs:      []string{okDeliveryResult},
 				inputTokens:  []int{2000},
 				outputTokens: []int{200},
 				cumulative:   []bool{true},
 			}
-			if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-e", Agent: "impl", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+			if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-e", Agent: "impl", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 				t.Fatalf("Enqueue: %v", err)
 			}
 			if _, err := mailbox.Run(ctx, "job-e", agent, adapter); err != nil {
@@ -680,7 +680,7 @@ func TestMailboxDeliverSeedsBaselineForAdoptedThread(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: "fresh:codex-solo", RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: "fresh:codex-solo", RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{
 		outputs: []string{
 			"fresh codex turn but no json",
@@ -692,7 +692,7 @@ func TestMailboxDeliverSeedsBaselineForAdoptedThread(t *testing.T) {
 		cumulative:    []bool{false, true},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "impl", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "impl", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -725,7 +725,7 @@ func TestMailboxDeliverDoesNotSeedBaselineWithoutAdoptedThread(t *testing.T) {
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
 	freshRef := "fresh:codex-single"
-	agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: freshRef, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	agent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: freshRef, RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{
 		outputs:      []string{okDeliveryResult},
 		inputTokens:  []int{100},
@@ -733,7 +733,7 @@ func TestMailboxDeliverDoesNotSeedBaselineWithoutAdoptedThread(t *testing.T) {
 		cumulative:   []bool{false},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "impl", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "impl", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -767,7 +767,7 @@ func TestMailboxEnqueuePersistsRootJobID(t *testing.T) {
 		ID:        "job-child",
 		Agent:     "audit",
 		Action:    "ask",
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		RootJobID: "root-coordinator",
 	}); err != nil {
@@ -807,7 +807,7 @@ func TestMailboxEnqueueSnapshotsAgentTemplate(t *testing.T) {
 		Role:         "reviewer",
 		Runtime:      "codex",
 		RuntimeRef:   "last",
-		RepoScope:    "jerryfane/gitmoot",
+		RepoScope:    "gitmoot/gitmoot",
 		TemplateID:   "thermo",
 		Capabilities: []string{"review"},
 	}); err != nil {
@@ -818,7 +818,7 @@ func TestMailboxEnqueueSnapshotsAgentTemplate(t *testing.T) {
 		ID:     "job-1",
 		Agent:  "audit",
 		Action: "review",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
@@ -851,7 +851,7 @@ func TestMailboxEnqueueSnapshotsAgentTemplate(t *testing.T) {
 		Role:         "reviewer",
 		Runtime:      "codex",
 		RuntimeRef:   "last",
-		RepoScope:    "jerryfane/gitmoot",
+		RepoScope:    "gitmoot/gitmoot",
 		TemplateID:   "thermo@v1",
 		Capabilities: []string{"review"},
 	}); err != nil {
@@ -861,7 +861,7 @@ func TestMailboxEnqueueSnapshotsAgentTemplate(t *testing.T) {
 		ID:     "job-2",
 		Agent:  "audit-pinned",
 		Action: "review",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("Enqueue pinned returned error: %v", err)
 	}
@@ -887,7 +887,7 @@ func TestMailboxEnqueueAppliesTemplateOverride(t *testing.T) {
 	if err := store.UpsertAgentTemplate(ctx, db.AgentTemplate{
 		ID:             "agent-own",
 		Name:           "Agent Own",
-		SourceRepo:     "jerryfane/gitmoot",
+		SourceRepo:     "gitmoot/gitmoot",
 		SourceRef:      "main",
 		ResolvedCommit: "own123",
 		Content:        "Agent's own prompt.",
@@ -899,7 +899,7 @@ func TestMailboxEnqueueAppliesTemplateOverride(t *testing.T) {
 		Role:         "coordinator",
 		Runtime:      "codex",
 		RuntimeRef:   "last",
-		RepoScope:    "jerryfane/gitmoot",
+		RepoScope:    "gitmoot/gitmoot",
 		TemplateID:   "agent-own",
 		Capabilities: []string{"ask"},
 	}); err != nil {
@@ -909,7 +909,7 @@ func TestMailboxEnqueueAppliesTemplateOverride(t *testing.T) {
 	override := db.AgentTemplate{
 		ID:             "review-panel",
 		Name:           "Review Panel",
-		SourceRepo:     "jerryfane/gitmoot",
+		SourceRepo:     "gitmoot/gitmoot",
 		SourceRef:      "main",
 		ResolvedCommit: "recipe456",
 		Content:        "Recipe prompt.",
@@ -918,7 +918,7 @@ func TestMailboxEnqueueAppliesTemplateOverride(t *testing.T) {
 		ID:               "job-override",
 		Agent:            "planner",
 		Action:           "ask",
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		TemplateOverride: &override,
 	}); err != nil {
 		t.Fatalf("Enqueue with override returned error: %v", err)
@@ -940,7 +940,7 @@ func TestMailboxEnqueueAppliesTemplateOverride(t *testing.T) {
 		ID:     "job-no-override",
 		Agent:  "planner",
 		Action: "ask",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("Enqueue without override returned error: %v", err)
 	}
@@ -961,7 +961,7 @@ func TestMailboxRunIncludesTemplateSnapshotInPrompt(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"approved","summary":"clean","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -978,7 +978,7 @@ func TestMailboxRunIncludesTemplateSnapshotInPrompt(t *testing.T) {
 		Outputs:              []string{"review_findings"},
 	}, "# Thermo\n\nReview deeply.")
 	payload, err := marshalPayload(JobPayload{
-		Repo:                   "jerryfane/gitmoot",
+		Repo:                   "gitmoot/gitmoot",
 		TemplateID:             "thermo",
 		TemplateResolvedCommit: "abc123",
 		TemplateContent:        templateContent,
@@ -1022,12 +1022,12 @@ func TestMailboxRunStoresResultAndSucceeds(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"implemented","summary":"done","findings":[],"changes_made":["mailbox"],"tests_run":["go test ./..."],"needs":[],"delegations":[]}}`,
 	}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot", Branch: "task-005", PullRequest: 5}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot", Branch: "task-005", PullRequest: 5}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	result, err := mailbox.Run(ctx, "job-1", agent, adapter)
@@ -1057,7 +1057,7 @@ func TestMailboxRunUsesAdapterSummaryWhenAvailable(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ClaudeRuntime, RuntimeRef: runtime.LastRef, RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ClaudeRuntime, RuntimeRef: runtime.LastRef, RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{
 		outputs: []string{`{"result":"wrapped by runtime"}`},
 		summaries: []string{
@@ -1065,7 +1065,7 @@ func TestMailboxRunUsesAdapterSummaryWhenAvailable(t *testing.T) {
 		},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	result, err := mailbox.Run(ctx, "job-1", agent, adapter)
@@ -1092,11 +1092,11 @@ func TestMailboxRunPersistsRefreshedRuntimeRef(t *testing.T) {
 		Role:       "implementer",
 		Runtime:    runtime.ClaudeRuntime,
 		RuntimeRef: oldRef,
-		RepoScope:  "jerryfane/gitmoot",
+		RepoScope:  "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
-	agent := runtime.Agent{Name: "shipper", Runtime: runtime.ClaudeRuntime, RuntimeRef: oldRef, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	agent := runtime.Agent{Name: "shipper", Runtime: runtime.ClaudeRuntime, RuntimeRef: oldRef, RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{
 		outputs: []string{
 			`{"gitmoot_result":{"decision":"implemented","summary":"done","findings":[],"changes_made":["x"],"tests_run":[],"needs":[],"delegations":[]}}`,
@@ -1104,7 +1104,7 @@ func TestMailboxRunPersistsRefreshedRuntimeRef(t *testing.T) {
 		refreshedRefs: []string{newRef},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -1150,11 +1150,11 @@ func TestMailboxRunRepairRetryResumesRefreshedRef(t *testing.T) {
 		Role:       "implementer",
 		Runtime:    runtime.ClaudeRuntime,
 		RuntimeRef: oldRef,
-		RepoScope:  "jerryfane/gitmoot",
+		RepoScope:  "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
-	agent := runtime.Agent{Name: "shipper", Runtime: runtime.ClaudeRuntime, RuntimeRef: oldRef, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	agent := runtime.Agent{Name: "shipper", Runtime: runtime.ClaudeRuntime, RuntimeRef: oldRef, RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{
 		// First delivery self-heals (newRef) but is malformed; the repair delivery
 		// returns a clean result without further refresh.
@@ -1165,7 +1165,7 @@ func TestMailboxRunRepairRetryResumesRefreshedRef(t *testing.T) {
 		refreshedRefs: []string{newRef},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -1194,11 +1194,11 @@ func TestMailboxRunFreshRefRepairUsesConcreteSessionWithoutPersisting(t *testing
 		Role:       "implementer",
 		Runtime:    runtime.CodexRuntime,
 		RuntimeRef: freshRef,
-		RepoScope:  "jerryfane/gitmoot",
+		RepoScope:  "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
-	agent := runtime.Agent{Name: "shipper", Runtime: runtime.CodexRuntime, RuntimeRef: freshRef, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	agent := runtime.Agent{Name: "shipper", Runtime: runtime.CodexRuntime, RuntimeRef: freshRef, RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{
 		outputs: []string{
 			"fresh job session but no json",
@@ -1207,7 +1207,7 @@ func TestMailboxRunFreshRefRepairUsesConcreteSessionWithoutPersisting(t *testing
 		refreshedRefs: []string{concreteRef},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -1250,11 +1250,11 @@ func TestMailboxRunEphemeralRefAdoptedButNotPersisted(t *testing.T) {
 		Role:       "agent",
 		Runtime:    runtime.ClaudeRuntime,
 		RuntimeRef: runtime.LastRef,
-		RepoScope:  "jerryfane/gitmoot",
+		RepoScope:  "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
-	agent := runtime.Agent{Name: "coordinator", Runtime: runtime.ClaudeRuntime, RuntimeRef: runtime.LastRef, RepoScope: "jerryfane/gitmoot", Role: "agent", TemplateID: "coordinator"}
+	agent := runtime.Agent{Name: "coordinator", Runtime: runtime.ClaudeRuntime, RuntimeRef: runtime.LastRef, RepoScope: "gitmoot/gitmoot", Role: "agent", TemplateID: "coordinator"}
 	adapter := &fakeDelivery{
 		// First delivery mints an ephemeral session but is malformed; the repair
 		// delivery must resume that concrete session, not "last".
@@ -1266,7 +1266,7 @@ func TestMailboxRunEphemeralRefAdoptedButNotPersisted(t *testing.T) {
 		ephemeral:     []bool{true},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "coordinator", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "coordinator", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -1314,7 +1314,7 @@ func TestMailboxRunEphemeralRefStaysFreshAcrossJobs(t *testing.T) {
 		Role:       "agent",
 		Runtime:    runtime.ClaudeRuntime,
 		RuntimeRef: runtime.LastRef,
-		RepoScope:  "jerryfane/gitmoot",
+		RepoScope:  "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
@@ -1335,8 +1335,8 @@ func TestMailboxRunEphemeralRefStaysFreshAcrossJobs(t *testing.T) {
 		if stored.RuntimeRef != runtime.LastRef {
 			t.Fatalf("stored runtime_ref before %s = %q, want %q — an ephemeral session leaked into the stored ref", jobID, stored.RuntimeRef, runtime.LastRef)
 		}
-		agent := runtime.Agent{Name: "coordinator", Runtime: runtime.ClaudeRuntime, RuntimeRef: stored.RuntimeRef, RepoScope: "jerryfane/gitmoot", Role: "agent", TemplateID: "coordinator"}
-		if _, err := mailbox.Enqueue(ctx, JobRequest{ID: jobID, Agent: "coordinator", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+		agent := runtime.Agent{Name: "coordinator", Runtime: runtime.ClaudeRuntime, RuntimeRef: stored.RuntimeRef, RepoScope: "gitmoot/gitmoot", Role: "agent", TemplateID: "coordinator"}
+		if _, err := mailbox.Enqueue(ctx, JobRequest{ID: jobID, Agent: "coordinator", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 			t.Fatalf("Enqueue %s returned error: %v", jobID, err)
 		}
 		if _, err := mailbox.Run(ctx, jobID, agent, adapter); err != nil {
@@ -1364,16 +1364,16 @@ func TestMailboxRunNoRefreshLeavesRefUnchanged(t *testing.T) {
 		Role:       "implementer",
 		Runtime:    runtime.ClaudeRuntime,
 		RuntimeRef: oldRef,
-		RepoScope:  "jerryfane/gitmoot",
+		RepoScope:  "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
-	agent := runtime.Agent{Name: "shipper", Runtime: runtime.ClaudeRuntime, RuntimeRef: oldRef, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	agent := runtime.Agent{Name: "shipper", Runtime: runtime.ClaudeRuntime, RuntimeRef: oldRef, RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"implemented","summary":"done","findings":[],"changes_made":["x"],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "shipper", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -1402,13 +1402,13 @@ func TestMailboxRunRetriesMalformedOutputOnce(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{
 		"review complete, no json",
 		`{"gitmoot_result":{"decision":"approved","summary":"clean after repair","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	result, err := mailbox.Run(ctx, "job-1", agent, adapter)
@@ -1438,14 +1438,14 @@ func TestMailboxRunSalvagesMissingEnvelopeAfterSecondRepair(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{
 		"findings posted, no json",
 		"still no json",
 		`{"gitmoot_result":{"decision":"approved","summary":"salvaged after second repair","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	result, err := mailbox.Run(ctx, "job-1", agent, adapter)
@@ -1485,14 +1485,14 @@ func TestMailboxRunFailsAfterExhaustingRepairs(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{
 		"no json here",
 		"still no json",
 		"and again no json",
 	}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err == nil {
@@ -1514,12 +1514,12 @@ func TestMailboxRunMarksBlockedDecision(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"blocked","summary":"needs credentials","findings":[],"changes_made":[],"tests_run":[],"needs":["GITHUB_TOKEN"],"delegations":[]}}`,
 	}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -1538,12 +1538,12 @@ func TestMailboxRunRejectsNonQueuedJob(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"approved","summary":"should not run","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if err := store.UpdateJobState(ctx, "job-1", string(JobCancelled)); err != nil {
@@ -1571,7 +1571,7 @@ func TestMailboxRunPreservesCancellationDuringDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{
 		outputs: []string{
 			`{"gitmoot_result":{"decision":"approved","summary":"completed after cancellation","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
@@ -1583,7 +1583,7 @@ func TestMailboxRunPreservesCancellationDuringDelivery(t *testing.T) {
 		},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err == nil {
@@ -1602,7 +1602,7 @@ func TestMailboxRunSkipsRepairAfterCancellation(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 	adapter := &fakeDelivery{
 		outputs: []string{"malformed"},
 		onDeliver: func() {
@@ -1612,7 +1612,7 @@ func TestMailboxRunSkipsRepairAfterCancellation(t *testing.T) {
 		},
 	}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err == nil {
@@ -1724,7 +1724,7 @@ func TestMailboxEnqueuePersistsCockpitFields(t *testing.T) {
 		ID:             "job-cockpit",
 		Agent:          "audit",
 		Action:         "ask",
-		Repo:           "jerryfane/gitmoot",
+		Repo:           "gitmoot/gitmoot",
 		Branch:         "task-005",
 		Sender:         "local",
 		Cockpit:        true,

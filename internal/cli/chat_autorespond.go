@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // chatAutoRespondDispatcher is the seam the auto-respond sweep enqueues through. In

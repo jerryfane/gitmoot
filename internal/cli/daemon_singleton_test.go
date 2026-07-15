@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 // spawnFakeDaemon starts a real, long-lived child process and records it in the

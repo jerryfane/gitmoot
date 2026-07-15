@@ -552,7 +552,7 @@ the redacted draft, and create an issue only when the user explicitly asks or
 the active workflow policy already permits filing reports. Non-interactive
 creation requires `--create --yes`.
 
-Created reports target `jerryfane/gitmoot`, include the labels
+Created reports target `gitmoot/gitmoot`, include the labels
 `gitmoot-dashboard-report` and `bug`, and carry a fingerprint marker in the
 body so duplicate open issues can be reused instead of creating another report.
 If duplicate search fails in the CLI path, Gitmoot prints a warning and still

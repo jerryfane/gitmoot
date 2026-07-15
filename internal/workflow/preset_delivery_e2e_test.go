@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // presetJobPayload builds a stored job payload that snapshots a preset, mirroring
@@ -15,7 +15,7 @@ import (
 func presetJobPayload(t *testing.T) string {
 	t.Helper()
 	payload, err := marshalPayload(JobPayload{
-		Repo:                   "jerryfane/gitmoot",
+		Repo:                   "gitmoot/gitmoot",
 		TemplateID:             "thermo",
 		TemplateResolvedCommit: "abc123",
 		TemplateContent:        "Review deeply.",
@@ -43,7 +43,7 @@ func TestPresetDeliveryReferencedFiresOnlyWithPriorState(t *testing.T) {
 		Name:           "audit",
 		Runtime:        runtime.ShellRuntime,
 		RuntimeRef:     "printf ok",
-		RepoScope:      "jerryfane/gitmoot",
+		RepoScope:      "gitmoot/gitmoot",
 		Role:           "reviewer",
 		PresetDelivery: db.PresetDeliveryReferenced,
 	}
@@ -108,7 +108,7 @@ func TestPresetDeliveryFullModeAlwaysSendsFullEvenWithState(t *testing.T) {
 			Name:           "audit",
 			Runtime:        runtime.ShellRuntime,
 			RuntimeRef:     "printf ok",
-			RepoScope:      "jerryfane/gitmoot",
+			RepoScope:      "gitmoot/gitmoot",
 			Role:           "reviewer",
 			PresetDelivery: mode,
 		}
@@ -141,7 +141,7 @@ func TestPresetDeliveryAutoRequiresPersistedRuntime(t *testing.T) {
 	if err := store.RecordPresetSessionState(ctx, runtime.ShellRuntime, "printf ok", "thermo", "abc123"); err != nil {
 		t.Fatalf("seed shell state: %v", err)
 	}
-	shellAgent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer", PresetDelivery: db.PresetDeliveryAuto}
+	shellAgent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer", PresetDelivery: db.PresetDeliveryAuto}
 	shellAdapter := &fakeDelivery{outputs: []string{okDeliveryResult}}
 	if err := store.CreateJob(ctx, db.Job{ID: "job-auto-shell", Agent: "audit", Type: "review", State: string(JobQueued), Payload: presetJobPayload(t)}); err != nil {
 		t.Fatalf("CreateJob job-auto-shell: %v", err)
@@ -158,7 +158,7 @@ func TestPresetDeliveryAutoRequiresPersistedRuntime(t *testing.T) {
 	if err := store.RecordPresetSessionState(ctx, runtime.CodexRuntime, concrete, "thermo", "abc123"); err != nil {
 		t.Fatalf("seed codex state: %v", err)
 	}
-	codexAgent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: concrete, RepoScope: "jerryfane/gitmoot", Role: "reviewer", PresetDelivery: db.PresetDeliveryAuto}
+	codexAgent := runtime.Agent{Name: "impl", Runtime: runtime.CodexRuntime, RuntimeRef: concrete, RepoScope: "gitmoot/gitmoot", Role: "reviewer", PresetDelivery: db.PresetDeliveryAuto}
 	codexAdapter := &fakeDelivery{outputs: []string{okDeliveryResult}}
 	if err := store.CreateJob(ctx, db.Job{ID: "job-auto-codex", Agent: "impl", Type: "review", State: string(JobQueued), Payload: presetJobPayload(t)}); err != nil {
 		t.Fatalf("CreateJob job-auto-codex: %v", err)
@@ -182,7 +182,7 @@ func TestPresetDeliveryReferencedFallsBackOnCommitMismatch(t *testing.T) {
 	if err := store.RecordPresetSessionState(ctx, runtime.ShellRuntime, "printf ok", "thermo", "old000"); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "reviewer", PresetDelivery: db.PresetDeliveryReferenced}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "reviewer", PresetDelivery: db.PresetDeliveryReferenced}
 	adapter := &fakeDelivery{outputs: []string{okDeliveryResult}}
 	if err := store.CreateJob(ctx, db.Job{ID: "job-mismatch", Agent: "audit", Type: "review", State: string(JobQueued), Payload: presetJobPayload(t)}); err != nil {
 		t.Fatalf("CreateJob: %v", err)

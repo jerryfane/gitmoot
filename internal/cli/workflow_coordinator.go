@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 const workflowHerdrLookupTimeout = 2 * time.Second

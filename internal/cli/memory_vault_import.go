@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/memory"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/memory"
 )
 
 // memory vault import (#737 P2) — the human curation gate as an explicit

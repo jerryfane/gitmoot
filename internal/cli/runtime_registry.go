@@ -11,8 +11,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // resolveRuntimeRegistry builds the effective runtime metadata registry: the

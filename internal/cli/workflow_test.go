@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 func TestRunGoalImportAndStatus(t *testing.T) {
@@ -33,7 +33,7 @@ Document the workflow.
 `)
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("goal import exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -62,7 +62,7 @@ Document the workflow.
 	if err != nil {
 		t.Fatalf("GetTask task-001 returned error: %v", err)
 	}
-	if task.RepoFullName != "jerryfane/gitmoot" || task.GoalID != "goal" || task.Branch != "task-001-bootstrap-runtime" {
+	if task.RepoFullName != "gitmoot/gitmoot" || task.GoalID != "goal" || task.Branch != "task-001-bootstrap-runtime" {
 		t.Fatalf("task-001 = %+v", task)
 	}
 	if err := store.UpsertTask(context.Background(), db.Task{
@@ -78,7 +78,7 @@ Document the workflow.
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"status", "--home", home, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code = Run([]string{"status", "--home", home, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("status exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -147,7 +147,7 @@ func TestRunStatusIncludesUnscopedImportedTasks(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"status", "--home", home, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code = Run([]string{"status", "--home", home, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("status exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -186,7 +186,7 @@ func TestRunGoalImportRejectsTaskIDConflict(t *testing.T) {
 	writeFile(t, secondGoal, "# Second\n\n### Task 1: Other Bootstrap\n")
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"goal", "import", "--home", home, "--file", firstGoal, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", firstGoal, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("first import exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -208,7 +208,7 @@ func TestRunGoalImportPreservesExistingTaskProgress(t *testing.T) {
 	writeFile(t, goalPath, "# Build Gitmoot\n\n### Task 1: Bootstrap\n")
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("first import exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -219,7 +219,7 @@ func TestRunGoalImportPreservesExistingTaskProgress(t *testing.T) {
 	}
 	if err := store.UpsertTask(context.Background(), db.Task{
 		ID:           "task-001",
-		RepoFullName: "jerryfane/gitmoot",
+		RepoFullName: "gitmoot/gitmoot",
 		GoalID:       "goal",
 		Title:        "Bootstrap",
 		State:        "implementing",
@@ -248,7 +248,7 @@ func TestRunGoalImportPreservesExistingTaskProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTask returned error: %v", err)
 	}
-	if task.RepoFullName != "jerryfane/gitmoot" || task.Title != "Bootstrap Updated" || task.State != "implementing" || task.Branch != "custom-branch" {
+	if task.RepoFullName != "gitmoot/gitmoot" || task.Title != "Bootstrap Updated" || task.State != "implementing" || task.Branch != "custom-branch" {
 		t.Fatalf("task after reimport = %+v", task)
 	}
 }
@@ -259,7 +259,7 @@ func TestRunTaskList(t *testing.T) {
 	writeFile(t, goalPath, "# Build Gitmoot\n\n### Task 1: Bootstrap\n\n### Task 2: Review\n")
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("goal import exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -269,12 +269,12 @@ func TestRunTaskList(t *testing.T) {
 	}
 	if err := store.UpsertTask(context.Background(), db.Task{
 		ID:           "task-001",
-		RepoFullName: "jerryfane/gitmoot",
+		RepoFullName: "gitmoot/gitmoot",
 		GoalID:       "goal",
 		Title:        "Bootstrap",
 		State:        "implementing",
 		Branch:       "task-001-bootstrap",
-		WorktreePath: "/tmp/gitmoot/worktrees/jerryfane--gitmoot/task-001",
+		WorktreePath: "/tmp/gitmoot/worktrees/gitmoot--gitmoot/task-001",
 	}); err != nil {
 		t.Fatalf("UpsertTask returned error: %v", err)
 	}
@@ -284,12 +284,12 @@ func TestRunTaskList(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"task", "list", "--home", home, "--repo", "jerryfane/gitmoot", "--state", "implementing"}, &stdout, &stderr)
+	code = Run([]string{"task", "list", "--home", home, "--repo", "gitmoot/gitmoot", "--state", "implementing"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("task list exit code = %d, stderr=%s", code, stderr.String())
 	}
 	output := stdout.String()
-	if !strings.Contains(output, "task-001\timplementing\tjerryfane/gitmoot\ttask-001-bootstrap\t/tmp/gitmoot/worktrees/jerryfane--gitmoot/task-001\tBootstrap") {
+	if !strings.Contains(output, "task-001\timplementing\tgitmoot/gitmoot\ttask-001-bootstrap\t/tmp/gitmoot/worktrees/gitmoot--gitmoot/task-001\tBootstrap") {
 		t.Fatalf("task list output = %q", output)
 	}
 	if strings.Contains(output, "task-002") {
@@ -298,7 +298,7 @@ func TestRunTaskList(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"task", "list", "--home", home, "--repo", "jerryfane/gitmoot", "--json"}, &stdout, &stderr)
+	code = Run([]string{"task", "list", "--home", home, "--repo", "gitmoot/gitmoot", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("task list --json exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -323,7 +323,7 @@ func TestRunGoalImportRollsBackOnTaskFailure(t *testing.T) {
 	}
 	if err := store.UpsertTask(context.Background(), db.Task{
 		ID:           "task-existing",
-		RepoFullName: "jerryfane/gitmoot",
+		RepoFullName: "gitmoot/gitmoot",
 		GoalID:       "existing",
 		Title:        "Existing",
 		State:        "planned",
@@ -340,7 +340,7 @@ func TestRunGoalImportRollsBackOnTaskFailure(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("import exit code = %d, want 1; stderr=%s", code, stderr.String())
 	}
@@ -380,11 +380,11 @@ func TestRunTaskRunRejectsRepoMismatch(t *testing.T) {
 	writeFile(t, goalPath, "# Build Gitmoot\n\n### Task 1: Bootstrap\n")
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("goal import exit code = %d, stderr=%s", code, stderr.String())
 	}
-	subscribeShellImplementAgent(t, home, "lead", "jerryfane/gitmoot")
+	subscribeShellImplementAgent(t, home, "lead", "gitmoot/gitmoot")
 
 	repoDir := t.TempDir()
 	runGit(t, repoDir, "init")
@@ -397,7 +397,7 @@ func TestRunTaskRunRejectsRepoMismatch(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("task run exit code = %d, want 1; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "belongs to repo jerryfane/gitmoot") {
+	if !strings.Contains(stderr.String(), "belongs to repo gitmoot/gitmoot") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
@@ -408,11 +408,11 @@ func TestRunTaskRunRejectsWrongCheckout(t *testing.T) {
 	writeFile(t, goalPath, "# Build Gitmoot\n\n### Task 1: Bootstrap\n")
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("goal import exit code = %d, stderr=%s", code, stderr.String())
 	}
-	subscribeShellImplementAgent(t, home, "lead", "jerryfane/gitmoot")
+	subscribeShellImplementAgent(t, home, "lead", "gitmoot/gitmoot")
 
 	repoDir := t.TempDir()
 	runGit(t, repoDir, "init")
@@ -421,11 +421,11 @@ func TestRunTaskRunRejectsWrongCheckout(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "jerryfane/gitmoot", "--owner", "lead"}, &stdout, &stderr)
+	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "gitmoot/gitmoot", "--owner", "lead"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("task run exit code = %d, want 1; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "not jerryfane/gitmoot") {
+	if !strings.Contains(stderr.String(), "not gitmoot/gitmoot") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
@@ -436,16 +436,16 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 	writeFile(t, goalPath, "# Build Gitmoot\n\n### Task 1: Bootstrap\n")
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("goal import exit code = %d, stderr=%s", code, stderr.String())
 	}
-	subscribeShellImplementAgent(t, home, "lead", "jerryfane/gitmoot")
+	subscribeShellImplementAgent(t, home, "lead", "gitmoot/gitmoot")
 
 	repoDir := t.TempDir()
 	runGit(t, repoDir, "init")
 	runGit(t, repoDir, "branch", "-m", "main")
-	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/jerryfane/gitmoot.git")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/gitmoot/gitmoot.git")
 	writeFile(t, filepath.Join(repoDir, "README.md"), "smoke\n")
 	runGit(t, repoDir, "add", "README.md")
 	runGit(t, repoDir, "-c", "user.name=Gitmoot Test", "-c", "user.email=gitmoot@example.com", "commit", "-m", "initial")
@@ -453,7 +453,7 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "jerryfane/gitmoot", "--owner", "lead"}, &stdout, &stderr)
+	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "gitmoot/gitmoot", "--owner", "lead"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("task run exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -468,22 +468,22 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	repo, err := store.GetRepo(context.Background(), "jerryfane/gitmoot")
+	repo, err := store.GetRepo(context.Background(), "gitmoot/gitmoot")
 	if err != nil {
 		t.Fatalf("GetRepo returned error: %v", err)
 	}
-	if repo.CheckoutPath != repoDir || repo.RemoteURL != "https://github.com/jerryfane/gitmoot.git" {
+	if repo.CheckoutPath != repoDir || repo.RemoteURL != "https://github.com/gitmoot/gitmoot.git" {
 		t.Fatalf("repo = %+v", repo)
 	}
 	task, err := store.GetTask(context.Background(), "task-001")
 	if err != nil {
 		t.Fatalf("GetTask returned error: %v", err)
 	}
-	wantWorktree := filepath.Join(home, ".gitmoot", "worktrees", "jerryfane--gitmoot", "task-001")
+	wantWorktree := filepath.Join(home, ".gitmoot", "worktrees", "gitmoot--gitmoot", "task-001")
 	if task.State != "implementing" || task.Branch != "task-001-bootstrap" || task.WorktreePath != wantWorktree {
 		t.Fatalf("task = %+v, want implementing task-001-bootstrap at %s", task, wantWorktree)
 	}
-	lock, err := store.GetBranchLock(context.Background(), "jerryfane/gitmoot", "task-001-bootstrap")
+	lock, err := store.GetBranchLock(context.Background(), "gitmoot/gitmoot", "task-001-bootstrap")
 	if err != nil {
 		t.Fatalf("GetBranchLock returned error: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "jerryfane/gitmoot", "--owner", "lead"}, &stdout, &stderr)
+	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "gitmoot/gitmoot", "--owner", "lead"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("stale rerun task run exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -563,7 +563,7 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "jerryfane/gitmoot", "--owner", "lead"}, &stdout, &stderr)
+	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "gitmoot/gitmoot", "--owner", "lead"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("duplicate rerun task run exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -584,7 +584,7 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "jerryfane/gitmoot", "--owner", "lead"}, &stdout, &stderr)
+	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "gitmoot/gitmoot", "--owner", "lead"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("rerun task run exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -613,7 +613,7 @@ func TestRunTaskRunRegistersCurrentRepo(t *testing.T) {
 
 func TestTaskRunJobMatchesDelegatedImplementJob(t *testing.T) {
 	payload, err := json.Marshal(workflow.JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Branch:           "task-001-bootstrap",
 		HeadSHA:          "head123",
 		GoalID:           "goal-1",
@@ -640,7 +640,7 @@ func TestTaskRunJobMatchesDelegatedImplementJob(t *testing.T) {
 		ID:           "task-task-001-implement-lead",
 		Agent:        "lead",
 		Action:       "implement",
-		Repo:         "jerryfane/gitmoot",
+		Repo:         "gitmoot/gitmoot",
 		Branch:       "task-001-bootstrap",
 		HeadSHA:      "head123",
 		GoalID:       "goal-1",
@@ -1126,16 +1126,16 @@ func TestRunTaskRunWaitsWhenCheckoutMutationLocked(t *testing.T) {
 	writeFile(t, goalPath, "# Build Gitmoot\n\n### Task 1: Bootstrap\n")
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"goal", "import", "--home", home, "--file", goalPath, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("goal import exit code = %d, stderr=%s", code, stderr.String())
 	}
-	subscribeShellImplementAgent(t, home, "lead", "jerryfane/gitmoot")
+	subscribeShellImplementAgent(t, home, "lead", "gitmoot/gitmoot")
 
 	repoDir := t.TempDir()
 	runGit(t, repoDir, "init")
 	runGit(t, repoDir, "branch", "-m", "main")
-	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/jerryfane/gitmoot.git")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/gitmoot/gitmoot.git")
 	writeFile(t, filepath.Join(repoDir, "README.md"), "smoke\n")
 	runGit(t, repoDir, "add", "README.md")
 	runGit(t, repoDir, "-c", "user.name=Gitmoot Test", "-c", "user.email=gitmoot@example.com", "commit", "-m", "initial")
@@ -1166,7 +1166,7 @@ func TestRunTaskRunWaitsWhenCheckoutMutationLocked(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "jerryfane/gitmoot", "--owner", "lead"}, &stdout, &stderr)
+	code = Run([]string{"task", "run", "task-001", "--home", home, "--repo", "gitmoot/gitmoot", "--owner", "lead"}, &stdout, &stderr)
 	<-released
 	if err := store.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
@@ -1179,7 +1179,7 @@ func TestRunTaskRunWaitsWhenCheckoutMutationLocked(t *testing.T) {
 	if strings.TrimSpace(branches) == "" {
 		t.Fatal("task branch was not created after checkout lock release")
 	}
-	worktreePath := filepath.Join(home, ".gitmoot", "worktrees", "jerryfane--gitmoot", "task-001")
+	worktreePath := filepath.Join(home, ".gitmoot", "worktrees", "gitmoot--gitmoot", "task-001")
 	if _, err := os.Stat(worktreePath); err != nil {
 		t.Fatalf("worktree path after checkout lock release = %v, want existing worktree", err)
 	}

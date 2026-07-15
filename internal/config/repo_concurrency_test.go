@@ -20,7 +20,7 @@ func writeRepoConcurrencyConfig(t *testing.T, body string) Paths {
 
 func TestLoadRepoConcurrencyParsesValidSections(t *testing.T) {
 	paths := writeRepoConcurrencyConfig(t, `
-[repos."jerryfane/gitmoot"]
+[repos."gitmoot/gitmoot"]
 max_parallel = 1
 
 [repos."owner/other"]
@@ -36,7 +36,7 @@ scheduler = "pool"
 	}
 	// Config order is preserved.
 	first := repos[0]
-	if first.Repo != "jerryfane/gitmoot" || first.MaxParallel != 1 || first.Scheduler != "" {
+	if first.Repo != "gitmoot/gitmoot" || first.MaxParallel != 1 || first.Scheduler != "" {
 		t.Fatalf("first override = %+v", first)
 	}
 	second := repos[1]
@@ -64,7 +64,7 @@ func TestLoadRepoConcurrencyAbsentDefaultsToEmpty(t *testing.T) {
 	if len(repos) != 0 {
 		t.Fatalf("expected no overrides for a config without [repos.*], got %+v", repos)
 	}
-	if _, ok := RepoConcurrencyFor(repos, "jerryfane/gitmoot"); ok {
+	if _, ok := RepoConcurrencyFor(repos, "gitmoot/gitmoot"); ok {
 		t.Fatalf("RepoConcurrencyFor on an empty list must not match")
 	}
 }
@@ -73,7 +73,7 @@ func TestLoadRepoConcurrencyZeroMaxParallelIsAllowed(t *testing.T) {
 	// max_parallel = 0 explicitly means "use the global default" — it must NOT
 	// error (never a zero-concurrency stalled repo), and it must not override.
 	paths := writeRepoConcurrencyConfig(t, `
-[repos."jerryfane/gitmoot"]
+[repos."gitmoot/gitmoot"]
 max_parallel = 0
 `)
 	repos, err := LoadRepoConcurrency(paths)
@@ -87,7 +87,7 @@ max_parallel = 0
 
 func TestLoadRepoConcurrencyRejectsNegativeMaxParallel(t *testing.T) {
 	paths := writeRepoConcurrencyConfig(t, `
-[repos."jerryfane/gitmoot"]
+[repos."gitmoot/gitmoot"]
 max_parallel = -1
 `)
 	_, err := LoadRepoConcurrency(paths)
@@ -98,7 +98,7 @@ max_parallel = -1
 
 func TestLoadRepoConcurrencyRejectsUnknownScheduler(t *testing.T) {
 	paths := writeRepoConcurrencyConfig(t, `
-[repos."jerryfane/gitmoot"]
+[repos."gitmoot/gitmoot"]
 max_parallel = 2
 scheduler = "turbo"
 `)
@@ -110,7 +110,7 @@ scheduler = "turbo"
 
 func TestLoadRepoConcurrencyRejectsNonIntMaxParallel(t *testing.T) {
 	paths := writeRepoConcurrencyConfig(t, `
-[repos."jerryfane/gitmoot"]
+[repos."gitmoot/gitmoot"]
 max_parallel = "two"
 `)
 	_, err := LoadRepoConcurrency(paths)

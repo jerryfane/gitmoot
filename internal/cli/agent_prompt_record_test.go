@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // seedPromptRecordFixture builds an isolated home with a tracked repo and an agent
@@ -34,7 +34,7 @@ func seedPromptRecordFixture(t *testing.T) (string, *db.Store) {
 	if err := store.UpsertAgentTemplate(context.Background(), db.AgentTemplate{
 		ID:             "planner",
 		Name:           "Planner",
-		SourceRepo:     "jerryfane/gitmoot",
+		SourceRepo:     "gitmoot/gitmoot",
 		SourceRef:      "main",
 		SourcePath:     "skills/gitmoot/agent-templates/planner.md",
 		ResolvedCommit: "abc123",

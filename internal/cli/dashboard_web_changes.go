@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // ChangeCursor returns the dashboard's opaque liveness cursor. The dashboard

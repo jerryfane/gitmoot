@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	gitutil "github.com/jerryfane/gitmoot/internal/git"
+	gitutil "github.com/gitmoot/gitmoot/internal/git"
 
 	_ "modernc.org/sqlite"
 )

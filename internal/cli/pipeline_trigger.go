@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/activepieces"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/activepieces"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
 )
 
 const (

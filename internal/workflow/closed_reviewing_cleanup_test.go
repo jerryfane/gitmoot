@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // TestHandleReviewPullRequestClosedMergedReleasesLockAndWorktree covers #543
@@ -23,9 +23,9 @@ import (
 // worktree from `blocked` too, while blocked+closed-unmerged keeps them.
 func TestHandleReviewPullRequestClosedMergedReleasesLockAndWorktree(t *testing.T) {
 	const (
-		repo    = "jerryfane/gitmoot"
+		repo    = "gitmoot/gitmoot"
 		branch  = "task-7304-csv-export"
-		path    = "/tmp/gitmoot/worktrees/jerryfane--gitmoot/task-7304"
+		path    = "/tmp/gitmoot/worktrees/gitmoot--gitmoot/task-7304"
 		headSHA = "d0b6891d074f7b5af39c2555c6fe4b6fd3284003"
 	)
 
@@ -80,7 +80,7 @@ func TestHandleReviewPullRequestClosedMergedReleasesLockAndWorktree(t *testing.T
 				if err := store.UpsertPullRequest(ctx, db.PullRequest{
 					RepoFullName: repo,
 					Number:       6,
-					URL:          "https://github.com/jerryfane/gitmoot/pull/6",
+					URL:          "https://github.com/gitmoot/gitmoot/pull/6",
 					HeadBranch:   branch,
 					BaseBranch:   "main",
 					HeadSHA:      headSHA,

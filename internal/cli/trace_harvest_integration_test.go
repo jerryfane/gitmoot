@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/agenttemplate"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/agenttemplate"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // TestTraceHarvestFullChain is the FULL-CHAIN integration test for #465 (Mode A
@@ -162,7 +162,7 @@ func seedChainImplementJob(t *testing.T, store *db.Store, version db.AgentTempla
 		Agent: "lead",
 		Type:  "implement",
 	}, workflow.JobPayload{
-		Repo:                   "jerryfane/gitmoot",
+		Repo:                   "gitmoot/gitmoot",
 		Branch:                 "task-7",
 		PullRequest:            7,
 		TaskID:                 "task-7",
@@ -185,7 +185,7 @@ func seedChainApprovingReview(t *testing.T, store *db.Store, headSHA string) {
 		Agent: "audit",
 		Type:  "review",
 	}, workflow.JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		HeadSHA:     headSHA,
@@ -305,7 +305,7 @@ func TestTraceHarvestFullChainMergedRealCI(t *testing.T) {
 	if event.RunID != "auto-trace:"+version.ID {
 		t.Fatalf("run id = %q, want auto-trace:%s", event.RunID, version.ID)
 	}
-	if event.SourceURL != "https://github.com/jerryfane/gitmoot/pull/7" {
+	if event.SourceURL != "https://github.com/gitmoot/gitmoot/pull/7" {
 		t.Fatalf("source_url = %q", event.SourceURL)
 	}
 	// The strong-positive band is the persisted, observable marker that the no-CI

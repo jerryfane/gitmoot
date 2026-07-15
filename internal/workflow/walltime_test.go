@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // TestEngineWallClockBudgetTripEnqueuesFinalize pins the #338 wall-clock backstop:
@@ -14,8 +14,8 @@ import (
 func TestEngineWallClockBudgetTripEnqueuesFinalize(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	engine := testEngine(store)
 	// Drive the clock MaxDelegationWallClock + 1h past the root's created_at so the
@@ -23,7 +23,7 @@ func TestEngineWallClockBudgetTripEnqueuesFinalize(t *testing.T) {
 	engine.Now = func() time.Time { return time.Now().Add(MaxDelegationWallClock + time.Hour) }
 
 	insertCompletedJob(t, store, db.Job{ID: "slow", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "slow tree", Delegations: []Delegation{
 			{ID: "d0", Agent: "w", Action: "ask", Prompt: "work"},
 			{ID: "d1", Agent: "w", Action: "ask", Prompt: "work"},
@@ -55,12 +55,12 @@ func TestEngineWallClockBudgetTripEnqueuesFinalize(t *testing.T) {
 func TestEngineWithinWallClockBudgetDispatches(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store) // default clock => elapsed ~0
 
 	insertCompletedJob(t, store, db.Job{ID: "fresh", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "fresh tree", Delegations: []Delegation{
 			{ID: "d0", Agent: "w", Action: "ask", Prompt: "work"},
 		}},

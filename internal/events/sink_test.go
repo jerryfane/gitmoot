@@ -10,7 +10,7 @@ import (
 
 func TestNewEventContractShape(t *testing.T) {
 	ts := time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC)
-	ev := NewEvent(EventJobFinished, "job-1", "root-1", "jerryfane/gitmoot", "succeeded", "all good", ts, nil)
+	ev := NewEvent(EventJobFinished, "job-1", "root-1", "gitmoot/gitmoot", "succeeded", "all good", ts, nil)
 
 	if ev.SchemaVersion != 1 {
 		t.Fatalf("SchemaVersion = %d, want 1", ev.SchemaVersion)
@@ -21,7 +21,7 @@ func TestNewEventContractShape(t *testing.T) {
 	if ev.Type != EventJobFinished {
 		t.Fatalf("Type = %q, want %q", ev.Type, EventJobFinished)
 	}
-	if ev.JobID != "job-1" || ev.RootID != "root-1" || ev.Repo != "jerryfane/gitmoot" || ev.Status != "succeeded" || ev.Detail != "all good" {
+	if ev.JobID != "job-1" || ev.RootID != "root-1" || ev.Repo != "gitmoot/gitmoot" || ev.Status != "succeeded" || ev.Detail != "all good" {
 		t.Fatalf("event fields = %+v", ev)
 	}
 	if ev.Timestamp != "2026-06-16T12:00:00Z" {
@@ -78,7 +78,7 @@ func TestNewEventRedactsEveryStringField(t *testing.T) {
 	redact := func(s string) string {
 		return strings.ReplaceAll(s, "ghp_secretsecretsecret", "[REDACTED]")
 	}
-	ev := NewEvent(EventJobFailed, "job-1", "root-1", "jerryfane/gitmoot", "failed", "token ghp_secretsecretsecret leaked", time.Now(), redact)
+	ev := NewEvent(EventJobFailed, "job-1", "root-1", "gitmoot/gitmoot", "failed", "token ghp_secretsecretsecret leaked", time.Now(), redact)
 	if strings.Contains(ev.Detail, "ghp_secretsecretsecret") {
 		t.Fatalf("detail not redacted: %q", ev.Detail)
 	}
@@ -139,11 +139,11 @@ func TestNewEventScrubsAbsolutePathsFromDetail(t *testing.T) {
 
 func TestNewEventRepoIsOwnerRepoOnly(t *testing.T) {
 	cases := map[string]string{
-		"jerryfane/gitmoot":            "jerryfane/gitmoot",
-		"github.com/jerryfane/gitmoot": "jerryfane/gitmoot",
-		"/abs/path/to/checkout":        "", // absolute path must never leak
-		"":                             "",
-		"singletoken":                  "singletoken",
+		"gitmoot/gitmoot":            "gitmoot/gitmoot",
+		"github.com/gitmoot/gitmoot": "gitmoot/gitmoot",
+		"/abs/path/to/checkout":      "", // absolute path must never leak
+		"":                           "",
+		"singletoken":                "singletoken",
 	}
 	for in, want := range cases {
 		ev := NewEvent(EventJobFinished, "j", "r", in, "succeeded", "", time.Now(), nil)

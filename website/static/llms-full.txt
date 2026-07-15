@@ -15,8 +15,8 @@ needs fuller local workflow, CLI, plugin, safety, and result-contract context.
 <div align="center">
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-black.svg?style=flat-square)](./LICENSE)
-[![GitHub release](https://img.shields.io/github/v/release/jerryfane/gitmoot?include_prereleases&color=black&style=flat-square)](https://github.com/jerryfane/gitmoot/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/jerryfane/gitmoot/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/jerryfane/gitmoot/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/gitmoot/gitmoot?include_prereleases&color=black&style=flat-square)](https://github.com/gitmoot/gitmoot/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/gitmoot/gitmoot/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/gitmoot/gitmoot/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/Docs-gitmoot.io-blue?style=flat-square)](https://gitmoot.io/docs/intro)
 [![LLM index](https://img.shields.io/badge/llms.txt-agents_start_here-8A2BE2?style=flat-square)](https://gitmoot.io/llms.txt)
 [![Go](https://img.shields.io/badge/go-single_static_binary-00ADD8?style=flat-square&logo=go&logoColor=white)](./go.mod)
@@ -143,7 +143,7 @@ More workflows: **[coordinator recipes](https://gitmoot.io/docs/workflows/coordi
 
 ## What's Next
 
-The roadmap lives in the open: follow the [open issues](https://github.com/jerryfane/gitmoot/issues) to see what's coming and weigh in on what matters to you.
+The roadmap lives in the open: follow the [open issues](https://github.com/gitmoot/gitmoot/issues) to see what's coming and weigh in on what matters to you.
 
 ## Documentation
 
@@ -167,8 +167,8 @@ go vet ./...
 
 GitHub Actions enforces build, vet, and tests, plus the race detector on the core packages, on every push to `main` and every pull request.
 
-<a href="https://github.com/jerryfane/gitmoot/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=jerryfane/gitmoot" />
+<a href="https://github.com/gitmoot/gitmoot/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=gitmoot/gitmoot" />
 </a>
 
 ## Acknowledgements
@@ -191,7 +191,7 @@ license: Apache-2.0
 compatibility: Requires the gitmoot CLI, git, GitHub CLI authentication, network access to GitHub, and a supported runtime such as Codex, Claude Code, or Kimi Code.
 metadata:
   gitmoot-version: "0.8.8"
-  source: "jerryfane/gitmoot"
+  source: "gitmoot/gitmoot"
   openclaw:
     requires:
       bins:
@@ -2559,7 +2559,7 @@ like:
 ```toml
 [agents.repo-maintainer.heartbeats.daily-status]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 jitter = "15m"
 action = "ask"
@@ -2607,19 +2607,19 @@ Create and manage heartbeats programmatically (no hand-edited TOML):
 ```sh
 # Create (or update) a heartbeat. Omit --enabled to add it disabled.
 gitmoot agent heartbeat add repo-maintainer daily-status \
-  --repo jerryfane/gitmoot --interval 24h --jitter 15m \
+  --repo gitmoot/gitmoot --interval 24h --jitter 15m \
   --prompt "Review open issues, PRs, and recent jobs." --enabled
 
 # A review heartbeat requires the agent to hold the review capability.
 gitmoot agent heartbeat add reviewer stale-prs \
-  --repo jerryfane/gitmoot --interval 12h --action review \
+  --repo gitmoot/gitmoot --interval 12h --action review \
   --prompt "Review stale open PRs and summarize blockers."
 
 # An implement heartbeat requires the agent to hold the implement capability AND
 # a write-granting policy (workspace-write / danger-full-access). Add --runtime to
 # pin a specific runtime for this schedule.
 gitmoot agent heartbeat add builder nightly-tidy \
-  --repo jerryfane/gitmoot --interval 24h --action implement --runtime codex \
+  --repo gitmoot/gitmoot --interval 24h --action implement --runtime codex \
   --prompt "Fix the top lint/type error and open a small PR."
 
 gitmoot agent heartbeat list [--agent repo-maintainer]
@@ -6280,7 +6280,7 @@ This keeps local review deterministic and avoids rerunning every baseline for
 each candidate import.
 
 Future live pairwise mode is tracked in
-[GitHub issue #77](https://github.com/jerryfane/gitmoot/issues/77). That mode
+[GitHub issue #77](https://github.com/gitmoot/gitmoot/issues/77). That mode
 would run the current promoted template and the pending candidate live for every
 validation item before collecting blind A/B feedback. The tradeoff is more
 faithful comparisons and better protection against stale baseline outputs, at
@@ -6731,7 +6731,7 @@ Human approval stays **explicit** for these ambiguous or high-stakes evaluator
 outcomes: the view surfaces them and links to the action, but nothing is auto-approved.
 
 The same failed-check and binary-verdict payloads back the planned Slack/media
-bridge ([#519](https://github.com/jerryfane/gitmoot/issues/519)), which needs
+bridge ([#519](https://github.com/gitmoot/gitmoot/issues/519)), which needs
 compact human-action status to post into a thread. Two read-only endpoints expose
 them for bridge consumers: `GET /api/job/{id}/checks` (a job's failed result checks
 + policy mode) and `GET /api/run/{id}/verdicts` (a SkillOpt run's per-question
@@ -8764,7 +8764,7 @@ license: Apache-2.0
 compatibility: Requires the gitmoot CLI, git, GitHub CLI authentication, network access to GitHub, and a supported runtime such as Codex, Claude Code, or Kimi Code.
 metadata:
   gitmoot-version: "0.8.8"
-  source: "jerryfane/gitmoot"
+  source: "gitmoot/gitmoot"
 ---
 
 # Gitmoot Agent Skill
@@ -9782,7 +9782,7 @@ the redacted draft, and create an issue only when the user explicitly asks or
 the active workflow policy already permits filing reports. Non-interactive
 creation requires `--create --yes`.
 
-Created reports target `jerryfane/gitmoot`, include the labels
+Created reports target `gitmoot/gitmoot`, include the labels
 `gitmoot-dashboard-report` and `bug`, and carry a fingerprint marker in the
 body so duplicate open issues can be reused instead of creating another report.
 If duplicate search fails in the CLI path, Gitmoot prints a warning and still

@@ -5,10 +5,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/events"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/events"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
 )
 
 // This file adds the CROSS-FEATURE leg the #635 gate tests do not cover: the

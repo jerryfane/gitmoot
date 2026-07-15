@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/pipeline"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // pipelineStageResultCmd is a shell command that ignores its input and echoes a

@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/memory"
-	"github.com/jerryfane/gitmoot/internal/mention"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/memory"
+	"github.com/gitmoot/gitmoot/internal/mention"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // runChat is the `gitmoot chat` command group (#534, V1 local-only): a durable,

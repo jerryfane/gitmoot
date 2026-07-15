@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/daemon"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/pipeline"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/daemon"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // runPipeline is the CLI for the #681 pipeline registry: define, inspect, and

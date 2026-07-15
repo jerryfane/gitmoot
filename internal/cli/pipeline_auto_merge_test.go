@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	gitutil "github.com/jerryfane/gitmoot/internal/git"
-	"github.com/jerryfane/gitmoot/internal/pipeline"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	gitutil "github.com/gitmoot/gitmoot/internal/git"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 const pipelineAutoMergeSpec = `name: auto-merge

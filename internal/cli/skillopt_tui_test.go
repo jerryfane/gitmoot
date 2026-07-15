@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
 )
 
 // replaceSkillOptTrainInitTUI stubs the TUI gate and (optionally) the runner.
@@ -32,7 +32,7 @@ func TestSkillOptTrainInitTUIDispatchWritesScaffold(t *testing.T) {
 	restore := replaceSkillOptTrainInitTUI(true, func(_, _ string, _ io.Writer, values *skillOptTrainInitInputs, _ []string) error {
 		values.Name = "tui-flow"
 		values.Template = "planner"
-		values.ReviewRepo = "jerryfane/gitmoot"
+		values.ReviewRepo = "gitmoot/gitmoot"
 		values.ArtifactKind = "text"
 		values.Preview = "text-table"
 		values.Request = "Improve planner summaries."
@@ -49,7 +49,7 @@ func TestSkillOptTrainInitTUIDispatchWritesScaffold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTrainInitConfig: %v", err)
 	}
-	if cfg.Name != "tui-flow" || cfg.Template != "planner" || cfg.ReviewRepo != "jerryfane/gitmoot" || cfg.Preview != "text-table" {
+	if cfg.Name != "tui-flow" || cfg.Template != "planner" || cfg.ReviewRepo != "gitmoot/gitmoot" || cfg.Preview != "text-table" {
 		t.Fatalf("config = %+v", cfg)
 	}
 }
@@ -110,7 +110,7 @@ func TestSkillOptTrainInitTUIIncapableFallsBackToLineWizard(t *testing.T) {
 	defer restore()
 	restoreInteractive := replaceSkillOptTrainInitInteractive(true)
 	defer restoreInteractive()
-	restoreStdin := replaceSkillOptTrainInitStdin("line-flow\nplanner\njerryfane/gitmoot\ntext\ntext-table\nImprove planner.\n")
+	restoreStdin := replaceSkillOptTrainInitStdin("line-flow\nplanner\ngitmoot/gitmoot\ntext\ntext-table\nImprove planner.\n")
 	defer restoreStdin()
 
 	var stdout, stderr bytes.Buffer

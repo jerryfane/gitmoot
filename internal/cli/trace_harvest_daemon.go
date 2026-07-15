@@ -3,13 +3,13 @@ package cli
 import (
 	"context"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // daemonOutcomeHarvester returns the best-effort Mode-A trace-harvester for this

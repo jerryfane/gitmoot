@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // TestPickCrossFamilyJuryDistinctFamilies: with all three families available, a

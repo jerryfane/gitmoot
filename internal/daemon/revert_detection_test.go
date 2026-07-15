@@ -6,17 +6,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // TestRevertedOriginalPRParsesBody covers the pure body-parser (#467): a GitHub
 // Revert-button body maps to the ORIGINAL same-repo PR number; no-match,
 // cross-repo, and malformed bodies all reject.
 func TestRevertedOriginalPRParsesBody(t *testing.T) {
-	d := Daemon{Repo: github.Repository{Owner: "jerryfane", Name: "gitmoot"}}
+	d := Daemon{Repo: github.Repository{Owner: "gitmoot", Name: "gitmoot"}}
 	cases := []struct {
 		name string
 		body string
@@ -24,9 +24,9 @@ func TestRevertedOriginalPRParsesBody(t *testing.T) {
 		ok   bool
 	}{
 		{"plain reverts hash", "Reverts #7", 7, true},
-		{"owner repo reference", "Reverts jerryfane/gitmoot#42", 42, true},
+		{"owner repo reference", "Reverts gitmoot/gitmoot#42", 42, true},
 		{"lowercase reverts", "reverts #11", 11, true},
-		{"embedded in prose", "This PR\n\nReverts jerryfane/gitmoot#9\n\ncc @someone", 9, true},
+		{"embedded in prose", "This PR\n\nReverts gitmoot/gitmoot#9\n\ncc @someone", 9, true},
 		{"no anchor", "Just a normal PR description.", 0, false},
 		{"empty body", "", 0, false},
 		{"cross repo owner", "Reverts otherowner/gitmoot#7", 0, false},
@@ -183,7 +183,7 @@ func revertDaemonEngine(store *db.Store) *workflow.Engine {
 func TestPollOnceCorrectsOnMergedRevert(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	versionID := seedHarvestedPositive(t, store, repo, 7, "task-7")
 
 	before := revertFeedback(t, store, versionID)
@@ -201,7 +201,7 @@ func TestPollOnceCorrectsOnMergedRevert(t *testing.T) {
 				// merged_at timestamp and NO `merged` boolean.
 				State:    "closed",
 				MergedAt: "2026-06-27T12:00:00Z",
-				URL:      "https://github.com/jerryfane/gitmoot/pull/20",
+				URL:      "https://github.com/gitmoot/gitmoot/pull/20",
 				Body:     "Reverts #7",
 				HeadRef:  "revert-task-7",
 				BaseRef:  "main",
@@ -240,7 +240,7 @@ func TestPollOnceCorrectsOnMergedRevert(t *testing.T) {
 func TestPollOnceSkipsUnmergedRevert(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	versionID := seedHarvestedPositive(t, store, repo, 7, "task-7")
 
 	client := &fakeGitHub{
@@ -251,7 +251,7 @@ func TestPollOnceSkipsUnmergedRevert(t *testing.T) {
 				Title:   `Revert "Task 7"`,
 				State:   "closed", // closed but NOT merged
 				Merged:  false,
-				URL:     "https://github.com/jerryfane/gitmoot/pull/21",
+				URL:     "https://github.com/gitmoot/gitmoot/pull/21",
 				Body:    "Reverts #7",
 				HeadRef: "revert-task-7",
 				BaseRef: "main",
@@ -277,7 +277,7 @@ func TestPollOnceSkipsUnmergedRevert(t *testing.T) {
 func TestPollOnceDisabledIsByteIdentical(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	versionID := seedHarvestedPositive(t, store, repo, 7, "task-7")
 
 	client := &countingClosedListGitHub{fakeGitHub: &fakeGitHub{

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/artifact"
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/artifact"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
 )
 
 // seedSkillOptTrainItemsReady starts a 2-item, 2-option train session that lands

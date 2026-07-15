@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // GateCorpusKind is the fixed kind tag every replay-gate corpus file carries so a

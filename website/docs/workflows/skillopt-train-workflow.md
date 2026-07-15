@@ -74,7 +74,7 @@ gitmoot interactive answer <prompt-id> <value> --source agent
 
 To run the wizard in a visible terminal pane that a human can watch while the
 agent answers from its own session, see the
-[Herdr composable train init note](https://github.com/jerryfane/gitmoot/blob/main/docs/herdr-composable-train-init.md);
+[Herdr composable train init note](https://github.com/gitmoot/gitmoot/blob/main/docs/herdr-composable-train-init.md);
 Herdr is an optional frontend, not a Gitmoot dependency.
 
 For agents that prefer answering everything asynchronously in one pass, pass

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 // sessionEst is a test thunk for an admitted session job holding gb of RAM (it

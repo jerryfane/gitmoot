@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 // These tests bind the #597 review findings: the #556 flock refusal must be

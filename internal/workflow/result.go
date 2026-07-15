@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 const resultKey = `"gitmoot_result"`

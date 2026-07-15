@@ -10,7 +10,7 @@ import (
 
 func highRiskEvent() PullRequestEvent {
 	return PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		GoalID:            "goal-1",
@@ -30,9 +30,9 @@ func highRiskEvent() PullRequestEvent {
 func TestHighRiskPRFansOutLensReviewers(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 
@@ -92,9 +92,9 @@ func TestHighRiskPRFansOutLensReviewers(t *testing.T) {
 func TestHighRiskCriticalRefutationBlocks(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 
@@ -145,9 +145,9 @@ func TestHighRiskCriticalRefutationBlocks(t *testing.T) {
 func TestHighRiskAllLensesApproveSatisfiesQuorum(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement", "ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement", "ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 
@@ -179,9 +179,9 @@ func TestHighRiskAllLensesApproveSatisfiesQuorum(t *testing.T) {
 func TestHighRiskChangesRequestedLensFailsQuorum(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 
@@ -226,9 +226,9 @@ func TestHighRiskChangesRequestedLensFailsQuorum(t *testing.T) {
 func TestHighRiskCriticalFindingNotPreNormalizedBlocks(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 
@@ -286,9 +286,9 @@ func TestHighRiskAllApproveReachesMergeWithoutAskCapability(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
 	// Lead has implement + review but deliberately NOT `ask`.
-	seedAgent(t, store, "lead", []string{"implement", "review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement", "review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 
@@ -348,9 +348,9 @@ func TestHighRiskAllApproveReachesMergeWithoutAskCapability(t *testing.T) {
 func TestHighRiskSeamErrorDefersInsteadOfRoutine(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 
@@ -362,7 +362,7 @@ func TestHighRiskSeamErrorDefersInsteadOfRoutine(t *testing.T) {
 		return nil, []string{"internal/auth/session.go"}, nil
 	}
 	event := PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		TaskID:            "task-7",
@@ -404,22 +404,22 @@ func TestHighRiskSeamErrorDefersInsteadOfRoutine(t *testing.T) {
 func TestPullRequestSignalsSeamClassifiesInProcess(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "sec", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "sec", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 	called := 0
 	engine.PullRequestSignals = func(_ context.Context, repo string, number int) ([]string, []string, error) {
 		called++
-		if repo != "jerryfane/gitmoot" || number != 7 {
+		if repo != "gitmoot/gitmoot" || number != 7 {
 			t.Fatalf("seam called with repo=%q number=%d", repo, number)
 		}
 		return nil, []string{"internal/auth/session.go"}, nil
 	}
 
 	event := PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		TaskID:            "task-7",
@@ -443,8 +443,8 @@ func TestPullRequestSignalsSeamClassifiesInProcess(t *testing.T) {
 func TestPullRequestSignalsSeamSkippedWhenEventCarriesSignals(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 	engine.PullRequestSignals = func(context.Context, string, int) ([]string, []string, error) {
@@ -452,7 +452,7 @@ func TestPullRequestSignalsSeamSkippedWhenEventCarriesSignals(t *testing.T) {
 		return nil, nil, nil
 	}
 	event := PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		TaskID:            "task-7",
@@ -478,12 +478,12 @@ func TestPullRequestSignalsSeamSkippedWhenEventCarriesSignals(t *testing.T) {
 func TestRiskTiersOffIsByteIdentical(t *testing.T) {
 	run := func(t *testing.T, enabled bool, withSignals bool) string {
 		store := openEngineStore(t)
-		seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-		seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+		seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+		seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 		engine := testEngine(store)
 		engine.RiskTiersEnabled = enabled
 		event := PullRequestEvent{
-			Repo:              "jerryfane/gitmoot",
+			Repo:              "gitmoot/gitmoot",
 			Branch:            "task-7",
 			PullRequest:       7,
 			GoalID:            "goal-1",
@@ -523,13 +523,13 @@ func TestRiskTiersOffIsByteIdentical(t *testing.T) {
 func TestRiskTiersEnabledRoutineTakesSingleReviewPath(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RiskTiersEnabled = true
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		TaskID:            "task-7",

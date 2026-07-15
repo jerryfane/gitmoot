@@ -111,4 +111,4 @@ when session validation or resume fails:
 [Troubleshooting](../operations/troubleshooting.md).
 
 The full adapter authoring reference lives in
-[`docs/adapters.md`](https://github.com/jerryfane/gitmoot/blob/main/docs/adapters.md).
+[`docs/adapters.md`](https://github.com/gitmoot/gitmoot/blob/main/docs/adapters.md).

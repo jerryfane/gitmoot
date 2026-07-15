@@ -64,7 +64,7 @@ func TestExtractAgentResultAcceptsLearningWithoutScope(t *testing.T) {
 
 func TestExtractAgentResultRejectsMalformedLearnings(t *testing.T) {
 	cases := map[string]string{
-		"missing key": `{"gitmoot_result":{"decision":"approved","summary":"s","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[],"learnings":[{"content":"no key"}]}}`,
+		"missing key":   `{"gitmoot_result":{"decision":"approved","summary":"s","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[],"learnings":[{"content":"no key"}]}}`,
 		"blank content": `{"gitmoot_result":{"decision":"approved","summary":"s","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[],"learnings":[{"key":"k","content":"   "}]}}`,
 		"bad scope":     `{"gitmoot_result":{"decision":"approved","summary":"s","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[],"learnings":[{"key":"k","scope":"planetary","content":"c"}]}}`,
 	}

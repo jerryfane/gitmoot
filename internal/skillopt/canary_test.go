@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // negFeedback is a harvested negative outcome (choice "b"): a changes-requested

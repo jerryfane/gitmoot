@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
 )
 
 // PipelineAutoMergeRequest identifies the immutable PR head a pipeline gate is

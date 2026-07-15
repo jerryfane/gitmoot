@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // roOnlyWorktreeManager satisfies ReadOnlyWorktreeManager (force-remove) but

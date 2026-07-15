@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // CanaryDecision is the verdict of the bounded regression-window comparator

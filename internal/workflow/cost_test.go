@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // floatNear reports whether got is within eps of want; the price math is in
@@ -70,13 +70,13 @@ func seedCostTree(t *testing.T, store *db.Store, rootID, model string, n, perChi
 	t.Helper()
 	ctx := context.Background()
 	insertCompletedJob(t, store, db.Job{ID: rootID, Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-380", TaskID: "task-380", Sender: "coord", Model: model,
+		Repo: "gitmoot/gitmoot", Branch: "task-380", TaskID: "task-380", Sender: "coord", Model: model,
 		Result: &AgentResult{Decision: "approved", Summary: "tree", Delegations: rootDelegations},
 	})
 	for i := 0; i < n; i++ {
 		childID := rootID + "/child" + string(rune('a'+i))
 		insertCompletedJob(t, store, db.Job{ID: childID, Agent: "w", Type: "ask"}, JobPayload{
-			Repo: "jerryfane/gitmoot", Branch: "task-380", TaskID: "task-380", Sender: "w",
+			Repo: "gitmoot/gitmoot", Branch: "task-380", TaskID: "task-380", Sender: "w",
 			RootJobID: rootID, Model: model,
 			Result: &AgentResult{Decision: "approved", Summary: "child"},
 		})
@@ -97,7 +97,7 @@ func TestSumRootDelegationCost(t *testing.T) {
 	// Root R on Opus: coordinator (1e6 in / 1e6 out => $90) + one Opus child
 	// (1e6 out => $75) => $165 total.
 	insertCompletedJob(t, store, db.Job{ID: "R", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", TaskID: "task-380", Sender: "coord", Model: "claude-opus-4-8",
+		Repo: "gitmoot/gitmoot", TaskID: "task-380", Sender: "coord", Model: "claude-opus-4-8",
 		Result: &AgentResult{Decision: "approved", Summary: "root"},
 	})
 	if err := store.UpdateJobUsage(ctx, "R", 1_000_000, 1_000_000); err != nil {
@@ -133,8 +133,8 @@ func TestSumRootDelegationCost(t *testing.T) {
 func TestEngineCostBudgetTripEnqueuesFinalize(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	engine := testEngine(store)
 	engine.MaxDelegationCostUSD = 100.0
@@ -173,8 +173,8 @@ func TestEngineCostBudgetTripEnqueuesFinalize(t *testing.T) {
 func TestEngineWithinCostBudgetDispatches(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	engine := testEngine(store)
 	engine.MaxDelegationCostUSD = 100.0
@@ -202,8 +202,8 @@ func TestEngineWithinCostBudgetDispatches(t *testing.T) {
 func TestEngineZeroCostBudgetIsUnlimited(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	engine := testEngine(store) // MaxDelegationCostUSD defaults to 0 => unlimited
 

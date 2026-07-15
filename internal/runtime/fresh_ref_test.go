@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // TestSupportedRuntimesMatchFactory proves the registry enumeration
@@ -84,7 +84,7 @@ func TestValidateAgentAcceptsFreshRefs(t *testing.T) {
 		t.Fatalf("NewFreshRef returned error: %v", err)
 	}
 	for _, runtimeName := range []string{CodexRuntime, ClaudeRuntime, KimiRuntime, KimiCLIRuntime} {
-		agent := Agent{Name: "audit", Role: "reviewer", Runtime: runtimeName, RuntimeRef: ref, RepoScope: "jerryfane/gitmoot"}
+		agent := Agent{Name: "audit", Role: "reviewer", Runtime: runtimeName, RuntimeRef: ref, RepoScope: "gitmoot/gitmoot"}
 		if err := ValidateAgent(agent); err != nil {
 			t.Fatalf("ValidateAgent rejected fresh ref for %s: %v", runtimeName, err)
 		}
@@ -106,7 +106,7 @@ func TestCodexDeliverFreshRef(t *testing.T) {
 	}, "\n")
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "audit", Role: "reviewer", Runtime: CodexRuntime, RuntimeRef: ref, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "audit", Role: "reviewer", Runtime: CodexRuntime, RuntimeRef: ref, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "do the thing", Model: "gpt-5.5-codex"})
 	if err != nil {
@@ -138,7 +138,7 @@ func TestClaudeDeliverFreshRef(t *testing.T) {
 	minted := "11111111-1111-4111-8111-111111111111"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"fresh claude output"}`}}}
 	adapter := ClaudeAdapter{Runner: runner, NewRuntimeRef: func() (string, error) { return minted, nil }}
-	agent := Agent{Name: "audit", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: ref, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "audit", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: ref, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "do the thing", Model: "claude-opus-4"})
 	if err != nil {
@@ -173,7 +173,7 @@ func TestShellDeliverFreshRefErrors(t *testing.T) {
 	}
 	runner := &fakeRunner{}
 	adapter := ShellAdapter{Runner: runner}
-	agent := Agent{Name: "audit", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: ref, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "audit", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: ref, RepoScope: "gitmoot/gitmoot"}
 
 	_, err = adapter.Deliver(context.Background(), agent, Job{Prompt: "do the thing"})
 	if err == nil {

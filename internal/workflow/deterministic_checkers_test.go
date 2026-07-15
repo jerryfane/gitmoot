@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // recordingCheckerDispatcher is a stub DeterministicCheckerDispatcher that records
@@ -36,7 +36,7 @@ func (r *recordingCheckerDispatcher) Check(_ context.Context, job db.Job, _ JobP
 func TestEngineDispatchesCheckerLegOnMerge(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	harvester := &recordingHarvester{}
@@ -44,7 +44,7 @@ func TestEngineDispatchesCheckerLegOnMerge(t *testing.T) {
 	dispatcher := &recordingCheckerDispatcher{
 		ok: true,
 		outcome: Outcome{
-			Kind: OutcomeReviewed, Objective: true, Repo: "jerryfane/gitmoot", PullRequest: 7,
+			Kind: OutcomeReviewed, Objective: true, Repo: "gitmoot/gitmoot", PullRequest: 7,
 			Rubric: map[string]float64{"diff_size": 0.9},
 		},
 	}
@@ -87,7 +87,7 @@ func TestEngineDispatchesCheckerLegOnMerge(t *testing.T) {
 func TestEngineNilCheckerDispatcherIsByteIdentical(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	engine.OutcomeHarvester = &recordingHarvester{}
@@ -111,7 +111,7 @@ func TestEngineNilCheckerDispatcherIsByteIdentical(t *testing.T) {
 func TestEngineCheckerDispatchErrorNeverFailsMerge(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	engine.OutcomeHarvester = &recordingHarvester{}
@@ -143,7 +143,7 @@ func TestEngineCheckerDispatchErrorNeverFailsMerge(t *testing.T) {
 func TestEngineCheckerDispatchSkipWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	harvester := &recordingHarvester{}
@@ -172,7 +172,7 @@ type blockingCheckerDispatcher struct {
 func (b *blockingCheckerDispatcher) Check(_ context.Context, _ db.Job, _ JobPayload, _ string) (Outcome, bool, error) {
 	b.once.Do(func() { close(b.started) })
 	<-b.release
-	return Outcome{Kind: OutcomeReviewed, Objective: true, Repo: "jerryfane/gitmoot", PullRequest: 7, Rubric: map[string]float64{"diff_size": 1.0}}, true, nil
+	return Outcome{Kind: OutcomeReviewed, Objective: true, Repo: "gitmoot/gitmoot", PullRequest: 7, Rubric: map[string]float64{"diff_size": 1.0}}, true, nil
 }
 
 // TestEngineCheckerLegDoesNotBlockAdvanceJob is the detach regression: even when the
@@ -183,7 +183,7 @@ func (b *blockingCheckerDispatcher) Check(_ context.Context, _ db.Job, _ JobPayl
 func TestEngineCheckerLegDoesNotBlockAdvanceJob(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	// Build an engine with the PRODUCTION default async spawn (no synchronous
 	// CheckerSpawner override), so the detached goroutine is exercised for real.
 	engine := Engine{

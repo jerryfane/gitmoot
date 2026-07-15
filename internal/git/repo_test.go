@@ -8,9 +8,9 @@ func TestParseGitHubRemote(t *testing.T) {
 		remote string
 		want   string
 	}{
-		{name: "https without suffix", remote: "https://github.com/jerryfane/gitmoot", want: "jerryfane/gitmoot"},
-		{name: "https with suffix", remote: "https://github.com/jerryfane/gitmoot.git", want: "jerryfane/gitmoot"},
-		{name: "ssh", remote: "git@github.com:jerryfane/gitmoot.git", want: "jerryfane/gitmoot"},
+		{name: "https without suffix", remote: "https://github.com/gitmoot/gitmoot", want: "gitmoot/gitmoot"},
+		{name: "https with suffix", remote: "https://github.com/gitmoot/gitmoot.git", want: "gitmoot/gitmoot"},
+		{name: "ssh", remote: "git@github.com:gitmoot/gitmoot.git", want: "gitmoot/gitmoot"},
 		{name: "dotted repo", remote: "https://github.com/jerryfane/foo.bar.git", want: "jerryfane/foo.bar"},
 	}
 

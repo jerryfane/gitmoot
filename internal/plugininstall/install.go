@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/internal/pluginpack"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/pluginpack"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 const (

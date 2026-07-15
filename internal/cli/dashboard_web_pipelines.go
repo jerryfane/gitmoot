@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	dashboard "github.com/jerryfane/gitmoot-dashboard"
+	dashboard "github.com/gitmoot/gitmoot-dashboard"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
 )
 
 // This file implements the two Pipelines-page DataSource methods — Pipelines (the

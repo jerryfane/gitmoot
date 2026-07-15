@@ -569,6 +569,6 @@ capture also feeds the `$`-denominated `[orchestrate].max_delegation_cost_usd`
 budget — see the dollar-cost bullet under [Termination bounds](#termination-bounds).
 
 For the in-repo source of truth, see
-[`skills/gitmoot/references/RESULT_CONTRACT.md`](https://github.com/jerryfane/gitmoot/blob/main/skills/gitmoot/references/RESULT_CONTRACT.md)
+[`skills/gitmoot/references/RESULT_CONTRACT.md`](https://github.com/gitmoot/gitmoot/blob/main/skills/gitmoot/references/RESULT_CONTRACT.md)
 and the safety notes in
-[`skills/gitmoot/references/SAFETY.md`](https://github.com/jerryfane/gitmoot/blob/main/skills/gitmoot/references/SAFETY.md).
+[`skills/gitmoot/references/SAFETY.md`](https://github.com/gitmoot/gitmoot/blob/main/skills/gitmoot/references/SAFETY.md).

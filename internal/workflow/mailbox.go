@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/agenttemplate"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/prompts"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/agenttemplate"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/prompts"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // maxRepairAttempts bounds how many times a malformed (missing gitmoot_result

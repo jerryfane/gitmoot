@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // seedAskGateCoordinator inserts a HEALTHY coordinator whose result carries
@@ -16,7 +16,7 @@ import (
 func seedAskGateCoordinator(t *testing.T, store *db.Store, questions []HumanQuestion) {
 	t.Helper()
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -32,7 +32,7 @@ func seedAskGateCoordinator(t *testing.T, store *db.Store, questions []HumanQues
 func TestAskGatePausesHealthyResult(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	notifier := &recordingNotifier{}
 	engine := testEngine(store)
 	engine.EscalationNotifier = notifier
@@ -85,7 +85,7 @@ func TestAskGatePausesHealthyResult(t *testing.T) {
 func TestAskGateIsIdempotentWithinOpenRound(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	notifier := &recordingNotifier{}
 	engine := testEngine(store)
 	engine.EscalationNotifier = notifier
@@ -110,7 +110,7 @@ func TestAskGateIsIdempotentWithinOpenRound(t *testing.T) {
 func TestAskGatePausesEvenWhenNotifierErrors(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{errOnNotify: true}
 
@@ -130,7 +130,7 @@ func TestAskGatePausesEvenWhenNotifierErrors(t *testing.T) {
 func TestResolveEscalationAnswerEnqueuesContinuationWithAnswers(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -186,7 +186,7 @@ func TestResolveEscalationAnswerEnqueuesContinuationWithAnswers(t *testing.T) {
 func TestResolveEscalationAnswerSingleQuestionConvenience(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -211,9 +211,9 @@ func TestResolveEscalationAnswerSingleQuestionConvenience(t *testing.T) {
 func TestResolveEscalationAnswerRejectsOnFailureRound(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -240,7 +240,7 @@ func TestResolveEscalationAnswerRejectsOnFailureRound(t *testing.T) {
 func TestRetryContinueAbortRejectedOnAskRound(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -264,7 +264,7 @@ func TestRetryContinueAbortRejectedOnAskRound(t *testing.T) {
 func TestAskGateAutoFinalizesAfterTTL(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -306,7 +306,7 @@ func TestAskGateAutoFinalizesAfterTTL(t *testing.T) {
 func TestAskGatePausedTimeExcludedFromWallClock(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -328,7 +328,7 @@ func TestAskGatePausedTimeExcludedFromWallClock(t *testing.T) {
 func TestAskGateBudgetNeutral(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -362,14 +362,14 @@ func TestAskGateBudgetNeutral(t *testing.T) {
 func TestNoHumanQuestionsIsByteIdenticalNoPause(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
 	// A healthy result WITHOUT human_questions[] never pauses: no escalation event,
 	// task is not awaiting_human.
 	insertCompletedJob(t, store, db.Job{ID: "plain-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		TaskID: "task-9",
 		Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "done, no questions"},
@@ -412,7 +412,7 @@ func TestParseHumanAnswers(t *testing.T) {
 func seedAskWithDelegationsCoordinator(t *testing.T, store *db.Store, synthesisRule string) {
 	t.Helper()
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -438,9 +438,9 @@ func seedAskWithDelegationsCoordinator(t *testing.T, store *db.Store, synthesisR
 func TestAskGateWithVoteDelegationsAnswerEnqueuesContinuation(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -494,9 +494,9 @@ func TestAskGateWithVoteDelegationsAnswerEnqueuesContinuation(t *testing.T) {
 func TestAskGateWithQuorumDelegationsAnswerEnqueuesContinuation(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.EscalationNotifier = &recordingNotifier{}
 
@@ -528,11 +528,11 @@ func seedCoordinatorWithAskingChildren(t *testing.T, store *db.Store, engine Eng
 	ctx := context.Background()
 	dels := make([]Delegation, 0, len(ids))
 	for _, id := range ids {
-		seedAgent(t, store, id, []string{"review"}, "jerryfane/gitmoot")
+		seedAgent(t, store, id, []string{"review"}, "gitmoot/gitmoot")
 		dels = append(dels, Delegation{ID: id, Agent: id, Action: "review", Prompt: "review " + id})
 	}
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -557,7 +557,7 @@ func seedCoordinatorWithAskingChildren(t *testing.T, store *db.Store, engine Eng
 func TestAskGateChildRoutesPauseToCoordinator(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	notifier := &recordingNotifier{}
 	engine := testEngine(store)
 	engine.EscalationNotifier = notifier
@@ -619,7 +619,7 @@ func TestAskGateChildRoutesPauseToCoordinator(t *testing.T) {
 func TestAskGateSiblingsShareOneRoundOnCoordinator(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	notifier := &recordingNotifier{}
 	engine := testEngine(store)
 	engine.EscalationNotifier = notifier

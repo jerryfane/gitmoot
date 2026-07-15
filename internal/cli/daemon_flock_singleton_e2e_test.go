@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 // daemonRunChildHomeEnv, when set, flips the re-exec'd test binary into a REAL

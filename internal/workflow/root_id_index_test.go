@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // naiveCountRoot is the pre-#420 reference: scan the whole jobs table and filter

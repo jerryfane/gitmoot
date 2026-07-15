@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // TestMailboxRunSkipsRefreshedRefPersistForRuntimeOverride pins the #531
@@ -29,7 +29,7 @@ func TestMailboxRunSkipsRefreshedRefPersistForRuntimeOverride(t *testing.T) {
 		Role:       "implementer",
 		Runtime:    runtime.CodexRuntime,
 		RuntimeRef: defaultRef,
-		RepoScope:  "jerryfane/gitmoot",
+		RepoScope:  "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestMailboxRunSkipsRefreshedRefPersistForRuntimeOverride(t *testing.T) {
 		t.Fatalf("NewFreshRef returned error: %v", err)
 	}
 	// The EFFECTIVE agent an override job runs as: override runtime + per-job ref.
-	effective := runtime.Agent{Name: "shipper", Runtime: runtime.ClaudeRuntime, RuntimeRef: freshRef, RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	effective := runtime.Agent{Name: "shipper", Runtime: runtime.ClaudeRuntime, RuntimeRef: freshRef, RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 	adapter := &fakeDelivery{
 		outputs: []string{
 			`{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
@@ -50,7 +50,7 @@ func TestMailboxRunSkipsRefreshedRefPersistForRuntimeOverride(t *testing.T) {
 		ID:                 "job-override",
 		Agent:              "shipper",
 		Action:             "ask",
-		Repo:               "jerryfane/gitmoot",
+		Repo:               "gitmoot/gitmoot",
 		RuntimeOverride:    runtime.ClaudeRuntime,
 		RuntimeOverrideRef: freshRef,
 	}); err != nil {
@@ -87,7 +87,7 @@ func TestMailboxEnqueuePersistsRuntimeOverride(t *testing.T) {
 		ID:                 "job-override",
 		Agent:              "shipper",
 		Action:             "ask",
-		Repo:               "jerryfane/gitmoot",
+		Repo:               "gitmoot/gitmoot",
 		RuntimeOverride:    runtime.ShellRuntime,
 		RuntimeOverrideRef: "printf ok",
 		ShellEnv:           []string{"GITMOOT_TRIGGER_BODY=first\n第二"},

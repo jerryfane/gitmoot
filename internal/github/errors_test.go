@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 func TestIsTransientMessage(t *testing.T) {

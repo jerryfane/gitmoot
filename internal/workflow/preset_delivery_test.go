@@ -3,8 +3,8 @@ package workflow
 import (
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // TestDecidePresetReferenceEveryModeStateCombination exercises the pure #33

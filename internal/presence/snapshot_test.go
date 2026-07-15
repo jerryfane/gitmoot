@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	gmruntime "github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	gmruntime "github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // TestClaudeCredEnvFromLookupNeutralizesAbsentVars is the #486 credential-isolation

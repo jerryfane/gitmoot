@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo="jerryfane/gitmoot"
+repo="gitmoot/gitmoot"
 api_url="https://api.github.com/repos/${repo}/releases?per_page=20"
 install_dir="${GITMOOT_INSTALL_DIR:-"$HOME/.local/bin"}"
 

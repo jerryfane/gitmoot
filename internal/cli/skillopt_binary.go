@@ -13,10 +13,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // runSkillOptBinary dispatches the BINEVAL binary-evaluation subcommands (#525).

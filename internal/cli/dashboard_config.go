@@ -9,8 +9,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jerryfane/gitmoot/internal/cli/tui"
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/cli/tui"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 // buildDashboardConfigView parses the config file into the read-only sections

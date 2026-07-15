@@ -102,13 +102,13 @@ func TestCountInFlightChatThreadJobs(t *testing.T) {
 			t.Fatalf("CreateJob %s: %v", id, err)
 		}
 	}
-	mk("j-queued", "responder", "queued", tid)   // counts
-	mk("j-running", "responder", "running", tid)  // counts
-	mk("j-done", "responder", "succeeded", tid)   // terminal: excluded
-	mk("j-failed", "responder", "failed", tid)    // terminal: excluded
+	mk("j-queued", "responder", "queued", tid)             // counts
+	mk("j-running", "responder", "running", tid)           // counts
+	mk("j-done", "responder", "succeeded", tid)            // terminal: excluded
+	mk("j-failed", "responder", "failed", tid)             // terminal: excluded
 	mk("j-other", "responder", "running", "chat-thread-2") // other thread: excluded
-	mk("j-agent", "someoneelse", "running", tid)  // other agent: excluded
-	mk("j-nothread", "responder", "running", "")  // no thread link: excluded
+	mk("j-agent", "someoneelse", "running", tid)           // other agent: excluded
+	mk("j-nothread", "responder", "running", "")           // no thread link: excluded
 
 	n, err := store.CountInFlightChatThreadJobs(ctx, tid, "responder")
 	if err != nil {

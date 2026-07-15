@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // TransientError marks a gh-CLI failure that a network/GitHub outage caused —

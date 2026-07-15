@@ -172,7 +172,7 @@ pattern), bounded by depth, a per-root job budget, and loop detection.
    `commit: unknown`:
 
    ```sh
-   PKG=github.com/jerryfane/gitmoot/internal/buildinfo
+   PKG=github.com/gitmoot/gitmoot/internal/buildinfo
    CGO_ENABLED=0 go build -trimpath -ldflags \
      "-s -w -X $PKG.Version=dev-$(git rev-parse --short HEAD) \
       -X $PKG.Commit=$(git rev-parse HEAD) -X $PKG.Date=$(date -Iseconds)" \

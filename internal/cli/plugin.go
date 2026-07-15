@@ -15,13 +15,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/internal/plugincontext"
-	"github.com/jerryfane/gitmoot/internal/plugininstall"
-	"github.com/jerryfane/gitmoot/internal/pluginpack"
-	gitmootruntime "github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
-	"github.com/jerryfane/gitmoot/skills"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/plugincontext"
+	"github.com/gitmoot/gitmoot/internal/plugininstall"
+	"github.com/gitmoot/gitmoot/internal/pluginpack"
+	gitmootruntime "github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/skills"
 )
 
 var pluginExecutable = os.Executable

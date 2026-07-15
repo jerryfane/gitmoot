@@ -1,8 +1,8 @@
 package cli
 
 import (
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // applyMergeGatePolicy loads the [merge_gate] policy for `home` and applies the

@@ -98,7 +98,7 @@ max_ci_wait = "3m"
 
 	// A repo with no override keeps the global default (require_external_ci off) and
 	// the default max_ci_wait.
-	other := cfg.For("jerryfane/gitmoot")
+	other := cfg.For("gitmoot/gitmoot")
 	if other.RequireExternalCI {
 		t.Fatalf("non-override repo require_external_ci = true, want false")
 	}

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // heartbeatScanFixture writes a config (DefaultConfig + body), initializes it, and
@@ -34,7 +34,7 @@ func heartbeatScanFixture(t *testing.T, body string) (config.Paths, *db.Store) {
 	// so the heartbeat repo guard treats it as runnable. Tests that exercise the
 	// unmanaged-repo path register their own repo state instead.
 	if err := store.UpsertRepo(context.Background(), db.Repo{
-		Owner: "jerryfane", Name: "gitmoot", CheckoutPath: t.TempDir(),
+		Owner: "gitmoot", Name: "gitmoot", CheckoutPath: t.TempDir(),
 	}); err != nil {
 		t.Fatalf("UpsertRepo: %v", err)
 	}
@@ -59,7 +59,7 @@ max_background = 1
 
 [agents.repo-maintainer.heartbeats.daily]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 prompt = "Review open issues and PRs."
 max_concurrent = 1
@@ -103,7 +103,7 @@ func TestHeartbeatScanEnqueuesDueJob(t *testing.T) {
 	}
 	req := (*seen)[0]
 	if req.Agent != "repo-maintainer" || req.Action != "ask" || req.Sender != "heartbeat" ||
-		req.Repo != "jerryfane/gitmoot" || req.Instructions != "Review open issues and PRs." ||
+		req.Repo != "gitmoot/gitmoot" || req.Instructions != "Review open issues and PRs." ||
 		req.Fingerprint != "heartbeat:repo-maintainer/daily" {
 		t.Fatalf("unexpected request shape: %+v", req)
 	}
@@ -135,7 +135,7 @@ role = "repo-maintainer"
 
 [agents.repo-maintainer.heartbeats.daily]
 enabled = false
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 prompt = "p"
 `)
@@ -230,7 +230,7 @@ func TestHeartbeatScanSkipsUnmanagedRepo(t *testing.T) {
 	paths, store := heartbeatScanFixture(t, enabledHeartbeatBody)
 	ctx := context.Background()
 	// Disable the registered repo so it is no longer a runnable target.
-	if err := store.SetRepoEnabled(ctx, "jerryfane/gitmoot", false); err != nil {
+	if err := store.SetRepoEnabled(ctx, "gitmoot/gitmoot", false); err != nil {
 		t.Fatalf("SetRepoEnabled: %v", err)
 	}
 	enq, seen := recordingEnqueuer()
@@ -262,7 +262,7 @@ max_background = 2
 
 [agents.builder.heartbeats.nightly]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 action = "implement"
 prompt = "Fix the top lint error and open a small PR."
@@ -277,15 +277,15 @@ func TestHeartbeatScanEnqueuesImplementJob(t *testing.T) {
 	ctx := context.Background()
 	// The implement heartbeat now allocates a real task worktree (#611), so the
 	// target repo needs a real git checkout on its default branch — not the fixture's
-	// bare temp dir. Re-register jerryfane/gitmoot onto one.
+	// bare temp dir. Re-register gitmoot/gitmoot onto one.
 	checkout := createDaemonWorkerGitCheckout(t, "main")
 	if err := store.UpsertRepo(ctx, db.Repo{
-		Owner: "jerryfane", Name: "gitmoot", CheckoutPath: checkout, DefaultBranch: "main", PollInterval: "30s",
+		Owner: "gitmoot", Name: "gitmoot", CheckoutPath: checkout, DefaultBranch: "main", PollInterval: "30s",
 	}); err != nil {
 		t.Fatalf("UpsertRepo: %v", err)
 	}
 	if err := store.UpsertAgent(ctx, db.Agent{
-		Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+		Name: "builder", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 		Capabilities: []string{"ask", "implement"}, AutonomyPolicy: "danger-full-access", RuntimeRef: "last",
 	}); err != nil {
 		t.Fatalf("UpsertAgent: %v", err)
@@ -433,7 +433,7 @@ func TestHeartbeatScanImplementRejectsReadOnlyPolicy(t *testing.T) {
 	paths, store := heartbeatScanFixture(t, implementHeartbeatBody)
 	ctx := context.Background()
 	if err := store.UpsertAgent(ctx, db.Agent{
-		Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+		Name: "builder", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 		Capabilities: []string{"ask", "implement"}, AutonomyPolicy: "auto", RuntimeRef: "last",
 	}); err != nil {
 		t.Fatalf("UpsertAgent: %v", err)
@@ -465,7 +465,7 @@ func TestHeartbeatScanImplementRejectsMissingCapability(t *testing.T) {
 	paths, store := heartbeatScanFixture(t, implementHeartbeatBody)
 	ctx := context.Background()
 	if err := store.UpsertAgent(ctx, db.Agent{
-		Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+		Name: "builder", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 		Capabilities: []string{"ask"}, AutonomyPolicy: "danger-full-access", RuntimeRef: "last",
 	}); err != nil {
 		t.Fatalf("UpsertAgent: %v", err)
@@ -495,7 +495,7 @@ max_background = 1
 
 [agents.repo-maintainer.heartbeats.daily]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 action = "ask"
 runtime = "claude"
@@ -554,7 +554,7 @@ max_background = 2
 
 [agents.reviewer.heartbeats.stale-prs]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "12h"
 action = "review"
 prompt = "Review stale open PRs."
@@ -567,7 +567,7 @@ func TestHeartbeatScanEnqueuesReviewJob(t *testing.T) {
 	paths, store := heartbeatScanFixture(t, reviewHeartbeatBody)
 	ctx := context.Background()
 	if err := store.UpsertAgent(ctx, db.Agent{
-		Name: "reviewer", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+		Name: "reviewer", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 		Capabilities: []string{"ask", "review"}, RuntimeRef: "last",
 	}); err != nil {
 		t.Fatalf("UpsertAgent: %v", err)
@@ -597,7 +597,7 @@ func TestHeartbeatScanReviewRejectsMissingCapability(t *testing.T) {
 	ctx := context.Background()
 	// Register the agent WITHOUT the review capability.
 	if err := store.UpsertAgent(ctx, db.Agent{
-		Name: "reviewer", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+		Name: "reviewer", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 		Capabilities: []string{"ask"}, RuntimeRef: "last",
 	}); err != nil {
 		t.Fatalf("UpsertAgent: %v", err)

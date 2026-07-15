@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func TestEngineStartTaskBranchCreatesBranchAndLock(t *testing.T) {
@@ -18,7 +18,7 @@ func TestEngineStartTaskBranchCreatesBranchAndLock(t *testing.T) {
 	brancher := &fakeBranchCreator{}
 
 	task, err := engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:       "jerryfane/gitmoot",
+		Repo:       "gitmoot/gitmoot",
 		GoalID:     "goal-1",
 		TaskID:     "task-8",
 		TaskTitle:  "Branch Rules",
@@ -33,7 +33,7 @@ func TestEngineStartTaskBranchCreatesBranchAndLock(t *testing.T) {
 	if task.ID != "task-8" || task.Branch != "task-8" || task.State != string(TaskImplementing) {
 		t.Fatalf("task = %+v", task)
 	}
-	lock, err := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-8")
+	lock, err := store.GetBranchLock(ctx, "gitmoot/gitmoot", "task-8")
 	if err != nil {
 		t.Fatalf("GetBranchLock returned error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestEngineStartTaskBranchAcquiresCheckoutMutationLockBeforeBranchSetup(t *t
 	}}
 
 	if _, err := engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:     "jerryfane/gitmoot",
+		Repo:     "gitmoot/gitmoot",
 		TaskID:   "task-8",
 		Branch:   "task-8",
 		Owner:    "lead",
@@ -114,7 +114,7 @@ func TestEngineStartTaskBranchBlocksWhenCheckoutMutationLocked(t *testing.T) {
 	brancher := &fakeBranchCreator{}
 
 	_, err = engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:     "jerryfane/gitmoot",
+		Repo:     "gitmoot/gitmoot",
 		TaskID:   "task-8",
 		Branch:   "task-8",
 		Owner:    "lead",
@@ -137,7 +137,7 @@ func TestEngineStartTaskBranchReleasesLockOnBranchCreateFailure(t *testing.T) {
 	brancher := &fakeBranchCreator{err: errors.New("git failed")}
 
 	_, err := engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		TaskID: "task-8",
 		Branch: "task-8",
 		Owner:  "lead",
@@ -146,7 +146,7 @@ func TestEngineStartTaskBranchReleasesLockOnBranchCreateFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("StartTaskBranch succeeded despite branch failure")
 	}
-	if _, lockErr := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-8"); !errors.Is(lockErr, sql.ErrNoRows) {
+	if _, lockErr := store.GetBranchLock(ctx, "gitmoot/gitmoot", "task-8"); !errors.Is(lockErr, sql.ErrNoRows) {
 		t.Fatalf("lock after failure error = %v, want sql.ErrNoRows", lockErr)
 	}
 }
@@ -163,7 +163,7 @@ func TestEngineStartTaskBranchReleasesCheckoutMutationLockOnBranchCreateFailure(
 	brancher := &fakeBranchCreator{err: errors.New("git failed")}
 
 	_, err = engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:     "jerryfane/gitmoot",
+		Repo:     "gitmoot/gitmoot",
 		TaskID:   "task-8",
 		Branch:   "task-8",
 		Owner:    "lead",
@@ -183,7 +183,7 @@ func TestEngineStartTaskBranchPreservesExistingTaskMetadata(t *testing.T) {
 	store := openEngineStore(t)
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-8",
-		RepoFullName: "jerryfane/gitmoot",
+		RepoFullName: "gitmoot/gitmoot",
 		GoalID:       "goal-1",
 		Title:        "Branch Rules",
 		State:        string(TaskPlanned),
@@ -193,7 +193,7 @@ func TestEngineStartTaskBranchPreservesExistingTaskMetadata(t *testing.T) {
 	engine := testEngine(store)
 
 	task, err := engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		TaskID: "task-8",
 		Branch: "task-8",
 		Owner:  "lead",
@@ -211,13 +211,13 @@ func TestEngineStartTaskBranchPreservesExistingSameOwnerLockOnFailure(t *testing
 	ctx := context.Background()
 	store := openEngineStore(t)
 	engine := testEngine(store)
-	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-8", Owner: "lead"}); err != nil || !acquired {
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-8", Owner: "lead"}); err != nil || !acquired {
 		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
 	}
 	brancher := &fakeBranchCreator{err: errors.New("git failed")}
 
 	_, err := engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		TaskID: "task-8",
 		Branch: "task-8",
 		Owner:  "lead",
@@ -226,7 +226,7 @@ func TestEngineStartTaskBranchPreservesExistingSameOwnerLockOnFailure(t *testing
 	if err == nil {
 		t.Fatal("StartTaskBranch succeeded despite branch failure")
 	}
-	lock, lockErr := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-8")
+	lock, lockErr := store.GetBranchLock(ctx, "gitmoot/gitmoot", "task-8")
 	if lockErr != nil {
 		t.Fatalf("GetBranchLock returned error: %v", lockErr)
 	}
@@ -239,12 +239,12 @@ func TestEngineStartTaskBranchBlocksWhenBranchLocked(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
 	engine := testEngine(store)
-	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-8", Owner: "other"}); err != nil || !acquired {
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-8", Owner: "other"}); err != nil || !acquired {
 		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
 	}
 
 	_, err := engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		TaskID: "task-8",
 		Branch: "task-8",
 		Owner:  "lead",
@@ -266,7 +266,7 @@ func TestEngineStartTaskBranchRejectsBranchAssignedToOtherTask(t *testing.T) {
 	brancher := &fakeBranchCreator{}
 
 	_, err := engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		TaskID: "task-8",
 		Branch: "task-8",
 		Owner:  "lead",
@@ -290,7 +290,7 @@ func TestEngineStartTaskBranchAllowsSameBranchInAnotherRepo(t *testing.T) {
 	brancher := &fakeBranchCreator{}
 
 	task, err := engine.StartTaskBranch(ctx, TaskBranchRequest{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		GoalID:    "goal-1",
 		TaskID:    "task-8",
 		TaskTitle: "Task 8",
@@ -300,8 +300,8 @@ func TestEngineStartTaskBranchAllowsSameBranchInAnotherRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartTaskBranch returned error: %v", err)
 	}
-	if task.RepoFullName != "jerryfane/gitmoot" {
-		t.Fatalf("task repo = %q, want jerryfane/gitmoot", task.RepoFullName)
+	if task.RepoFullName != "gitmoot/gitmoot" {
+		t.Fatalf("task repo = %q, want gitmoot/gitmoot", task.RepoFullName)
 	}
 }
 

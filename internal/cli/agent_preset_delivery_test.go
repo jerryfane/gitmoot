@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func agentPresetDelivery(t *testing.T, home, name string) string {
@@ -37,7 +37,7 @@ func TestAgentSubscribePresetDeliveryFlag(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "review",
 		"--preset-delivery", "referenced",
 	}, &stdout, &stderr)
@@ -57,7 +57,7 @@ func TestAgentSubscribePresetDeliveryFlag(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440002",
 		"--role", "coordinator",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "ask",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -94,7 +94,7 @@ func TestAgentSubscribePresetDeliveryFlag(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440003",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "review",
 		"--preset-delivery", "loose",
 	}, &stdout, &stderr)
@@ -117,7 +117,7 @@ func TestAgentReSubscribePreservesPresetDelivery(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "review",
 		"--preset-delivery", "auto",
 	}, &stdout, &stderr)
@@ -138,7 +138,7 @@ func TestAgentReSubscribePreservesPresetDelivery(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440099",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "review",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -157,7 +157,7 @@ func TestAgentReSubscribePreservesPresetDelivery(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440099",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "review",
 		"--preset-delivery", "full",
 	}, &stdout, &stderr)
@@ -177,7 +177,7 @@ func TestAgentReSubscribePreservesPresetDelivery(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440002",
 		"--role", "coordinator",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "ask",
 	}, &stdout, &stderr)
 	if code != 0 {

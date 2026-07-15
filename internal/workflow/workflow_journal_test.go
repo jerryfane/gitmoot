@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func seedWorkflowJournalLifecycle(t *testing.T, store *db.Store, state TaskState) PullRequestEvent {

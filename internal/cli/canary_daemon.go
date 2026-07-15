@@ -3,11 +3,11 @@ package cli
 import (
 	"context"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/events"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/events"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // daemonOutcomeHarvesterWithCanary returns the daemon's Mode-A trace-harvester,

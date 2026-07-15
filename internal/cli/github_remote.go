@@ -8,9 +8,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/daemon"
-	"github.com/jerryfane/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/daemon"
+	"github.com/gitmoot/gitmoot/internal/github"
 )
 
 // githubRemoteWriteClient is the repository/file write surface shared by

@@ -3,8 +3,8 @@ package cli
 import (
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // resultChecksMode resolves the [workflow] result_checks policy (#526) for a

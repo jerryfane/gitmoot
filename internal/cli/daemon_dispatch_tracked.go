@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // This file is the #562 fix: job execution runs OFF the supervisor worker-tick /

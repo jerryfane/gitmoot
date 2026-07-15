@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
 )
 
 func seedTriggerPipeline(t *testing.T, home string, raw []byte, enabled bool, binding pipelineTriggerBinding) {

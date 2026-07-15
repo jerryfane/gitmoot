@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/daemon"
-	"github.com/jerryfane/gitmoot/internal/db"
-	gitutil "github.com/jerryfane/gitmoot/internal/git"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/daemon"
+	"github.com/gitmoot/gitmoot/internal/db"
+	gitutil "github.com/gitmoot/gitmoot/internal/git"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 var newAgentDispatchGitHubClient = func(checkout string) github.Client {

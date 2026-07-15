@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	gitutil "github.com/jerryfane/gitmoot/internal/git"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	gitutil "github.com/gitmoot/gitmoot/internal/git"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 func TestRunAgentSubscribeListRemove(t *testing.T) {
@@ -35,7 +35,7 @@ func TestRunAgentSubscribeListRemove(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--repo", "jerryfane/other",
 		"--capability", "review",
 		"--capability", "ask",
@@ -51,7 +51,7 @@ func TestRunAgentSubscribeListRemove(t *testing.T) {
 		t.Fatalf("list exit code = %d, stderr=%s", code, stderr.String())
 	}
 	output := stdout.String()
-	if !strings.Contains(output, "audit") || !strings.Contains(output, "jerryfane/gitmoot,jerryfane/other") || !strings.Contains(output, "review,ask") {
+	if !strings.Contains(output, "audit") || !strings.Contains(output, "gitmoot/gitmoot,jerryfane/other") || !strings.Contains(output, "review,ask") {
 		t.Fatalf("list output = %q", output)
 	}
 
@@ -63,7 +63,7 @@ func TestRunAgentSubscribeListRemove(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "review",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -77,7 +77,7 @@ func TestRunAgentSubscribeListRemove(t *testing.T) {
 		t.Fatalf("list after resubscribe exit code = %d, stderr=%s", code, stderr.String())
 	}
 	output = stdout.String()
-	if !strings.Contains(output, "jerryfane/gitmoot") || strings.Contains(output, "jerryfane/other") {
+	if !strings.Contains(output, "gitmoot/gitmoot") || strings.Contains(output, "jerryfane/other") {
 		t.Fatalf("list after resubscribe output = %q", output)
 	}
 
@@ -108,7 +108,7 @@ func TestRunAgentShow(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "review",
 		"--policy", "workspace-write",
 	}, &stdout, &stderr)
@@ -129,7 +129,7 @@ func TestRunAgentShow(t *testing.T) {
 		"role: reviewer",
 		"capabilities: review",
 		"policy: workspace-write",
-		"allowed_repos: jerryfane/gitmoot",
+		"allowed_repos: gitmoot/gitmoot",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("agent show output missing %q:\n%s", want, stdout.String())
@@ -146,7 +146,7 @@ func TestRunAgentShow(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("json output did not decode: %v\n%s", err, stdout.String())
 	}
-	if decoded.Name != "audit" || decoded.Policy != runtime.AutonomyPolicyWorkspaceWrite || strings.Join(decoded.AllowedRepos, ",") != "jerryfane/gitmoot" {
+	if decoded.Name != "audit" || decoded.Policy != runtime.AutonomyPolicyWorkspaceWrite || strings.Join(decoded.AllowedRepos, ",") != "gitmoot/gitmoot" {
 		t.Fatalf("decoded = %+v", decoded)
 	}
 }
@@ -161,7 +161,7 @@ func TestRunAgentSubscribeValidatesAutonomyPolicy(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--capability", "review",
 		"--policy", "workspace-write",
 	}, &stdout, &stderr)
@@ -187,7 +187,7 @@ func TestRunAgentSubscribeValidatesAutonomyPolicy(t *testing.T) {
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440002",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--policy", "manual",
 	}, &stdout, &stderr)
 	if code != 2 {
@@ -216,11 +216,11 @@ func TestRunAgentAccessCommands(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"agent", "allow", "audit", "--home", home, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code = Run([]string{"agent", "allow", "audit", "--home", home, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("allow exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "allowed audit on jerryfane/gitmoot") {
+	if !strings.Contains(stdout.String(), "allowed audit on gitmoot/gitmoot") {
 		t.Fatalf("allow output = %q", stdout.String())
 	}
 
@@ -230,13 +230,13 @@ func TestRunAgentAccessCommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("repos exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if strings.TrimSpace(stdout.String()) != "jerryfane/gitmoot" {
+	if strings.TrimSpace(stdout.String()) != "gitmoot/gitmoot" {
 		t.Fatalf("repos output = %q", stdout.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"agent", "deny", "audit", "--home", home, "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code = Run([]string{"agent", "deny", "audit", "--home", home, "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deny exit code = %d, stderr=%s", code, stderr.String())
 	}
@@ -2182,7 +2182,7 @@ job_timeout = "10m"
 	if err := store.UpsertAgentTemplate(context.Background(), db.AgentTemplate{
 		ID:             retiredID,
 		Name:           "Retired Planner",
-		SourceRepo:     "jerryfane/gitmoot",
+		SourceRepo:     "gitmoot/gitmoot",
 		SourceRef:      "main",
 		SourcePath:     "skills/gitmoot/agent-templates/" + retiredID + ".md",
 		ResolvedCommit: "old",
@@ -2768,7 +2768,7 @@ func TestRunAgentSubscribeAppliesInstalledTemplateDefaults(t *testing.T) {
 		"--home", home,
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--template", "thermo-nuclear-code-quality-review",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -2807,7 +2807,7 @@ func TestRunAgentSubscribeUsesInstalledCustomTemplate(t *testing.T) {
 		"--home", home,
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--template", "frontend-reviewer",
 		"--role", "reviewer",
 	}, &stdout, &stderr)
@@ -2825,7 +2825,7 @@ func TestRunAgentSubscribeUsesInstalledCustomTemplate(t *testing.T) {
 		"--home", home,
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--template", "frontend-reviewer",
 		"--role", "reviewer",
 		"--capability", "ask",
@@ -2854,7 +2854,7 @@ func TestRunAgentSubscribeRejectsMissingTemplateAndImplementCapability(t *testin
 		"--home", home,
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--template", "frontend-reviewer",
 	}, &stdout, &stderr)
 	if code != 1 {
@@ -2872,7 +2872,7 @@ func TestRunAgentSubscribeRejectsMissingTemplateAndImplementCapability(t *testin
 		"--home", home,
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--template", "thermo-nuclear-code-quality-review",
 	}, &stdout, &stderr)
 	if code != 1 {
@@ -2914,7 +2914,7 @@ func TestRunAgentSubscribeRejectsMissingTemplateAndImplementCapability(t *testin
 		"--home", home,
 		"--runtime", "codex",
 		"--session", "550e8400-e29b-41d4-a716-446655440001",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--template", "thermo-nuclear-code-quality-review",
 		"--capability", "implement",
 	}, &stdout, &stderr)
@@ -3019,7 +3019,7 @@ func TestRunAgentSubscribeRefusesImplementWithNonWritePolicy(t *testing.T) {
 
 func TestRunAgentSubscribeValidatesInput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"agent", "subscribe", "bad name", "--runtime", "codex", "--session", "s", "--role", "reviewer", "--repo", "jerryfane/gitmoot"}, &stdout, &stderr)
+	code := Run([]string{"agent", "subscribe", "bad name", "--runtime", "codex", "--session", "s", "--role", "reviewer", "--repo", "gitmoot/gitmoot"}, &stdout, &stderr)
 
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
@@ -3040,7 +3040,7 @@ func TestRunAgentDoctorPersistsHealth(t *testing.T) {
 		"--runtime", "shell",
 		"--session", "printf ok",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("subscribe exit code = %d, stderr=%s", code, stderr.String())
@@ -3312,7 +3312,7 @@ func subscribeClaudeAgent(t *testing.T, home string, name string) {
 		"--runtime", "claude",
 		"--session", "550e8400-e29b-41d4-a716-446655440099",
 		"--role", "reviewer",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("subscribe exit code = %d, stderr=%s", code, stderr.String())
@@ -3357,7 +3357,7 @@ func seedPlannerTemplate(t *testing.T, home string) {
 	if err := store.UpsertAgentTemplate(context.Background(), db.AgentTemplate{
 		ID:             "planner",
 		Name:           "Gitmoot Plan and Goal Writer",
-		SourceRepo:     "jerryfane/gitmoot",
+		SourceRepo:     "gitmoot/gitmoot",
 		SourceRef:      "main",
 		SourcePath:     "skills/gitmoot/agent-templates/planner.md",
 		ResolvedCommit: "def456",

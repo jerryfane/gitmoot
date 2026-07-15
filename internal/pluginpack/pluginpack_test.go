@@ -9,7 +9,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
 )
 
 func TestBuildCodexPackage(t *testing.T) {

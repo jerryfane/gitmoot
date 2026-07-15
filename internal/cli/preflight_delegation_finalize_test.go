@@ -6,11 +6,11 @@ import (
 	"io"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/events"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/events"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // recordingEscalationNotifier captures NotifyEscalation calls so a pre-flight
@@ -56,10 +56,10 @@ func newPreflightHarnessForAction(t *testing.T, failPolicy string, failingAction
 	t.Helper()
 	store := daemonWorkerStore(t)
 	checkout := t.TempDir()
-	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", checkout)
-	seedDaemonWorkerAgent(t, store, "coord", runtime.ShellRuntime, "unused", []string{"ask"}, "jerryfane/gitmoot")
-	seedDaemonWorkerAgent(t, store, "api", runtime.ShellRuntime, "unused", []string{failingAction}, "jerryfane/gitmoot")
-	seedDaemonWorkerAgent(t, store, "ui", runtime.ShellRuntime, "unused", []string{"review"}, "jerryfane/gitmoot")
+	seedDaemonWorkerRepo(t, store, "gitmoot/gitmoot", checkout)
+	seedDaemonWorkerAgent(t, store, "coord", runtime.ShellRuntime, "unused", []string{"ask"}, "gitmoot/gitmoot")
+	seedDaemonWorkerAgent(t, store, "api", runtime.ShellRuntime, "unused", []string{failingAction}, "gitmoot/gitmoot")
+	seedDaemonWorkerAgent(t, store, "ui", runtime.ShellRuntime, "unused", []string{"review"}, "gitmoot/gitmoot")
 
 	notifier := &recordingEscalationNotifier{}
 	engine := daemonWorkflowEngine(store, github.NewClient(checkout), checkout, "")
@@ -92,7 +92,7 @@ func (h *preflightHarness) seedPreflightCoordinator(t *testing.T, failPolicy str
 	ctx := context.Background()
 	coordinator := db.Job{ID: "parent-job", Agent: "coord", Type: "ask", State: string(workflow.JobSucceeded)}
 	payload := workflow.JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    preflightChildBranch,
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -403,9 +403,9 @@ func TestPreflightCancelledChildIsNotForceFinalized(t *testing.T) {
 func TestFinishQueuedJobNonDelegationUnaffected(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
-	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", t.TempDir())
-	seedDaemonWorkerAgent(t, store, "audit", runtime.ShellRuntime, "unused", []string{"ask"}, "jerryfane/gitmoot")
-	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "ask-job", Agent: "audit", Action: "ask", Repo: "jerryfane/gitmoot", Branch: "main", PullRequest: 1})
+	seedDaemonWorkerRepo(t, store, "gitmoot/gitmoot", t.TempDir())
+	seedDaemonWorkerAgent(t, store, "audit", runtime.ShellRuntime, "unused", []string{"ask"}, "gitmoot/gitmoot")
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{ID: "ask-job", Agent: "audit", Action: "ask", Repo: "gitmoot/gitmoot", Branch: "main", PullRequest: 1})
 
 	worker := defaultJobWorker(store, io.Discard)
 	// A WorkflowFactory that panics proves the non-delegation path never touches
@@ -451,7 +451,7 @@ func TestPreflightDelegationChildBlockedAdvancesParent(t *testing.T) {
 	// child to finishQueuedJob(JobBlocked).
 	if err := h.store.UpsertAgent(ctx, db.Agent{
 		Name: "api", Role: "worker", Runtime: runtime.ShellRuntime, RuntimeRef: "unused",
-		RepoScope: "jerryfane/gitmoot", Capabilities: []string{"ask"},
+		RepoScope: "gitmoot/gitmoot", Capabilities: []string{"ask"},
 		AutonomyPolicy: runtime.AutonomyPolicyAuto, HealthStatus: "ok",
 	}); err != nil {
 		t.Fatalf("UpsertAgent(api, no review cap) returned error: %v", err)
@@ -528,7 +528,7 @@ func TestPreflightReadOnlyImplementDelegationChildAdvancesParent(t *testing.T) {
 	// readOnlyImplementationBlocked(job.Type, agent) is true.
 	if err := h.store.UpsertAgent(ctx, db.Agent{
 		Name: "api", Role: "worker", Runtime: runtime.CodexRuntime, RuntimeRef: "unused",
-		RepoScope: "jerryfane/gitmoot", Capabilities: []string{"implement"},
+		RepoScope: "gitmoot/gitmoot", Capabilities: []string{"implement"},
 		AutonomyPolicy: runtime.AutonomyPolicyReadOnly, HealthStatus: "ok",
 	}); err != nil {
 		t.Fatalf("UpsertAgent(api, read-only implement) returned error: %v", err)
@@ -584,10 +584,10 @@ func TestPreflightReadOnlyImplementDelegationChildAdvancesParent(t *testing.T) {
 func TestPreflightReadOnlyImplementNonDelegationUnaffected(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
-	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", t.TempDir())
-	seedDaemonWorkerAgentWithPolicy(t, store, "lead", runtime.CodexRuntime, "unused", []string{"implement"}, "jerryfane/gitmoot", runtime.AutonomyPolicyReadOnly)
+	seedDaemonWorkerRepo(t, store, "gitmoot/gitmoot", t.TempDir())
+	seedDaemonWorkerAgentWithPolicy(t, store, "lead", runtime.CodexRuntime, "unused", []string{"implement"}, "gitmoot/gitmoot", runtime.AutonomyPolicyReadOnly)
 	job := db.Job{ID: "impl-job", Agent: "lead", Type: "implement", State: string(workflow.JobQueued), Payload: mustJobPayload(t, workflow.JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead",
+		Repo: "gitmoot/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead",
 	})}
 	if err := store.CreateJobWithEvent(ctx, job, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
 		t.Fatalf("CreateJobWithEvent returned error: %v", err)
@@ -630,10 +630,10 @@ func TestPreflightReadOnlyImplementNonDelegationUnaffected(t *testing.T) {
 func TestPreflightReadOnlyImplementEmitsJobBlocked(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
-	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", t.TempDir())
-	seedDaemonWorkerAgentWithPolicy(t, store, "lead", runtime.CodexRuntime, "unused", []string{"implement"}, "jerryfane/gitmoot", runtime.AutonomyPolicyReadOnly)
+	seedDaemonWorkerRepo(t, store, "gitmoot/gitmoot", t.TempDir())
+	seedDaemonWorkerAgentWithPolicy(t, store, "lead", runtime.CodexRuntime, "unused", []string{"implement"}, "gitmoot/gitmoot", runtime.AutonomyPolicyReadOnly)
 	job := db.Job{ID: "impl-job", Agent: "lead", Type: "implement", State: string(workflow.JobQueued), Payload: mustJobPayload(t, workflow.JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead", RootJobID: "root-impl",
+		Repo: "gitmoot/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead", RootJobID: "root-impl",
 	})}
 	if err := store.CreateJobWithEvent(ctx, job, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
 		t.Fatalf("CreateJobWithEvent returned error: %v", err)
@@ -656,7 +656,7 @@ func TestPreflightReadOnlyImplementEmitsJobBlocked(t *testing.T) {
 		t.Fatalf("job.blocked emissions = %d, want exactly 1; all=%+v", len(blocked), sink.events)
 	}
 	ev := blocked[0]
-	if ev.JobID != "impl-job" || ev.RootID != "root-impl" || ev.Repo != "jerryfane/gitmoot" || ev.Status != string(workflow.JobBlocked) {
+	if ev.JobID != "impl-job" || ev.RootID != "root-impl" || ev.Repo != "gitmoot/gitmoot" || ev.Status != string(workflow.JobBlocked) {
 		t.Fatalf("job.blocked event = %+v", ev)
 	}
 	if ev.Detail != agentPermissionBlockedMessage {
@@ -671,10 +671,10 @@ func TestPreflightReadOnlyImplementEmitsJobBlocked(t *testing.T) {
 func TestPreflightAutoImplementIsPermissionBlocked(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
-	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", t.TempDir())
-	seedDaemonWorkerAgentWithPolicy(t, store, "lead", runtime.CodexRuntime, "unused", []string{"implement"}, "jerryfane/gitmoot", runtime.AutonomyPolicyAuto)
+	seedDaemonWorkerRepo(t, store, "gitmoot/gitmoot", t.TempDir())
+	seedDaemonWorkerAgentWithPolicy(t, store, "lead", runtime.CodexRuntime, "unused", []string{"implement"}, "gitmoot/gitmoot", runtime.AutonomyPolicyAuto)
 	job := db.Job{ID: "impl-auto-job", Agent: "lead", Type: "implement", State: string(workflow.JobQueued), Payload: mustJobPayload(t, workflow.JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead", RootJobID: "root-impl",
+		Repo: "gitmoot/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead", RootJobID: "root-impl",
 	})}
 	if err := store.CreateJobWithEvent(ctx, job, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
 		t.Fatalf("CreateJobWithEvent returned error: %v", err)
@@ -877,11 +877,11 @@ func TestMidRunPermissionBlockedNonDelegationUnaffected(t *testing.T) {
 	ctx := context.Background()
 	store := daemonWorkerStore(t)
 	checkout := t.TempDir()
-	seedDaemonWorkerRepo(t, store, "jerryfane/gitmoot", checkout)
+	seedDaemonWorkerRepo(t, store, "gitmoot/gitmoot", checkout)
 	// Writable implement agent so the job reaches RunJob (not the read-only block).
-	seedDaemonWorkerAgent(t, store, "lead", runtime.ShellRuntime, "unused", []string{"implement"}, "jerryfane/gitmoot")
+	seedDaemonWorkerAgent(t, store, "lead", runtime.ShellRuntime, "unused", []string{"implement"}, "gitmoot/gitmoot")
 	job := db.Job{ID: "impl-job", Agent: "lead", Type: "implement", State: string(workflow.JobQueued), Payload: mustJobPayload(t, workflow.JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead",
+		Repo: "gitmoot/gitmoot", Branch: "feature", TaskID: "task-impl", TaskTitle: "Solo implement", Sender: "lead",
 	})}
 	if err := store.CreateJobWithEvent(ctx, job, db.JobEvent{Kind: string(workflow.JobQueued), Message: "seed"}); err != nil {
 		t.Fatalf("CreateJobWithEvent returned error: %v", err)

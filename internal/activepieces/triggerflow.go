@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
 )
 
 const GeneratedTriggerFlowPrefix = "gitmoot: "

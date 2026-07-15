@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/memory"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/memory"
 )
 
 // This file implements the #737 P3 slice: `gitmoot memory ingest` (markdown →

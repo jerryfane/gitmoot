@@ -12,9 +12,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jerryfane/gitmoot/internal/agenttemplate"
-	"github.com/jerryfane/gitmoot/internal/artifact"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/agenttemplate"
+	"github.com/gitmoot/gitmoot/internal/artifact"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func TestExportTrainingPackage(t *testing.T) {

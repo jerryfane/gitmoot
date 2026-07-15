@@ -647,10 +647,10 @@ func TestChatThreadMootMetadata(t *testing.T) {
 			t.Fatalf("AddChatMessage(%s/%s): %v", kind, authorKind, err)
 		}
 	}
-	add(ChatKindChat, ChatAuthorKindAgent, "alice")  // counts
-	add(ChatKindChat, ChatAuthorKindAgent, "bob")     // counts
-	add(ChatKindChat, ChatAuthorKindHuman, "human")   // excluded (human)
-	add(ChatKindSystem, ChatAuthorKindSystem, "system") // excluded (system)
+	add(ChatKindChat, ChatAuthorKindAgent, "alice")      // counts
+	add(ChatKindChat, ChatAuthorKindAgent, "bob")        // counts
+	add(ChatKindChat, ChatAuthorKindHuman, "human")      // excluded (human)
+	add(ChatKindSystem, ChatAuthorKindSystem, "system")  // excluded (system)
 	add(ChatKindJobResult, ChatAuthorKindAgent, "alice") // excluded (job_result)
 
 	n, err := store.CountChatMootMessages(ctx, moot.ID)

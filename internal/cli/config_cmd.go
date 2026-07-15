@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 func runConfig(args []string, stdout, stderr io.Writer) int {

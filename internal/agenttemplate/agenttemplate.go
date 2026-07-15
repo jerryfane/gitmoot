@@ -16,8 +16,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 const ThermoNuclearCodeQualityReviewID = "thermo-nuclear-code-quality-review"
@@ -108,22 +108,22 @@ var builtins = []Definition{
 		DefaultRole:         "planner",
 		DefaultCapabilities: []string{"ask"},
 		Mutation:            true,
-		SourceRepo:          "jerryfane/gitmoot",
+		SourceRepo:          "gitmoot/gitmoot",
 		SourceRef:           "main",
 		SourcePath:          "skills/gitmoot/agent-templates/planner.md",
 	},
 	{ID: ReviewPanelTemplateID, Name: "Review Panel Coordinator",
-		Description:         "Coordinator recipe that fans a PR or change out to a panel of ephemeral reviewers with diverse lenses, then synthesizes their findings.",
-		DefaultRole:         "coordinator", DefaultCapabilities: []string{"ask", "review"}, Mutation: false,
-		SourceRepo: "jerryfane/gitmoot", SourceRef: "main", SourcePath: "skills/gitmoot/agent-templates/review-panel.md"},
+		Description: "Coordinator recipe that fans a PR or change out to a panel of ephemeral reviewers with diverse lenses, then synthesizes their findings.",
+		DefaultRole: "coordinator", DefaultCapabilities: []string{"ask", "review"}, Mutation: false,
+		SourceRepo: "gitmoot/gitmoot", SourceRef: "main", SourcePath: "skills/gitmoot/agent-templates/review-panel.md"},
 	{ID: DecomposeAndVerifyTemplateID, Name: "Decompose and Verify Coordinator",
-		Description:         "Coordinator recipe that decomposes a task into parallel ephemeral implementation subtasks, then runs a verify step that depends on all of them.",
-		DefaultRole:         "coordinator", DefaultCapabilities: []string{"ask", "review", "implement"}, Mutation: true,
-		SourceRepo: "jerryfane/gitmoot", SourceRef: "main", SourcePath: "skills/gitmoot/agent-templates/decompose-and-verify.md"},
+		Description: "Coordinator recipe that decomposes a task into parallel ephemeral implementation subtasks, then runs a verify step that depends on all of them.",
+		DefaultRole: "coordinator", DefaultCapabilities: []string{"ask", "review", "implement"}, Mutation: true,
+		SourceRepo: "gitmoot/gitmoot", SourceRef: "main", SourcePath: "skills/gitmoot/agent-templates/decompose-and-verify.md"},
 	{ID: VerifierTemplateID, Name: "Verifier Coordinator",
-		Description:         "Coordinator recipe that runs one producer leg, then an independent read-only verify leg on a different runtime that checks the combined result against the original goal before reporting back.",
-		DefaultRole:         "coordinator", DefaultCapabilities: []string{"ask", "review", "implement"}, Mutation: true,
-		SourceRepo: "jerryfane/gitmoot", SourceRef: "main", SourcePath: "skills/gitmoot/agent-templates/verifier.md"},
+		Description: "Coordinator recipe that runs one producer leg, then an independent read-only verify leg on a different runtime that checks the combined result against the original goal before reporting back.",
+		DefaultRole: "coordinator", DefaultCapabilities: []string{"ask", "review", "implement"}, Mutation: true,
+		SourceRepo: "gitmoot/gitmoot", SourceRef: "main", SourcePath: "skills/gitmoot/agent-templates/verifier.md"},
 }
 
 var retiredIDs = map[string]struct{}{

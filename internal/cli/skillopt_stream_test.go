@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // streamRecordingRunner implements subprocess.StreamRunner and records which

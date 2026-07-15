@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	gitmootruntime "github.com/jerryfane/gitmoot/internal/runtime"
+	gitmootruntime "github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // Translator converts complete logical lines into normalized events. Flush is

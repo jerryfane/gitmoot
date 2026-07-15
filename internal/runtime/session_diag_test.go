@@ -10,7 +10,7 @@ import (
 // given script, run by a REAL process (nil Runner -> GroupRunner) so the exit
 // code / signal decoding is exercised at the true runtime boundary.
 func shellDiagAgent(script string) Agent {
-	return Agent{Name: "diag", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: script, RepoScope: "jerryfane/gitmoot"}
+	return Agent{Name: "diag", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: script, RepoScope: "gitmoot/gitmoot"}
 }
 
 func TestShellDeliverSessionDiagNonZeroExit(t *testing.T) {

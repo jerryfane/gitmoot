@@ -3,7 +3,7 @@ package workflow
 import (
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func TestJobKeepsTaskLiveTable(t *testing.T) {

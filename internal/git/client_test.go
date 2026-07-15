@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 func TestClientUsesSharedSubprocessRunner(t *testing.T) {
-	runner := &fakeRunner{results: []subprocess.Result{{}, {Stdout: "task-1\n"}, {}, {Stdout: "/repo\n"}, {Stdout: "https://github.com/jerryfane/gitmoot.git\n"}, {}, {}, {}}}
+	runner := &fakeRunner{results: []subprocess.Result{{}, {Stdout: "task-1\n"}, {}, {Stdout: "/repo\n"}, {Stdout: "https://github.com/gitmoot/gitmoot.git\n"}, {}, {}, {}}}
 	client := Client{Runner: runner, Dir: "/repo"}
 
 	if err := client.CreateBranch(context.Background(), "task-1", "main"); err != nil {
@@ -41,7 +41,7 @@ func TestClientUsesSharedSubprocessRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OriginRemote returned error: %v", err)
 	}
-	if remote != "https://github.com/jerryfane/gitmoot.git" {
+	if remote != "https://github.com/gitmoot/gitmoot.git" {
 		t.Fatalf("remote = %q", remote)
 	}
 	clean, err := client.WorktreeClean(context.Background())

@@ -3,8 +3,8 @@ package cli
 import (
 	"context"
 
-	"github.com/jerryfane/gitmoot/internal/cockpit"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/cockpit"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // cockpitPaneStore adapts a *db.Store to the cockpit.PaneStore interface. The

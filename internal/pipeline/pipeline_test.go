@@ -8,7 +8,7 @@ import (
 
 const validSpec = `
 name: deploy-flow
-repo: jerryfane/gitmoot
+repo: gitmoot/gitmoot
 schedule:
   interval: 24h
   jitter: 15m
@@ -32,7 +32,7 @@ func TestLoadValidSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load valid spec: %v", err)
 	}
-	if spec.Name != "deploy-flow" || spec.Repo != "jerryfane/gitmoot" {
+	if spec.Name != "deploy-flow" || spec.Repo != "gitmoot/gitmoot" {
 		t.Fatalf("unexpected header: %+v", spec)
 	}
 	if spec.Schedule == nil || spec.Schedule.Interval != "24h" || spec.Schedule.Jitter != "15m" {
@@ -123,14 +123,14 @@ func TestLoadDescriptionValidation(t *testing.T) {
 }
 
 func TestLoadEmailTriggerDefaultsAndValidation(t *testing.T) {
-	loaded, err := Load([]byte("name: mail\nrepo: jerryfane/gitmoot\ntrigger:\n  kind: email\nstages:\n  - {id: run, cmd: echo}\n"))
+	loaded, err := Load([]byte("name: mail\nrepo: gitmoot/gitmoot\ntrigger:\n  kind: email\nstages:\n  - {id: run, cmd: echo}\n"))
 	if err != nil {
 		t.Fatalf("Load email trigger: %v", err)
 	}
 	if loaded.Trigger == nil || loaded.Trigger.Connection != "gmail-imap" || loaded.Trigger.Mailbox != "INBOX" {
 		t.Fatalf("trigger defaults = %+v", loaded.Trigger)
 	}
-	mapped, err := Load([]byte("name: mail\nrepo: jerryfane/gitmoot\ntrigger:\n  kind: email\n  map:\n    sender: from_address\n    subject: subject\n    received_at: date\nstages:\n  - {id: run, cmd: echo}\n"))
+	mapped, err := Load([]byte("name: mail\nrepo: gitmoot/gitmoot\ntrigger:\n  kind: email\n  map:\n    sender: from_address\n    subject: subject\n    received_at: date\nstages:\n  - {id: run, cmd: echo}\n"))
 	if err != nil {
 		t.Fatalf("Load mapped email trigger: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestLoadEmailTriggerDefaultsAndValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Load([]byte("name: mail\nrepo: jerryfane/gitmoot\ntrigger: " + tc.trigger + "\nstages:\n  - {id: run, cmd: echo}\n"))
+			_, err := Load([]byte("name: mail\nrepo: gitmoot/gitmoot\ntrigger: " + tc.trigger + "\nstages:\n  - {id: run, cmd: echo}\n"))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Load error = %v, want %q", err, tc.want)
 			}
@@ -197,7 +197,7 @@ func TestLoadPipelineTriggerValidation(t *testing.T) {
 func TestLoadValidAgentSpec(t *testing.T) {
 	const agentSpec = `
 name: mixed-flow
-repo: jerryfane/gitmoot
+repo: gitmoot/gitmoot
 stages:
   - id: build
     cmd: make build
@@ -773,7 +773,7 @@ stages:
 // StageKindOrchestrate, while the malformed shapes are rejected at add time.
 func TestPipelineOrchestrateStageValidation(t *testing.T) {
 	const validSpec = `name: orch
-repo: jerryfane/gitmoot
+repo: gitmoot/gitmoot
 stages:
   - id: extract
     cmd: echo facts

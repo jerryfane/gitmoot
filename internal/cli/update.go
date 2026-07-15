@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/internal/update"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/update"
 )
 
 func runUpdate(args []string, stdout, stderr io.Writer) int {

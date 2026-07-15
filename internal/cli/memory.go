@@ -14,10 +14,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/memory"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/memory"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // runMemory is the entry point for `gitmoot memory` — the read-only audit +

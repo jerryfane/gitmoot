@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // TestCrossFamilyReviewFullChain is the FULL-CHAIN integration test for #469. It
@@ -41,14 +41,14 @@ func seedCodexImplementJob(t *testing.T, store *db.Store, version db.AgentTempla
 	if err := store.UpsertAgent(context.Background(), db.Agent{
 		Name:         "lead",
 		Runtime:      runtime.CodexRuntime,
-		RepoScope:    "jerryfane/gitmoot",
+		RepoScope:    "gitmoot/gitmoot",
 		Capabilities: []string{"implement"},
 		RuntimeRef:   "last",
 	}); err != nil {
 		t.Fatalf("UpsertAgent(lead) returned error: %v", err)
 	}
 	insertChainJob(t, store, db.Job{ID: "implement-job", Agent: "lead", Type: "implement"}, workflow.JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-7", PullRequest: 7, HeadSHA: "head123",
+		Repo: "gitmoot/gitmoot", Branch: "task-7", PullRequest: 7, HeadSHA: "head123",
 		TaskID: "task-7", TaskTitle: "Workflow Engine", LeadAgent: "lead",
 		TemplateID: version.TemplateID, TemplateResolvedCommit: version.ResolvedCommit,
 		Instructions: "Implement the cross-family review",
@@ -64,7 +64,7 @@ func registerShellReviewer(t *testing.T, store *db.Store) {
 	if err := store.UpsertAgent(context.Background(), db.Agent{
 		Name:         "shell-reviewer",
 		Runtime:      runtime.ShellRuntime,
-		RepoScope:    "jerryfane/gitmoot",
+		RepoScope:    "gitmoot/gitmoot",
 		Capabilities: []string{"ask", "review"},
 		RuntimeRef:   reviewShellScript,
 	}); err != nil {
@@ -245,7 +245,7 @@ func TestCrossFamilyReviewSameFamilyFallbackWarns(t *testing.T) {
 	// A SAME-family (codex) registered reviewer; NO different family authed.
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name: "codex-reviewer", Role: "reviewer", Runtime: runtime.CodexRuntime,
-		RepoScope: "jerryfane/gitmoot", Capabilities: []string{"ask", "review"}, RuntimeRef: "last",
+		RepoScope: "gitmoot/gitmoot", Capabilities: []string{"ask", "review"}, RuntimeRef: "last",
 	}); err != nil {
 		t.Fatalf("UpsertAgent(codex-reviewer) returned error: %v", err)
 	}

@@ -19,14 +19,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/daemon"
-	"github.com/jerryfane/gitmoot/internal/db"
-	gitutil "github.com/jerryfane/gitmoot/internal/git"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/daemon"
+	"github.com/gitmoot/gitmoot/internal/db"
+	gitutil "github.com/gitmoot/gitmoot/internal/git"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 func TestRunDaemonUsageAndValidation(t *testing.T) {
@@ -51,7 +51,7 @@ func TestRunDaemonUsageAndValidation(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"daemon", "start", "--repo", "jerryfane/gitmoot", "--poll", "0s"}, &stdout, &stderr)
+	code = Run([]string{"daemon", "start", "--repo", "gitmoot/gitmoot", "--poll", "0s"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("daemon start invalid poll exit code = %d, want 2", code)
 	}
@@ -61,7 +61,7 @@ func TestRunDaemonUsageAndValidation(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run([]string{"daemon", "run", "--repo", "jerryfane/gitmoot", "--dry-run"}, &stdout, &stderr)
+	code = Run([]string{"daemon", "run", "--repo", "gitmoot/gitmoot", "--dry-run"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("daemon run single-repo dry-run exit code = %d, want 2", code)
 	}
@@ -380,7 +380,7 @@ func TestDaemonStartRepoPreflightsCheckoutBeforeDaemonizing(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"daemon", "start", "--home", home, "--repo", "jerryfane/gitmoot", "--poll", "1h"}, &stdout, &stderr)
+	code := Run([]string{"daemon", "start", "--home", home, "--repo", "gitmoot/gitmoot", "--poll", "1h"}, &stdout, &stderr)
 
 	if code != 1 {
 		t.Fatalf("daemon start exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -407,7 +407,7 @@ func TestDaemonRestartRepoPreflightsCheckoutBeforeStop(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"daemon", "restart", "--home", home, "--repo", "jerryfane/gitmoot", "--poll", "1h"}, &stdout, &stderr)
+	code := Run([]string{"daemon", "restart", "--home", home, "--repo", "gitmoot/gitmoot", "--poll", "1h"}, &stdout, &stderr)
 
 	if code != 1 {
 		t.Fatalf("daemon restart exit code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -6015,10 +6015,10 @@ func TestDaemonLogsEmptyWhenMissing(t *testing.T) {
 func TestResolveDaemonCheckoutRequiresMatchingOrigin(t *testing.T) {
 	runner := &daemonGitRunner{results: []subprocess.Result{
 		{Stdout: "/repo/gitmoot\n"},
-		{Stdout: "https://github.com/jerryfane/gitmoot.git\n"},
+		{Stdout: "https://github.com/gitmoot/gitmoot.git\n"},
 	}}
 
-	root, err := resolveDaemonCheckout(context.Background(), github.Repository{Owner: "jerryfane", Name: "gitmoot"}, gitutil.Client{Runner: runner, Dir: "."})
+	root, err := resolveDaemonCheckout(context.Background(), github.Repository{Owner: "gitmoot", Name: "gitmoot"}, gitutil.Client{Runner: runner, Dir: "."})
 
 	if err != nil {
 		t.Fatalf("resolveDaemonCheckout returned error: %v", err)
@@ -6036,9 +6036,9 @@ func TestResolveDaemonCheckoutRejectsWrongOrigin(t *testing.T) {
 		{Stdout: "https://github.com/jerryfane/other.git\n"},
 	}}
 
-	_, err := resolveDaemonCheckout(context.Background(), github.Repository{Owner: "jerryfane", Name: "gitmoot"}, gitutil.Client{Runner: runner, Dir: "."})
+	_, err := resolveDaemonCheckout(context.Background(), github.Repository{Owner: "gitmoot", Name: "gitmoot"}, gitutil.Client{Runner: runner, Dir: "."})
 
-	if err == nil || !strings.Contains(err.Error(), "not jerryfane/gitmoot") {
+	if err == nil || !strings.Contains(err.Error(), "not gitmoot/gitmoot") {
 		t.Fatalf("error = %v, want wrong-origin error", err)
 	}
 }

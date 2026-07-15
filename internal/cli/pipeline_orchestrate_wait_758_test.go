@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/pipeline"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // #758 WAIT: an orchestrate stage is a bounded agent SUB-TREE root. The coordinator

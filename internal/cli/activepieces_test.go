@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/activepieces"
+	"github.com/gitmoot/gitmoot/internal/activepieces"
 )
 
 func TestResolveBridgeBind(t *testing.T) {

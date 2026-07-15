@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // fakeRunner records every herdr invocation and returns canned stdout (and an
@@ -478,7 +478,7 @@ func TestWrapDeliverArgsCarryVerifiedFields(t *testing.T) {
 
 // TestWrapDeliverFallsBackToDerivedRootPaneWhenEmpty covers the defensive path:
 // a LEGACY registry row bound a workspace to the root before root_pane_id existed,
-// so the migration defaulted its root_pane_id to ''. open() must then split off the
+// so the migration defaulted its root_pane_id to ”. open() must then split off the
 // DERIVED root pane "<ws>:p1" (rootPaneFor) — never the bare workspace id, which
 // herdr rejects with pane_not_found (the fake runner enforces that) — and must NOT
 // re-create the already-bound workspace.
@@ -1120,7 +1120,7 @@ func TestSeatSlug(t *testing.T) {
 // per-job log is one file rather than nesting into non-existent dirs (bug 1).
 func TestSafeLogName(t *testing.T) {
 	cases := map[string]string{
-		"plain-job-1234":                            "plain-job-1234",
+		"plain-job-1234": "plain-job-1234",
 		"local-ask-conductor-1234/delegation/haiku": "local-ask-conductor-1234_delegation_haiku",
 		"root/continuation":                         "root_continuation",
 		"":                                          "seat",

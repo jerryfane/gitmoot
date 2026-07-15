@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/pipeline"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // The #681 pipeline RESUME and CANCEL verbs. Resume re-runs a parked (blocked or

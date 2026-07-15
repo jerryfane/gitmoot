@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/update"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/update"
 )
 
 // stageLiveDaemon makes the home look like it hosts a running daemon whose
