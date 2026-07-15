@@ -103,3 +103,45 @@ func TestAdvanceRetryCollapseMigration(t *testing.T) {
 		t.Fatalf("pending advance-retry candidates = %v, want [stuck]", ids)
 	}
 }
+
+func TestRefreshLatestAdvanceRetryKeepsWhyStuckCurrent(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateJob(ctx, Job{ID: "j-stuck", Agent: "w", Type: "implement", State: "succeeded", Payload: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddJobEvent(ctx, JobEvent{JobID: "j-stuck", Kind: "advance_retry", Message: "github unavailable"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.RefreshLatestAdvanceRetry(ctx, "j-stuck", "merge conflict")
+	if err != nil || !updated {
+		t.Fatalf("refresh with new message = %v, %v; want updated", updated, err)
+	}
+	// Unchanged message must cost zero writes.
+	updated, err = store.RefreshLatestAdvanceRetry(ctx, "j-stuck", "merge conflict")
+	if err != nil || updated {
+		t.Fatalf("refresh with same message = %v, %v; want no-op", updated, err)
+	}
+	// No advance_retry row at all: no-op, no error.
+	if err := store.CreateJob(ctx, Job{ID: "j-clean", Agent: "w", Type: "implement", State: "succeeded", Payload: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if updated, err = store.RefreshLatestAdvanceRetry(ctx, "j-clean", "anything"); err != nil || updated {
+		t.Fatalf("refresh with no row = %v, %v; want no-op", updated, err)
+	}
+	events, err := store.ListJobEvents(ctx, "j-stuck")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retries := 0
+	last := ""
+	for _, ev := range events {
+		if ev.Kind == "advance_retry" {
+			retries++
+			last = ev.Message
+		}
+	}
+	if retries != 1 || last != "merge conflict" {
+		t.Fatalf("rows=%d last=%q; want exactly one row carrying the latest message", retries, last)
+	}
+}

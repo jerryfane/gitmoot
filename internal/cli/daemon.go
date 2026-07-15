@@ -6853,7 +6853,10 @@ func (w jobWorker) recordAdvanceRetryOnce(ctx context.Context, jobID, message st
 		return err
 	}
 	if latest == "advance_retry" {
-		return nil
+		// Keep the single-row bound but refresh the surviving row so the why-stuck
+		// surface (#552) reports the current failure, not the first one.
+		_, err := w.Store.RefreshLatestAdvanceRetry(ctx, jobID, message)
+		return err
 	}
 	return w.Store.AddJobEvent(ctx, db.JobEvent{JobID: jobID, Kind: "advance_retry", Message: message})
 }

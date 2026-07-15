@@ -3638,6 +3638,26 @@ func (s *Store) GetLatestJobEventByKind(ctx context.Context, jobID, kind string)
 // jobNeedsAdvanceRetry's per-job ListJobEvents both scale with those rows). The
 // job stays a retry candidate regardless (last-one-wins is unchanged); only the
 // duplicate row is elided.
+// RefreshLatestAdvanceRetry rewrites the surviving advance_retry row's message
+// and timestamp so the #552 why-stuck surface keeps showing the CURRENT failure
+// while recordAdvanceRetryOnce keeps the row count bounded at one per stuck job.
+// The write is skipped when the message is unchanged, so a stable failure costs
+// zero writes per tick. Reported updated=false covers both no-row and no-change.
+func (s *Store) RefreshLatestAdvanceRetry(ctx context.Context, jobID string, message string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE job_events
+		SET message = ?, created_at = CURRENT_TIMESTAMP
+		WHERE id = (SELECT id FROM job_events WHERE job_id = ? AND kind = 'advance_retry' ORDER BY id DESC LIMIT 1)
+		  AND message != ?`, message, jobID, message)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 func (s *Store) LatestAdvancementMarker(ctx context.Context, jobID string) (string, error) {
 	var kind string
 	err := s.db.QueryRowContext(ctx, `SELECT kind FROM job_events
