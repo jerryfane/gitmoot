@@ -70,3 +70,72 @@ func TestListDashboardTasksExcludesDismissed(t *testing.T) {
 		t.Fatalf("dashboard tasks = %+v, want only visible", tasks)
 	}
 }
+
+func TestListDashboardJobSummariesProjectsLegacyAndMalformedPayloads(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	if err := store.UpsertAgent(ctx, Agent{Name: "registered", Runtime: "codex"}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	jobs := []Job{
+		{
+			ID: "current", Agent: "registered", Type: "ask", State: "running",
+			Payload:     `{"instructions":"  current title  ","repo":"acme/current","pull_request":42,"ephemeral":{"runtime":"kimi"}}`,
+			InputTokens: 3, OutputTokens: 5,
+		},
+		{
+			ID: "ephemeral", Agent: "temp-worker", Type: "implement", State: "queued",
+			Payload: `{"instructions":"inline","repo":"acme/inline","ephemeral":{"runtime":"claude"}}`,
+		},
+		{
+			ID: "legacy", Agent: "registered", Type: "review", State: "succeeded",
+			Payload: `{"instructions":"legacy","repo":"acme/legacy","pull_request":7}`,
+		},
+		{ID: "malformed", Agent: "unknown", Type: "ask", State: "failed", Payload: `{"instructions":`},
+	}
+	for _, job := range jobs {
+		if err := store.CreateJob(ctx, job); err != nil {
+			t.Fatalf("CreateJob(%s): %v", job.ID, err)
+		}
+		if job.InputTokens != 0 || job.OutputTokens != 0 {
+			if err := store.UpdateJobUsage(ctx, job.ID, job.InputTokens, job.OutputTokens); err != nil {
+				t.Fatalf("UpdateJobUsage(%s): %v", job.ID, err)
+			}
+		}
+	}
+	// Simulate a row written before repo/pull_request were denormalized.
+	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET repo = '', pull_request = 0 WHERE id = 'legacy'`); err != nil {
+		t.Fatalf("clear legacy projections: %v", err)
+	}
+
+	rows, err := store.ListDashboardJobSummaries(ctx)
+	if err != nil {
+		t.Fatalf("ListDashboardJobSummaries: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d, want 4", len(rows))
+	}
+	byID := make(map[string]DashboardJobSummaryRow, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	current := byID["current"]
+	if current.Instructions != "  current title  " || current.Repo != "acme/current" || current.PullRequest != 42 ||
+		current.RegisteredRuntime != "codex" || current.EphemeralRuntime != "kimi" || current.InputTokens != 3 || current.OutputTokens != 5 {
+		t.Fatalf("current projection = %+v", current)
+	}
+	inline := byID["ephemeral"]
+	if inline.RegisteredRuntime != "" || inline.EphemeralRuntime != "claude" || inline.Repo != "acme/inline" {
+		t.Fatalf("ephemeral projection = %+v", inline)
+	}
+	legacy := byID["legacy"]
+	if legacy.Repo != "acme/legacy" || legacy.PullRequest != 7 || legacy.Instructions != "legacy" {
+		t.Fatalf("legacy projection = %+v", legacy)
+	}
+	malformed := byID["malformed"]
+	if malformed.Instructions != "" || malformed.Repo != "" || malformed.PullRequest != 0 || malformed.EphemeralRuntime != "" {
+		t.Fatalf("malformed projection = %+v, want empty payload fields", malformed)
+	}
+}
+
+var benchmarkDashboardJobRows any
