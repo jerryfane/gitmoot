@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	dashboard "github.com/jerryfane/gitmoot-dashboard"
+	dashboard "github.com/gitmoot/gitmoot-dashboard"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // This file implements the two Chat-page DataSource methods (gitmoot #534) —

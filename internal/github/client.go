@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 type Client interface {

@@ -21,8 +21,8 @@ func rootIDOf(t *testing.T, store *Store, id string) string {
 // TestCreateJobPopulatesRootID pins #420 at the insert path: a coordinator with no
 // payload RootJobID self-roots to its own id, a child inherits the payload's
 // root, and a malformed payload self-roots (it never errors the insert). This is
-// load-bearing — an implementation that forgets to bind COALESCE(NULLIF(?,''), ?)
-// on insert leaves root_id = '' and fails here.
+// load-bearing — an implementation that forgets to bind the empty-string check
+// in COALESCE(NULLIF(...)) leaves root_id empty and fails here.
 func TestCreateJobPopulatesRootID(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "gitmoot.db"))
@@ -80,7 +80,7 @@ func TestListJobsByRootReturnsTree(t *testing.T) {
 	seed("R", `{}`)
 	seed("R/a", `{"root_job_id":"R"}`)
 	seed("R/b", `{"root_job_id":"R"}`)
-	seed("S", `{}`)         // unrelated root
+	seed("S", `{}`) // unrelated root
 	seed("S/a", `{"root_job_id":"S"}`)
 
 	jobs, err := store.ListJobsByRoot(ctx, "R")
@@ -210,10 +210,10 @@ func TestMigrateBackfillsRootID(t *testing.T) {
 			t.Fatalf("insert legacy %q returned error: %v", id, err)
 		}
 	}
-	insert("R", `{"sender":"coord"}`)        // self-root (no root_job_id)
-	insert("R/c1", `{"root_job_id":"R"}`)     // child -> payload root
-	insert("R/c2", `{"root_job_id":""}`)      // empty root -> self-root
-	insert("bad", `definitely not json`)      // malformed -> self-root
+	insert("R", `{"sender":"coord"}`)     // self-root (no root_job_id)
+	insert("R/c1", `{"root_job_id":"R"}`) // child -> payload root
+	insert("R/c2", `{"root_job_id":""}`)  // empty root -> self-root
+	insert("bad", `definitely not json`)  // malformed -> self-root
 	if err := raw.Close(); err != nil {
 		t.Fatalf("raw Close returned error: %v", err)
 	}

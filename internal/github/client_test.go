@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 func TestRepositoryExists(t *testing.T) {
@@ -217,7 +217,7 @@ func TestListIssueCommentsDedupesByID(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	comments, err := client.ListIssueComments(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2)
+	comments, err := client.ListIssueComments(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2)
 
 	if err != nil {
 		t.Fatalf("ListIssueComments returned error: %v", err)
@@ -228,7 +228,7 @@ func TestListIssueCommentsDedupesByID(t *testing.T) {
 	if comments[0].Body != "first" || comments[1].Author != "bob" {
 		t.Fatalf("comments were not decoded in first-seen order: %+v", comments)
 	}
-	runner.wantArgs(t, 0, "api", "--paginate", "repos/jerryfane/gitmoot/issues/2/comments")
+	runner.wantArgs(t, 0, "api", "--paginate", "repos/gitmoot/gitmoot/issues/2/comments")
 }
 
 func TestListRepoIssueCommentsPassesSinceAndGroupsByIssue(t *testing.T) {
@@ -237,16 +237,16 @@ func TestListRepoIssueCommentsPassesSinceAndGroupsByIssue(t *testing.T) {
 			// Single-page (apiPageJSON) repo-wide payload: comments for a plain issue
 			// (#41) AND a PR (#42, every PR is an issue), each carrying issue_url.
 			Stdout: `[
-				{"id": 11, "body": "@a ask on issue", "issue_url": "https://api.github.com/repos/jerryfane/gitmoot/issues/41", "updated_at": "2026-06-27T10:00:00Z", "user": {"login": "alice"}},
-				{"id": 12, "body": "@a ask on PR", "issue_url": "https://api.github.com/repos/jerryfane/gitmoot/issues/42", "updated_at": "2026-06-27T11:00:00Z", "user": {"login": "bob"}},
-				{"id": 11, "body": "duplicate", "issue_url": "https://api.github.com/repos/jerryfane/gitmoot/issues/41", "updated_at": "2026-06-27T10:00:00Z", "user": {"login": "alice"}}
+				{"id": 11, "body": "@a ask on issue", "issue_url": "https://api.github.com/repos/gitmoot/gitmoot/issues/41", "updated_at": "2026-06-27T10:00:00Z", "user": {"login": "alice"}},
+				{"id": 12, "body": "@a ask on PR", "issue_url": "https://api.github.com/repos/gitmoot/gitmoot/issues/42", "updated_at": "2026-06-27T11:00:00Z", "user": {"login": "bob"}},
+				{"id": 11, "body": "duplicate", "issue_url": "https://api.github.com/repos/gitmoot/gitmoot/issues/41", "updated_at": "2026-06-27T10:00:00Z", "user": {"login": "alice"}}
 			]`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
 	since := time.Date(2026, 6, 27, 9, 30, 0, 0, time.UTC)
-	comments, err := client.ListRepoIssueComments(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, since)
+	comments, err := client.ListRepoIssueComments(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, since)
 	if err != nil {
 		t.Fatalf("ListRepoIssueComments returned error: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestListRepoIssueCommentsPassesSinceAndGroupsByIssue(t *testing.T) {
 		t.Fatalf("author decode: %+v", comments[1])
 	}
 	// One bounded page (no --paginate), since passthrough as RFC3339, oldest-first.
-	runner.wantArgs(t, 0, "api", "-i", "-X", "GET", "repos/jerryfane/gitmoot/issues/comments",
+	runner.wantArgs(t, 0, "api", "-i", "-X", "GET", "repos/gitmoot/gitmoot/issues/comments",
 		"-f", "sort=updated", "-f", "direction=asc", "-f", "per_page=100",
 		"-f", "since=2026-06-27T09:30:00Z")
 }
@@ -270,23 +270,23 @@ func TestListRepoIssueCommentsZeroSinceOmitsFilter(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `[]`}}}
 	client := GhClient{Runner: runner}
 
-	if _, err := client.ListRepoIssueComments(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, time.Time{}); err != nil {
+	if _, err := client.ListRepoIssueComments(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, time.Time{}); err != nil {
 		t.Fatalf("ListRepoIssueComments returned error: %v", err)
 	}
 	// A zero since omits the since= arg entirely (no whole-history backfill trigger).
-	runner.wantArgs(t, 0, "api", "-i", "-X", "GET", "repos/jerryfane/gitmoot/issues/comments",
+	runner.wantArgs(t, 0, "api", "-i", "-X", "GET", "repos/gitmoot/gitmoot/issues/comments",
 		"-f", "sort=updated", "-f", "direction=asc", "-f", "per_page=100")
 }
 
 func TestPostIssueCommentUsesIssueCommentsEndpoint(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"id": 21, "body": "done", "html_url": "https://github.com/jerryfane/gitmoot/pull/2#issuecomment-21", "user": {"login": "gitmoot"}}`,
+			Stdout: `{"id": 21, "body": "done", "html_url": "https://github.com/gitmoot/gitmoot/pull/2#issuecomment-21", "user": {"login": "gitmoot"}}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	comment, err := client.PostIssueComment(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2, "done")
+	comment, err := client.PostIssueComment(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2, "done")
 
 	if err != nil {
 		t.Fatalf("PostIssueComment returned error: %v", err)
@@ -294,19 +294,19 @@ func TestPostIssueCommentUsesIssueCommentsEndpoint(t *testing.T) {
 	if comment.ID != 21 || comment.Body != "done" {
 		t.Fatalf("comment = %+v", comment)
 	}
-	runner.wantArgs(t, 0, "api", "repos/jerryfane/gitmoot/issues/2/comments", "-f", "body=done")
+	runner.wantArgs(t, 0, "api", "repos/gitmoot/gitmoot/issues/2/comments", "-f", "body=done")
 }
 
 func TestCreateIssueUsesIssuesEndpoint(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"number": 8, "title": "Review run-1", "state": "open", "html_url": "https://github.com/jerryfane/gitmoot/issues/8"}`,
+			Stdout: `{"number": 8, "title": "Review run-1", "state": "open", "html_url": "https://github.com/gitmoot/gitmoot/issues/8"}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
 	issue, err := client.CreateIssue(context.Background(), CreateIssueInput{
-		Repo:  Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:  Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Title: "Review run-1",
 		Body:  "body",
 	})
@@ -314,16 +314,16 @@ func TestCreateIssueUsesIssuesEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIssue returned error: %v", err)
 	}
-	if issue.Number != 8 || issue.URL != "https://github.com/jerryfane/gitmoot/issues/8" {
+	if issue.Number != 8 || issue.URL != "https://github.com/gitmoot/gitmoot/issues/8" {
 		t.Fatalf("issue = %+v", issue)
 	}
-	runner.wantArgs(t, 0, "api", "repos/jerryfane/gitmoot/issues", "-f", "title=Review run-1", "-f", "body=body")
+	runner.wantArgs(t, 0, "api", "repos/gitmoot/gitmoot/issues", "-f", "title=Review run-1", "-f", "body=body")
 }
 
 func TestCreateIssueAppliesLabelsBestEffort(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{
-			{Stdout: `{"number": 8, "title": "Bug", "state": "open", "html_url": "https://github.com/jerryfane/gitmoot/issues/8"}`},
+			{Stdout: `{"number": 8, "title": "Bug", "state": "open", "html_url": "https://github.com/gitmoot/gitmoot/issues/8"}`},
 			{Stderr: "HTTP 422: Validation Failed"},
 			{Stderr: "HTTP 422: Validation Failed"},
 			{Stderr: "HTTP 422: Validation Failed"},
@@ -338,7 +338,7 @@ func TestCreateIssueAppliesLabelsBestEffort(t *testing.T) {
 	client := GhClient{Runner: runner}
 
 	issue, err := client.CreateIssue(context.Background(), CreateIssueInput{
-		Repo:   Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:   Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Title:  "Bug",
 		Body:   "body",
 		Labels: []string{"gitmoot-dashboard-report", "bug"},
@@ -350,21 +350,21 @@ func TestCreateIssueAppliesLabelsBestEffort(t *testing.T) {
 	if issue.Number != 8 {
 		t.Fatalf("issue = %+v", issue)
 	}
-	runner.wantArgs(t, 0, "api", "repos/jerryfane/gitmoot/issues", "-f", "title=Bug", "-f", "body=body")
-	runner.wantArgs(t, 1, "api", "repos/jerryfane/gitmoot/labels", "-f", "name=gitmoot-dashboard-report", "-f", "color=5319e7", "-f", "description=Gitmoot-generated bug report")
-	runner.wantArgs(t, 2, "api", "repos/jerryfane/gitmoot/labels", "-f", "name=bug", "-f", "color=d73a4a", "-f", "description=Something is not working")
-	runner.wantArgs(t, 3, "api", "repos/jerryfane/gitmoot/issues/8/labels", "-f", "labels[]=gitmoot-dashboard-report", "-f", "labels[]=bug")
+	runner.wantArgs(t, 0, "api", "repos/gitmoot/gitmoot/issues", "-f", "title=Bug", "-f", "body=body")
+	runner.wantArgs(t, 1, "api", "repos/gitmoot/gitmoot/labels", "-f", "name=gitmoot-dashboard-report", "-f", "color=5319e7", "-f", "description=Gitmoot-generated bug report")
+	runner.wantArgs(t, 2, "api", "repos/gitmoot/gitmoot/labels", "-f", "name=bug", "-f", "color=d73a4a", "-f", "description=Something is not working")
+	runner.wantArgs(t, 3, "api", "repos/gitmoot/gitmoot/issues/8/labels", "-f", "labels[]=gitmoot-dashboard-report", "-f", "labels[]=bug")
 }
 
 func TestSearchOpenIssuesUsesIssueSearchEndpoint(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"items":[{"number":8,"title":"Bug","state":"open","html_url":"https://github.com/jerryfane/gitmoot/issues/8","body":"<!-- gitmoot:dashboard-report fingerprint:abc -->"}]}`,
+			Stdout: `{"items":[{"number":8,"title":"Bug","state":"open","html_url":"https://github.com/gitmoot/gitmoot/issues/8","body":"<!-- gitmoot:dashboard-report fingerprint:abc -->"}]}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	issues, err := client.SearchOpenIssues(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, "<!-- gitmoot:dashboard-report fingerprint:abc -->")
+	issues, err := client.SearchOpenIssues(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, "<!-- gitmoot:dashboard-report fingerprint:abc -->")
 
 	if err != nil {
 		t.Fatalf("SearchOpenIssues returned error: %v", err)
@@ -372,7 +372,7 @@ func TestSearchOpenIssuesUsesIssueSearchEndpoint(t *testing.T) {
 	if len(issues) != 1 || issues[0].Number != 8 || !strings.Contains(issues[0].Body, "fingerprint:abc") {
 		t.Fatalf("issues = %+v", issues)
 	}
-	runner.wantArgs(t, 0, "api", "-X", "GET", "search/issues", "-f", `q=repo:jerryfane/gitmoot is:issue is:open in:body "<!-- gitmoot:dashboard-report fingerprint:abc -->"`)
+	runner.wantArgs(t, 0, "api", "-X", "GET", "search/issues", "-f", `q=repo:gitmoot/gitmoot is:issue is:open in:body "<!-- gitmoot:dashboard-report fingerprint:abc -->"`)
 }
 
 func TestListIssuesFiltersOutPullRequests(t *testing.T) {
@@ -382,14 +382,14 @@ func TestListIssuesFiltersOutPullRequests(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
 			Stdout: `[
-				{"number":42,"title":"A real issue","state":"open","html_url":"https://github.com/jerryfane/gitmoot/issues/42","body":"please help"},
-				{"number":43,"title":"A pull request","state":"open","html_url":"https://github.com/jerryfane/gitmoot/pull/43","pull_request":{"url":"https://api.github.com/repos/jerryfane/gitmoot/pulls/43"}}
+				{"number":42,"title":"A real issue","state":"open","html_url":"https://github.com/gitmoot/gitmoot/issues/42","body":"please help"},
+				{"number":43,"title":"A pull request","state":"open","html_url":"https://github.com/gitmoot/gitmoot/pull/43","pull_request":{"url":"https://api.github.com/repos/gitmoot/gitmoot/pulls/43"}}
 			]`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	issues, err := client.ListIssues(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, "open")
+	issues, err := client.ListIssues(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, "open")
 	if err != nil {
 		t.Fatalf("ListIssues returned error: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestListIssuesFiltersOutPullRequests(t *testing.T) {
 	if issues[0].Number != 42 || issues[0].IsPullRequest {
 		t.Fatalf("issues[0] = %+v, want plain issue #42", issues[0])
 	}
-	runner.wantArgs(t, 0, "api", "-i", "-X", "GET", "repos/jerryfane/gitmoot/issues", "-f", "state=open", "-f", "per_page=100")
+	runner.wantArgs(t, 0, "api", "-i", "-X", "GET", "repos/gitmoot/gitmoot/issues", "-f", "state=open", "-f", "per_page=100")
 }
 
 func TestPreflightChecksGhAuthAndRepoAccess(t *testing.T) {
@@ -407,18 +407,18 @@ func TestPreflightChecksGhAuthAndRepoAccess(t *testing.T) {
 		results: []subprocess.Result{
 			{Stdout: "gh version 2.45.0"},
 			{Stdout: "Logged in to github.com"},
-			{Stdout: `{"nameWithOwner":"jerryfane/gitmoot"}`},
+			{Stdout: `{"nameWithOwner":"gitmoot/gitmoot"}`},
 		},
 	}
 	client := GhClient{Runner: runner}
 
-	if err := client.Preflight(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}); err != nil {
+	if err := client.Preflight(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}); err != nil {
 		t.Fatalf("Preflight returned error: %v", err)
 	}
 
 	runner.wantArgs(t, 0, "--version")
 	runner.wantArgs(t, 1, "auth", "status", "--hostname", "github.com")
-	runner.wantArgs(t, 2, "repo", "view", "jerryfane/gitmoot", "--json", "nameWithOwner")
+	runner.wantArgs(t, 2, "repo", "view", "gitmoot/gitmoot", "--json", "nameWithOwner")
 }
 
 func TestPreflightReportsAuthLoginHint(t *testing.T) {
@@ -431,7 +431,7 @@ func TestPreflightReportsAuthLoginHint(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	err := client.Preflight(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"})
+	err := client.Preflight(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"})
 
 	if err == nil || !strings.Contains(err.Error(), "gh auth login --hostname github.com") {
 		t.Fatalf("Preflight error = %v, want auth login hint", err)
@@ -461,12 +461,12 @@ func TestPreflightReportsExpectedRepoAccess(t *testing.T) {
 func TestCloseIssueUsesIssueEndpoint(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"number": 8, "title": "Review run-1", "state": "closed", "html_url": "https://github.com/jerryfane/gitmoot/issues/8"}`,
+			Stdout: `{"number": 8, "title": "Review run-1", "state": "closed", "html_url": "https://github.com/gitmoot/gitmoot/issues/8"}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	issue, err := client.CloseIssue(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 8)
+	issue, err := client.CloseIssue(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 8)
 
 	if err != nil {
 		t.Fatalf("CloseIssue returned error: %v", err)
@@ -474,7 +474,7 @@ func TestCloseIssueUsesIssueEndpoint(t *testing.T) {
 	if issue.Number != 8 || issue.State != "closed" {
 		t.Fatalf("issue = %+v", issue)
 	}
-	runner.wantArgs(t, 0, "api", "-X", "PATCH", "repos/jerryfane/gitmoot/issues/8", "-f", "state=closed")
+	runner.wantArgs(t, 0, "api", "-X", "PATCH", "repos/gitmoot/gitmoot/issues/8", "-f", "state=closed")
 }
 
 func TestGetUserPermissionUsesCollaboratorPermissionEndpoint(t *testing.T) {
@@ -485,7 +485,7 @@ func TestGetUserPermissionUsesCollaboratorPermissionEndpoint(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	permission, err := client.GetUserPermission(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, "alice")
+	permission, err := client.GetUserPermission(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, "alice")
 
 	if err != nil {
 		t.Fatalf("GetUserPermission returned error: %v", err)
@@ -493,7 +493,7 @@ func TestGetUserPermissionUsesCollaboratorPermissionEndpoint(t *testing.T) {
 	if permission.Permission != "write" || permission.RoleName != "write" {
 		t.Fatalf("permission = %+v", permission)
 	}
-	runner.wantArgs(t, 0, "api", "repos/jerryfane/gitmoot/collaborators/alice/permission")
+	runner.wantArgs(t, 0, "api", "repos/gitmoot/gitmoot/collaborators/alice/permission")
 }
 
 func TestGetUserPermissionMapsNotFoundToNone(t *testing.T) {
@@ -503,7 +503,7 @@ func TestGetUserPermissionMapsNotFoundToNone(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	permission, err := client.GetUserPermission(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, "mallory")
+	permission, err := client.GetUserPermission(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, "mallory")
 
 	if err != nil {
 		t.Fatalf("GetUserPermission returned error: %v", err)
@@ -522,7 +522,7 @@ func TestCreateCommitStatusUsesStatusesEndpoint(t *testing.T) {
 	client := GhClient{Runner: runner}
 
 	status, err := client.CreateCommitStatus(context.Background(), CommitStatusInput{
-		Repo:        Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:        Repository{Owner: "gitmoot", Name: "gitmoot"},
 		SHA:         "abc123",
 		State:       "success",
 		Context:     "gitmoot/task",
@@ -538,7 +538,7 @@ func TestCreateCommitStatusUsesStatusesEndpoint(t *testing.T) {
 	}
 	runner.wantArgs(t, 0,
 		"api",
-		"repos/jerryfane/gitmoot/statuses/abc123",
+		"repos/gitmoot/gitmoot/statuses/abc123",
 		"-f", "state=success",
 		"-f", "context=gitmoot/task",
 		"-f", "description=ok",
@@ -549,12 +549,12 @@ func TestCreateCommitStatusUsesStatusesEndpoint(t *testing.T) {
 func TestGetPullRequestDecodesBaseSHA(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"number": 2, "title": "Task", "state": "open", "html_url": "https://github.com/jerryfane/gitmoot/pull/2", "head": {"ref": "task", "sha": "head123"}, "base": {"ref": "main", "sha": "base123"}}`,
+			Stdout: `{"number": 2, "title": "Task", "state": "open", "html_url": "https://github.com/gitmoot/gitmoot/pull/2", "head": {"ref": "task", "sha": "head123"}, "base": {"ref": "main", "sha": "base123"}}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	pr, err := client.GetPullRequest(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2)
+	pr, err := client.GetPullRequest(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2)
 
 	if err != nil {
 		t.Fatalf("GetPullRequest returned error: %v", err)
@@ -562,23 +562,23 @@ func TestGetPullRequestDecodesBaseSHA(t *testing.T) {
 	if pr.HeadSHA != "head123" || pr.BaseSHA != "base123" {
 		t.Fatalf("pull request = %+v", pr)
 	}
-	runner.wantArgs(t, 0, "api", "repos/jerryfane/gitmoot/pulls/2")
+	runner.wantArgs(t, 0, "api", "repos/gitmoot/gitmoot/pulls/2")
 }
 
 func TestGetPullRequestDecodesHeadRepository(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"number": 2, "state": "open", "head": {"ref": "task", "sha": "head123", "repo": {"full_name": "jerryfane/gitmoot"}}, "base": {"ref": "main"}}`,
+			Stdout: `{"number": 2, "state": "open", "head": {"ref": "task", "sha": "head123", "repo": {"full_name": "gitmoot/gitmoot"}}, "base": {"ref": "main"}}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	pr, err := client.GetPullRequest(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2)
+	pr, err := client.GetPullRequest(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2)
 	if err != nil {
 		t.Fatalf("GetPullRequest returned error: %v", err)
 	}
-	if pr.HeadRepoFullName != "jerryfane/gitmoot" {
-		t.Fatalf("head repository = %q, want jerryfane/gitmoot", pr.HeadRepoFullName)
+	if pr.HeadRepoFullName != "gitmoot/gitmoot" {
+		t.Fatalf("head repository = %q, want gitmoot/gitmoot", pr.HeadRepoFullName)
 	}
 }
 
@@ -588,17 +588,17 @@ func TestGetPullRequestDecodesHeadRepository(t *testing.T) {
 func TestGetPullRequestDecodesBody(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"number": 9, "title": "Revert \"Add feature\"", "state": "closed", "merged": true, "html_url": "https://github.com/jerryfane/gitmoot/pull/9", "body": "Reverts jerryfane/gitmoot#7", "head": {"ref": "revert-7", "sha": "rev123"}, "base": {"ref": "main", "sha": "base123"}}`,
+			Stdout: `{"number": 9, "title": "Revert \"Add feature\"", "state": "closed", "merged": true, "html_url": "https://github.com/gitmoot/gitmoot/pull/9", "body": "Reverts gitmoot/gitmoot#7", "head": {"ref": "revert-7", "sha": "rev123"}, "base": {"ref": "main", "sha": "base123"}}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	pr, err := client.GetPullRequest(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 9)
+	pr, err := client.GetPullRequest(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 9)
 
 	if err != nil {
 		t.Fatalf("GetPullRequest returned error: %v", err)
 	}
-	if pr.Body != "Reverts jerryfane/gitmoot#7" {
+	if pr.Body != "Reverts gitmoot/gitmoot#7" {
 		t.Fatalf("pull request body = %q, want the Reverts anchor", pr.Body)
 	}
 	if !pr.Merged {
@@ -612,12 +612,12 @@ func TestGetPullRequestDecodesBody(t *testing.T) {
 func TestGetPullRequestBodyDefaultsEmpty(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"number": 2, "title": "Task", "state": "open", "html_url": "https://github.com/jerryfane/gitmoot/pull/2", "head": {"ref": "task", "sha": "head123"}, "base": {"ref": "main", "sha": "base123"}}`,
+			Stdout: `{"number": 2, "title": "Task", "state": "open", "html_url": "https://github.com/gitmoot/gitmoot/pull/2", "head": {"ref": "task", "sha": "head123"}, "base": {"ref": "main", "sha": "base123"}}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	pr, err := client.GetPullRequest(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2)
+	pr, err := client.GetPullRequest(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2)
 
 	if err != nil {
 		t.Fatalf("GetPullRequest returned error: %v", err)
@@ -634,12 +634,12 @@ func TestGetPullRequestBodyDefaultsEmpty(t *testing.T) {
 func TestListRecentClosedPullRequestsDecodesMergedAt(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `[{"number": 20, "title": "Revert \"Task 7\"", "state": "closed", "merged_at": "2026-06-27T12:00:00Z", "html_url": "https://github.com/jerryfane/gitmoot/pull/20", "body": "Reverts #7", "head": {"ref": "revert-task-7"}, "base": {"ref": "main"}}]`,
+			Stdout: `[{"number": 20, "title": "Revert \"Task 7\"", "state": "closed", "merged_at": "2026-06-27T12:00:00Z", "html_url": "https://github.com/gitmoot/gitmoot/pull/20", "body": "Reverts #7", "head": {"ref": "revert-task-7"}, "base": {"ref": "main"}}]`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
-	pulls, err := client.ListRecentClosedPullRequests(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"})
+	pulls, err := client.ListRecentClosedPullRequests(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"})
 	if err != nil {
 		t.Fatalf("ListRecentClosedPullRequests returned error: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestCompareCommitsUsesEscapedCompareEndpoint(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	compare, err := client.CompareCommits(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, "release/1.0", "head123")
+	compare, err := client.CompareCommits(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, "release/1.0", "head123")
 
 	if err != nil {
 		t.Fatalf("CompareCommits returned error: %v", err)
@@ -684,19 +684,19 @@ func TestCompareCommitsUsesEscapedCompareEndpoint(t *testing.T) {
 	if compare.Status != "ahead" || compare.AheadBy != 3 || compare.BehindBy != 0 {
 		t.Fatalf("compare = %+v", compare)
 	}
-	runner.wantArgs(t, 0, "api", "repos/jerryfane/gitmoot/compare/release%2F1.0...head123")
+	runner.wantArgs(t, 0, "api", "repos/gitmoot/gitmoot/compare/release%2F1.0...head123")
 }
 
 func TestUpdatePullRequestBranchUsesExpectedHeadSHA(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{
-			Stdout: `{"message":"Updating pull request branch.","url":"https://github.com/repos/jerryfane/gitmoot/pulls/2"}`,
+			Stdout: `{"message":"Updating pull request branch.","url":"https://github.com/repos/gitmoot/gitmoot/pulls/2"}`,
 		}},
 	}
 	client := GhClient{Runner: runner}
 
 	result, err := client.UpdatePullRequestBranch(context.Background(), UpdatePullRequestBranchInput{
-		Repo:            Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:            Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Number:          2,
 		ExpectedHeadSHA: "head123",
 	})
@@ -710,7 +710,7 @@ func TestUpdatePullRequestBranchUsesExpectedHeadSHA(t *testing.T) {
 	runner.wantArgs(t, 0,
 		"api",
 		"-X", "PUT",
-		"repos/jerryfane/gitmoot/pulls/2/update-branch",
+		"repos/gitmoot/gitmoot/pulls/2/update-branch",
 		"-f", "expected_head_sha=head123",
 	)
 }
@@ -723,7 +723,7 @@ func TestUpdatePullRequestBranchClassifiesStaleHead(t *testing.T) {
 	client := GhClient{Runner: runner}
 
 	_, err := client.UpdatePullRequestBranch(context.Background(), UpdatePullRequestBranchInput{
-		Repo:            Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:            Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Number:          2,
 		ExpectedHeadSHA: "old",
 	})
@@ -741,7 +741,7 @@ func TestUpdatePullRequestBranchClassifiesConflict(t *testing.T) {
 	client := GhClient{Runner: runner}
 
 	_, err := client.UpdatePullRequestBranch(context.Background(), UpdatePullRequestBranchInput{
-		Repo:            Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:            Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Number:          2,
 		ExpectedHeadSHA: "head123",
 	})
@@ -759,7 +759,7 @@ func TestUpdatePullRequestBranchClassifiesUnsupported(t *testing.T) {
 	client := GhClient{Runner: runner}
 
 	_, err := client.UpdatePullRequestBranch(context.Background(), UpdatePullRequestBranchInput{
-		Repo:            Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:            Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Number:          2,
 		ExpectedHeadSHA: "head123",
 	})
@@ -780,7 +780,7 @@ func TestListPullRequestChecksUsesGhChecksOutput(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	checks, err := client.ListPullRequestChecks(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2)
+	checks, err := client.ListPullRequestChecks(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2)
 
 	if err != nil {
 		t.Fatalf("ListPullRequestChecks returned error: %v", err)
@@ -790,7 +790,7 @@ func TestListPullRequestChecksUsesGhChecksOutput(t *testing.T) {
 	}
 	runner.wantArgs(t, 0,
 		"pr", "checks", "2",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--json", "name,state,bucket,link,workflow,completedAt",
 	)
 }
@@ -804,7 +804,7 @@ func TestListPullRequestChecksAcceptsPendingExitWithJSON(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	checks, err := client.ListPullRequestChecks(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2)
+	checks, err := client.ListPullRequestChecks(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2)
 
 	if err != nil {
 		t.Fatalf("ListPullRequestChecks returned error: %v", err)
@@ -823,7 +823,7 @@ func TestListPullRequestChecksTreatsNoChecksAsEmpty(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	checks, err := client.ListPullRequestChecks(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2)
+	checks, err := client.ListPullRequestChecks(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2)
 
 	if err != nil {
 		t.Fatalf("ListPullRequestChecks returned error: %v", err)
@@ -848,7 +848,7 @@ func TestListPullRequestChecksFallsBackToStatusCheckRollup(t *testing.T) {
 	}
 	client := GhClient{Runner: runner}
 
-	checks, err := client.ListPullRequestChecks(context.Background(), Repository{Owner: "jerryfane", Name: "gitmoot"}, 2)
+	checks, err := client.ListPullRequestChecks(context.Background(), Repository{Owner: "gitmoot", Name: "gitmoot"}, 2)
 
 	if err != nil {
 		t.Fatalf("ListPullRequestChecks returned error: %v", err)
@@ -864,12 +864,12 @@ func TestListPullRequestChecksFallsBackToStatusCheckRollup(t *testing.T) {
 	}
 	runner.wantArgs(t, 0,
 		"pr", "checks", "2",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--json", "name,state,bucket,link,workflow,completedAt",
 	)
 	runner.wantArgs(t, 1,
 		"pr", "view", "2",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--json", "statusCheckRollup",
 	)
 }
@@ -877,12 +877,12 @@ func TestListPullRequestChecksFallsBackToStatusCheckRollup(t *testing.T) {
 func TestMergePullRequestUsesSafeHeadMatch(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{
 		{Stdout: "merged"},
-		{Stdout: `{"number": 2, "title": "Task", "state": "closed", "merged": true, "html_url": "https://github.com/jerryfane/gitmoot/pull/2", "merge_commit_sha": "merge123", "head": {"ref": "task", "sha": "abc123"}, "base": {"ref": "main"}}`},
+		{Stdout: `{"number": 2, "title": "Task", "state": "closed", "merged": true, "html_url": "https://github.com/gitmoot/gitmoot/pull/2", "merge_commit_sha": "merge123", "head": {"ref": "task", "sha": "abc123"}, "base": {"ref": "main"}}`},
 	}}
 	client := GhClient{Runner: runner}
 
 	result, err := client.MergePullRequest(context.Background(), MergePullRequestInput{
-		Repo:            Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:            Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Number:          2,
 		Method:          "squash",
 		Subject:         "feat: task",
@@ -898,13 +898,13 @@ func TestMergePullRequestUsesSafeHeadMatch(t *testing.T) {
 	}
 	runner.wantArgs(t, 0,
 		"pr", "merge", "2",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--squash",
 		"--subject", "feat: task",
 		"--match-head-commit", "abc123",
 		"--delete-branch",
 	)
-	runner.wantArgs(t, 1, "api", "repos/jerryfane/gitmoot/pulls/2")
+	runner.wantArgs(t, 1, "api", "repos/gitmoot/gitmoot/pulls/2")
 }
 
 func TestMergePullRequestRequiresConfirmedMergedState(t *testing.T) {
@@ -918,7 +918,7 @@ func TestMergePullRequestRequiresConfirmedMergedState(t *testing.T) {
 	client := GhClient{Runner: runner}
 
 	result, err := client.MergePullRequest(context.Background(), MergePullRequestInput{
-		Repo:            Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:            Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Number:          2,
 		MatchHeadCommit: "abc123",
 	})
@@ -931,12 +931,12 @@ func TestMergePullRequestRequiresConfirmedMergedState(t *testing.T) {
 func TestMergePullRequestReportsQueuedMergeAsPending(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{
 		{Stdout: "queued"},
-		{Stdout: `{"number": 2, "title": "Task", "state": "open", "html_url": "https://github.com/jerryfane/gitmoot/pull/2", "merge_commit_sha": "synthetic", "head": {"ref": "task", "sha": "abc123"}, "base": {"ref": "main"}}`},
+		{Stdout: `{"number": 2, "title": "Task", "state": "open", "html_url": "https://github.com/gitmoot/gitmoot/pull/2", "merge_commit_sha": "synthetic", "head": {"ref": "task", "sha": "abc123"}, "base": {"ref": "main"}}`},
 	}}
 	client := GhClient{Runner: runner}
 
 	result, err := client.MergePullRequest(context.Background(), MergePullRequestInput{
-		Repo:            Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:            Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Number:          2,
 		MatchHeadCommit: "abc123",
 	})
@@ -968,7 +968,7 @@ func TestRateLimitBackoffRetries(t *testing.T) {
 	}
 
 	status, err := client.CreateCommitStatus(context.Background(), CommitStatusInput{
-		Repo:    Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:    Repository{Owner: "gitmoot", Name: "gitmoot"},
 		SHA:     "abc123",
 		State:   "pending",
 		Context: "gitmoot/task",
@@ -991,14 +991,14 @@ func TestRateLimitBackoffRetries(t *testing.T) {
 func TestCreatePullRequestFetchesCreatedPR(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{
-			{Stdout: "https://github.com/jerryfane/gitmoot/pull/7\n"},
-			{Stdout: `{"number": 7, "title": "Task 7", "state": "open", "html_url": "https://github.com/jerryfane/gitmoot/pull/7", "head": {"ref": "task-7", "sha": "abc123"}, "base": {"ref": "main"}}`},
+			{Stdout: "https://github.com/gitmoot/gitmoot/pull/7\n"},
+			{Stdout: `{"number": 7, "title": "Task 7", "state": "open", "html_url": "https://github.com/gitmoot/gitmoot/pull/7", "head": {"ref": "task-7", "sha": "abc123"}, "base": {"ref": "main"}}`},
 		},
 	}
 	client := GhClient{Runner: runner}
 
 	pr, err := client.CreatePullRequest(context.Background(), CreatePullRequestInput{
-		Repo:  Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:  Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Title: "Task 7",
 		Body:  "body",
 		Head:  "task-7",
@@ -1013,21 +1013,21 @@ func TestCreatePullRequestFetchesCreatedPR(t *testing.T) {
 	}
 	runner.wantArgs(t, 0,
 		"pr", "create",
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--title", "Task 7",
 		"--body", "body",
 		"--head", "task-7",
 		"--base", "main",
 	)
-	runner.wantArgs(t, 1, "api", "repos/jerryfane/gitmoot/pulls/7")
+	runner.wantArgs(t, 1, "api", "repos/gitmoot/gitmoot/pulls/7")
 }
 
 func TestGetOpenPullRequestByHead(t *testing.T) {
-	repo := Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := Repository{Owner: "gitmoot", Name: "gitmoot"}
 
 	t.Run("found", func(t *testing.T) {
 		runner := &fakeRunner{results: []subprocess.Result{
-			{Stdout: `[{"number":7,"url":"https://github.com/jerryfane/gitmoot/pull/7","headRefOid":"abc123","baseRefName":"main","state":"OPEN"}]`},
+			{Stdout: `[{"number":7,"url":"https://github.com/gitmoot/gitmoot/pull/7","headRefOid":"abc123","baseRefName":"main","state":"OPEN"}]`},
 		}}
 		client := GhClient{Runner: runner}
 		pr, ok, err := client.GetOpenPullRequestByHead(context.Background(), repo, "task-7", "main")
@@ -1039,7 +1039,7 @@ func TestGetOpenPullRequestByHead(t *testing.T) {
 		}
 		runner.wantArgs(t, 0,
 			"pr", "list",
-			"--repo", "jerryfane/gitmoot",
+			"--repo", "gitmoot/gitmoot",
 			"--head", "task-7",
 			"--base", "main",
 			"--state", "open",
@@ -1058,12 +1058,12 @@ func TestGetOpenPullRequestByHead(t *testing.T) {
 }
 
 func TestEnsurePullRequest(t *testing.T) {
-	repo := Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := Repository{Owner: "gitmoot", Name: "gitmoot"}
 	input := CreatePullRequestInput{Repo: repo, Title: "Task 7", Body: "body", Head: "task-7", Base: "main"}
 
 	t.Run("adopts existing open head PR without creating", func(t *testing.T) {
 		runner := &fakeRunner{results: []subprocess.Result{
-			{Stdout: `[{"number":9,"url":"https://github.com/jerryfane/gitmoot/pull/9","headRefOid":"def456","baseRefName":"main","state":"OPEN"}]`},
+			{Stdout: `[{"number":9,"url":"https://github.com/gitmoot/gitmoot/pull/9","headRefOid":"def456","baseRefName":"main","state":"OPEN"}]`},
 		}}
 		client := GhClient{Runner: runner}
 		pr, err := client.EnsurePullRequest(context.Background(), input)
@@ -1077,14 +1077,14 @@ func TestEnsurePullRequest(t *testing.T) {
 		if len(runner.calls) != 1 {
 			t.Fatalf("calls = %v, want exactly the query call", runner.calls)
 		}
-		runner.wantArgs(t, 0, "pr", "list", "--repo", "jerryfane/gitmoot", "--head", "task-7", "--base", "main", "--state", "open", "--json", "number,url,headRefOid,baseRefName,state")
+		runner.wantArgs(t, 0, "pr", "list", "--repo", "gitmoot/gitmoot", "--head", "task-7", "--base", "main", "--state", "open", "--json", "number,url,headRefOid,baseRefName,state")
 	})
 
 	t.Run("creates when absent", func(t *testing.T) {
 		runner := &fakeRunner{results: []subprocess.Result{
 			{Stdout: `[]`}, // query: none
-			{Stdout: "https://github.com/jerryfane/gitmoot/pull/11\n"}, // create
-			{Stdout: `{"number":11,"title":"Task 7","state":"open","html_url":"https://github.com/jerryfane/gitmoot/pull/11","head":{"ref":"task-7","sha":"sha11"},"base":{"ref":"main"}}`}, // getPullRequest
+			{Stdout: "https://github.com/gitmoot/gitmoot/pull/11\n"}, // create
+			{Stdout: `{"number":11,"title":"Task 7","state":"open","html_url":"https://github.com/gitmoot/gitmoot/pull/11","head":{"ref":"task-7","sha":"sha11"},"base":{"ref":"main"}}`}, // getPullRequest
 		}}
 		client := GhClient{Runner: runner}
 		pr, err := client.EnsurePullRequest(context.Background(), input)
@@ -1094,16 +1094,16 @@ func TestEnsurePullRequest(t *testing.T) {
 		if pr.Number != 11 || pr.HeadSHA != "sha11" {
 			t.Fatalf("pr = %+v", pr)
 		}
-		runner.wantArgs(t, 0, "pr", "list", "--repo", "jerryfane/gitmoot", "--head", "task-7", "--base", "main", "--state", "open", "--json", "number,url,headRefOid,baseRefName,state")
-		runner.wantArgs(t, 1, "pr", "create", "--repo", "jerryfane/gitmoot", "--title", "Task 7", "--body", "body", "--head", "task-7", "--base", "main")
+		runner.wantArgs(t, 0, "pr", "list", "--repo", "gitmoot/gitmoot", "--head", "task-7", "--base", "main", "--state", "open", "--json", "number,url,headRefOid,baseRefName,state")
+		runner.wantArgs(t, 1, "pr", "create", "--repo", "gitmoot/gitmoot", "--title", "Task 7", "--body", "body", "--head", "task-7", "--base", "main")
 	})
 
 	t.Run("re-queries and adopts on 422 already exists race", func(t *testing.T) {
 		runner := &fakeRunner{
 			results: []subprocess.Result{
 				{Stdout: `[]`}, // query: none (TOCTOU window)
-				{Stderr: "pull request create failed: GraphQL: A pull request already exists for jerryfane:task-7. (createPullRequest)"},                  // create: 422
-				{Stdout: `[{"number":13,"url":"https://github.com/jerryfane/gitmoot/pull/13","headRefOid":"sha13","baseRefName":"main","state":"OPEN"}]`}, // re-query: winner
+				{Stderr: "pull request create failed: GraphQL: A pull request already exists for gitmoot:task-7. (createPullRequest)"},                  // create: 422
+				{Stdout: `[{"number":13,"url":"https://github.com/gitmoot/gitmoot/pull/13","headRefOid":"sha13","baseRefName":"main","state":"OPEN"}]`}, // re-query: winner
 			},
 			errs: []error{
 				nil,
@@ -1143,7 +1143,7 @@ func TestEnsurePullRequest(t *testing.T) {
 	})
 
 	t.Run("returns the 422 error when the re-query still finds nothing", func(t *testing.T) {
-		createErr := errors.New("pull request create failed: GraphQL: A pull request already exists for jerryfane:task-7. (createPullRequest)")
+		createErr := errors.New("pull request create failed: GraphQL: A pull request already exists for gitmoot:task-7. (createPullRequest)")
 		runner := &fakeRunner{
 			results: []subprocess.Result{
 				{Stdout: `[]`}, // query: none

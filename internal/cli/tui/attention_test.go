@@ -7,7 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func promptSnap(prompts ...db.InteractivePrompt) Snapshot {
@@ -322,7 +322,7 @@ func TestAttentionShowsAwaitingHuman(t *testing.T) {
 	deps := Deps{Load: func() (Snapshot, error) { return Snapshot{}, nil }}
 	snap := Snapshot{
 		Daemon:        Daemon{Running: true},
-		AwaitingHuman: []AwaitingHumanTask{{TaskID: "task-5", Repo: "jerryfane/gitmoot", Title: "Parent"}},
+		AwaitingHuman: []AwaitingHumanTask{{TaskID: "task-5", Repo: "gitmoot/gitmoot", Title: "Parent"}},
 	}
 	m := attentionModel(t, deps, snap)
 	view := m.View()

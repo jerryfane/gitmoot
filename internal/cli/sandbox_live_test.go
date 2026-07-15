@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // TestLiveKimiProduceLandlockState is an opt-in live test because it consumes a

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // TestEngineBackstopTripEnqueuesFinalizeContinuation pins the #305 "Later"
@@ -17,8 +17,8 @@ import (
 func TestEngineBackstopTripEnqueuesFinalizeContinuation(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	dels := make([]Delegation, 0, MaxDelegationWidth+1)
@@ -30,7 +30,7 @@ func TestEngineBackstopTripEnqueuesFinalizeContinuation(t *testing.T) {
 		t.Fatalf("NewFreshRef: %v", err)
 	}
 	insertCompletedJob(t, store, db.Job{ID: "wide", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
 		// A coordinator running under a per-job runtime override (#531): the
 		// finalize continuation must stay on the override, never revert to (and
 		// resume) the agent's default-runtime session.
@@ -78,12 +78,12 @@ func TestEngineBackstopTripEnqueuesFinalizeContinuation(t *testing.T) {
 func TestEngineFinalizeContinuationIsTerminal(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "fin", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
 		DelegationFinalize: true,
 		Result: &AgentResult{Decision: "approved", Summary: "final synthesis", Delegations: []Delegation{
 			{ID: "again", Agent: "w", Action: "ask", Prompt: "still more work"},

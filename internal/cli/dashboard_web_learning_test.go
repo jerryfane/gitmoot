@@ -10,11 +10,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	dashboard "github.com/jerryfane/gitmoot-dashboard"
+	dashboard "github.com/gitmoot/gitmoot-dashboard"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/memory"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/memory"
 )
 
 // reviewScoreSeed pins a candidate-review score (the nullable REAL column, carried

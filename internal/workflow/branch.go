@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 type BranchCreator interface {

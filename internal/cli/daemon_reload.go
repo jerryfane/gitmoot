@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/github"
 )
 
 // daemonReloadableConfig holds the daemon's live, WARM-reloadable runtime settings

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
 )
 
 type versionOutput struct {

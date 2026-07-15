@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/cli/style"
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/cli/style"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 func dashboardTestHome(t *testing.T) string {

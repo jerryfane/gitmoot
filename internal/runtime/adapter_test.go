@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 func TestImplementWritePolicyError(t *testing.T) {
@@ -65,7 +65,7 @@ func TestPolicyGrantsImplementWrite(t *testing.T) {
 }
 
 func TestValidateAgent(t *testing.T) {
-	agent := Agent{Name: "audit", Role: "reviewer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440000", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "audit", Role: "reviewer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440000", RepoScope: "gitmoot/gitmoot"}
 	if err := ValidateAgent(agent); err != nil {
 		t.Fatalf("ValidateAgent returned error: %v", err)
 	}
@@ -84,19 +84,19 @@ func TestValidateAgent(t *testing.T) {
 	if err := ValidateAgent(agent); err != nil {
 		t.Fatalf("ValidateAgent rejected global agent without repo scope: %v", err)
 	}
-	agent.RepoScope = "jerryfane/gitmoot"
+	agent.RepoScope = "gitmoot/gitmoot"
 
 	agent.Runtime = "unknown"
 	if err := ValidateAgent(agent); err == nil {
 		t.Fatal("ValidateAgent accepted unsupported runtime")
 	}
 
-	agent = Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "session-name", RepoScope: "jerryfane/gitmoot"}
+	agent = Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "session-name", RepoScope: "gitmoot/gitmoot"}
 	if err := ValidateAgent(agent); err != nil {
 		t.Fatalf("ValidateAgent rejected Codex runtime name: %v", err)
 	}
 
-	agent = Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "session-name", RepoScope: "jerryfane/gitmoot"}
+	agent = Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "session-name", RepoScope: "gitmoot/gitmoot"}
 	if err := ValidateAgent(agent); err == nil {
 		t.Fatal("ValidateAgent accepted non-UUID Claude runtime ref")
 	}
@@ -110,7 +110,7 @@ func TestValidateAgent(t *testing.T) {
 }
 
 func TestAdapterValidateRejectsRuntimeMismatch(t *testing.T) {
-	agent := Agent{Name: "audit", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440000", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "audit", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440000", RepoScope: "gitmoot/gitmoot"}
 	if err := (CodexAdapter{}).Validate(context.Background(), agent); err == nil {
 		t.Fatal("CodexAdapter accepted a Claude agent")
 	}
@@ -119,7 +119,7 @@ func TestAdapterValidateRejectsRuntimeMismatch(t *testing.T) {
 func TestCodexDeliverCommand(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review this"})
 
@@ -135,7 +135,7 @@ func TestCodexDeliverCommand(t *testing.T) {
 func TestCodexDeliverCommandUsesJobModel(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", Model: "agent-default"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", Model: "agent-default"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review this", Model: "opus"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -146,7 +146,7 @@ func TestCodexDeliverCommandUsesJobModel(t *testing.T) {
 func TestCodexDeliverCommandFallsBackToAgentModel(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", Model: "sonnet"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", Model: "sonnet"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review this"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -162,7 +162,7 @@ func TestCodexDeliverCommandFallsBackToAgentModel(t *testing.T) {
 func TestCodexDeliverCommandFallsBackToRuntimeDefaultModel(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review this", RuntimeDefaultModel: "gpt-5.5"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -175,7 +175,7 @@ func TestCodexDeliverCommandFallsBackToRuntimeDefaultModel(t *testing.T) {
 func TestCodexDeliverCommandJobModelWinsOverRuntimeDefault(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review this", Model: "opus", RuntimeDefaultModel: "gpt-5.5"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -188,7 +188,7 @@ func TestCodexDeliverCommandJobModelWinsOverRuntimeDefault(t *testing.T) {
 func TestCodexDeliverCommandAgentModelWinsOverRuntimeDefault(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", Model: "sonnet"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", Model: "sonnet"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review this", RuntimeDefaultModel: "gpt-5.5"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -202,7 +202,7 @@ func TestCodexDeliverCommandAgentModelWinsOverRuntimeDefault(t *testing.T) {
 func TestCodexDeliverCommandNoRuntimeDefaultIsByteIdentical(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review this", RuntimeDefaultModel: ""}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -306,7 +306,7 @@ func TestCodexDeliverArgsReasoningEffort(t *testing.T) {
 func TestCodexStartCommandUsesAgentModel(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440009"}` + "\n"}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot", Model: "opus"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot", Model: "opus"}
 
 	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err != nil {
 		t.Fatalf("Start returned error: %v", err)
@@ -317,7 +317,7 @@ func TestCodexStartCommandUsesAgentModel(t *testing.T) {
 func TestCodexStartCommandUsesAgentEffort(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440009"}` + "\n"}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot", Effort: "high"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot", Effort: "high"}
 
 	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err != nil {
 		t.Fatalf("Start returned error: %v", err)
@@ -328,7 +328,7 @@ func TestCodexStartCommandUsesAgentEffort(t *testing.T) {
 func TestCodexStartCommandParsesThreadID(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "not json\n" + `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440009"}` + "\n"}}}
 	adapter := CodexAdapter{Runner: runner, Dir: "/repo"}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"})
 
@@ -354,7 +354,7 @@ func TestCodexStartCommandAppliesAutonomyPolicy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := &fakeRunner{results: []subprocess.Result{{Stdout: "not json\n" + `{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440009"}` + "\n"}}}
 			adapter := CodexAdapter{Runner: runner}
-			agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot", AutonomyPolicy: tt.policy}
+			agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot", AutonomyPolicy: tt.policy}
 
 			if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err != nil {
 				t.Fatalf("Start returned error: %v", err)
@@ -373,7 +373,7 @@ func TestCodexDeliverChatSeatSandbox(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok"}}}
 	adapter := CodexAdapter{Runner: runner}
 	agent := Agent{
-		Name: "planner", Role: "planner", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot",
+		Name: "planner", Role: "planner", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot",
 		RuntimeRef: "last", AutonomyPolicy: AutonomyPolicyReadOnly, ChatSeat: true,
 	}
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "converse"}); err != nil {
@@ -388,7 +388,7 @@ func TestCodexDeliverNonSeatSandboxUnchanged(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok"}}}
 	adapter := CodexAdapter{Runner: runner}
 	agent := Agent{
-		Name: "planner", Role: "planner", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot",
+		Name: "planner", Role: "planner", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot",
 		RuntimeRef: "last", AutonomyPolicy: AutonomyPolicyReadOnly,
 	}
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "converse"}); err != nil {
@@ -412,7 +412,7 @@ func TestCodexDeliverWorkspaceWriteGrantsLinkedWorktreeGitDir(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok"}}}
 	adapter := CodexAdapter{Runner: runner, Dir: worktree}
 	agent := Agent{
-		Name: "worker", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot",
+		Name: "worker", Role: "implementer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot",
 		RuntimeRef: "last", AutonomyPolicy: AutonomyPolicyWorkspaceWrite,
 	}
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"}); err != nil {
@@ -432,7 +432,7 @@ func TestCodexDeliverPrimaryCheckoutOmitsGitDirGrant(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok"}}}
 	adapter := CodexAdapter{Runner: runner, Dir: repo}
 	agent := Agent{
-		Name: "worker", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot",
+		Name: "worker", Role: "implementer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot",
 		RuntimeRef: "last", AutonomyPolicy: AutonomyPolicyWorkspaceWrite,
 	}
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "implement"}); err != nil {
@@ -452,7 +452,7 @@ func TestCodexDeliverReadOnlyLinkedWorktreeOmitsGitDirGrant(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok"}}}
 	adapter := CodexAdapter{Runner: runner, Dir: worktree}
 	agent := Agent{
-		Name: "worker", Role: "reviewer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot",
+		Name: "worker", Role: "reviewer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot",
 		RuntimeRef: "last", AutonomyPolicy: AutonomyPolicyReadOnly,
 	}
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
@@ -504,7 +504,7 @@ func TestLinkedWorktreeGitDir(t *testing.T) {
 func TestCodexStartRejectsMissingThreadID(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"type":"turn.completed"}` + "\n"}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err == nil {
 		t.Fatal("Start accepted output without thread id")
@@ -552,7 +552,7 @@ func TestCodexStartUnwrapsJSONTranscript(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := &fakeRunner{results: []subprocess.Result{{Stdout: tt.stdout}}}
 			adapter := CodexAdapter{Runner: runner}
-			agent := Agent{Name: "challenger", Role: "reviewer", Runtime: CodexRuntime, RepoScope: "jerryfane/gitmoot"}
+			agent := Agent{Name: "challenger", Role: "reviewer", Runtime: CodexRuntime, RepoScope: "gitmoot/gitmoot"}
 
 			result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "generate"})
 			if err != nil {
@@ -572,7 +572,7 @@ func TestCodexStartUnwrapsJSONTranscript(t *testing.T) {
 func TestCodexDeliverLastSessionCommand(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "continue"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -593,7 +593,7 @@ func TestCodexDeliverCommandAppliesAutonomyPolicy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 			adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-			agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: tt.policy}
+			agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: tt.policy}
 
 			if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
 				t.Fatalf("Deliver returned error: %v", err)
@@ -606,7 +606,7 @@ func TestCodexDeliverCommandAppliesAutonomyPolicy(t *testing.T) {
 func TestCodexDeliverVerifiesNamedSession(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "review-thread", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "review-thread", RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -617,7 +617,7 @@ func TestCodexDeliverVerifiesNamedSession(t *testing.T) {
 func TestCodexDeliverRejectsMissingNamedSession(t *testing.T) {
 	runner := &fakeRunner{}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "missing-thread", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "missing-thread", RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err == nil {
 		t.Fatal("Deliver accepted missing codex session")
@@ -630,7 +630,7 @@ func TestCodexDeliverRejectsMissingNamedSession(t *testing.T) {
 func TestCodexDeliverAllowsMissingUUIDSessionToReachCodex(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "done"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -641,7 +641,7 @@ func TestCodexDeliverAllowsMissingUUIDSessionToReachCodex(t *testing.T) {
 func TestCodexHealthUsesRegisteredSession(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "OK"}}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot"}
 
 	if err := adapter.Health(context.Background(), agent); err != nil {
 		t.Fatalf("Health returned error: %v", err)
@@ -652,7 +652,7 @@ func TestCodexHealthUsesRegisteredSession(t *testing.T) {
 func TestCodexHealthRejectsBrokenSession(t *testing.T) {
 	runner := &fakeRunner{errs: []error{errors.New("exit 1")}}
 	adapter := CodexAdapter{Runner: runner, SessionResolver: staticCodexSessions{exists: true}}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: CodexRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot"}
 
 	if err := adapter.Health(context.Background(), agent); err == nil {
 		t.Fatal("Health accepted broken codex session")
@@ -663,7 +663,7 @@ func TestCodexHealthRejectsBrokenSession(t *testing.T) {
 func TestClaudeDeliverCommand(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 
@@ -679,7 +679,7 @@ func TestClaudeDeliverCommand(t *testing.T) {
 func TestClaudeDeliverCommandUsesJobModel(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot", Model: "agent-default"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot", Model: "agent-default"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review", Model: "opus"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -690,7 +690,7 @@ func TestClaudeDeliverCommandUsesJobModel(t *testing.T) {
 func TestClaudeDeliverCommandFallsBackToAgentModel(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot", Model: "sonnet"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot", Model: "sonnet"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -702,7 +702,7 @@ func TestNonCodexDeliveriesNeverEmitReasoningEffort(t *testing.T) {
 	t.Run("claude", func(t *testing.T) {
 		runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
 		adapter := ClaudeAdapter{Runner: runner}
-		agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot", Effort: "high"}
+		agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot", Effort: "high"}
 		if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review", Effort: "xhigh", RuntimeDefaultEffort: "low"}); err != nil {
 			t.Fatalf("Deliver returned error: %v", err)
 		}
@@ -714,7 +714,7 @@ func TestNonCodexDeliveriesNeverEmitReasoningEffort(t *testing.T) {
 	t.Run("kimi", func(t *testing.T) {
 		runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"role":"assistant","content":"done"}` + "\n"}}}
 		adapter := KimiAdapter{Runner: runner}
-		agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_1", RepoScope: "jerryfane/gitmoot", Effort: "high"}
+		agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_1", RepoScope: "gitmoot/gitmoot", Effort: "high"}
 		if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review", Effort: "xhigh", RuntimeDefaultEffort: "low"}); err != nil {
 			t.Fatalf("Deliver returned error: %v", err)
 		}
@@ -815,7 +815,7 @@ func TestClaudeDeliverSelfHealsDeadSession(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440099", nil
 		},
 	}
-	agent := Agent{Name: "shipper", Role: "implementer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "shipper", Role: "implementer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 
@@ -854,7 +854,7 @@ func TestClaudeDeliverSelfHealUnrecoverable(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440099", nil
 		},
 	}
-	agent := Agent{Name: "shipper", Role: "implementer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "shipper", Role: "implementer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	_, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 
@@ -888,7 +888,7 @@ func TestClaudeDeliverSelfHealAuthFailureStaysAuth(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440099", nil
 		},
 	}
-	agent := Agent{Name: "shipper", Role: "implementer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "shipper", Role: "implementer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	_, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err == nil {
@@ -914,7 +914,7 @@ func TestClaudeDeliverDoesNotHealLastSession(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440099", nil
 		},
 	}
-	agent := Agent{Name: "researcher", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "researcher", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot"}
 
 	_, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err == nil {
@@ -937,7 +937,7 @@ func TestClaudeStartCommandUsesAgentModel(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440010", nil
 		},
 	}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "jerryfane/gitmoot", Model: "opus"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "gitmoot/gitmoot", Model: "opus"}
 
 	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err != nil {
 		t.Fatalf("Start returned error: %v", err)
@@ -954,7 +954,7 @@ func TestClaudeStartCommandUsesGeneratedSessionID(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440010", nil
 		},
 	}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"})
 
@@ -1000,7 +1000,7 @@ func TestClaudeStartUnwrapsJSONEnvelope(t *testing.T) {
 					return "550e8400-e29b-41d4-a716-446655440010", nil
 				},
 			}
-			agent := Agent{Name: "challenger", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "jerryfane/gitmoot"}
+			agent := Agent{Name: "challenger", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "gitmoot/gitmoot"}
 
 			result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "generate"})
 			if err != nil {
@@ -1035,7 +1035,7 @@ func TestClaudeStartCommandAppliesAutonomyPolicy(t *testing.T) {
 					return "550e8400-e29b-41d4-a716-446655440010", nil
 				},
 			}
-			agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "jerryfane/gitmoot", AutonomyPolicy: tt.policy}
+			agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "gitmoot/gitmoot", AutonomyPolicy: tt.policy}
 
 			if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err != nil {
 				t.Fatalf("Start returned error: %v", err)
@@ -1056,7 +1056,7 @@ func TestClaudeStartDoesNotStoreSessionIDWhenCommandFails(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440010", nil
 		},
 	}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err == nil {
 		t.Fatal("Start accepted failed claude command")
@@ -1076,7 +1076,7 @@ func TestClaudeStartClassifiesAuthFailure(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440010", nil
 		},
 	}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"})
 
@@ -1100,7 +1100,7 @@ func TestClaudeStartClassifiesAuthFailure(t *testing.T) {
 func TestClaudeDeliverLastSessionCommand(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -1122,7 +1122,7 @@ func TestClaudeTemplateAgentIgnoresLastSession(t *testing.T) {
 		Role:       "agent",
 		Runtime:    ClaudeRuntime,
 		RuntimeRef: LastRef,
-		RepoScope:  "jerryfane/gitmoot",
+		RepoScope:  "gitmoot/gitmoot",
 		TemplateID: "coordinator",
 		Model:      "opus",
 	}
@@ -1163,7 +1163,7 @@ func TestClaudeDeliverCommandAppliesAutonomyPolicy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
 			adapter := ClaudeAdapter{Runner: runner}
-			agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: tt.policy}
+			agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: tt.policy}
 
 			if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
 				t.Fatalf("Deliver returned error: %v", err)
@@ -1182,7 +1182,7 @@ func TestClaudeDeliverFallsBackToText(t *testing.T) {
 		errs: []error{errors.New("exit 1"), nil},
 	}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 
@@ -1203,7 +1203,7 @@ func TestClaudeDeliverClassifiesAuthFailure(t *testing.T) {
 		errs:    []error{errors.New("exit 1")},
 	}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 
@@ -1233,7 +1233,7 @@ func TestClaudeDeliverRetriesTransientSocketError(t *testing.T) {
 		errs: []error{errors.New("exit 1"), nil},
 	}
 	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Nanosecond}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 
@@ -1256,7 +1256,7 @@ func TestClaudeDeliverDoesNotRetryPermanentError(t *testing.T) {
 		errs:    []error{errors.New("exit 1")},
 	}
 	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Nanosecond}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err == nil {
 		t.Fatal("Deliver accepted permanent error")
@@ -1269,7 +1269,7 @@ func TestClaudeDeliverDoesNotRetryPermanentError(t *testing.T) {
 func TestClaudeDeliverSucceedsWithoutRetry(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"done"}`}}}
 	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Nanosecond}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 
@@ -1301,7 +1301,7 @@ func TestClaudeDeliverRetriesExhausted(t *testing.T) {
 		RetryBackoff:  time.Nanosecond,
 		NewRuntimeRef: func() (string, error) { return "550e8400-e29b-41d4-a716-446655440099", nil },
 	}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err == nil {
 		t.Fatal("Deliver accepted a transient that persisted across all attempts")
@@ -1336,7 +1336,7 @@ func TestClaudeDeliverEscalatesToFreshSessionOnPersistentTransient(t *testing.T)
 		RetryBackoff:  time.Nanosecond,
 		NewRuntimeRef: func() (string, error) { return "550e8400-e29b-41d4-a716-446655440099", nil },
 	}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err != nil {
@@ -1375,7 +1375,7 @@ func TestClaudeDeliverDoesNotEscalateLastSessionOnTransient(t *testing.T) {
 		RetryBackoff:  time.Nanosecond,
 		NewRuntimeRef: func() (string, error) { return "550e8400-e29b-41d4-a716-446655440099", nil },
 	}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: LastRef, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: LastRef, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err == nil {
@@ -1408,7 +1408,7 @@ func TestClaudeDeliverSucceedsOnFinalAttempt(t *testing.T) {
 	results[claudeDeliveryMaxAttempts-1] = subprocess.Result{Stdout: `{"result":"recovered"}`}
 	runner := &fakeRunner{results: results, errs: errs}
 	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Nanosecond}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err != nil {
@@ -1433,7 +1433,7 @@ func TestClaudeDeliverStopsRetryOnContextCancelledDuringBackoff(t *testing.T) {
 	}
 	runner := &fakeRunner{results: results, errs: errs}
 	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Hour}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -1489,7 +1489,7 @@ func TestClaudeDeliverStopsRetryOnContextCancellation(t *testing.T) {
 	}
 	// A large backoff would hang for an hour if cancellation were ignored.
 	adapter := ClaudeAdapter{Runner: runner, RetryBackoff: time.Hour}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1532,7 +1532,7 @@ func TestIsTransientClaudeDeliveryError(t *testing.T) {
 func TestClaudeHealthUsesRegisteredSession(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `{"result":"OK"}`}}}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	if err := adapter.Health(context.Background(), agent); err != nil {
 		t.Fatalf("Health returned error: %v", err)
@@ -1546,7 +1546,7 @@ func TestClaudeHealthClassifiesAuthFailure(t *testing.T) {
 		errs:    []error{errors.New("exit 1")},
 	}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	err := adapter.Health(context.Background(), agent)
 
@@ -1567,7 +1567,7 @@ func TestClaudeHealthClassifiesAuthFailure(t *testing.T) {
 func TestClaudeHealthRejectsBrokenSession(t *testing.T) {
 	runner := &fakeRunner{errs: []error{errors.New("exit 1")}}
 	adapter := ClaudeAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	if err := adapter.Health(context.Background(), agent); err == nil {
 		t.Fatal("Health accepted broken claude session")
@@ -1578,7 +1578,7 @@ func TestClaudeHealthRejectsBrokenSession(t *testing.T) {
 func TestShellDeliverCommand(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: "ok\n"}}}
 	adapter := ShellAdapter{Runner: runner}
-	agent := Agent{Name: "custom", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "custom", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "hello"})
 
@@ -1594,7 +1594,7 @@ func TestShellDeliverCommand(t *testing.T) {
 func TestShellDeliverInjectsJobEnvironment(t *testing.T) {
 	runner := &envFakeRunner{fakeRunner: fakeRunner{results: []subprocess.Result{{Stdout: "ok\n"}}}}
 	adapter := ShellAdapter{Runner: runner}
-	agent := Agent{Name: "custom", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "custom", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot"}
 	env := []string{"GITMOOT_TRIGGER_BODY=first\n第二", "GITMOOT_TRIGGER_SUBJECT=Snowman ☃"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "hello", ShellEnv: env}); err != nil {
@@ -1707,7 +1707,7 @@ func TestUpstreamContextFileErrorRedactsPathAndPreservesErrno(t *testing.T) {
 
 func TestShellStartUnsupported(t *testing.T) {
 	adapter := ShellAdapter{}
-	agent := Agent{Name: "custom", Role: "reviewer", Runtime: ShellRuntime, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "custom", Role: "reviewer", Runtime: ShellRuntime, RepoScope: "gitmoot/gitmoot"}
 
 	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err == nil {
 		t.Fatal("Start accepted shell runtime")
@@ -1717,7 +1717,7 @@ func TestShellStartUnsupported(t *testing.T) {
 func TestShellHealthRunsProbe(t *testing.T) {
 	runner := &fakeRunner{errs: []error{errors.New("exit 1")}}
 	adapter := ShellAdapter{Runner: runner}
-	agent := Agent{Name: "custom", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: "exit 1", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "custom", Role: "reviewer", Runtime: ShellRuntime, RuntimeRef: "exit 1", RepoScope: "gitmoot/gitmoot"}
 
 	if err := adapter.Health(context.Background(), agent); err == nil {
 		t.Fatal("Health accepted failing shell command")
@@ -1975,7 +1975,7 @@ func TestClaudeCommandError(t *testing.T) {
 
 func TestValidateAgentAcceptsKimiRuntimes(t *testing.T) {
 	for _, runtimeName := range []string{KimiRuntime, KimiCLIRuntime} {
-		agent := Agent{Name: "audit", Role: "reviewer", Runtime: runtimeName, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "jerryfane/gitmoot"}
+		agent := Agent{Name: "audit", Role: "reviewer", Runtime: runtimeName, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "gitmoot/gitmoot"}
 		if err := ValidateAgent(agent); err != nil {
 			t.Fatalf("ValidateAgent rejected valid %s agent: %v", runtimeName, err)
 		}
@@ -1984,7 +1984,7 @@ func TestValidateAgentAcceptsKimiRuntimes(t *testing.T) {
 
 func TestValidateAgentRejectsInvalidKimiRef(t *testing.T) {
 	for _, runtimeName := range []string{KimiRuntime, KimiCLIRuntime} {
-		agent := Agent{Name: "audit", Role: "reviewer", Runtime: runtimeName, RuntimeRef: "not-a-session", RepoScope: "jerryfane/gitmoot"}
+		agent := Agent{Name: "audit", Role: "reviewer", Runtime: runtimeName, RuntimeRef: "not-a-session", RepoScope: "gitmoot/gitmoot"}
 		if err := ValidateAgent(agent); err == nil {
 			t.Fatalf("ValidateAgent accepted invalid %s runtime ref", runtimeName)
 		}
@@ -1992,7 +1992,7 @@ func TestValidateAgentRejectsInvalidKimiRef(t *testing.T) {
 }
 
 func TestKimiAdapterValidateRejectsRuntimeMismatch(t *testing.T) {
-	agent := Agent{Name: "audit", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "audit", Role: "reviewer", Runtime: ClaudeRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440000", RepoScope: "gitmoot/gitmoot"}
 	if err := (KimiAdapter{}).Validate(context.Background(), agent); err == nil {
 		t.Fatal("KimiAdapter accepted a Claude agent")
 	}
@@ -2006,7 +2006,7 @@ func TestKimiStartCommandParsesSessionID(t *testing.T) {
 		`{"role":"meta","type":"session.resume_hint","session_id":"session_550e8400-e29b-41d4-a716-446655440000","command":"kimi -r session_550e8400-e29b-41d4-a716-446655440000","content":"To resume this session: kimi -r session_550e8400-e29b-41d4-a716-446655440000"}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiAdapter{Runner: runner, Dir: "/repo"}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
 
 	result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"})
 	if err != nil {
@@ -2042,7 +2042,7 @@ func TestKimiStartCommandDoesNotPassPermissionFlags(t *testing.T) {
 					return "550e8400-e29b-41d4-a716-446655440010", nil
 				},
 			}
-			agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "jerryfane/gitmoot", AutonomyPolicy: tt.policy}
+			agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "gitmoot/gitmoot", AutonomyPolicy: tt.policy}
 
 			if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err != nil {
 				t.Fatalf("Start returned error: %v", err)
@@ -2060,7 +2060,7 @@ func TestKimiStartFallsBackToGeneratedRefWhenSessionIDMissing(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440010", nil
 		},
 	}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "gitmoot/gitmoot"}
 
 	result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"})
 	if err != nil {
@@ -2076,7 +2076,7 @@ func TestKimiDeliverCommandStartsFreshSession(t *testing.T) {
 		`{"role":"meta","type":"session.resume_hint","session_id":"session_550e8400-e29b-41d4-a716-446655440001","command":"kimi -r session_550e8400-e29b-41d4-a716-446655440001","content":"To resume this session: kimi -r session_550e8400-e29b-41d4-a716-446655440001"}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err != nil {
@@ -2095,7 +2095,7 @@ func TestKimiDeliverAcceptsArrayContentParts(t *testing.T) {
 	stdout := "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"prefix\\n```json\\n{\\\"gitmoot_result\\\":{\\\"decision\\\":\\\"approved\\\",\\\"summary\\\":\\\"ok\\\",\\\"findings\\\":[],\\\"changes_made\\\":[],\\\"tests_run\\\":[],\\\"needs\\\":[],\\\"delegations\\\":[]}}\\n```\\n\"}]}\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"})
 	if err != nil {
@@ -2113,7 +2113,7 @@ func TestKimiDeliverDoesNotProbePrintFallback(t *testing.T) {
 		errs:    []error{errors.New("exit 1")},
 	}
 	adapter := KimiAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err == nil {
 		t.Fatal("Deliver accepted command failure")
@@ -2128,7 +2128,7 @@ func TestKimiDeliverCommandUsesJobModel(t *testing.T) {
 	stdout := `{"role":"assistant","content":"done"}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly, Model: "agent-default"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly, Model: "agent-default"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review", Model: "opus"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -2140,7 +2140,7 @@ func TestKimiDeliverCommandFallsBackToAgentModel(t *testing.T) {
 	stdout := `{"role":"assistant","content":"done"}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly, Model: "sonnet"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly, Model: "sonnet"}
 
 	if _, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review"}); err != nil {
 		t.Fatalf("Deliver returned error: %v", err)
@@ -2157,7 +2157,7 @@ func TestKimiStartCommandUsesAgentModel(t *testing.T) {
 			return "550e8400-e29b-41d4-a716-446655440010", nil
 		},
 	}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "jerryfane/gitmoot", Model: "opus"}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "gitmoot/gitmoot", Model: "opus"}
 
 	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"}); err != nil {
 		t.Fatalf("Start returned error: %v", err)
@@ -2170,7 +2170,7 @@ func TestKimiHealthRunsFreshSession(t *testing.T) {
 		`{"role":"meta","type":"session.resume_hint","session_id":"session_550e8400-e29b-41d4-a716-446655440002","command":"kimi -r session_550e8400-e29b-41d4-a716-446655440002","content":"To resume this session: kimi -r session_550e8400-e29b-41d4-a716-446655440002"}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
 
 	if err := adapter.Health(context.Background(), agent); err != nil {
 		t.Fatalf("Health returned error: %v", err)
@@ -2184,7 +2184,7 @@ func TestKimiHealthClassifiesAuthFailure(t *testing.T) {
 		errs:    []error{errors.New("exit 1")},
 	}
 	adapter := KimiAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot"}
 
 	err := adapter.Health(context.Background(), agent)
 	if err == nil {
@@ -2201,7 +2201,7 @@ func TestKimiHealthClassifiesAuthFailure(t *testing.T) {
 func TestKimiHealthRejectsBrokenSession(t *testing.T) {
 	runner := &fakeRunner{errs: []error{errors.New("exit 1")}}
 	adapter := KimiAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440002", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440002", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
 
 	if err := adapter.Health(context.Background(), agent); err == nil {
 		t.Fatal("Health accepted broken Kimi session")
@@ -2214,7 +2214,7 @@ func TestKimiCLIStartCommandUsesPrintRuntime(t *testing.T) {
 		`{"role":"meta","type":"session.resume_hint","session_id":"session_550e8400-e29b-41d4-a716-446655440003"}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiCLIAdapter{Runner: runner, Dir: "/repo"}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiCLIRuntime, RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiCLIRuntime, RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
 
 	result, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: "initialize"})
 	if err != nil {
@@ -2230,7 +2230,7 @@ func TestKimiCLIDeliverCommandUsesPrintRuntime(t *testing.T) {
 	stdout := `{"role":"assistant","content":"done"}` + "\n"
 	runner := &fakeRunner{results: []subprocess.Result{{Stdout: stdout}}}
 	adapter := KimiCLIAdapter{Runner: runner}
-	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiCLIRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly, Model: "agent-default"}
+	agent := Agent{Name: "reviewer", Role: "reviewer", Runtime: KimiCLIRuntime, RuntimeRef: "session_550e8400-e29b-41d4-a716-446655440001", RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly, Model: "agent-default"}
 
 	result, err := adapter.Deliver(context.Background(), agent, Job{Prompt: "review", Model: "opus"})
 	if err != nil {

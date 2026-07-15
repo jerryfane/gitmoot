@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // withFakeSkillOptABJudge swaps the off-by-default cross-family judge seam for a

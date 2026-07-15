@@ -8,7 +8,7 @@ Refresh Gitmoot's public documentation so a new user, an AI coding agent, and a
 release consumer can install, verify, use, troubleshoot, and understand the
 current Gitmoot product without relying on stale live pages or source-only
 references. The work is tracked by GitHub issue #288:
-https://github.com/jerryfane/gitmoot/issues/288
+https://github.com/gitmoot/gitmoot/issues/288
 
 The goal touches public Docusaurus docs, root documentation, skill references,
 AI-readable docs, and lightweight project support files. It should not change

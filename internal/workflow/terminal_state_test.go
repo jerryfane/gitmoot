@@ -3,7 +3,7 @@ package workflow
 import (
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // TestSettledVsFinalTruthTables pins the canonical two-predicate contract (#632):

@@ -7,14 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 func TestGhReleaseClientQueriesLatestRelease(t *testing.T) {
 	runner := &fakeRunner{results: []subprocess.Result{{
 		Stdout: `[
-			{"tag_name":"v0.1.0-beta.1","html_url":"https://github.com/jerryfane/gitmoot/releases/tag/v0.1.0-beta.1","prerelease":true,"assets":[{"name":"gitmoot_linux_amd64","browser_download_url":"https://example.com/gitmoot","digest":"sha256:abc","size":12}]}
+			{"tag_name":"v0.1.0-beta.1","html_url":"https://github.com/gitmoot/gitmoot/releases/tag/v0.1.0-beta.1","prerelease":true,"assets":[{"name":"gitmoot_linux_amd64","browser_download_url":"https://example.com/gitmoot","digest":"sha256:abc","size":12}]}
 		]`,
 	}}}
 	client := GhReleaseClient{Runner: runner}
@@ -27,7 +27,7 @@ func TestGhReleaseClientQueriesLatestRelease(t *testing.T) {
 	if release.TagName != "v0.1.0-beta.1" || len(release.Assets) != 1 {
 		t.Fatalf("release = %+v", release)
 	}
-	runner.wantArgs(t, 0, "gh", "api", "repos/jerryfane/gitmoot/releases?per_page=20")
+	runner.wantArgs(t, 0, "gh", "api", "repos/gitmoot/gitmoot/releases?per_page=20")
 }
 
 func TestGhReleaseClientMapsLatestReleaseNotFound(t *testing.T) {
@@ -60,7 +60,7 @@ func TestCheckReportsMissingRelease(t *testing.T) {
 func TestCheckFindsPlatformAssetAndManualCommands(t *testing.T) {
 	client := fakeReleaseClient{release: Release{
 		TagName: "v0.1.0-beta.1",
-		URL:     "https://github.com/jerryfane/gitmoot/releases/tag/v0.1.0-beta.1",
+		URL:     "https://github.com/gitmoot/gitmoot/releases/tag/v0.1.0-beta.1",
 		Assets:  []Asset{{Name: "gitmoot_linux_amd64", Digest: "sha256:abc"}},
 	}}
 
@@ -75,7 +75,7 @@ func TestCheckFindsPlatformAssetAndManualCommands(t *testing.T) {
 	if result.Asset == nil || result.Asset.Name != "gitmoot_linux_amd64" {
 		t.Fatalf("asset = %+v", result.Asset)
 	}
-	want := "gh release download v0.1.0-beta.1 --repo jerryfane/gitmoot --pattern gitmoot_linux_amd64 --output /tmp/gitmoot-update/gitmoot_linux_amd64"
+	want := "gh release download v0.1.0-beta.1 --repo gitmoot/gitmoot --pattern gitmoot_linux_amd64 --output /tmp/gitmoot-update/gitmoot_linux_amd64"
 	if !contains(result.ManualCommands, want) {
 		t.Fatalf("manual commands = %+v, missing %q", result.ManualCommands, want)
 	}

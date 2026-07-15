@@ -330,7 +330,7 @@ func TestJobsBugReportPreviewCreateFlow(t *testing.T) {
 			if preview.Fingerprint != "abc123" || !strings.Contains(preview.Body, "redacted body") {
 				t.Fatalf("CreateBugReport received preview = %+v", preview)
 			}
-			return BugReportCreateResult{URL: "https://github.com/jerryfane/gitmoot/issues/777"}, nil
+			return BugReportCreateResult{URL: "https://github.com/gitmoot/gitmoot/issues/777"}, nil
 		},
 	}
 	m := jobsModel(t, deps, jobsSnapshot())
@@ -368,7 +368,7 @@ func TestJobsBugReportPreviewCreateFlow(t *testing.T) {
 	if created != "j-failed" {
 		t.Fatalf("CreateBugReport called with %q", created)
 	}
-	if m.mode != modeBugReportPreview || !strings.Contains(m.View(), "https://github.com/jerryfane/gitmoot/issues/777") {
+	if m.mode != modeBugReportPreview || !strings.Contains(m.View(), "https://github.com/gitmoot/gitmoot/issues/777") {
 		t.Fatalf("success should keep preview open with URL:\n%s", m.View())
 	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -389,7 +389,7 @@ func TestJobsBugReportPreviewKeepsFooterVisibleForLongBody(t *testing.T) {
 			}, nil
 		},
 		CreateBugReport: func(id string, preview BugReportPreview) (BugReportCreateResult, error) {
-			return BugReportCreateResult{URL: "https://github.com/jerryfane/gitmoot/issues/777"}, nil
+			return BugReportCreateResult{URL: "https://github.com/gitmoot/gitmoot/issues/777"}, nil
 		},
 	}
 	m := jobsModel(t, deps, jobsSnapshot())
@@ -438,7 +438,7 @@ func TestJobsBugReportExistingIssueLabel(t *testing.T) {
 			return BugReportPreview{Title: "draft", Body: "body", Fingerprint: "abc123"}, nil
 		},
 		CreateBugReport: func(id string, preview BugReportPreview) (BugReportCreateResult, error) {
-			return BugReportCreateResult{URL: "https://github.com/jerryfane/gitmoot/issues/777", Existing: true}, nil
+			return BugReportCreateResult{URL: "https://github.com/gitmoot/gitmoot/issues/777", Existing: true}, nil
 		},
 	}
 	m := jobsModel(t, deps, jobsSnapshot())
@@ -452,10 +452,10 @@ func TestJobsBugReportExistingIssueLabel(t *testing.T) {
 	next, _ = m.Update(cmd())
 	m = next.(Model)
 	view := m.View()
-	if !strings.Contains(view, "existing: https://github.com/jerryfane/gitmoot/issues/777") {
+	if !strings.Contains(view, "existing: https://github.com/gitmoot/gitmoot/issues/777") {
 		t.Fatalf("existing issue should be labeled distinctly:\n%s", view)
 	}
-	if strings.Contains(view, "created: https://github.com/jerryfane/gitmoot/issues/777") {
+	if strings.Contains(view, "created: https://github.com/gitmoot/gitmoot/issues/777") {
 		t.Fatalf("existing issue must not be labeled created:\n%s", view)
 	}
 }
@@ -466,7 +466,7 @@ func TestJobsBugReportCreateResultNotDroppedAfterEsc(t *testing.T) {
 			return BugReportPreview{Title: "draft", Body: "body", Fingerprint: "abc123"}, nil
 		},
 		CreateBugReport: func(id string, preview BugReportPreview) (BugReportCreateResult, error) {
-			return BugReportCreateResult{URL: "https://github.com/jerryfane/gitmoot/issues/778"}, nil
+			return BugReportCreateResult{URL: "https://github.com/gitmoot/gitmoot/issues/778"}, nil
 		},
 	}
 	m := jobsModel(t, deps, jobsSnapshot())
@@ -484,7 +484,7 @@ func TestJobsBugReportCreateResultNotDroppedAfterEsc(t *testing.T) {
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if !strings.Contains(m.View(), "created: https://github.com/jerryfane/gitmoot/issues/778") {
+	if !strings.Contains(m.View(), "created: https://github.com/gitmoot/gitmoot/issues/778") {
 		t.Fatalf("create result should still render after esc:\n%s", m.View())
 	}
 }

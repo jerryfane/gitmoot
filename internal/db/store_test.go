@@ -2067,47 +2067,47 @@ func TestRepositoryMethods(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.UpsertRepo(ctx, Repo{Owner: "jerryfane", Name: "gitmoot", DefaultBranch: "main", RemoteURL: "https://github.com/jerryfane/gitmoot.git", CheckoutPath: "/repo/gitmoot", PrimaryCheckoutPath: "/repo/gitmoot"}); err != nil {
+	if err := store.UpsertRepo(ctx, Repo{Owner: "gitmoot", Name: "gitmoot", DefaultBranch: "main", RemoteURL: "https://github.com/gitmoot/gitmoot.git", CheckoutPath: "/repo/gitmoot", PrimaryCheckoutPath: "/repo/gitmoot"}); err != nil {
 		t.Fatalf("UpsertRepo returned error: %v", err)
 	}
-	repo, err := store.GetRepo(ctx, "jerryfane/gitmoot")
+	repo, err := store.GetRepo(ctx, "gitmoot/gitmoot")
 	if err != nil {
 		t.Fatalf("GetRepo returned error: %v", err)
 	}
-	if repo.FullName() != "jerryfane/gitmoot" || repo.DefaultBranch != "main" || repo.RemoteURL == "" || repo.CheckoutPath != "/repo/gitmoot" || repo.PrimaryCheckoutPath != "/repo/gitmoot" || !repo.Enabled || repo.PollInterval != "" {
+	if repo.FullName() != "gitmoot/gitmoot" || repo.DefaultBranch != "main" || repo.RemoteURL == "" || repo.CheckoutPath != "/repo/gitmoot" || repo.PrimaryCheckoutPath != "/repo/gitmoot" || !repo.Enabled || repo.PollInterval != "" {
 		t.Fatalf("repo = %+v", repo)
 	}
-	if err := store.SetRepoPollInterval(ctx, "jerryfane/gitmoot", "45s"); err != nil {
+	if err := store.SetRepoPollInterval(ctx, "gitmoot/gitmoot", "45s"); err != nil {
 		t.Fatalf("SetRepoPollInterval returned error: %v", err)
 	}
-	repo, err = store.GetRepo(ctx, "jerryfane/gitmoot")
+	repo, err = store.GetRepo(ctx, "gitmoot/gitmoot")
 	if err != nil || repo.PollInterval != "45s" {
 		t.Fatalf("repo after SetRepoPollInterval = %+v err=%v", repo, err)
 	}
-	if err := store.UpsertRepo(ctx, Repo{Owner: "jerryfane", Name: "gitmoot", PollInterval: "1m"}); err != nil {
+	if err := store.UpsertRepo(ctx, Repo{Owner: "gitmoot", Name: "gitmoot", PollInterval: "1m"}); err != nil {
 		t.Fatalf("second UpsertRepo returned error: %v", err)
 	}
-	repo, err = store.GetRepo(ctx, "jerryfane/gitmoot")
+	repo, err = store.GetRepo(ctx, "gitmoot/gitmoot")
 	if err != nil {
 		t.Fatalf("GetRepo after update returned error: %v", err)
 	}
 	if repo.DefaultBranch != "main" || repo.RemoteURL == "" || repo.CheckoutPath != "/repo/gitmoot" || repo.PollInterval != "1m" {
 		t.Fatalf("updated repo lost existing fields: %+v", repo)
 	}
-	if err := store.UpsertRepo(ctx, Repo{Owner: "jerryfane", Name: "gitmoot", RemoteURL: "git@github.com:jerryfane/gitmoot.git"}); err != nil {
+	if err := store.UpsertRepo(ctx, Repo{Owner: "gitmoot", Name: "gitmoot", RemoteURL: "git@github.com:gitmoot/gitmoot.git"}); err != nil {
 		t.Fatalf("auto UpsertRepo returned error: %v", err)
 	}
-	repo, err = store.GetRepo(ctx, "jerryfane/gitmoot")
+	repo, err = store.GetRepo(ctx, "gitmoot/gitmoot")
 	if err != nil {
 		t.Fatalf("GetRepo after auto update returned error: %v", err)
 	}
-	if repo.RemoteURL != "git@github.com:jerryfane/gitmoot.git" || repo.PollInterval != "1m" {
+	if repo.RemoteURL != "git@github.com:gitmoot/gitmoot.git" || repo.PollInterval != "1m" {
 		t.Fatalf("auto update did not preserve configured poll interval: %+v", repo)
 	}
-	if err := store.SetRepoEnabled(ctx, "jerryfane/gitmoot", false); err != nil {
+	if err := store.SetRepoEnabled(ctx, "gitmoot/gitmoot", false); err != nil {
 		t.Fatalf("SetRepoEnabled returned error: %v", err)
 	}
-	if err := store.UpdateRepoPollResult(ctx, "jerryfane/gitmoot", "2026-05-21T12:00:00Z", "rate limited"); err != nil {
+	if err := store.UpdateRepoPollResult(ctx, "gitmoot/gitmoot", "2026-05-21T12:00:00Z", "rate limited"); err != nil {
 		t.Fatalf("UpdateRepoPollResult returned error: %v", err)
 	}
 	repos, err := store.ListRepos(ctx)
@@ -2117,7 +2117,7 @@ func TestRepositoryMethods(t *testing.T) {
 	if len(repos) != 1 || repos[0].Enabled || repos[0].LastPollAt == "" || repos[0].LastError != "rate limited" {
 		t.Fatalf("repos = %+v", repos)
 	}
-	removed, err := store.RemoveRepo(ctx, "jerryfane/gitmoot")
+	removed, err := store.RemoveRepo(ctx, "gitmoot/gitmoot")
 	if err != nil {
 		t.Fatalf("RemoveRepo returned error: %v", err)
 	}
@@ -2366,10 +2366,10 @@ func TestRepositoryMethods(t *testing.T) {
 	if len(templates) != 2 || templates[0].ID != "outoforder" || templates[1].ID != "thermo" {
 		t.Fatalf("templates = %+v", templates)
 	}
-	if err := store.UpsertAgent(ctx, Agent{Name: "audit", Role: "reviewer", Runtime: "codex", RuntimeRef: "session", RepoScope: "jerryfane/gitmoot", TemplateID: "thermo", Capabilities: []string{"review"}, AutonomyPolicy: "auto", HealthStatus: "ok"}); err != nil {
+	if err := store.UpsertAgent(ctx, Agent{Name: "audit", Role: "reviewer", Runtime: "codex", RuntimeRef: "session", RepoScope: "gitmoot/gitmoot", TemplateID: "thermo", Capabilities: []string{"review"}, AutonomyPolicy: "auto", HealthStatus: "ok"}); err != nil {
 		t.Fatalf("UpsertAgent returned error: %v", err)
 	}
-	allowed, err := store.AgentCanAccessRepo(ctx, "audit", "jerryfane/gitmoot")
+	allowed, err := store.AgentCanAccessRepo(ctx, "audit", "gitmoot/gitmoot")
 	if err != nil {
 		t.Fatalf("AgentCanAccessRepo returned error: %v", err)
 	}
@@ -2383,7 +2383,7 @@ func TestRepositoryMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAgentRepos returned error: %v", err)
 	}
-	if len(agentRepos) != 2 || agentRepos[0] != "jerryfane/gitmoot" || agentRepos[1] != "jerryfane/other" {
+	if len(agentRepos) != 2 || agentRepos[0] != "gitmoot/gitmoot" || agentRepos[1] != "jerryfane/other" {
 		t.Fatalf("agent repos = %+v", agentRepos)
 	}
 	denied, err := store.DenyAgentRepo(ctx, "audit", "jerryfane/other")
@@ -2413,7 +2413,7 @@ func TestRepositoryMethods(t *testing.T) {
 	if allowed {
 		t.Fatal("empty ReplaceAgentRepos left stale access")
 	}
-	if err := store.AllowAgentRepo(ctx, "audit", "jerryfane/gitmoot"); err != nil {
+	if err := store.AllowAgentRepo(ctx, "audit", "gitmoot/gitmoot"); err != nil {
 		t.Fatalf("restore AllowAgentRepo returned error: %v", err)
 	}
 	agent, err := store.GetAgent(ctx, "audit")
@@ -2449,41 +2449,41 @@ func TestRepositoryMethods(t *testing.T) {
 	if task.GoalID != "goal-2" {
 		t.Fatalf("task goal_id = %q, want goal-2", task.GoalID)
 	}
-	if err := store.UpsertPullRequest(ctx, PullRequest{RepoFullName: "jerryfane/gitmoot", Number: 1, URL: "https://github.com/jerryfane/gitmoot/pull/1", HeadBranch: "task", BaseBranch: "main", HeadSHA: "abc123", State: "open"}); err != nil {
+	if err := store.UpsertPullRequest(ctx, PullRequest{RepoFullName: "gitmoot/gitmoot", Number: 1, URL: "https://github.com/gitmoot/gitmoot/pull/1", HeadBranch: "task", BaseBranch: "main", HeadSHA: "abc123", State: "open"}); err != nil {
 		t.Fatalf("UpsertPullRequest returned error: %v", err)
 	}
-	pr, err := store.GetPullRequest(ctx, "jerryfane/gitmoot", 1)
+	pr, err := store.GetPullRequest(ctx, "gitmoot/gitmoot", 1)
 	if err != nil {
 		t.Fatalf("GetPullRequest returned error: %v", err)
 	}
 	if pr.HeadSHA != "abc123" {
 		t.Fatalf("pull request head sha = %q, want abc123", pr.HeadSHA)
 	}
-	byBranch, err := store.GetPullRequestByRepoBranch(ctx, "jerryfane/gitmoot", "task")
+	byBranch, err := store.GetPullRequestByRepoBranch(ctx, "gitmoot/gitmoot", "task")
 	if err != nil {
 		t.Fatalf("GetPullRequestByRepoBranch returned error: %v", err)
 	}
 	if byBranch.Number != 1 || byBranch.HeadSHA != "abc123" {
 		t.Fatalf("pull request by branch = %+v", byBranch)
 	}
-	if err := store.MarkCommentSeen(ctx, Comment{RepoFullName: "jerryfane/gitmoot", CommentID: 100, PullRequest: 1, Body: "/gitmoot audit review"}); err != nil {
+	if err := store.MarkCommentSeen(ctx, Comment{RepoFullName: "gitmoot/gitmoot", CommentID: 100, PullRequest: 1, Body: "/gitmoot audit review"}); err != nil {
 		t.Fatalf("MarkCommentSeen returned error: %v", err)
 	}
-	seen, err := store.HasCommentSeen(ctx, "jerryfane/gitmoot", 100)
+	seen, err := store.HasCommentSeen(ctx, "gitmoot/gitmoot", 100)
 	if err != nil {
 		t.Fatalf("HasCommentSeen returned error: %v", err)
 	}
 	if !seen {
 		t.Fatal("HasCommentSeen did not find marked comment")
 	}
-	isNew, err := store.MarkCommentSeenIfNew(ctx, Comment{RepoFullName: "jerryfane/gitmoot", CommentID: 101, PullRequest: 1, Body: "/gitmoot audit review again"})
+	isNew, err := store.MarkCommentSeenIfNew(ctx, Comment{RepoFullName: "gitmoot/gitmoot", CommentID: 101, PullRequest: 1, Body: "/gitmoot audit review again"})
 	if err != nil {
 		t.Fatalf("MarkCommentSeenIfNew returned error: %v", err)
 	}
 	if !isNew {
 		t.Fatal("MarkCommentSeenIfNew did not report new comment")
 	}
-	isNew, err = store.MarkCommentSeenIfNew(ctx, Comment{RepoFullName: "jerryfane/gitmoot", CommentID: 101, PullRequest: 1, Body: "/gitmoot audit review again"})
+	isNew, err = store.MarkCommentSeenIfNew(ctx, Comment{RepoFullName: "gitmoot/gitmoot", CommentID: 101, PullRequest: 1, Body: "/gitmoot audit review again"})
 	if err != nil {
 		t.Fatalf("duplicate MarkCommentSeenIfNew returned error: %v", err)
 	}
@@ -2578,73 +2578,73 @@ func TestRepositoryMethods(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != "queued" {
 		t.Fatalf("events = %+v", events)
 	}
-	acquired, err := store.AcquireLock(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task", Owner: "lead"})
+	acquired, err := store.AcquireLock(ctx, BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task", Owner: "lead"})
 	if err != nil {
 		t.Fatalf("AcquireLock returned error: %v", err)
 	}
 	if !acquired {
 		t.Fatal("first AcquireLock did not acquire lock")
 	}
-	acquired, err = store.AcquireLock(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task", Owner: "lead"})
+	acquired, err = store.AcquireLock(ctx, BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task", Owner: "lead"})
 	if err != nil {
 		t.Fatalf("same-owner AcquireLock returned error: %v", err)
 	}
 	if !acquired {
 		t.Fatal("same-owner AcquireLock did not return acquired")
 	}
-	lock, err := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task")
+	lock, err := store.GetBranchLock(ctx, "gitmoot/gitmoot", "task")
 	if err != nil {
 		t.Fatalf("GetBranchLock returned error: %v", err)
 	}
 	if lock.Owner != "lead" {
 		t.Fatalf("lock owner = %q, want lead", lock.Owner)
 	}
-	created, err := store.CreateLock(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task", Owner: "lead"})
+	created, err := store.CreateLock(ctx, BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task", Owner: "lead"})
 	if err != nil {
 		t.Fatalf("CreateLock existing returned error: %v", err)
 	}
 	if created {
 		t.Fatal("CreateLock reported existing lock as newly created")
 	}
-	acquired, err = store.AcquireLock(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task", Owner: "other"})
+	acquired, err = store.AcquireLock(ctx, BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task", Owner: "other"})
 	if err != nil {
 		t.Fatalf("second AcquireLock returned error: %v", err)
 	}
 	if acquired {
 		t.Fatal("second AcquireLock unexpectedly acquired lock")
 	}
-	released, err := store.ReleaseLock(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task", Owner: "other"})
+	released, err := store.ReleaseLock(ctx, BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task", Owner: "other"})
 	if err != nil {
 		t.Fatalf("wrong-owner ReleaseLock returned error: %v", err)
 	}
 	if released {
 		t.Fatal("wrong-owner ReleaseLock released lock")
 	}
-	released, err = store.ReleaseLockWithEvent(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task", Owner: "lead"}, BranchLockEvent{Kind: "released", Message: "done"})
+	released, err = store.ReleaseLockWithEvent(ctx, BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task", Owner: "lead"}, BranchLockEvent{Kind: "released", Message: "done"})
 	if err != nil {
 		t.Fatalf("ReleaseLockWithEvent returned error: %v", err)
 	}
 	if !released {
 		t.Fatal("ReleaseLock did not release owned lock")
 	}
-	lockEvents, err := store.ListBranchLockEvents(ctx, "jerryfane/gitmoot", "task")
+	lockEvents, err := store.ListBranchLockEvents(ctx, "gitmoot/gitmoot", "task")
 	if err != nil {
 		t.Fatalf("ListBranchLockEvents returned error: %v", err)
 	}
 	if len(lockEvents) != 1 || lockEvents[0].Kind != "released" || lockEvents[0].Owner != "lead" {
 		t.Fatalf("lock events = %+v", lockEvents)
 	}
-	if acquired, err := store.AcquireLock(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-force", Owner: "lead"}); err != nil || !acquired {
+	if acquired, err := store.AcquireLock(ctx, BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-force", Owner: "lead"}); err != nil || !acquired {
 		t.Fatalf("force lock AcquireLock returned acquired=%v err=%v", acquired, err)
 	}
-	releasedLock, released, err := store.ForceReleaseLockWithEvent(ctx, "jerryfane/gitmoot", "task-force", BranchLockEvent{Kind: "force_released", Message: "stale"})
+	releasedLock, released, err := store.ForceReleaseLockWithEvent(ctx, "gitmoot/gitmoot", "task-force", BranchLockEvent{Kind: "force_released", Message: "stale"})
 	if err != nil {
 		t.Fatalf("ForceReleaseLockWithEvent returned error: %v", err)
 	}
 	if !released || releasedLock.Owner != "lead" {
 		t.Fatalf("force release returned lock=%+v released=%v", releasedLock, released)
 	}
-	if err := store.UpsertMergeGate(ctx, MergeGate{RepoFullName: "jerryfane/gitmoot", PullRequest: 1, State: "pending", Reason: "waiting"}); err != nil {
+	if err := store.UpsertMergeGate(ctx, MergeGate{RepoFullName: "gitmoot/gitmoot", PullRequest: 1, State: "pending", Reason: "waiting"}); err != nil {
 		t.Fatalf("UpsertMergeGate returned error: %v", err)
 	}
 	removed, err = store.RemoveAgent(ctx, "audit")
@@ -2761,12 +2761,12 @@ func TestBranchLockSkipNativeReviewFanout(t *testing.T) {
 	}
 	defer store.Close()
 
-	if created, err := store.CreateLock(ctx, BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !created {
+	if created, err := store.CreateLock(ctx, BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !created {
 		t.Fatalf("CreateLock returned created=%v err=%v", created, err)
 	}
 
 	// CreateLock defaults the flag to false.
-	lock, err := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	lock, err := store.GetBranchLock(ctx, "gitmoot/gitmoot", "task-7")
 	if err != nil {
 		t.Fatalf("GetBranchLock returned error: %v", err)
 	}
@@ -2775,10 +2775,10 @@ func TestBranchLockSkipNativeReviewFanout(t *testing.T) {
 	}
 
 	// SetBranchLockReviewFanout flips it; GetBranchLock returns it.
-	if err := store.SetBranchLockReviewFanout(ctx, "jerryfane/gitmoot", "task-7", true); err != nil {
+	if err := store.SetBranchLockReviewFanout(ctx, "gitmoot/gitmoot", "task-7", true); err != nil {
 		t.Fatalf("SetBranchLockReviewFanout returned error: %v", err)
 	}
-	lock, err = store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	lock, err = store.GetBranchLock(ctx, "gitmoot/gitmoot", "task-7")
 	if err != nil {
 		t.Fatalf("GetBranchLock returned error: %v", err)
 	}
@@ -2787,7 +2787,7 @@ func TestBranchLockSkipNativeReviewFanout(t *testing.T) {
 	}
 
 	// ListBranchLocks round-trips the column.
-	locks, err := store.ListBranchLocks(ctx, "jerryfane/gitmoot")
+	locks, err := store.ListBranchLocks(ctx, "gitmoot/gitmoot")
 	if err != nil {
 		t.Fatalf("ListBranchLocks returned error: %v", err)
 	}
@@ -2796,10 +2796,10 @@ func TestBranchLockSkipNativeReviewFanout(t *testing.T) {
 	}
 
 	// Flipping back to false round-trips too.
-	if err := store.SetBranchLockReviewFanout(ctx, "jerryfane/gitmoot", "task-7", false); err != nil {
+	if err := store.SetBranchLockReviewFanout(ctx, "gitmoot/gitmoot", "task-7", false); err != nil {
 		t.Fatalf("SetBranchLockReviewFanout(false) returned error: %v", err)
 	}
-	lock, err = store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	lock, err = store.GetBranchLock(ctx, "gitmoot/gitmoot", "task-7")
 	if err != nil {
 		t.Fatalf("GetBranchLock returned error: %v", err)
 	}
@@ -2903,7 +2903,7 @@ func TestMigrateCopiesAgentRepoScopeToAgentRepos(t *testing.T) {
 		}
 	}
 	if _, err := raw.ExecContext(ctx, `INSERT INTO agents(name, role, runtime, runtime_ref, repo_scope, capabilities_json, autonomy_policy, health_status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, "audit", "reviewer", "codex", "last", "jerryfane/gitmoot", `["review"]`, "auto", "ok"); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, "audit", "reviewer", "codex", "last", "gitmoot/gitmoot", `["review"]`, "auto", "ok"); err != nil {
 		t.Fatalf("insert legacy agent returned error: %v", err)
 	}
 	if _, err := store.ListAgentRepos(ctx, "audit"); err == nil {
@@ -2916,7 +2916,7 @@ func TestMigrateCopiesAgentRepoScopeToAgentRepos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAgentRepos returned error: %v", err)
 	}
-	if len(repos) != 1 || repos[0] != "jerryfane/gitmoot" {
+	if len(repos) != 1 || repos[0] != "gitmoot/gitmoot" {
 		t.Fatalf("repos = %+v", repos)
 	}
 }
@@ -3115,7 +3115,7 @@ func TestTasksAllowSameBranchAcrossRepos(t *testing.T) {
 	}
 	defer store.Close()
 
-	first := Task{ID: "task-1", RepoFullName: "jerryfane/gitmoot", GoalID: "goal-1", Title: "First", State: "planned", Branch: "task-branch"}
+	first := Task{ID: "task-1", RepoFullName: "gitmoot/gitmoot", GoalID: "goal-1", Title: "First", State: "planned", Branch: "task-branch"}
 	second := Task{ID: "task-2", RepoFullName: "jerryfane/other", GoalID: "goal-1", Title: "Second", State: "planned", Branch: "task-branch"}
 	if err := store.UpsertTask(ctx, first); err != nil {
 		t.Fatalf("UpsertTask first returned error: %v", err)

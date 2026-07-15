@@ -1044,7 +1044,7 @@ This keeps local review deterministic and avoids rerunning every baseline for
 each candidate import.
 
 Future live pairwise mode is tracked in
-[GitHub issue #77](https://github.com/jerryfane/gitmoot/issues/77). That mode
+[GitHub issue #77](https://github.com/gitmoot/gitmoot/issues/77). That mode
 would run the current promoted template and the pending candidate live for every
 validation item before collecting blind A/B feedback. The tradeoff is more
 faithful comparisons and better protection against stale baseline outputs, at

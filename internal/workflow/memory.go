@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/memory"
-	"github.com/jerryfane/gitmoot/internal/prompts"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/memory"
+	"github.com/gitmoot/gitmoot/internal/prompts"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // RenderBaseJobPrompt renders the job prompt for a payload WITHOUT any memory

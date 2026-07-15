@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // vagueImplementResult is a deliberately deficient implement result: it claims
@@ -15,7 +15,7 @@ import (
 const vagueImplementResult = `{"gitmoot_result":{"decision":"implemented","summary":"did the work","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`
 
 func shellAgent() runtime.Agent {
-	return runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "implementer"}
+	return runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "implementer"}
 }
 
 func TestMailboxRunResultChecksOffIsByteIdentical(t *testing.T) {
@@ -25,7 +25,7 @@ func TestMailboxRunResultChecksOffIsByteIdentical(t *testing.T) {
 	mailbox := Mailbox{Store: store, resultCheckMode: ResultChecksOff}
 	adapter := &fakeDelivery{outputs: []string{vagueImplementResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-off", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-off", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	result, err := mailbox.Run(ctx, "job-off", shellAgent(), adapter)
@@ -72,7 +72,7 @@ func TestMailboxRunResultChecksWarnSurfacesButSucceeds(t *testing.T) {
 	mailbox := Mailbox{Store: store, resultCheckMode: ResultChecksWarn}
 	adapter := &fakeDelivery{outputs: []string{vagueImplementResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-warn", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-warn", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	result, err := mailbox.Run(ctx, "job-warn", shellAgent(), adapter)
@@ -136,7 +136,7 @@ func TestMailboxRunResultChecksBlockFailsLikeContractViolation(t *testing.T) {
 	mailbox := Mailbox{Store: store, resultCheckMode: ResultChecksBlock}
 	adapter := &fakeDelivery{outputs: []string{vagueImplementResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-block", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-block", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	_, err := mailbox.Run(ctx, "job-block", shellAgent(), adapter)
@@ -193,7 +193,7 @@ func TestMailboxRunResultChecksWarnCleanResultIsQuiet(t *testing.T) {
 	clean := `{"gitmoot_result":{"decision":"implemented","summary":"implemented X","findings":[],"changes_made":["added foo.go"],"tests_run":["go test ./..."],"needs":[],"delegations":[]}}`
 	adapter := &fakeDelivery{outputs: []string{clean}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-clean", Agent: "audit", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-clean", Agent: "audit", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-clean", shellAgent(), adapter); err != nil {

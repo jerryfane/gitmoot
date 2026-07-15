@@ -6,11 +6,11 @@ import (
 	"os"
 	"testing"
 
-	dashboard "github.com/jerryfane/gitmoot-dashboard"
+	dashboard "github.com/gitmoot/gitmoot-dashboard"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // seedAttentionHome seeds a home exercising all three #528 buckets: a blocked job
@@ -71,13 +71,13 @@ func seedAttentionHome(t *testing.T, home string) {
 
 	// One pending synth item + one rejected (must be filtered out).
 	if err := store.CreateSynthReviewItem(ctx, db.SynthReviewItem{
-		ID: "synth-1", TemplateID: "tmpl-reviewer", Repo: "jerryfane/gitmoot", Status: db.SynthItemStatusPending,
+		ID: "synth-1", TemplateID: "tmpl-reviewer", Repo: "gitmoot/gitmoot", Status: db.SynthItemStatusPending,
 		Question: "flag an unearned pass?", Gap: 0.29, WeakAgent: "r@v2", StrongAgent: "r@v3", JudgeAgent: "judge",
 	}); err != nil {
 		t.Fatalf("CreateSynthReviewItem pending: %v", err)
 	}
 	if err := store.CreateSynthReviewItem(ctx, db.SynthReviewItem{
-		ID: "synth-2", TemplateID: "tmpl-reviewer", Repo: "jerryfane/gitmoot", Status: db.SynthItemStatusRejected,
+		ID: "synth-2", TemplateID: "tmpl-reviewer", Repo: "gitmoot/gitmoot", Status: db.SynthItemStatusRejected,
 		Question: "already decided", Gap: 0.10,
 	}); err != nil {
 		t.Fatalf("CreateSynthReviewItem rejected: %v", err)

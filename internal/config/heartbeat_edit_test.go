@@ -26,7 +26,7 @@ func TestSaveHeartbeatCreateRoundTrip(t *testing.T) {
 		Agent:    "repo-maintainer",
 		Name:     "daily-status",
 		Enabled:  true,
-		Repo:     "jerryfane/gitmoot",
+		Repo:     "gitmoot/gitmoot",
 		Interval: "24h",
 		Jitter:   "15m",
 		Action:   "ask",
@@ -44,7 +44,7 @@ func TestSaveHeartbeatCreateRoundTrip(t *testing.T) {
 	}
 	hb := got[0]
 	if hb.Agent != "repo-maintainer" || hb.Name != "daily-status" || !hb.Enabled ||
-		hb.Repo != "jerryfane/gitmoot" || hb.Interval != "24h" || hb.Jitter != "15m" ||
+		hb.Repo != "gitmoot/gitmoot" || hb.Interval != "24h" || hb.Jitter != "15m" ||
 		hb.Action != "ask" || hb.Prompt != "Review open issues and PRs." || hb.MaxConcurrent != 1 {
 		t.Fatalf("round-trip mismatch: %+v", hb)
 	}

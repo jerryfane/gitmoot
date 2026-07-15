@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // RateLimiter is the process-wide GitHub-call scheduler (#683). Every gh call

@@ -3,11 +3,11 @@ package github
 import "testing"
 
 func TestParsePullRequestURL(t *testing.T) {
-	ref, err := ParsePullRequestURL("https://github.com/jerryfane/gitmoot/pull/12")
+	ref, err := ParsePullRequestURL("https://github.com/gitmoot/gitmoot/pull/12")
 	if err != nil {
 		t.Fatalf("ParsePullRequestURL returned error: %v", err)
 	}
-	if ref.Repository() != "jerryfane/gitmoot" {
+	if ref.Repository() != "gitmoot/gitmoot" {
 		t.Fatalf("repository = %q", ref.Repository())
 	}
 	if ref.Number != 12 {

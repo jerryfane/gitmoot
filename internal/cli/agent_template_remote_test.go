@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/agenttemplate"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/agenttemplate"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // stubGitHubRunner answers the gh calls UpsertFile / RepositoryExists /

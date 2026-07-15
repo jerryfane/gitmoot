@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	gitutil "github.com/jerryfane/gitmoot/internal/git"
-	"github.com/jerryfane/gitmoot/internal/presence"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/config"
+	gitutil "github.com/gitmoot/gitmoot/internal/git"
+	"github.com/gitmoot/gitmoot/internal/presence"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 type Check struct {

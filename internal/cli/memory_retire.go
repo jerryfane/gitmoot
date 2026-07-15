@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 type memoryRetireResult struct {

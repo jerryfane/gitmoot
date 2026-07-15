@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // ClaudeLiveProbeTimeout bounds a single live `claude -p` probe so a hung or slow

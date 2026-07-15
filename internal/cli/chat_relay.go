@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // #732 daemon chat relay. A `gitmoot moot` seat runs inside the codex/claude

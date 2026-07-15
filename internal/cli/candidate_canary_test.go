@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/events"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/events"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // seedAutoTraceFeedback writes n harvested feedback events of the given a/b choice
@@ -67,8 +67,8 @@ func canaryHarvesterFixture(t *testing.T, sample float64) (store *db.Store, cham
 func TestCanaryHarvesterGraduates(t *testing.T) {
 	ctx := context.Background()
 	store, championID, canaryID := canaryHarvesterFixture(t, 1.0)
-	seedAutoTraceFeedback(t, store, "planner", canaryID, "a", 3)    // canary all strong-positive
-	seedAutoTraceFeedback(t, store, "planner", championID, "a", 3)  // champion strong-positive too
+	seedAutoTraceFeedback(t, store, "planner", canaryID, "a", 3)   // canary all strong-positive
+	seedAutoTraceFeedback(t, store, "planner", championID, "a", 3) // champion strong-positive too
 	sink := &recordingSink{}
 	h := &canaryRegressionHarvester{store: store, sink: sink, minSamples: floatPtrCLIInt(3)}
 

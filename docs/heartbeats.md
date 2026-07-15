@@ -19,7 +19,7 @@ like:
 ```toml
 [agents.repo-maintainer.heartbeats.daily-status]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 jitter = "15m"
 action = "ask"
@@ -67,19 +67,19 @@ Create and manage heartbeats programmatically (no hand-edited TOML):
 ```sh
 # Create (or update) a heartbeat. Omit --enabled to add it disabled.
 gitmoot agent heartbeat add repo-maintainer daily-status \
-  --repo jerryfane/gitmoot --interval 24h --jitter 15m \
+  --repo gitmoot/gitmoot --interval 24h --jitter 15m \
   --prompt "Review open issues, PRs, and recent jobs." --enabled
 
 # A review heartbeat requires the agent to hold the review capability.
 gitmoot agent heartbeat add reviewer stale-prs \
-  --repo jerryfane/gitmoot --interval 12h --action review \
+  --repo gitmoot/gitmoot --interval 12h --action review \
   --prompt "Review stale open PRs and summarize blockers."
 
 # An implement heartbeat requires the agent to hold the implement capability AND
 # a write-granting policy (workspace-write / danger-full-access). Add --runtime to
 # pin a specific runtime for this schedule.
 gitmoot agent heartbeat add builder nightly-tidy \
-  --repo jerryfane/gitmoot --interval 24h --action implement --runtime codex \
+  --repo gitmoot/gitmoot --interval 24h --action implement --runtime codex \
   --prompt "Fix the top lint/type error and open a small PR."
 
 gitmoot agent heartbeat list [--agent repo-maintainer]

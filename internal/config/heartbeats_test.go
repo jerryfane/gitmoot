@@ -22,7 +22,7 @@ func TestLoadHeartbeatsParsesAndDefaults(t *testing.T) {
 	paths := writeHeartbeatConfig(t, `
 [agents.repo-maintainer.heartbeats.daily-status]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 jitter = "15m"
 action = "ask"
@@ -31,7 +31,7 @@ max_concurrent = 1
 
 [agents.repo-maintainer.heartbeats.minimal]
 enabled = false
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "1h"
 prompt = "Quick check."
 `)
@@ -44,7 +44,7 @@ prompt = "Quick check."
 	}
 	first := heartbeats[0]
 	if first.Agent != "repo-maintainer" || first.Name != "daily-status" || !first.Enabled ||
-		first.Repo != "jerryfane/gitmoot" || first.Interval != "24h" || first.Jitter != "15m" ||
+		first.Repo != "gitmoot/gitmoot" || first.Interval != "24h" || first.Jitter != "15m" ||
 		first.Action != "ask" || first.Prompt != "Review open issues and PRs." || first.MaxConcurrent != 1 {
 		t.Fatalf("first heartbeat = %+v", first)
 	}

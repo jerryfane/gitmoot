@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 // reloadFixture initializes a home + config file with the given [daemon] body and

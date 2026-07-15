@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // TestHandlePullRequestRevertedFiresCorrectiveHarvest proves the wired revert
@@ -21,7 +21,7 @@ func TestHandlePullRequestRevertedFiresCorrectiveHarvest(t *testing.T) {
 	seedImplementJobForHarvest(t, store)
 
 	if err := engine.HandlePullRequestReverted(ctx, RevertEvent{
-		Repo:                "jerryfane/gitmoot",
+		Repo:                "gitmoot/gitmoot",
 		OriginalPullRequest: 7,
 		OriginalBranch:      "task-7",
 		OriginalTaskID:      "task-7",
@@ -36,8 +36,8 @@ func TestHandlePullRequestRevertedFiresCorrectiveHarvest(t *testing.T) {
 	if got[0].Kind != OutcomeReverted {
 		t.Fatalf("outcome kind = %q, want reverted", got[0].Kind)
 	}
-	if got[0].PullRequest != 7 || got[0].Repo != "jerryfane/gitmoot" {
-		t.Fatalf("outcome attribution = %+v, want repo=jerryfane/gitmoot pr=7", got[0])
+	if got[0].PullRequest != 7 || got[0].Repo != "gitmoot/gitmoot" {
+		t.Fatalf("outcome attribution = %+v, want repo=gitmoot/gitmoot pr=7", got[0])
 	}
 	if harvester.jobIDs[0] != "implement-job" {
 		t.Fatalf("reverted outcome attributed to %q, want implement-job", harvester.jobIDs[0])
@@ -60,7 +60,7 @@ func TestHandlePullRequestRevertedResolvesByRepoPROnly(t *testing.T) {
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:                   "jerryfane/gitmoot",
+		Repo:                   "gitmoot/gitmoot",
 		PullRequest:            42,
 		TemplateID:             "planner",
 		TemplateResolvedCommit: "commit-1",
@@ -68,7 +68,7 @@ func TestHandlePullRequestRevertedResolvesByRepoPROnly(t *testing.T) {
 	})
 
 	if err := engine.HandlePullRequestReverted(ctx, RevertEvent{
-		Repo:                "jerryfane/gitmoot",
+		Repo:                "gitmoot/gitmoot",
 		OriginalPullRequest: 42,
 	}); err != nil {
 		t.Fatalf("HandlePullRequestReverted returned error: %v", err)
@@ -90,7 +90,7 @@ func TestHandlePullRequestRevertedNilHarvesterNoOp(t *testing.T) {
 	seedImplementJobForHarvest(t, store)
 
 	if err := engine.HandlePullRequestReverted(ctx, RevertEvent{
-		Repo:                "jerryfane/gitmoot",
+		Repo:                "gitmoot/gitmoot",
 		OriginalPullRequest: 7,
 	}); err != nil {
 		t.Fatalf("HandlePullRequestReverted with nil harvester returned error: %v", err)
@@ -110,7 +110,7 @@ func TestHandlePullRequestRevertedUnresolvableSkips(t *testing.T) {
 	// No implement job seeded for PR 99.
 
 	if err := engine.HandlePullRequestReverted(ctx, RevertEvent{
-		Repo:                "jerryfane/gitmoot",
+		Repo:                "gitmoot/gitmoot",
 		OriginalPullRequest: 99,
 	}); err != nil {
 		t.Fatalf("HandlePullRequestReverted returned error: %v", err)
@@ -132,8 +132,8 @@ func TestHandlePullRequestRevertedInvalidEventSkips(t *testing.T) {
 
 	for _, event := range []RevertEvent{
 		{Repo: "", OriginalPullRequest: 7},
-		{Repo: "jerryfane/gitmoot", OriginalPullRequest: 0},
-		{Repo: "jerryfane/gitmoot", OriginalPullRequest: -1},
+		{Repo: "gitmoot/gitmoot", OriginalPullRequest: 0},
+		{Repo: "gitmoot/gitmoot", OriginalPullRequest: -1},
 	} {
 		if err := engine.HandlePullRequestReverted(ctx, event); err != nil {
 			t.Fatalf("HandlePullRequestReverted(%+v) returned error: %v", event, err)

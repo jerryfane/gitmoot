@@ -16,14 +16,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/agenttemplate"
-	"github.com/jerryfane/gitmoot/internal/artifact"
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/agenttemplate"
+	"github.com/gitmoot/gitmoot/internal/artifact"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 func TestSkillOptExportAndImportCommands(t *testing.T) {
@@ -1083,7 +1083,7 @@ func TestSkillOptTrainInitCompletesFromPromptAnswers(t *testing.T) {
 	answers := map[string]string{
 		"name":          "prompt-flow",
 		"template":      "planner",
-		"review-repo":   "jerryfane/gitmoot",
+		"review-repo":   "gitmoot/gitmoot",
 		"artifact-kind": "text",
 		"preview":       "text-table",
 		"request":       "Improve planner summaries.",
@@ -1108,7 +1108,7 @@ func TestSkillOptTrainInitCompletesFromPromptAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTrainInitConfig returned error: %v", err)
 	}
-	if cfg.Name != "prompt-flow" || cfg.Template != "planner" || cfg.ReviewRepo != "jerryfane/gitmoot" || cfg.ArtifactKind != "text" || cfg.Preview != "text-table" || cfg.Mode != db.EvalRunModeExplore {
+	if cfg.Name != "prompt-flow" || cfg.Template != "planner" || cfg.ReviewRepo != "gitmoot/gitmoot" || cfg.ArtifactKind != "text" || cfg.Preview != "text-table" || cfg.Mode != db.EvalRunModeExplore {
 		t.Fatalf("config from prompts = %+v", cfg)
 	}
 	task, err := os.ReadFile(filepath.Join(workspace, ".gitmoot", "skillopt", "prompt-flow", "task.md"))
@@ -1133,7 +1133,7 @@ func TestSkillOptTrainInitCompletesFromPromptAnswers(t *testing.T) {
 }
 
 func TestSkillOptTrainInitWizardConfirm(t *testing.T) {
-	answers := "confirm-flow\nplanner\njerryfane/gitmoot\ntext\ntext-table\nImprove planner summaries.\n"
+	answers := "confirm-flow\nplanner\ngitmoot/gitmoot\ntext\ntext-table\nImprove planner summaries.\n"
 	cases := []struct {
 		name         string
 		stdin        string
@@ -1206,7 +1206,7 @@ func TestSkillOptTrainInitWizardCompletesFromStdin(t *testing.T) {
 	}
 	restoreInteractive := replaceSkillOptTrainInitInteractive(true)
 	defer restoreInteractive()
-	restoreStdin := replaceSkillOptTrainInitStdin("wizard-flow\nplanner\njerryfane/gitmoot\ntext\ntext-table\nImprove planner summaries.\n")
+	restoreStdin := replaceSkillOptTrainInitStdin("wizard-flow\nplanner\ngitmoot/gitmoot\ntext\ntext-table\nImprove planner summaries.\n")
 	defer restoreStdin()
 
 	var stdout, stderr bytes.Buffer
@@ -1232,7 +1232,7 @@ func TestSkillOptTrainInitWizardCompletesFromStdin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTrainInitConfig returned error: %v", err)
 	}
-	if cfg.Name != "wizard-flow" || cfg.Template != "planner" || cfg.ReviewRepo != "jerryfane/gitmoot" || cfg.ArtifactKind != "text" || cfg.Preview != "text-table" || cfg.Mode != db.EvalRunModeExplore {
+	if cfg.Name != "wizard-flow" || cfg.Template != "planner" || cfg.ReviewRepo != "gitmoot/gitmoot" || cfg.ArtifactKind != "text" || cfg.Preview != "text-table" || cfg.Mode != db.EvalRunModeExplore {
 		t.Fatalf("config from wizard = %+v", cfg)
 	}
 }
@@ -1282,7 +1282,7 @@ func TestSkillOptTrainInitWizardCompletesFromInteractiveAnswers(t *testing.T) {
 	answers := map[string]string{
 		"name":          "agent-flow",
 		"template":      "planner",
-		"review_repo":   "jerryfane/gitmoot",
+		"review_repo":   "gitmoot/gitmoot",
 		"artifact_kind": "text",
 		"preview":       "text-table",
 		"request":       "Improve planner summaries.",
@@ -1315,7 +1315,7 @@ func TestSkillOptTrainInitWizardCompletesFromInteractiveAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTrainInitConfig returned error: %v", err)
 	}
-	if cfg.Name != "agent-flow" || cfg.Template != "planner" || cfg.ReviewRepo != "jerryfane/gitmoot" || cfg.ArtifactKind != "text" || cfg.Preview != "text-table" {
+	if cfg.Name != "agent-flow" || cfg.Template != "planner" || cfg.ReviewRepo != "gitmoot/gitmoot" || cfg.ArtifactKind != "text" || cfg.Preview != "text-table" {
 		t.Fatalf("config from agent answers = %+v", cfg)
 	}
 }
@@ -1634,7 +1634,7 @@ func TestSkillOptTrainInitKeepsPromptAnswersForExplicitFlagErrors(t *testing.T) 
 	answers := map[string]string{
 		"name":          "explicit-error-flow",
 		"template":      "planner",
-		"review-repo":   "jerryfane/gitmoot",
+		"review-repo":   "gitmoot/gitmoot",
 		"artifact-kind": "text",
 		"request":       "Improve planner summaries.",
 	}
@@ -1690,7 +1690,7 @@ func TestSkillOptTrainInitFullyFlaggedBypassesPromptCreation(t *testing.T) {
 		"--home", home,
 		"--name", "flagged-flow",
 		"--template", "planner",
-		"--review-repo", "jerryfane/gitmoot",
+		"--review-repo", "gitmoot/gitmoot",
 		"--task-kind", "writing",
 		"--artifact-kind", "text",
 		"--preview", "text-table",
@@ -1874,7 +1874,7 @@ func TestSkillOptTrainStartConfigPreviewFlagsOverrideNone(t *testing.T) {
 		"--home", home,
 		"--name", "config-preview-enable",
 		"--template", "planner",
-		"--review-repo", "jerryfane/gitmoot",
+		"--review-repo", "gitmoot/gitmoot",
 		"--artifact-kind", "text",
 		"--preview", "none",
 		"--request", "Improve planner summaries.",
@@ -1928,7 +1928,7 @@ func TestSkillOptTrainInitAppliesModeDefaults(t *testing.T) {
 		"--home", home,
 		"--name", "validate-defaults",
 		"--template", "planner",
-		"--review-repo", "jerryfane/gitmoot",
+		"--review-repo", "gitmoot/gitmoot",
 		"--artifact-kind", "text",
 		"--preview", "none",
 		"--mode", "validate",
@@ -1976,7 +1976,7 @@ func TestSkillOptTrainStartConfigRepoOverrideDrivesVuePreviewRepo(t *testing.T) 
 		"--workspace-repo", "owner/workspace",
 		"--home", home,
 		"--config", filepath.Join(scaffoldDir, "config.toml"),
-		"--repo", "jerryfane/gitmoot",
+		"--repo", "gitmoot/gitmoot",
 		"--session", "config-repo-override-session",
 		"--yes",
 	}, &stdout, &stderr)
@@ -1992,10 +1992,10 @@ func TestSkillOptTrainStartConfigRepoOverrideDrivesVuePreviewRepo(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetSkillOptTrainSession returned error: %v", err)
 	}
-	if session.TargetRepo != "jerryfane/gitmoot" || session.PreviewRepo != "jerryfane/gitmoot" {
+	if session.TargetRepo != "gitmoot/gitmoot" || session.PreviewRepo != "gitmoot/gitmoot" {
 		t.Fatalf("session repos = target %q preview %q", session.TargetRepo, session.PreviewRepo)
 	}
-	if skillOptMetadataString(session.MetadataJSON, "review", "expected_repo") != "jerryfane/gitmoot" {
+	if skillOptMetadataString(session.MetadataJSON, "review", "expected_repo") != "gitmoot/gitmoot" {
 		t.Fatalf("expected review repo metadata = %s", session.MetadataJSON)
 	}
 }

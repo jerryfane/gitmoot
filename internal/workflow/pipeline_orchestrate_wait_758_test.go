@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // #758 ENGINE EDGE: every tree-terminal path for a pipeline-orchestrate root must
@@ -25,15 +25,15 @@ import (
 func TestPipelineOrchestrateRootBlockParentFinalizesInsteadOfBlocking(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// The stage job IS the sub-tree root: OrchestrateStage set, RootJobID = its own id,
 	// and crucially NO TaskID — a pipeline orchestrate stage request sets none, so the
 	// taskRef the block_parent path would act on is empty.
 	insertCompletedJob(t, store, db.Job{ID: "stage-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Sender:           "coord",
 		RootJobID:        "stage-job",
 		OrchestrateStage: true,
@@ -91,14 +91,14 @@ func TestPipelineOrchestrateRootBlockParentFinalizesInsteadOfBlocking(t *testing
 func TestPipelineOrchestrateContinuationBlockParentResolvesRootFlag(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// The tree ROOT carries the flag; it need not carry a live result for this test —
 	// isPipelineOrchestrateRoot only reads its OrchestrateStage flag.
 	insertCompletedJob(t, store, db.Job{ID: "stage-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Sender:           "coord",
 		RootJobID:        "stage-job",
 		OrchestrateStage: true,
@@ -106,7 +106,7 @@ func TestPipelineOrchestrateContinuationBlockParentResolvesRootFlag(t *testing.T
 	})
 	// A continuation generation: NO OrchestrateStage flag, RootJobID points at the root.
 	insertCompletedJob(t, store, db.Job{ID: "stage-job/continuation", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Sender:    "coord",
 		RootJobID: "stage-job",
 		Result: &AgentResult{
@@ -143,13 +143,13 @@ func TestPipelineOrchestrateContinuationBlockParentResolvesRootFlag(t *testing.T
 func TestPipelineOrchestrateRootVoteGateFinalizesInsteadOfBlocking(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "stage-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Sender:           "coord",
 		RootJobID:        "stage-job",
 		OrchestrateStage: true,
@@ -198,8 +198,8 @@ func TestPipelineOrchestrateRootVoteGateFinalizesInsteadOfBlocking(t *testing.T)
 func TestPipelineOrchestrateRootDispatchBlockFinalizesInsteadOfBlocking(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "impl", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "impl", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// The stage job IS the sub-tree root (OrchestrateStage, RootJobID = own id, NO
@@ -207,7 +207,7 @@ func TestPipelineOrchestrateRootDispatchBlockFinalizesInsteadOfBlocking(t *testi
 	// DelegationWorktrees manager the child takes the shared-checkout branch-lock path,
 	// which blocks on the empty branch — a dispatch-time BlockedError on an empty ref.
 	insertCompletedJob(t, store, db.Job{ID: "stage-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Sender:           "coord",
 		RootJobID:        "stage-job",
 		OrchestrateStage: true,

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // seedTreeWithUsage builds a small coordination tree rooted at rootID: the root
@@ -15,13 +15,13 @@ func seedTreeWithUsage(t *testing.T, store *db.Store, rootID string, n int, perC
 	t.Helper()
 	ctx := context.Background()
 	insertCompletedJob(t, store, db.Job{ID: rootID, Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "tree", Delegations: rootDelegations},
 	})
 	for i := 0; i < n; i++ {
 		childID := rootID + "/child" + string(rune('a'+i))
 		insertCompletedJob(t, store, db.Job{ID: childID, Agent: "w", Type: "ask"}, JobPayload{
-			Repo: "jerryfane/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "w",
+			Repo: "gitmoot/gitmoot", Branch: "task-009", TaskID: "task-9", Sender: "w",
 			RootJobID: rootID,
 			Result:    &AgentResult{Decision: "approved", Summary: "child"},
 		})
@@ -40,8 +40,8 @@ func seedTreeWithUsage(t *testing.T, store *db.Store, rootID string, n int, perC
 func TestEngineTokenBudgetTripEnqueuesFinalize(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	engine := testEngine(store)
 	engine.MaxDelegationTokenBudget = 1000
@@ -79,8 +79,8 @@ func TestEngineTokenBudgetTripEnqueuesFinalize(t *testing.T) {
 func TestEngineWithinTokenBudgetDispatches(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	engine := testEngine(store)
 	engine.MaxDelegationTokenBudget = 1000
@@ -108,8 +108,8 @@ func TestEngineWithinTokenBudgetDispatches(t *testing.T) {
 func TestEngineZeroTokenBudgetIsUnlimited(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 
 	engine := testEngine(store) // MaxDelegationTokenBudget defaults to 0 => unlimited
 
@@ -139,7 +139,7 @@ func TestSumRootDelegationTokens(t *testing.T) {
 
 	// Root R: coordinator (10 in / 20 out) + two children (100 out, 250 out).
 	insertCompletedJob(t, store, db.Job{ID: "R", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", TaskID: "task-9", Sender: "coord",
+		Repo: "gitmoot/gitmoot", TaskID: "task-9", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "root"},
 	})
 	if err := store.UpdateJobUsage(ctx, "R", 10, 20); err != nil {

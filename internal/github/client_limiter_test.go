@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // A gh call that ULTIMATELY fails with a secondary rate limit must engage the

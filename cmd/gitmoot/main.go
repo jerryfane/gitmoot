@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/jerryfane/gitmoot/internal/cli"
+	"github.com/gitmoot/gitmoot/internal/cli"
 )
 
 func main() {

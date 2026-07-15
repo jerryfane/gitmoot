@@ -12,19 +12,19 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 func TestEngineAdvanceJobDispatchesDelegations(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-005",
 		PullRequest: 5,
 		TaskID:      "task-5",
@@ -71,14 +71,14 @@ func TestEngineAdvanceJobDispatchesDelegations(t *testing.T) {
 func TestEngineEphemeralWorkerCannotDelegate(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// A job that is itself an ephemeral worker (payload.Ephemeral set) returns a
 	// delegation. The engine must NOT dispatch it (an ephemeral worker is a leaf
 	// that is auto-disposed; a continuation to its synthetic agent would strand).
 	insertCompletedJob(t, store, db.Job{ID: "eph-job", Agent: "x-ephemeral-abc", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		Sender:    "x-ephemeral-abc",
 		Ephemeral: &EphemeralSpec{Runtime: "codex"},
@@ -101,14 +101,14 @@ func TestEngineEphemeralWorkerCannotDelegate(t *testing.T) {
 func TestEngineAdvanceJobWritesDelegationArtifacts(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	root := t.TempDir()
 	engine.ArtifactRoot = root
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -152,12 +152,12 @@ func TestEngineAdvanceJobWritesDelegationArtifacts(t *testing.T) {
 func TestEngineAdvanceJobSkipsArtifactsWithoutRoot(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -189,9 +189,9 @@ func TestEngineAdvanceJobSkipsArtifactsWithoutRoot(t *testing.T) {
 func TestDispatchDelegationsTwoImplementSiblingsGetSeparateWorktrees(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "builder-a", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "builder-b", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "builder-a", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "builder-b", []string{"implement"}, "gitmoot/gitmoot")
 	home := t.TempDir()
 	manager := &fakeWorktreeManager{}
 	engine := testEngine(store)
@@ -200,7 +200,7 @@ func TestDispatchDelegationsTwoImplementSiblingsGetSeparateWorktrees(t *testing.
 	engine.DelegationWorktrees = manager
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -230,8 +230,8 @@ func TestDispatchDelegationsTwoImplementSiblingsGetSeparateWorktrees(t *testing.
 		t.Fatalf("unmarshalPayload(d2) returned error: %v", err)
 	}
 
-	wantPathOne := filepath.Join(home, "worktrees", "jerryfane--gitmoot", "delegations", "parent-job", "d1")
-	wantPathTwo := filepath.Join(home, "worktrees", "jerryfane--gitmoot", "delegations", "parent-job", "d2")
+	wantPathOne := filepath.Join(home, "worktrees", "gitmoot--gitmoot", "delegations", "parent-job", "d1")
+	wantPathTwo := filepath.Join(home, "worktrees", "gitmoot--gitmoot", "delegations", "parent-job", "d2")
 	if payloadOne.WorktreePath != wantPathOne {
 		t.Fatalf("d1 worktree path = %q, want %q", payloadOne.WorktreePath, wantPathOne)
 	}
@@ -263,9 +263,9 @@ func TestDispatchDelegationsSiblingsSharingWorktreeHintGetDistinctBranches(t *te
 	// not collide on a branch already checked out by the first.
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "builder-a", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "builder-b", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "builder-a", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "builder-b", []string{"implement"}, "gitmoot/gitmoot")
 	home := t.TempDir()
 	manager := &fakeWorktreeManager{}
 	engine := testEngine(store)
@@ -274,7 +274,7 @@ func TestDispatchDelegationsSiblingsSharingWorktreeHintGetDistinctBranches(t *te
 	engine.DelegationWorktrees = manager
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -318,13 +318,13 @@ func TestDispatchDelegationsWithoutWorktreeManagerEmitsSkippedEvent(t *testing.T
 	// isolation must be observable via a delegation_worktree_skipped event.
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "builder", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "builder", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	// No engine.Home / engine.DelegationWorktrees: isolation unavailable.
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -366,8 +366,8 @@ func TestEngineDelegationRetryGetsIsolatedWorktreePathAndBranch(t *testing.T) {
 	// failed original attempt's leftover worktree directory and checked-out branch.
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "builder", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "builder", []string{"implement"}, "gitmoot/gitmoot")
 	home := t.TempDir()
 	manager := &fakeWorktreeManager{}
 	engine := testEngine(store)
@@ -376,7 +376,7 @@ func TestEngineDelegationRetryGetsIsolatedWorktreePathAndBranch(t *testing.T) {
 	engine.DelegationWorktrees = manager
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -415,7 +415,7 @@ func TestEngineDelegationRetryGetsIsolatedWorktreePathAndBranch(t *testing.T) {
 	if retryPayload.Branch == originalPayload.Branch {
 		t.Fatalf("retry reuses original branch %q", retryPayload.Branch)
 	}
-	wantRetryPath := filepath.Join(home, "worktrees", "jerryfane--gitmoot", "delegations", "parent-job", "build", "retry", "1")
+	wantRetryPath := filepath.Join(home, "worktrees", "gitmoot--gitmoot", "delegations", "parent-job", "build", "retry", "1")
 	if retryPayload.WorktreePath != wantRetryPath {
 		t.Fatalf("retry worktree path = %q, want %q", retryPayload.WorktreePath, wantRetryPath)
 	}
@@ -434,12 +434,12 @@ func TestEngineDelegationRetryGetsIsolatedWorktreePathAndBranch(t *testing.T) {
 func TestEngineHandlePullRequestOpenedDispatchesReviewers(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		GoalID:            "goal-1",
@@ -461,7 +461,7 @@ func TestEngineHandlePullRequestOpenedDispatchesReviewers(t *testing.T) {
 	if !strings.Contains(job.Payload, `"lead_agent":"lead"`) {
 		t.Fatalf("payload missing lead agent: %s", job.Payload)
 	}
-	pr, err := store.GetPullRequest(ctx, "jerryfane/gitmoot", 7)
+	pr, err := store.GetPullRequest(ctx, "gitmoot/gitmoot", 7)
 	if err != nil {
 		t.Fatalf("GetPullRequest returned error: %v", err)
 	}
@@ -473,14 +473,14 @@ func TestEngineHandlePullRequestOpenedDispatchesReviewers(t *testing.T) {
 func TestEngineHandlePullRequestOpenedBlocksOnBranchLock(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-7", Owner: "other"}); err != nil || !acquired {
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-7", Owner: "other"}); err != nil || !acquired {
 		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
 	}
 	engine := testEngine(store)
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -498,11 +498,11 @@ func TestEngineHandlePullRequestOpenedBlocksOnBranchLock(t *testing.T) {
 func TestEngineHandlePullRequestOpenedBlocksWhenLeadLacksCapability(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -520,13 +520,13 @@ func TestEngineHandlePullRequestOpenedBlocksWhenLeadLacksCapability(t *testing.T
 func TestEngineHandlePullRequestOpenedRunsMergeGateWithoutReviewers(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	gate := &fakeMergeGate{decision: MergeDecision{Reason: "ci is pending"}}
 	engine.MergeGate = gate
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -547,7 +547,7 @@ func TestEngineHandlePullRequestOpenedRunsMergeGateWithoutReviewers(t *testing.T
 func TestEngineHandlePullRequestOpenedDoesNotOverwriteNoReviewerMerge(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	gate := &fakeMergeGate{
 		decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"},
@@ -555,7 +555,7 @@ func TestEngineHandlePullRequestOpenedDoesNotOverwriteNoReviewerMerge(t *testing
 			if err := store.UpsertPullRequest(ctx, db.PullRequest{
 				RepoFullName:   request.Repo,
 				Number:         int64(request.PullRequest),
-				URL:            "https://github.com/jerryfane/gitmoot/pull/7",
+				URL:            "https://github.com/gitmoot/gitmoot/pull/7",
 				HeadBranch:     request.Branch,
 				BaseBranch:     "main",
 				HeadSHA:        request.HeadSHA,
@@ -569,7 +569,7 @@ func TestEngineHandlePullRequestOpenedDoesNotOverwriteNoReviewerMerge(t *testing
 	engine.MergeGate = gate
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		HeadSHA:     "head123",
@@ -582,7 +582,7 @@ func TestEngineHandlePullRequestOpenedDoesNotOverwriteNoReviewerMerge(t *testing
 		t.Fatalf("HandlePullRequestOpened returned error: %v", err)
 	}
 	assertTaskState(t, store, "task-7", TaskMerged)
-	pr, err := store.GetPullRequest(ctx, "jerryfane/gitmoot", 7)
+	pr, err := store.GetPullRequest(ctx, "gitmoot/gitmoot", 7)
 	if err != nil {
 		t.Fatalf("GetPullRequest returned error: %v", err)
 	}
@@ -594,14 +594,14 @@ func TestEngineHandlePullRequestOpenedDoesNotOverwriteNoReviewerMerge(t *testing
 func TestEngineHandlePullRequestOpenedSkipsReviewFanout(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	gate := &fakeMergeGate{decision: MergeDecision{Ready: true}}
 	engine.MergeGate = gate
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		HeadSHA:           "head123",
@@ -634,7 +634,7 @@ func TestEngineHandlePullRequestOpenedSkipsReviewFanout(t *testing.T) {
 		t.Fatalf("merge gate requests = %+v", gate.requests)
 	}
 	// Baseline still recorded so the PR advances.
-	pr, err := store.GetPullRequest(ctx, "jerryfane/gitmoot", 7)
+	pr, err := store.GetPullRequest(ctx, "gitmoot/gitmoot", 7)
 	if err != nil {
 		t.Fatalf("GetPullRequest returned error: %v", err)
 	}
@@ -646,12 +646,12 @@ func TestEngineHandlePullRequestOpenedSkipsReviewFanout(t *testing.T) {
 func TestEngineAdvanceImplementPersistsSkipReviewFanoutOntoLock(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	gate := &fakeMergeGate{decision: MergeDecision{Reason: "ci is pending"}}
 	engine.MergeGate = gate
 	// A branch lock owned by the lead must exist for the setter to flip.
-	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
 		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
 	}
 	insertCompletedJob(t, store, db.Job{
@@ -659,7 +659,7 @@ func TestEngineAdvanceImplementPersistsSkipReviewFanoutOntoLock(t *testing.T) {
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:                   "jerryfane/gitmoot",
+		Repo:                   "gitmoot/gitmoot",
 		Branch:                 "task-7",
 		PullRequest:            7,
 		HeadSHA:                "head123",
@@ -684,7 +684,7 @@ func TestEngineAdvanceImplementPersistsSkipReviewFanoutOntoLock(t *testing.T) {
 			t.Fatalf("expected no review jobs, found %+v", job)
 		}
 	}
-	lock, err := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	lock, err := store.GetBranchLock(ctx, "gitmoot/gitmoot", "task-7")
 	if err != nil {
 		t.Fatalf("GetBranchLock returned error: %v", err)
 	}
@@ -700,8 +700,8 @@ func TestEngineAdvanceImplementPersistsSkipReviewFanoutOntoLock(t *testing.T) {
 func TestEngineAdvanceImplementDispatchesReviewers(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RequiredReviewers = []string{"audit"}
 	insertCompletedJob(t, store, db.Job{
@@ -709,7 +709,7 @@ func TestEngineAdvanceImplementDispatchesReviewers(t *testing.T) {
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		GoalID:      "goal-1",
@@ -740,8 +740,8 @@ func TestEngineAdvanceImplementDispatchesReviewers(t *testing.T) {
 func TestEngineAdvanceImplementDefaultsLeadAgent(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RequiredReviewers = []string{"audit"}
 	insertCompletedJob(t, store, db.Job{
@@ -749,7 +749,7 @@ func TestEngineAdvanceImplementDefaultsLeadAgent(t *testing.T) {
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -769,14 +769,14 @@ func TestEngineAdvanceImplementDefaultsLeadAgent(t *testing.T) {
 func TestEngineAdvanceImplementSkipsPullRequestFlowWhenNoPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	insertCompletedJob(t, store, db.Job{
 		ID:    "implement-job",
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-7",
 		GoalID:    "goal-1",
 		TaskID:    "task-7",
@@ -810,14 +810,14 @@ func TestEngineAdvanceImplementTerminalDecisionsRecordNoPROnce(t *testing.T) {
 		t.Run(decision, func(t *testing.T) {
 			ctx := context.Background()
 			store := openEngineStore(t)
-			seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+			seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 			engine := testEngine(store)
 			insertCompletedJob(t, store, db.Job{
 				ID:    "implement-job",
 				Agent: "lead",
 				Type:  "implement",
 			}, JobPayload{
-				Repo:      "jerryfane/gitmoot",
+				Repo:      "gitmoot/gitmoot",
 				Branch:    "task-817",
 				TaskID:    "task-817",
 				TaskTitle: "Terminal implement decision",
@@ -865,14 +865,14 @@ func TestEngineAdvanceImplementTerminalDecisionsRecordNoPROnce(t *testing.T) {
 func TestEngineAdvanceImplementNoPREventConcurrent(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	insertCompletedJob(t, store, db.Job{
 		ID:    "implement-job",
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Branch: "task-817",
 		Result: &AgentResult{Decision: "approved", Summary: "terminal without PR"},
 	})
@@ -915,7 +915,7 @@ func TestEngineAdvanceImplementNoPREventConcurrent(t *testing.T) {
 func TestEngineAdvanceImplementDoesNotFinalizeWithoutTaskWorktree(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.ImplementationFinalizer = fakeImplementationFinalizer{err: errors.New("finalizer should not run")}
 	insertCompletedJob(t, store, db.Job{
@@ -923,7 +923,7 @@ func TestEngineAdvanceImplementDoesNotFinalizeWithoutTaskWorktree(t *testing.T) 
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-7",
 		GoalID:    "goal-1",
 		TaskID:    "task-7",
@@ -952,13 +952,13 @@ func TestEngineAdvanceImplementDoesNotFinalizeWithoutTaskWorktree(t *testing.T) 
 func TestEngineAdvanceImplementUsesFinalizerBeforePullRequestFlow(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RequiredReviewers = []string{"audit"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-7",
-		RepoFullName: "jerryfane/gitmoot",
+		RepoFullName: "gitmoot/gitmoot",
 		GoalID:       "goal-1",
 		Title:        "Workflow Engine",
 		State:        string(TaskImplementing),
@@ -969,7 +969,7 @@ func TestEngineAdvanceImplementUsesFinalizerBeforePullRequestFlow(t *testing.T) 
 	}
 	engine.ImplementationFinalizer = fakeImplementationFinalizer{
 		payload: JobPayload{
-			Repo:        "jerryfane/gitmoot",
+			Repo:        "gitmoot/gitmoot",
 			Branch:      "task-7",
 			PullRequest: 8,
 			HeadSHA:     "head-after-finalizer",
@@ -985,7 +985,7 @@ func TestEngineAdvanceImplementUsesFinalizerBeforePullRequestFlow(t *testing.T) 
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-7",
 		GoalID:    "goal-1",
 		TaskID:    "task-7",
@@ -1013,11 +1013,11 @@ func TestEngineAdvanceImplementUsesFinalizerBeforePullRequestFlow(t *testing.T) 
 func TestEngineAdvanceExistingPullRequestImplementStillUsesFinalizer(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-7",
-		RepoFullName: "jerryfane/gitmoot",
+		RepoFullName: "gitmoot/gitmoot",
 		GoalID:       "goal-1",
 		Title:        "Workflow Engine",
 		State:        string(TaskImplementing),
@@ -1028,7 +1028,7 @@ func TestEngineAdvanceExistingPullRequestImplementStillUsesFinalizer(t *testing.
 	}
 	engine.ImplementationFinalizer = fakeImplementationFinalizer{
 		payload: JobPayload{
-			Repo:        "jerryfane/gitmoot",
+			Repo:        "gitmoot/gitmoot",
 			Branch:      "task-7",
 			PullRequest: 7,
 			HeadSHA:     "head-after-finalizer",
@@ -1044,7 +1044,7 @@ func TestEngineAdvanceExistingPullRequestImplementStillUsesFinalizer(t *testing.
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		HeadSHA:     "old-head",
@@ -1072,11 +1072,11 @@ func TestEngineAdvanceExistingPullRequestImplementStillUsesFinalizer(t *testing.
 func TestEngineRunJobAdvancesCompletedResult(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.RequiredReviewers = []string{"audit"}
-	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "lead"}
+	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "lead"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"implemented","summary":"opened PR","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -1084,7 +1084,7 @@ func TestEngineRunJobAdvancesCompletedResult(t *testing.T) {
 		ID:          "implement-job",
 		Agent:       "lead",
 		Action:      "implement",
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1114,12 +1114,12 @@ func TestEngineRunJobAdvancesCompletedResult(t *testing.T) {
 func TestEngineRunJobWrapsPostSuccessAdvanceError(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	// A pending (not-ready) merge gate blocks the no-reviewers tail -> AdvanceJob
 	// returns a BlockedError AFTER the result is stored.
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Reason: "ci is pending"}}
-	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "lead"}
+	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "lead"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"implemented","summary":"opened PR","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -1127,7 +1127,7 @@ func TestEngineRunJobWrapsPostSuccessAdvanceError(t *testing.T) {
 		ID:          "implement-job",
 		Agent:       "lead",
 		Action:      "implement",
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		HeadSHA:     "head123",
@@ -1165,16 +1165,16 @@ func TestEngineRunJobWrapsPostSuccessAdvanceError(t *testing.T) {
 func TestEngineRunJobDeliveryFailureStaysRaw(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
-	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "lead"}
+	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "lead"}
 	// A delivery error before the result is stored.
 	adapter := &fakeDelivery{err: errors.New("runtime exploded")}
 	if _, err := (Mailbox{Store: store}).Enqueue(ctx, JobRequest{
 		ID:        "implement-job",
 		Agent:     "lead",
 		Action:    "implement",
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-7",
 		TaskID:    "task-7",
 		LeadAgent: "lead",
@@ -1200,13 +1200,13 @@ func TestEngineRunJobDeliveryFailureStaysRaw(t *testing.T) {
 func TestEngineRunJobAllowsDelegatedImplementWithOriginalBranchLock(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
-	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
 		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
 	}
 	payload, err := marshalPayload(JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Branch:           "task-7",
 		PullRequest:      7,
 		HeadSHA:          "head123",
@@ -1223,7 +1223,7 @@ func TestEngineRunJobAllowsDelegatedImplementWithOriginalBranchLock(t *testing.T
 		t.Fatalf("CreateJob returned error: %v", err)
 	}
 	engine := testEngine(store)
-	agent := runtime.Agent{Name: "lead-temp-job-1", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "lead"}
+	agent := runtime.Agent{Name: "lead-temp-job-1", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "lead"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"implemented","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -1236,7 +1236,7 @@ func TestEngineRunJobAllowsDelegatedImplementWithOriginalBranchLock(t *testing.T
 	if job.State != string(JobSucceeded) {
 		t.Fatalf("job state = %q, want succeeded", job.State)
 	}
-	lock, err := store.GetBranchLock(ctx, "jerryfane/gitmoot", "task-7")
+	lock, err := store.GetBranchLock(ctx, "gitmoot/gitmoot", "task-7")
 	if err != nil {
 		t.Fatalf("GetBranchLock returned error: %v", err)
 	}
@@ -1250,9 +1250,9 @@ func TestEngineRunJobAllowsDelegatedImplementWithOriginalBranchLock(t *testing.T
 func TestEngineRunJobAllowsMergeBackAskForImplementOnlyOriginal(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	payload, err := marshalPayload(JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Branch:           "task-7",
 		TaskID:           "task-7",
 		OriginalAgent:    "lead",
@@ -1266,7 +1266,7 @@ func TestEngineRunJobAllowsMergeBackAskForImplementOnlyOriginal(t *testing.T) {
 		t.Fatalf("CreateJob returned error: %v", err)
 	}
 	engine := testEngine(store)
-	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "lead"}
+	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "lead"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"approved","summary":"ack","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -1284,12 +1284,12 @@ func TestEngineRunJobAllowsMergeBackAskForImplementOnlyOriginal(t *testing.T) {
 func TestEngineRunJobPreflightsPolicyBeforeDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-7", Owner: "other"}); err != nil || !acquired {
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-7", Owner: "other"}); err != nil || !acquired {
 		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
 	}
 	engine := testEngine(store)
-	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "lead"}
+	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "lead"}
 	delivered := false
 	adapter := &fakeDelivery{
 		outputs: []string{
@@ -1303,7 +1303,7 @@ func TestEngineRunJobPreflightsPolicyBeforeDelivery(t *testing.T) {
 		ID:          "implement-job",
 		Agent:       "lead",
 		Action:      "implement",
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1328,15 +1328,15 @@ func TestEngineRunJobPreflightsPolicyBeforeDelivery(t *testing.T) {
 func TestEngineAdvanceReviewChangesRequestedDispatchesFix(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	insertCompletedJob(t, store, db.Job{
 		ID:    "review-job",
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1362,7 +1362,7 @@ func TestEngineAdvancePipelineReviewIsReportOnly(t *testing.T) {
 		t.Run(decision, func(t *testing.T) {
 			ctx := context.Background()
 			store := openEngineStore(t)
-			seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+			seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 			engine := testEngine(store)
 			gate := &fakeMergeGate{onEvaluate: func(MergeRequest) {
 				t.Fatalf("merge gate evaluated for report-only pipeline review")
@@ -1373,7 +1373,7 @@ func TestEngineAdvancePipelineReviewIsReportOnly(t *testing.T) {
 				Agent: "audit",
 				Type:  "review",
 			}, JobPayload{
-				Repo:        "jerryfane/gitmoot",
+				Repo:        "gitmoot/gitmoot",
 				Branch:      "task-813",
 				PullRequest: 813,
 				HeadSHA:     "head813",
@@ -1415,8 +1415,8 @@ func TestEngineAdvancePipelineReviewIsReportOnly(t *testing.T) {
 func TestEngineAdvanceReviewSkipsPullRequestFlowWhenNoPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	// A non-nil merge gate that fails the test if it is ever evaluated: a PR-less
 	// approved review must not route into the merge gate (the daemon wires a real
@@ -1429,7 +1429,7 @@ func TestEngineAdvanceReviewSkipsPullRequestFlowWhenNoPullRequest(t *testing.T) 
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		TaskID:    "task-7",
 		TaskTitle: "Workflow Engine",
 		// PullRequest=0 / Branch="" as a review heartbeat enqueues it.
@@ -1460,7 +1460,7 @@ func TestEngineAdvanceReviewSkipsPullRequestFlowWhenNoPullRequest(t *testing.T) 
 func TestEngineAdvanceReviewApprovedSkipsMergeGateWhenNoPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{onEvaluate: func(MergeRequest) {
 		t.Fatalf("merge gate evaluated for a PR-less review; want skip")
@@ -1470,7 +1470,7 @@ func TestEngineAdvanceReviewApprovedSkipsMergeGateWhenNoPullRequest(t *testing.T
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		TaskID:    "task-7",
 		TaskTitle: "Workflow Engine",
 		Result:    &AgentResult{Decision: "approved", Summary: "looks good"},
@@ -1494,14 +1494,14 @@ func TestEngineAdvanceReviewApprovedSkipsMergeGateWhenNoPullRequest(t *testing.T
 func TestEngineAdvanceReviewChangesRequestedReplayIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	insertCompletedJob(t, store, db.Job{
 		ID:    "review-job",
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1536,8 +1536,8 @@ func TestEngineAdvanceReviewChangesRequestedReplayIsIdempotent(t *testing.T) {
 func TestEngineAdvanceReviewChangesRequestedUsesBranchLockLead(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "jerryfane/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "gitmoot/gitmoot", Branch: "task-7", Owner: "lead"}); err != nil || !acquired {
 		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
 	}
 	engine := testEngine(store)
@@ -1546,7 +1546,7 @@ func TestEngineAdvanceReviewChangesRequestedUsesBranchLockLead(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1577,7 +1577,7 @@ func TestEngineAdvanceReviewApprovalRunsMergeGate(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1607,7 +1607,7 @@ func TestEngineAdvanceDelegatedReviewApprovalUsesOriginalReviewer(t *testing.T) 
 		Agent: "audit-temp-job-a",
 		Type:  "review",
 	}, JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Branch:           "task-7",
 		PullRequest:      7,
 		TaskID:           "task-7",
@@ -1642,7 +1642,7 @@ func TestEngineAdvanceReviewApprovalCountsPriorDelegatedReviewer(t *testing.T) {
 		Agent: "audit-temp-job-a",
 		Type:  "review",
 	}, JobPayload{
-		Repo:             "jerryfane/gitmoot",
+		Repo:             "gitmoot/gitmoot",
 		Branch:           "task-7",
 		PullRequest:      7,
 		TaskID:           "task-7",
@@ -1658,7 +1658,7 @@ func TestEngineAdvanceReviewApprovalCountsPriorDelegatedReviewer(t *testing.T) {
 		Agent: "security",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1690,7 +1690,7 @@ func TestEngineAdvanceReviewApprovalWaitsForAllRequiredReviewers(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1712,7 +1712,7 @@ func TestEngineAdvanceReviewApprovalWaitsForAllRequiredReviewers(t *testing.T) {
 		Agent: "security",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1733,7 +1733,7 @@ func TestEngineAdvanceReviewApprovalWaitsForAllRequiredReviewers(t *testing.T) {
 func TestEngineAdvanceReviewApprovalPreservesChangesRequested(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	gate := &fakeMergeGate{decision: MergeDecision{Ready: true}}
 	engine.MergeGate = gate
@@ -1743,7 +1743,7 @@ func TestEngineAdvanceReviewApprovalPreservesChangesRequested(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1762,7 +1762,7 @@ func TestEngineAdvanceReviewApprovalPreservesChangesRequested(t *testing.T) {
 		Agent: "security",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1783,11 +1783,11 @@ func TestEngineAdvanceReviewApprovalPreservesChangesRequested(t *testing.T) {
 func TestEngineHandlePullRequestOpenedCreatesNewReviewRoundForUpdates(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	event := PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		TaskID:            "task-7",
@@ -1810,11 +1810,11 @@ func TestEngineHandlePullRequestOpenedCreatesNewReviewRoundForUpdates(t *testing
 func TestEngineHandlePullRequestOpenedIsIdempotentAfterDelegatedReview(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	event := PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		HeadSHA:           "head123",
@@ -1869,12 +1869,12 @@ func TestEngineHandlePullRequestOpenedIsIdempotentAfterDelegatedReview(t *testin
 func TestEngineHandlePullRequestOpenedPreflightsReviewersBeforeEnqueue(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
-		Repo:              "jerryfane/gitmoot",
+		Repo:              "gitmoot/gitmoot",
 		Branch:            "task-7",
 		PullRequest:       7,
 		TaskID:            "task-7",
@@ -1910,7 +1910,7 @@ func TestEngineAdvanceReviewApprovalIgnoresEarlierReviewRounds(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1924,7 +1924,7 @@ func TestEngineAdvanceReviewApprovalIgnoresEarlierReviewRounds(t *testing.T) {
 		Agent: "security",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1947,7 +1947,7 @@ func TestEngineAdvanceReviewApprovalIgnoresEarlierReviewRounds(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1985,7 +1985,7 @@ func TestEngineAdvanceReviewApprovalIgnoresStaleRoundWhenNewerRoundExists(t *tes
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -1995,7 +1995,7 @@ func TestEngineAdvanceReviewApprovalIgnoresStaleRoundWhenNewerRoundExists(t *tes
 		Result:      &AgentResult{Decision: "approved", Summary: "old approval"},
 	})
 	encoded, err := marshalPayload(JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -2036,7 +2036,7 @@ func TestEngineAdvanceStaleReviewDoesNotRegressReadyState(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -2050,7 +2050,7 @@ func TestEngineAdvanceStaleReviewDoesNotRegressReadyState(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -2096,7 +2096,7 @@ func TestEngineAdvanceReviewApprovalIgnoresOtherRepoTaskID(t *testing.T) {
 		Agent: "security",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -2125,7 +2125,7 @@ func TestEngineAdvanceReviewApprovalBlocksOnMergeGateRejection(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -2151,7 +2151,7 @@ func TestEngineAdvanceBlocksOnAgentBlockedResult(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-7",
 		TaskID:    "task-7",
 		TaskTitle: "Workflow Engine",
@@ -2335,14 +2335,14 @@ func jobExists(t *testing.T, store *db.Store, jobID string) bool {
 func TestEngineAdvanceDelegationsGatesOnDeps(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "integ", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "integ", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -2406,13 +2406,13 @@ func TestEngineAdvanceDelegationsGatesOnDeps(t *testing.T) {
 func TestEngineAdvanceDelegationsEnqueuesContinuationOnce(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -2485,12 +2485,12 @@ func TestEngineAdvanceDelegationsEnqueuesContinuationOnce(t *testing.T) {
 func TestEngineContinuationCarriesParentModel(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Branch: "task-005",
 		Sender: "coord",
 		Model:  "opus",
@@ -2530,8 +2530,8 @@ func TestEngineContinuationCarriesParentModel(t *testing.T) {
 func TestEngineContinuationCarriesRuntimeOverride(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	freshRef, err := runtime.NewFreshRef()
@@ -2539,7 +2539,7 @@ func TestEngineContinuationCarriesRuntimeOverride(t *testing.T) {
 		t.Fatalf("NewFreshRef: %v", err)
 	}
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:               "jerryfane/gitmoot",
+		Repo:               "gitmoot/gitmoot",
 		Branch:             "task-005",
 		Sender:             "coord",
 		Model:              "claude-opus-4-5",
@@ -2580,12 +2580,12 @@ func TestEngineContinuationCarriesRuntimeOverride(t *testing.T) {
 func TestEngineContinuationInheritsCockpit(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:           "jerryfane/gitmoot",
+		Repo:           "gitmoot/gitmoot",
 		Branch:         "task-005",
 		Sender:         "coord",
 		Cockpit:        true,
@@ -2619,13 +2619,13 @@ func TestEngineContinuationInheritsCockpit(t *testing.T) {
 func TestEngineDelegationFailurePolicyBlockParent(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "integ", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "integ", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -2659,14 +2659,14 @@ func TestEngineDelegationFailurePolicyBlockParent(t *testing.T) {
 func TestEngineDelegationFailurePolicyContinue(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "integ", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "integ", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -2720,13 +2720,13 @@ func TestEngineDelegationFailurePolicyContinue(t *testing.T) {
 func TestEngineDelegationFailurePolicyEscalate(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -2769,7 +2769,7 @@ func TestContinuationPromptInlinesChildResults(t *testing.T) {
 		"ui":  {ID: "parent-job/delegation/ui", Agent: "ui", State: string(JobSucceeded)},
 	}
 	childPayloads := map[string]JobPayload{
-		"api": {Repo: "jerryfane/gitmoot", PullRequest: 12, Result: &AgentResult{Decision: "implemented", Summary: "api built"}},
+		"api": {Repo: "gitmoot/gitmoot", PullRequest: 12, Result: &AgentResult{Decision: "implemented", Summary: "api built"}},
 		"ui":  {Result: &AgentResult{Decision: "approved", Summary: "ui built"}},
 	}
 	prompt := Engine{}.buildContinuationPrompt("", "", &AgentResult{Delegations: dels}, children, childPayloads, "")
@@ -2780,7 +2780,7 @@ func TestContinuationPromptInlinesChildResults(t *testing.T) {
 		"ui built",
 		"implemented",
 		"approved",
-		"https://github.com/jerryfane/gitmoot/pull/12",
+		"https://github.com/gitmoot/gitmoot/pull/12",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("continuation prompt missing %q\n%s", want, prompt)
@@ -3023,12 +3023,12 @@ func jobEventMessage(t *testing.T, store *db.Store, jobID, kind string) string {
 func TestEngineDelegationTimeoutPlumbedToChildPayload(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3059,9 +3059,9 @@ func TestEngineDelegationTimeoutPlumbedToChildPayload(t *testing.T) {
 func TestEngineDelegationDefaultTimeoutsAppliedFromPolicy(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "conductor", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "planner", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "reviewer", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "conductor", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "planner", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "reviewer", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.DelegationTimeoutDefaults = DelegationTimeoutDefaults{
 		Default: "45m",
@@ -3070,7 +3070,7 @@ func TestEngineDelegationDefaultTimeoutsAppliedFromPolicy(t *testing.T) {
 	}
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "conductor", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Branch: "task-005",
 		Sender: "conductor",
 		Result: &AgentResult{
@@ -3114,12 +3114,12 @@ func TestEngineDelegationDefaultTimeoutsAppliedFromPolicy(t *testing.T) {
 func TestEngineDelegationWithoutTimeoutDefaultStaysUnbounded(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Branch: "task-005",
 		Sender: "audit",
 		Result: &AgentResult{
@@ -3147,12 +3147,12 @@ func TestEngineDelegationWithoutTimeoutDefaultStaysUnbounded(t *testing.T) {
 func TestEngineDelegationModelAndEffortPlumbedToChildPayload(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3188,7 +3188,7 @@ func TestEngineDelegationRequestCopiesModelAndEffort(t *testing.T) {
 	engine := Engine{}
 	request := engine.delegationRequest(
 		db.Job{ID: "parent-job", Agent: "audit"},
-		JobPayload{Repo: "jerryfane/gitmoot", Effort: "low"},
+		JobPayload{Repo: "gitmoot/gitmoot", Effort: "low"},
 		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go", Model: "opus", Effort: "high"},
 	)
 	if request.Model != "opus" {
@@ -3202,12 +3202,12 @@ func TestEngineDelegationRequestCopiesModelAndEffort(t *testing.T) {
 func TestEngineDelegationPhasePlumbedToChildPayload(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "audit", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3239,7 +3239,7 @@ func TestEngineDelegationRequestCopiesPhase(t *testing.T) {
 	engine := Engine{}
 	request := engine.delegationRequest(
 		db.Job{ID: "parent-job", Agent: "audit"},
-		JobPayload{Repo: "jerryfane/gitmoot"},
+		JobPayload{Repo: "gitmoot/gitmoot"},
 		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go", Phase: "  design  "},
 	)
 	if request.Phase != "design" {
@@ -3251,7 +3251,7 @@ func TestEngineDelegationRequestInheritsCockpit(t *testing.T) {
 	engine := Engine{}
 	request := engine.delegationRequest(
 		db.Job{ID: "parent-job", Agent: "audit"},
-		JobPayload{Repo: "jerryfane/gitmoot", Cockpit: true, CockpitSession: "room", CockpitPaneKey: "seat"},
+		JobPayload{Repo: "gitmoot/gitmoot", Cockpit: true, CockpitSession: "room", CockpitPaneKey: "seat"},
 		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go"},
 	)
 	if !request.Cockpit {
@@ -3267,7 +3267,7 @@ func TestEngineDelegationRequestInheritsCockpit(t *testing.T) {
 	// A coordinator that did not opt in produces children with cockpit off.
 	off := engine.delegationRequest(
 		db.Job{ID: "parent-job", Agent: "audit"},
-		JobPayload{Repo: "jerryfane/gitmoot"},
+		JobPayload{Repo: "gitmoot/gitmoot"},
 		Delegation{ID: "del-2", Agent: "helper", Action: "review", Prompt: "go"},
 	)
 	if off.Cockpit {
@@ -3280,7 +3280,7 @@ func TestEngineDelegationRequestThreadsEphemeralSpec(t *testing.T) {
 	spec := &EphemeralSpec{Runtime: runtime.CodexRuntime, Model: "gpt-5.4", Effort: "high"}
 	request := engine.delegationRequest(
 		db.Job{ID: "parent-job", Agent: "audit"},
-		JobPayload{Repo: "jerryfane/gitmoot"},
+		JobPayload{Repo: "gitmoot/gitmoot"},
 		Delegation{ID: "worker", Ephemeral: spec, Action: "implement", Prompt: "hi"},
 	)
 	if request.Ephemeral != spec {
@@ -3298,7 +3298,7 @@ func TestEngineDelegationRequestThreadsEphemeralSpec(t *testing.T) {
 	// A non-ephemeral delegation keeps routing to its named agent unchanged.
 	plain := engine.delegationRequest(
 		db.Job{ID: "parent-job", Agent: "audit"},
-		JobPayload{Repo: "jerryfane/gitmoot"},
+		JobPayload{Repo: "gitmoot/gitmoot"},
 		Delegation{ID: "del-1", Agent: "helper", Action: "review", Prompt: "go"},
 	)
 	if plain.Ephemeral != nil {
@@ -3315,11 +3315,11 @@ func TestEngineDispatchesEphemeralDelegationWithoutRegisteredAgent(t *testing.T)
 	// The coordinator is registered; the ephemeral worker deliberately is NOT, so
 	// this exercises the engine's bypass of the registered-agent existence,
 	// repo-access, and capability checks for an ephemeral delegation.
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3397,12 +3397,12 @@ func TestEngineDelegationInvalidLifecycleRejectedAtExtraction(t *testing.T) {
 func TestEngineDelegationRetryReenqueuesUntilExhausted(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3474,13 +3474,13 @@ func TestEngineDelegationRetryReenqueuesUntilExhausted(t *testing.T) {
 func TestEngineDelegationFingerprintDedup(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3513,13 +3513,13 @@ func TestEngineDelegationFingerprintDedup(t *testing.T) {
 func TestEngineDelegationFingerprintScopedPerParent(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	for _, parent := range []string{"parent-a", "parent-b"} {
 		insertCompletedJob(t, store, db.Job{ID: parent, Agent: "coord", Type: "ask"}, JobPayload{
-			Repo:      "jerryfane/gitmoot",
+			Repo:      "gitmoot/gitmoot",
 			Branch:    "task-005",
 			TaskID:    "task-5",
 			TaskTitle: "Parent",
@@ -3558,14 +3558,14 @@ func TestEngineDelegationFingerprintScopedPerParent(t *testing.T) {
 func TestEngineDelegationDedupedResolvesContinuationAndDependent(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "synth", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "synth", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3628,15 +3628,15 @@ func TestEngineDelegationDedupedResolvesContinuationAndDependent(t *testing.T) {
 func TestEngineDelegationDeferredDedupResolvesContinuation(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "g1", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "g2", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "a", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "b", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "g1", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "g2", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "a", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "b", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3699,8 +3699,8 @@ func TestEngineDelegationDeferredDedupResolvesContinuation(t *testing.T) {
 func TestEngineDelegationDepthCapStopsDispatch(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	result := func() *AgentResult {
@@ -3713,7 +3713,7 @@ func TestEngineDelegationDepthCapStopsDispatch(t *testing.T) {
 
 	// At the cap: dispatch is refused and a delegation_depth_exceeded event fires.
 	insertCompletedJob(t, store, db.Job{ID: "deep-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
 		DelegationDepth: MaxDelegationDepth, Result: result(),
 	})
 	if err := engine.AdvanceJob(ctx, "deep-job"); err != nil {
@@ -3738,7 +3738,7 @@ func TestEngineDelegationDepthCapStopsDispatch(t *testing.T) {
 
 	// Just under the cap: dispatch still proceeds.
 	insertCompletedJob(t, store, db.Job{ID: "shallow-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
 		DelegationDepth: MaxDelegationDepth - 1, Result: result(),
 	})
 	if err := engine.AdvanceJob(ctx, "shallow-job"); err != nil {
@@ -3756,12 +3756,12 @@ func TestEngineDelegationDepthCapStopsDispatch(t *testing.T) {
 func TestEngineDelegationRootJobIDPropagates(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3833,14 +3833,14 @@ func TestContinuationPromptIncludesCompletionContract(t *testing.T) {
 func TestEngineDelegationBudgetCapStopsDispatch(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Seed MaxDelegationTotalJobs jobs already belonging to the root's tree: the
 	// originating coordinator itself plus enough children stamped with its root.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -3855,7 +3855,7 @@ func TestEngineDelegationBudgetCapStopsDispatch(t *testing.T) {
 	})
 	for i := 1; i < MaxDelegationTotalJobs; i++ {
 		insertCompletedJob(t, store, db.Job{ID: fmt.Sprintf("root-job/filler/%d", i), Agent: "w", Type: "review"}, JobPayload{
-			Repo:      "jerryfane/gitmoot",
+			Repo:      "gitmoot/gitmoot",
 			Branch:    "task-005",
 			TaskID:    "task-5",
 			Sender:    "coord",
@@ -3900,8 +3900,8 @@ func TestEngineDelegationBudgetCapStopsDispatch(t *testing.T) {
 func TestEngineDelegationWidthCapStopsDispatch(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	dels := make([]Delegation, 0, MaxDelegationWidth+1)
@@ -3909,7 +3909,7 @@ func TestEngineDelegationWidthCapStopsDispatch(t *testing.T) {
 		dels = append(dels, Delegation{ID: fmt.Sprintf("d%d", i), Agent: "w", Action: "ask", Prompt: "work"})
 	}
 	insertCompletedJob(t, store, db.Job{ID: "wide-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord",
 		Result: &AgentResult{Decision: "approved", Summary: "too wide", Delegations: dels},
 	})
 	if err := engine.AdvanceJob(ctx, "wide-job"); err != nil {
@@ -3942,13 +3942,13 @@ func TestEngineDelegationBudgetProjectedRefusesBatchJustUnderCap(t *testing.T) {
 	t.Setenv("GITMOOT_MAX_DELEGATION_TOTAL_JOBS", "3")
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Tree at total = maxJobs-1 = 2: the coordinator (self-roots) plus one filler.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
 		Result: &AgentResult{
 			Decision: "approved", Summary: "done",
 			Delegations: []Delegation{
@@ -3958,7 +3958,7 @@ func TestEngineDelegationBudgetProjectedRefusesBatchJustUnderCap(t *testing.T) {
 		},
 	})
 	insertCompletedJob(t, store, db.Job{ID: "root-job/filler/1", Agent: "w", Type: "review"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
 	})
 	if count, err := engine.countRootDelegationJobs(ctx, "root-job"); err != nil || count != 2 {
 		t.Fatalf("precondition countRootDelegationJobs = %d (err %v), want 2", count, err)
@@ -3994,13 +3994,13 @@ func TestEngineDelegationBudgetProjectedAdmitsExactFit(t *testing.T) {
 	t.Setenv("GITMOOT_MAX_DELEGATION_TOTAL_JOBS", "4")
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Tree at total = maxJobs-2 = 2: coordinator + one filler.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
 		Result: &AgentResult{
 			Decision: "approved", Summary: "done",
 			Delegations: []Delegation{
@@ -4010,7 +4010,7 @@ func TestEngineDelegationBudgetProjectedAdmitsExactFit(t *testing.T) {
 		},
 	})
 	insertCompletedJob(t, store, db.Job{ID: "root-job/filler/1", Agent: "w", Type: "review"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
 	})
 
 	if err := engine.AdvanceJob(ctx, "root-job"); err != nil {
@@ -4042,13 +4042,13 @@ func TestEngineDelegationBudgetProjectedCountsDeferredLegs(t *testing.T) {
 	t.Setenv("GITMOOT_MAX_DELEGATION_TOTAL_JOBS", "3")
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Tree at total = maxJobs-1 = 2.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
 		Result: &AgentResult{
 			Decision: "approved", Summary: "done",
 			Delegations: []Delegation{
@@ -4058,7 +4058,7 @@ func TestEngineDelegationBudgetProjectedCountsDeferredLegs(t *testing.T) {
 		},
 	})
 	insertCompletedJob(t, store, db.Job{ID: "root-job/filler/1", Agent: "w", Type: "review"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
 	})
 
 	if err := engine.AdvanceJob(ctx, "root-job"); err != nil {
@@ -4090,13 +4090,13 @@ func TestEngineDelegationBudgetProjectedDedupNearBoundary(t *testing.T) {
 	t.Setenv("GITMOOT_MAX_DELEGATION_TOTAL_JOBS", "4")
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Tree at total = maxJobs-2 = 2.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
 		Result: &AgentResult{
 			Decision: "approved", Summary: "done",
 			Delegations: []Delegation{
@@ -4107,7 +4107,7 @@ func TestEngineDelegationBudgetProjectedDedupNearBoundary(t *testing.T) {
 		},
 	})
 	insertCompletedJob(t, store, db.Job{ID: "root-job/filler/1", Agent: "w", Type: "review"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
 	})
 
 	if err := engine.AdvanceJob(ctx, "root-job"); err != nil {
@@ -4144,12 +4144,12 @@ func TestEngineDelegationBudgetProjectedIdempotentReadvance(t *testing.T) {
 	t.Setenv("GITMOOT_MAX_DELEGATION_TOTAL_JOBS", "4")
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", TaskTitle: "Parent", Sender: "coord",
 		Result: &AgentResult{
 			Decision: "approved", Summary: "done",
 			Delegations: []Delegation{
@@ -4159,7 +4159,7 @@ func TestEngineDelegationBudgetProjectedIdempotentReadvance(t *testing.T) {
 		},
 	})
 	insertCompletedJob(t, store, db.Job{ID: "root-job/filler/1", Agent: "w", Type: "review"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
+		Repo: "gitmoot/gitmoot", Branch: "task-005", TaskID: "task-5", Sender: "coord", RootJobID: "root-job",
 	})
 
 	// First advance: admits both legs, tree reaches maxJobs (4).
@@ -4196,13 +4196,13 @@ func TestEngineDelegationBudgetProjectedIdempotentReadvance(t *testing.T) {
 func TestEngineDelegationEscalateThenBlockParentFoldsIntoContinuation(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4254,14 +4254,14 @@ func TestEngineDelegationEscalateThenBlockParentFoldsIntoContinuation(t *testing
 func TestEngineDelegationTransitiveChainGatesAndContinues(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "wa", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "wb", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "wc", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "wa", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "wb", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "wc", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4335,13 +4335,13 @@ func TestEngineDelegationTransitiveChainGatesAndContinues(t *testing.T) {
 func TestEngineAdvanceDelegationsConcurrentContinuationExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4400,13 +4400,13 @@ func TestEngineAdvanceDelegationsConcurrentContinuationExactlyOnce(t *testing.T)
 func TestEngineDelegationSynthesisRuleVoteBlocksOnFailure(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4447,13 +4447,13 @@ func TestEngineDelegationSynthesisRuleVoteBlocksOnFailure(t *testing.T) {
 func TestEngineDelegationSynthesisRuleVotePassesWhenAllApproved(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4490,13 +4490,13 @@ func TestEngineDelegationSynthesisRuleVotePassesWhenAllApproved(t *testing.T) {
 func TestEngineDelegationSynthesisRuleQuorumBlocksWhenUnmet(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4537,13 +4537,13 @@ func TestEngineDelegationSynthesisRuleQuorumBlocksWhenUnmet(t *testing.T) {
 func TestEngineDelegationSynthesisRuleQuorumPassesWhenMet(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4744,15 +4744,15 @@ func driveStaticGeneration(t *testing.T, store *db.Store, engine Engine, continu
 func TestEngineStaticCoordinatorHaltedByLoopDetection(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	dels := []Delegation{{ID: "w1", Agent: "w", Action: "review", Prompt: "do work"}}
 
 	// Generation 0: the originating coordinator dispatches the set for real.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4850,13 +4850,13 @@ func TestEngineStaticCoordinatorHaltedByLoopDetection(t *testing.T) {
 func TestEngineProgressingCoordinatorNotFalselyFlagged(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Generation 0: dispatch the first distinct set for real.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -4999,8 +4999,8 @@ func TestProgressDigestIgnoresDelegationIdentityAndText(t *testing.T) {
 func TestEngineResultAwareNonProgressStreakTripsLadder(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Each round the child returns the same trivial approval with NO durable side
@@ -5015,7 +5015,7 @@ func TestEngineResultAwareNonProgressStreakTripsLadder(t *testing.T) {
 	// Generation 0: the originating coordinator dispatches a real set; its child
 	// returns no durable effect, establishing the baseline digest.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -5112,8 +5112,8 @@ func TestEngineResultAwareNonProgressStreakTripsLadder(t *testing.T) {
 func TestEngineResultAwareProgressResetsStreak(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// Each round perturbs the delegation id (silencing the structural set-hash path)
@@ -5132,7 +5132,7 @@ func TestEngineResultAwareProgressResetsStreak(t *testing.T) {
 
 	// Generation 0: dispatch the first set for real with a first durable effect.
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -5176,8 +5176,8 @@ func TestEngineResultAwareProgressResetsStreak(t *testing.T) {
 func TestEngineResultAwareStreakIdempotentOnReadvance(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	noProgress := AgentResult{Decision: "approved", Summary: "stuck"}
@@ -5188,7 +5188,7 @@ func TestEngineResultAwareStreakIdempotentOnReadvance(t *testing.T) {
 	}
 
 	insertCompletedJob(t, store, db.Job{ID: "root-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -5249,13 +5249,13 @@ func preflightFailureReason(t *testing.T, store *db.Store, jobID string) string 
 func TestEngineDelegationPreflightRuntimeNameMixup(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coordinator", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "shipper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coordinator", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "shipper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// The coordinator names the runtime "claude" instead of a registered agent.
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coordinator", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Sender: "coordinator",
 		Result: &AgentResult{
 			Decision: "approved",
@@ -5290,13 +5290,13 @@ func TestEngineDelegationPreflightRuntimeNameMixup(t *testing.T) {
 func TestEngineDelegationPreflightUnknownAgentNoRuntimeLine(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coordinator", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "shipper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coordinator", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "shipper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// A typo'd, non-runtime agent name: list available agents, no runtime line.
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coordinator", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Sender: "coordinator",
 		Result: &AgentResult{
 			Decision: "approved",
@@ -5322,13 +5322,13 @@ func TestEngineDelegationPreflightUnknownAgentNoRuntimeLine(t *testing.T) {
 func TestEngineDelegationPreflightAgentNamedClaudeNoFalseTrigger(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coordinator", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coordinator", []string{"ask"}, "gitmoot/gitmoot")
 	// A legitimately-registered, capable agent literally named "claude".
-	seedAgent(t, store, "claude", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "claude", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coordinator", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Sender: "coordinator",
 		Result: &AgentResult{
 			Decision: "approved",
@@ -5354,14 +5354,14 @@ func TestEngineDelegationPreflightAgentNamedClaudeNoFalseTrigger(t *testing.T) {
 func TestEngineDelegationPreflightNotAllowedOnRepo(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coordinator", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coordinator", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	// shipper exists and is capable but is scoped to a DIFFERENT repo.
 	seedAgent(t, store, "shipper", []string{"review"}, "other/repo")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coordinator", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Sender: "coordinator",
 		Result: &AgentResult{
 			Decision: "approved",
@@ -5387,13 +5387,13 @@ func TestEngineDelegationPreflightNotAllowedOnRepo(t *testing.T) {
 func TestEngineDelegationPreflightLacksCapability(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coordinator", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coordinator", []string{"ask"}, "gitmoot/gitmoot")
 	// shipper is on the repo but cannot do "review".
-	seedAgent(t, store, "shipper", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "shipper", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coordinator", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Sender: "coordinator",
 		Result: &AgentResult{
 			Decision: "approved",
@@ -5419,15 +5419,15 @@ func TestEngineDelegationPreflightLacksCapability(t *testing.T) {
 func TestEngineDelegationPreflightDeferredLeg(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coordinator", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coordinator", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// del-2 is DEFERRED (depends on del-1) and names a runtime; the upfront preflight
 	// must catch it and route the whole set through the corrective continuation
 	// without dispatching the ready leg del-1.
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coordinator", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Sender: "coordinator",
 		Result: &AgentResult{
 			Decision: "approved",
@@ -5453,12 +5453,12 @@ func TestEngineDelegationPreflightDeferredLeg(t *testing.T) {
 func TestEngineDelegationPreflightIdempotentReadvance(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coordinator", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "helper", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coordinator", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "helper", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coordinator", Type: "ask"}, JobPayload{
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Sender: "coordinator",
 		Result: &AgentResult{
 			Decision: "approved",
@@ -5486,14 +5486,14 @@ func TestEngineDelegationPreflightIdempotentReadvance(t *testing.T) {
 func TestEngineDelegationPreflightBoundedFinalize(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coordinator", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coordinator", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	// A coordinator generation that has already taken a corrective nudge
 	// (DelegationRepeatCount >= 1) and is at the streak threshold must finalize
 	// gracefully rather than loop, when it again names an unroutable agent.
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coordinator", Type: "ask"}, JobPayload{
-		Repo:                  "jerryfane/gitmoot",
+		Repo:                  "gitmoot/gitmoot",
 		Sender:                "coordinator",
 		DelegationRepeatCount: 1,
 		NonProgressStreak:     engine.nonProgressStreakThreshold() - 1,

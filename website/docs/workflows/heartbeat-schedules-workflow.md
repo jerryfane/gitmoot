@@ -13,19 +13,19 @@ daemon's scan returns immediately and behavior is unchanged.
 ```sh
 # Add a daily read-only status heartbeat for a named agent (disabled until --enabled).
 gitmoot agent heartbeat add repo-maintainer daily-status \
-  --repo jerryfane/gitmoot --interval 24h --jitter 15m \
+  --repo gitmoot/gitmoot --interval 24h --jitter 15m \
   --prompt "Review open issues, PRs, and recent jobs. Return a concise status report." \
   --enabled
 
 # A review heartbeat requires the agent to hold the review capability.
 gitmoot agent heartbeat add reviewer stale-prs \
-  --repo jerryfane/gitmoot --interval 12h --action review \
+  --repo gitmoot/gitmoot --interval 12h --action review \
   --prompt "Review stale open PRs and summarize blockers."
 
 # A policy-gated implement heartbeat (write action) on a specific runtime. The
 # agent must hold the implement capability AND a write-granting policy.
 gitmoot agent heartbeat add builder nightly-tidy \
-  --repo jerryfane/gitmoot --interval 24h --action implement --runtime codex \
+  --repo gitmoot/gitmoot --interval 24h --action implement --runtime codex \
   --prompt "Fix the top lint/type error and open a small PR."
 ```
 

@@ -35,12 +35,12 @@ func TestWebhookSinkDeliversExactJSON(t *testing.T) {
 	if sink == nil {
 		t.Fatal("NewWebhookSink returned nil for a valid URL")
 	}
-	want := NewEvent(EventJobNeedsAttention, "job-1", "root-1", "jerryfane/gitmoot", "awaiting_human", "please decide", time.Now(), nil)
+	want := NewEvent(EventJobNeedsAttention, "job-1", "root-1", "gitmoot/gitmoot", "awaiting_human", "please decide", time.Now(), nil)
 	sink.Emit(context.Background(), want)
 
 	select {
 	case got := <-received:
-		if got.Type != EventJobNeedsAttention || got.JobID != "job-1" || got.RootID != "root-1" || got.Repo != "jerryfane/gitmoot" || got.Status != "awaiting_human" || got.Detail != "please decide" {
+		if got.Type != EventJobNeedsAttention || got.JobID != "job-1" || got.RootID != "root-1" || got.Repo != "gitmoot/gitmoot" || got.Status != "awaiting_human" || got.Detail != "please decide" {
 			t.Fatalf("received event = %+v, want %+v", got, want)
 		}
 		if got.SchemaVersion != 1 {
@@ -215,7 +215,7 @@ func TestWebhookSinkFlushIsIdempotentAndDropsLateEmit(t *testing.T) {
 // no-ops, so the CLI can `defer events.FlushSink(ctx, sink)` over a sink that may
 // be nil when [events] is OFF.
 func TestFlushSinkNilAndNonFlusherAreNoOps(t *testing.T) {
-	FlushSink(context.Background(), nil)           // must not panic
+	FlushSink(context.Background(), nil)             // must not panic
 	FlushSink(context.Background(), &syncTestSink{}) // non-Flusher: no-op, must not panic
 }
 

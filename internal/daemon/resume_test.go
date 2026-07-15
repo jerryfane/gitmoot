@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // resumeFixture seeds a coordinator whose single escalate_human delegation failed
@@ -18,7 +18,7 @@ import (
 func resumeFixture(t *testing.T, store *db.Store) (*workflow.Engine, github.PullRequest) {
 	t.Helper()
 	ctx := context.Background()
-	repo := "jerryfane/gitmoot"
+	repo := "gitmoot/gitmoot"
 	seedResumeAgent(t, store, "coord", []string{"ask"}, repo)
 	seedResumeAgent(t, store, "api", []string{"review"}, repo)
 
@@ -126,7 +126,7 @@ func TestHandleResumeRetryReenqueuesLeg(t *testing.T) {
 	store := testStore(t)
 	engine, pull := resumeFixture(t, store)
 	client := &fakeGitHub{}
-	d := Daemon{Repo: github.Repository{Owner: "jerryfane", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
+	d := Daemon{Repo: github.Repository{Owner: "gitmoot", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
 
 	if err := d.handleResumeCommand(ctx, pull, Command{Action: "resume", JobID: "coord", Decision: "retry", Instructions: "use staging"}); err != nil {
 		t.Fatalf("handleResumeCommand(retry) returned error: %v", err)
@@ -144,7 +144,7 @@ func TestHandleResumeContinueEnqueuesContinuation(t *testing.T) {
 	store := testStore(t)
 	engine, pull := resumeFixture(t, store)
 	client := &fakeGitHub{}
-	d := Daemon{Repo: github.Repository{Owner: "jerryfane", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
+	d := Daemon{Repo: github.Repository{Owner: "gitmoot", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
 
 	if err := d.handleResumeCommand(ctx, pull, Command{Action: "resume", JobID: "coord", Decision: "continue"}); err != nil {
 		t.Fatalf("handleResumeCommand(continue) returned error: %v", err)
@@ -159,7 +159,7 @@ func TestHandleResumeAbortFinalizes(t *testing.T) {
 	store := testStore(t)
 	engine, pull := resumeFixture(t, store)
 	client := &fakeGitHub{}
-	d := Daemon{Repo: github.Repository{Owner: "jerryfane", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
+	d := Daemon{Repo: github.Repository{Owner: "gitmoot", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
 
 	if err := d.handleResumeCommand(ctx, pull, Command{Action: "resume", JobID: "coord", Decision: "abort"}); err != nil {
 		t.Fatalf("handleResumeCommand(abort) returned error: %v", err)
@@ -182,7 +182,7 @@ func TestHandleResumeRejectsOutOfScopeJob(t *testing.T) {
 	store := testStore(t)
 	engine, _ := resumeFixture(t, store)
 	client := &fakeGitHub{}
-	d := Daemon{Repo: github.Repository{Owner: "jerryfane", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
+	d := Daemon{Repo: github.Repository{Owner: "gitmoot", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
 
 	// A PR that does not own the coordinator job (#999) must be rejected without
 	// re-enqueueing anything.
@@ -205,7 +205,7 @@ func TestPollOnceResumeIsAuthorizeGated(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 	engine, _ := resumeFixture(t, store)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	client := &fakeGitHub{
 		permissions: map[string]string{"mallory": "read"},
 		pulls:       []github.PullRequest{{Number: 7, Title: "Task 7", State: "open", HeadRef: "task-7", BaseRef: "main", HeadSHA: "abc"}},
@@ -240,7 +240,7 @@ func TestHandleResumeRequiresWorkflowEngine(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 	client := &fakeGitHub{}
-	d := Daemon{Repo: github.Repository{Owner: "jerryfane", Name: "gitmoot"}, Store: store, GitHub: client}
+	d := Daemon{Repo: github.Repository{Owner: "gitmoot", Name: "gitmoot"}, Store: store, GitHub: client}
 	pull := github.PullRequest{Number: 7, HeadRef: "task-7"}
 	if err := d.handleResumeCommand(ctx, pull, Command{Action: "resume", JobID: "coord", Decision: "retry"}); err != nil {
 		t.Fatalf("handleResumeCommand returned error: %v", err)
@@ -256,7 +256,7 @@ func TestHandleResumeRequiresWorkflowEngine(t *testing.T) {
 func askGateFixture(t *testing.T, store *db.Store) (*workflow.Engine, github.PullRequest) {
 	t.Helper()
 	ctx := context.Background()
-	repo := "jerryfane/gitmoot"
+	repo := "gitmoot/gitmoot"
 	seedResumeAgent(t, store, "coord", []string{"ask"}, repo)
 
 	engine := &workflow.Engine{
@@ -299,7 +299,7 @@ func TestHandleResumeAnswerEnqueuesContinuation(t *testing.T) {
 	store := testStore(t)
 	engine, pull := askGateFixture(t, store)
 	client := &fakeGitHub{}
-	d := Daemon{Repo: github.Repository{Owner: "jerryfane", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
+	d := Daemon{Repo: github.Repository{Owner: "gitmoot", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
 
 	if err := d.handleResumeCommand(ctx, pull, Command{Action: "resume", JobID: "coord", Decision: "answer", Instructions: "q1: v3"}); err != nil {
 		t.Fatalf("handleResumeCommand(answer) returned error: %v", err)
@@ -328,7 +328,7 @@ func TestHandleResumeAnswerRejectedOnFailureRound(t *testing.T) {
 	store := testStore(t)
 	engine, pull := resumeFixture(t, store)
 	client := &fakeGitHub{}
-	d := Daemon{Repo: github.Repository{Owner: "jerryfane", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
+	d := Daemon{Repo: github.Repository{Owner: "gitmoot", Name: "gitmoot"}, Store: store, GitHub: client, Workflow: engine}
 
 	if err := d.handleResumeCommand(ctx, pull, Command{Action: "resume", JobID: "coord", Decision: "answer", Instructions: "q1: v3"}); err != nil {
 		t.Fatalf("handleResumeCommand(answer) returned error: %v", err)

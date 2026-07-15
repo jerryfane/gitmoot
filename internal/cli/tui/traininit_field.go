@@ -3,7 +3,7 @@ package tui
 import (
 	"context"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // FieldKind selects the input widget for a train-init field.

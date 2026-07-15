@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	dashboard "github.com/jerryfane/gitmoot-dashboard"
+	dashboard "github.com/gitmoot/gitmoot-dashboard"
 )
 
 const (
@@ -101,8 +101,8 @@ func newDashboardJSONCache(stderr io.Writer) *dashboardJSONCache {
 	}
 	now := time.Now
 	return &dashboardJSONCache{
-		entries: make(map[string]dashboardCacheEntry, len(dashboardCachePolicies)),
-		flights: make(map[string]*dashboardCacheFlight, len(dashboardCachePolicies)+1),
+		entries:    make(map[string]dashboardCacheEntry, len(dashboardCachePolicies)),
+		flights:    make(map[string]*dashboardCacheFlight, len(dashboardCachePolicies)+1),
 		stats:      make(map[string]dashboardCacheCounters, 3),
 		now:        now,
 		stderr:     stderr,

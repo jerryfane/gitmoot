@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/events"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/events"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // recordingSink captures EventSink emissions for the engine best-effort tests.
@@ -54,11 +54,11 @@ func (r *recordingSink) byType(typ events.EventType) []events.Event {
 func TestEngineEmitsJobFinishedOnSucceededTerminal(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	sink := &recordingSink{}
 	engine := testEngine(store)
 	engine.EventSink = sink
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"approved","summary":"looks good","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -66,7 +66,7 @@ func TestEngineEmitsJobFinishedOnSucceededTerminal(t *testing.T) {
 		ID:        "review-job",
 		Agent:     "audit",
 		Action:    "review",
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-9",
 		TaskID:    "task-9",
 		TaskTitle: "Review",
@@ -83,7 +83,7 @@ func TestEngineEmitsJobFinishedOnSucceededTerminal(t *testing.T) {
 		t.Fatalf("job.finished emissions = %d, want 1; all=%+v", len(finished), sink.snapshot())
 	}
 	ev := finished[0]
-	if ev.JobID != "review-job" || ev.RootID != "review-job" || ev.Repo != "jerryfane/gitmoot" || ev.Status != "succeeded" {
+	if ev.JobID != "review-job" || ev.RootID != "review-job" || ev.Repo != "gitmoot/gitmoot" || ev.Status != "succeeded" {
 		t.Fatalf("job.finished event = %+v", ev)
 	}
 	if ev.SchemaVersion != 1 {
@@ -99,11 +99,11 @@ func TestEngineEmitsJobFinishedOnSucceededTerminal(t *testing.T) {
 func TestEngineEmitsJobFailedOnFailedDecision(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	sink := &recordingSink{}
 	engine := testEngine(store)
 	engine.EventSink = sink
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"failed","summary":"could not finish","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -111,7 +111,7 @@ func TestEngineEmitsJobFailedOnFailedDecision(t *testing.T) {
 		ID:        "review-job",
 		Agent:     "audit",
 		Action:    "review",
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-9",
 		TaskID:    "task-9",
 		TaskTitle: "Review",
@@ -148,11 +148,11 @@ func TestEngineEmitsJobFailedOnFailedDecision(t *testing.T) {
 func TestEngineEmitsJobFailedOnDeliveryFailure(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	sink := &recordingSink{}
 	engine := testEngine(store)
 	engine.EventSink = sink
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	// A delivery error: Deliver returns an error, so Mailbox.Run takes the m.fail
 	// branch and never reaches finishWithPayload.
 	adapter := &fakeDelivery{err: errors.New("codex transport failure")}
@@ -160,7 +160,7 @@ func TestEngineEmitsJobFailedOnDeliveryFailure(t *testing.T) {
 		ID:        "review-job",
 		Agent:     "audit",
 		Action:    "review",
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-9",
 		TaskID:    "task-9",
 		TaskTitle: "Review",
@@ -187,7 +187,7 @@ func TestEngineEmitsJobFailedOnDeliveryFailure(t *testing.T) {
 		t.Fatalf("job.failed emissions = %d, want exactly 1; all=%+v", len(failed), sink.snapshot())
 	}
 	ev := failed[0]
-	if ev.JobID != "review-job" || ev.RootID != "root-9" || ev.Repo != "jerryfane/gitmoot" || ev.Status != "failed" {
+	if ev.JobID != "review-job" || ev.RootID != "root-9" || ev.Repo != "gitmoot/gitmoot" || ev.Status != "failed" {
 		t.Fatalf("job.failed event = %+v", ev)
 	}
 	// The transition message ("delivery failed: ...") is surfaced as the detail
@@ -203,11 +203,11 @@ func TestEngineEmitsJobFailedOnDeliveryFailure(t *testing.T) {
 func TestEngineEmitsJobFailedOnMalformedOutputAfterRepair(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	sink := &recordingSink{}
 	engine := testEngine(store)
 	engine.EventSink = sink
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	// Two un-parseable outputs: the first triggers the repair retry, the second
 	// (also malformed) drives m.fail -> finish with a parse error.
 	adapter := &fakeDelivery{outputs: []string{"not json", "still not json"}}
@@ -215,7 +215,7 @@ func TestEngineEmitsJobFailedOnMalformedOutputAfterRepair(t *testing.T) {
 		ID:        "review-job",
 		Agent:     "audit",
 		Action:    "review",
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-9",
 		TaskID:    "task-9",
 		TaskTitle: "Review",
@@ -245,9 +245,9 @@ func TestEngineEmitsJobFailedOnMalformedOutputAfterRepair(t *testing.T) {
 func TestEngineEmitsNeedsAttentionOnEscalateHumanPause(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	sink := &recordingSink{}
 	engine := testEngine(store)
 	engine.EventSink = sink
@@ -279,9 +279,9 @@ func TestEngineEmitsNeedsAttentionOnEscalateHumanPause(t *testing.T) {
 func TestEngineNeedsAttentionEmitIsOneShot(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "api", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "ui", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "api", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "ui", []string{"review"}, "gitmoot/gitmoot")
 	sink := &recordingSink{}
 	engine := testEngine(store)
 	engine.EventSink = sink
@@ -302,9 +302,9 @@ func TestEngineNeedsAttentionEmitIsOneShot(t *testing.T) {
 func TestEngineNilSinkIsByteIdentical(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store) // no EventSink
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -312,7 +312,7 @@ func TestEngineNilSinkIsByteIdentical(t *testing.T) {
 		ID:     "review-job",
 		Agent:  "audit",
 		Action: "review",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Branch: "task-9",
 		TaskID: "task-9",
 	}); err != nil {
@@ -337,12 +337,12 @@ func TestEngineNilSinkIsByteIdentical(t *testing.T) {
 func TestEngineSlowSinkDoesNotDeadlockEngine(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	hang := make(chan struct{})
 	sink := &recordingSink{hang: hang}
 	engine := testEngine(store)
 	engine.EventSink = sink
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -350,7 +350,7 @@ func TestEngineSlowSinkDoesNotDeadlockEngine(t *testing.T) {
 		ID:     "review-job",
 		Agent:  "audit",
 		Action: "review",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 		Branch: "task-9",
 		TaskID: "task-9",
 	}); err != nil {

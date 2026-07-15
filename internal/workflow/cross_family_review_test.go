@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // stubAgentLister is an in-memory AgentLister for the cross-family selector tests.
@@ -309,7 +309,7 @@ func seedMergeReviewJobs(t *testing.T, store *db.Store) {
 	t.Helper()
 	seedImplementJobForHarvest(t, store)
 	insertCompletedJob(t, store, db.Job{ID: "review-job", Agent: "audit", Type: "review"}, JobPayload{
-		Repo: "jerryfane/gitmoot", Branch: "task-7", PullRequest: 7, HeadSHA: "head123",
+		Repo: "gitmoot/gitmoot", Branch: "task-7", PullRequest: 7, HeadSHA: "head123",
 		TaskID: "task-7", TaskTitle: "Workflow Engine", LeadAgent: "lead",
 		Result: &AgentResult{Decision: "approved", Summary: "looks good"},
 	})
@@ -320,7 +320,7 @@ func seedMergeReviewJobs(t *testing.T, store *db.Store) {
 func TestEngineDispatchesReviewLegOnMerge(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	harvester := &recordingHarvester{}
@@ -328,7 +328,7 @@ func TestEngineDispatchesReviewLegOnMerge(t *testing.T) {
 	dispatcher := &recordingReviewDispatcher{
 		ok: true,
 		outcome: Outcome{
-			Kind: OutcomeReviewed, Repo: "jerryfane/gitmoot", PullRequest: 7,
+			Kind: OutcomeReviewed, Repo: "gitmoot/gitmoot", PullRequest: 7,
 			Reviewer: "claude", Rubric: map[string]float64{"coverage": 0.8},
 		},
 	}
@@ -362,7 +362,7 @@ func TestEngineDispatchesReviewLegOnMerge(t *testing.T) {
 func TestEngineNilReviewDispatcherIsByteIdentical(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	engine.OutcomeHarvester = &recordingHarvester{}
@@ -386,7 +386,7 @@ func TestEngineNilReviewDispatcherIsByteIdentical(t *testing.T) {
 func TestEngineReviewDispatchErrorNeverFailsMerge(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	engine.OutcomeHarvester = &recordingHarvester{}
@@ -418,7 +418,7 @@ func TestEngineReviewDispatchErrorNeverFailsMerge(t *testing.T) {
 func TestEngineReviewDispatchSkipWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	harvester := &recordingHarvester{}
@@ -447,7 +447,7 @@ type blockingReviewDispatcher struct {
 func (b *blockingReviewDispatcher) Review(_ context.Context, _ db.Job, _ JobPayload, _ string) (Outcome, bool, error) {
 	b.once.Do(func() { close(b.started) })
 	<-b.release
-	return Outcome{Kind: OutcomeReviewed, Repo: "jerryfane/gitmoot", PullRequest: 7, Reviewer: "claude"}, true, nil
+	return Outcome{Kind: OutcomeReviewed, Repo: "gitmoot/gitmoot", PullRequest: 7, Reviewer: "claude"}, true, nil
 }
 
 // TestEngineReviewLegDoesNotBlockAdvanceJob is the review-fix regression: even when
@@ -458,12 +458,14 @@ func (b *blockingReviewDispatcher) Review(_ context.Context, _ db.Job, _ JobPayl
 func TestEngineReviewLegDoesNotBlockAdvanceJob(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	// Build an engine with the PRODUCTION default async spawn (no synchronous
 	// spawnReview override), so the detached goroutine is exercised for real.
 	engine := Engine{
 		Store: store,
-		JobID: func(request JobRequest) string { return strings.Join([]string{request.Action, request.Agent, request.TaskID}, "-") },
+		JobID: func(request JobRequest) string {
+			return strings.Join([]string{request.Action, request.Agent, request.TaskID}, "-")
+		},
 	}
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	harvester := &recordingHarvester{}

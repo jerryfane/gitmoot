@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/report"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/report"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 func TestReportBugJobPreviewDefaultsToPreview(t *testing.T) {
@@ -69,7 +69,7 @@ func TestReportBugJobPreviewCreateSmoke(t *testing.T) {
 	}
 
 	fake := &reportFakeGitHub{
-		createdIssue: github.Issue{Number: 291, URL: "https://github.com/jerryfane/gitmoot/issues/291"},
+		createdIssue: github.Issue{Number: 291, URL: "https://github.com/gitmoot/gitmoot/issues/291"},
 	}
 	restore := replaceReportGitHubClient(fake)
 	defer restore()
@@ -80,7 +80,7 @@ func TestReportBugJobPreviewCreateSmoke(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("report bug create exit code = %d, stderr=%s", code, createErr.String())
 	}
-	if createOut.String() != "created issue: https://github.com/jerryfane/gitmoot/issues/291\n" {
+	if createOut.String() != "created issue: https://github.com/gitmoot/gitmoot/issues/291\n" {
 		t.Fatalf("stdout = %q", createOut.String())
 	}
 	if createErr.Len() != 0 {
@@ -89,7 +89,7 @@ func TestReportBugJobPreviewCreateSmoke(t *testing.T) {
 	if len(fake.searches) != 1 || !strings.Contains(fake.searches[0], fingerprint) {
 		t.Fatalf("searches = %+v, want fingerprint %q", fake.searches, fingerprint)
 	}
-	if fake.createInput.Repo.FullName() != "jerryfane/gitmoot" ||
+	if fake.createInput.Repo.FullName() != "gitmoot/gitmoot" ||
 		fake.createInput.Title != "Gitmoot failed job ask for audit in owner/repo" ||
 		strings.Join(fake.createInput.Labels, ",") != "gitmoot-dashboard-report,bug" ||
 		!strings.Contains(fake.createInput.Body, report.FingerprintMarker(fingerprint)) ||
@@ -140,7 +140,7 @@ func TestReportBugUnsupportedSourcesNameSource(t *testing.T) {
 func TestReportBugJobCreateCreatesIssueWithLabels(t *testing.T) {
 	home := seedCLIReportJob(t)
 	fake := &reportFakeGitHub{
-		createdIssue: github.Issue{Number: 289, URL: "https://github.com/jerryfane/gitmoot/issues/289"},
+		createdIssue: github.Issue{Number: 289, URL: "https://github.com/gitmoot/gitmoot/issues/289"},
 	}
 	restore := replaceReportGitHubClient(fake)
 	defer restore()
@@ -151,16 +151,16 @@ func TestReportBugJobCreateCreatesIssueWithLabels(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("report bug create exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if stdout.String() != "created issue: https://github.com/jerryfane/gitmoot/issues/289\n" {
+	if stdout.String() != "created issue: https://github.com/gitmoot/gitmoot/issues/289\n" {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
-	if len(fake.preflightRepos) != 1 || fake.preflightRepos[0].FullName() != "jerryfane/gitmoot" {
+	if len(fake.preflightRepos) != 1 || fake.preflightRepos[0].FullName() != "gitmoot/gitmoot" {
 		t.Fatalf("preflight repos = %+v", fake.preflightRepos)
 	}
 	if len(fake.searches) != 1 || !strings.Contains(fake.searches[0], "gitmoot:dashboard-report fingerprint:") {
 		t.Fatalf("searches = %+v", fake.searches)
 	}
-	if fake.createInput.Repo.FullName() != "jerryfane/gitmoot" ||
+	if fake.createInput.Repo.FullName() != "gitmoot/gitmoot" ||
 		!strings.Contains(fake.createInput.Body, "<!-- gitmoot:dashboard-report fingerprint:") ||
 		strings.Join(fake.createInput.Labels, ",") != "gitmoot-dashboard-report,bug" {
 		t.Fatalf("create input = %+v", fake.createInput)
@@ -172,7 +172,7 @@ func TestReportBugJobCreateReturnsExistingIssueForDuplicate(t *testing.T) {
 	fake := &reportFakeGitHub{
 		searchIssues: []github.Issue{{
 			Number: 289,
-			URL:    "https://github.com/jerryfane/gitmoot/issues/289",
+			URL:    "https://github.com/gitmoot/gitmoot/issues/289",
 		}},
 	}
 	restore := replaceReportGitHubClient(fake)
@@ -184,7 +184,7 @@ func TestReportBugJobCreateReturnsExistingIssueForDuplicate(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("report bug duplicate exit code = %d, stderr=%s", code, stderr.String())
 	}
-	if stdout.String() != "existing issue: https://github.com/jerryfane/gitmoot/issues/289\n" {
+	if stdout.String() != "existing issue: https://github.com/gitmoot/gitmoot/issues/289\n" {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if fake.createCalled {
@@ -285,7 +285,7 @@ func (f *reportFakeGitHub) CreateIssue(_ context.Context, input github.CreateIss
 		return github.Issue{}, f.createErr
 	}
 	if f.createdIssue.URL == "" {
-		return github.Issue{Number: 1, URL: "https://github.com/jerryfane/gitmoot/issues/1"}, nil
+		return github.Issue{Number: 1, URL: "https://github.com/gitmoot/gitmoot/issues/1"}, nil
 	}
 	return f.createdIssue, nil
 }
@@ -296,7 +296,7 @@ func TestReportBugContinuesWhenDuplicateSearchFails(t *testing.T) {
 	home := seedCLIReportJob(t)
 	fake := &reportFakeGitHub{
 		searchErr:    errors.New("search unavailable"),
-		createdIssue: github.Issue{Number: 290, URL: "https://github.com/jerryfane/gitmoot/issues/290"},
+		createdIssue: github.Issue{Number: 290, URL: "https://github.com/gitmoot/gitmoot/issues/290"},
 	}
 	restore := replaceReportGitHubClient(fake)
 	defer restore()
@@ -310,7 +310,7 @@ func TestReportBugContinuesWhenDuplicateSearchFails(t *testing.T) {
 	if !strings.Contains(stderr.String(), "warning: duplicate search failed: search unavailable") {
 		t.Fatalf("stderr missing warning: %q", stderr.String())
 	}
-	if stdout.String() != "created issue: https://github.com/jerryfane/gitmoot/issues/290\n" {
+	if stdout.String() != "created issue: https://github.com/gitmoot/gitmoot/issues/290\n" {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

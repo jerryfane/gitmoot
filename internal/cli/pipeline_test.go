@@ -11,8 +11,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
 )
 
 func TestPipelineAddEnabledTriggerPersistsPendingBinding(t *testing.T) {
@@ -45,7 +45,7 @@ func TestPipelineAddEnabledTriggerPersistsPendingBinding(t *testing.T) {
 }
 
 const testPipelineSpec = `name: deploy-flow
-repo: jerryfane/gitmoot
+repo: gitmoot/gitmoot
 schedule:
   interval: 24h
   jitter: 15m
@@ -94,7 +94,7 @@ func TestPipelineAddListShowEnableDisableRemove(t *testing.T) {
 		t.Fatalf("list exit=%d stderr=%s", code, errOut)
 	}
 	columns := strings.Split(strings.TrimSpace(out), "\t")
-	if len(columns) != 7 || columns[0] != "deploy-flow" || columns[1] != "enabled" || columns[2] != "24h" || columns[3] != "jerryfane/gitmoot" || columns[4] != "jerryfane/gitmoot" {
+	if len(columns) != 7 || columns[0] != "deploy-flow" || columns[1] != "enabled" || columns[2] != "24h" || columns[3] != "gitmoot/gitmoot" || columns[4] != "gitmoot/gitmoot" {
 		t.Fatalf("list stdout=%q", out)
 	}
 
@@ -102,7 +102,7 @@ func TestPipelineAddListShowEnableDisableRemove(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("show exit=%d stderr=%s", code, errOut)
 	}
-	if !strings.Contains(out, "group: jerryfane/gitmoot (default)") || !strings.Contains(out, "enabled: true") || !strings.Contains(out, "interval: 24h") ||
+	if !strings.Contains(out, "group: gitmoot/gitmoot (default)") || !strings.Contains(out, "enabled: true") || !strings.Contains(out, "interval: 24h") ||
 		!strings.Contains(out, "score\t[SHELL]\tcmd: ./score.sh\tneeds=source") ||
 		!strings.Contains(out, "deploy\t[SHELL]\tcmd: ./deploy.sh\tneeds=score") {
 		t.Fatalf("show stdout=%q", out)
@@ -364,7 +364,7 @@ func TestPipelineShowJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode show json: %v (%s)", err, stdout.String())
 	}
-	if decoded.Name != "deploy-flow" || decoded.Group != "jerryfane/gitmoot" || decoded.Enabled || decoded.SpecHash == "" {
+	if decoded.Name != "deploy-flow" || decoded.Group != "gitmoot/gitmoot" || decoded.Enabled || decoded.SpecHash == "" {
 		t.Fatalf("unexpected json header: %+v", decoded)
 	}
 	if len(decoded.Stages) != 3 || decoded.Stages[2].ID != "deploy" || len(decoded.Stages[2].Needs) != 1 {
@@ -391,7 +391,7 @@ func TestPipelineListJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode list json: %v (%s)", err, stdout.String())
 	}
-	if len(decoded) != 1 || decoded[0].Name != "deploy-flow" || decoded[0].Group != "jerryfane/gitmoot" || !decoded[0].Enabled || decoded[0].Interval != "24h" {
+	if len(decoded) != 1 || decoded[0].Name != "deploy-flow" || decoded[0].Group != "gitmoot/gitmoot" || !decoded[0].Enabled || decoded[0].Interval != "24h" {
 		t.Fatalf("unexpected list json: %+v", decoded)
 	}
 }

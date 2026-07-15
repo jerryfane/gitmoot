@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/credgw"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/credgw"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // gatewayLogSink collects gateway/auth logs. The gateway logs from its request

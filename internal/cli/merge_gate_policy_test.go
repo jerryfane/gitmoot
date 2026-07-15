@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 func TestApplyMergeGatePolicyOffByDefault(t *testing.T) {
@@ -57,7 +57,7 @@ require_external_ci = true
 	if !on.RequireExternalCI || on.MinCIWait != 45*time.Second || on.MaxCIWait != 7*time.Minute {
 		t.Fatalf("per-repo pipeline policy = %+v", on)
 	}
-	off := newPipelineAutoMerger(context.Background(), store, "jerryfane/gitmoot")
+	off := newPipelineAutoMerger(context.Background(), store, "gitmoot/gitmoot")
 	if off.RequireExternalCI || off.MinCIWait != 45*time.Second || off.MaxCIWait != 7*time.Minute {
 		t.Fatalf("global pipeline policy = %+v", off)
 	}
@@ -93,7 +93,7 @@ require_external_ci = true
 	}
 
 	other := workflow.PolicyMergeGate{}
-	applyMergeGatePolicy(&other, paths.Home, "jerryfane/gitmoot")
+	applyMergeGatePolicy(&other, paths.Home, "gitmoot/gitmoot")
 	if other.RequireExternalCI {
 		t.Fatalf("non-override repo RequireExternalCI = true, want false")
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // childJobWith builds a succeeded delegation child job whose stored payload
@@ -32,7 +32,7 @@ func childJobWith(t *testing.T, id, agent, action string, payload JobPayload) db
 func TestUpstreamDepBlockInjectsSucceededDepResult(t *testing.T) {
 	children := map[string]db.Job{
 		"research": childJobWith(t, "parent/delegation/research", "researcher", "review", JobPayload{
-			Repo:        "jerryfane/gitmoot",
+			Repo:        "gitmoot/gitmoot",
 			PullRequest: 42,
 			HeadSHA:     "abcdef0123456789",
 			Result: &AgentResult{
@@ -50,7 +50,7 @@ func TestUpstreamDepBlockInjectsSucceededDepResult(t *testing.T) {
 		"Upstream dependency results:",
 		`- dep "research" (agent researcher, action review): approved`,
 		"found three relevant prior arts",
-		"https://github.com/jerryfane/gitmoot/pull/42",
+		"https://github.com/gitmoot/gitmoot/pull/42",
 		"[changes_made: 2]",
 		"[head abcdef0]", // 7-char short SHA
 		"artifact_body:",
@@ -230,14 +230,14 @@ func TestUpstreamDepBlockFencesBacktickSummary(t *testing.T) {
 func TestAdvanceDelegationsInjectsUpstreamContextWhenEnabled(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "researcher", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "writer", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "researcher", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "writer", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.InjectUpstreamDepContext = true
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-419",
 		TaskID:    "task-419",
 		TaskTitle: "Parent",
@@ -289,14 +289,14 @@ func TestAdvanceDelegationsUpstreamFlagOffByteIdentical(t *testing.T) {
 		t.Helper()
 		ctx := context.Background()
 		store := openEngineStore(t)
-		seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-		seedAgent(t, store, "researcher", []string{"review"}, "jerryfane/gitmoot")
-		seedAgent(t, store, "writer", []string{"review"}, "jerryfane/gitmoot")
+		seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+		seedAgent(t, store, "researcher", []string{"review"}, "gitmoot/gitmoot")
+		seedAgent(t, store, "writer", []string{"review"}, "gitmoot/gitmoot")
 		engine := testEngine(store)
 		engine.InjectUpstreamDepContext = inject
 
 		insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-			Repo:      "jerryfane/gitmoot",
+			Repo:      "gitmoot/gitmoot",
 			Branch:    "task-419",
 			TaskID:    "task-419",
 			TaskTitle: "Parent",
@@ -351,14 +351,14 @@ func TestAdvanceDelegationsUpstreamFlagOffByteIdentical(t *testing.T) {
 func TestAdvanceDelegationsRetryReinjectsUpstreamContext(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "researcher", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "writer", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "researcher", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "writer", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.InjectUpstreamDepContext = true
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-419",
 		TaskID:    "task-419",
 		TaskTitle: "Parent",
@@ -421,14 +421,14 @@ func TestAdvanceDelegationsRetryUpstreamFlagOffByteIdentical(t *testing.T) {
 		t.Helper()
 		ctx := context.Background()
 		store := openEngineStore(t)
-		seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-		seedAgent(t, store, "researcher", []string{"review"}, "jerryfane/gitmoot")
-		seedAgent(t, store, "writer", []string{"review"}, "jerryfane/gitmoot")
+		seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+		seedAgent(t, store, "researcher", []string{"review"}, "gitmoot/gitmoot")
+		seedAgent(t, store, "writer", []string{"review"}, "gitmoot/gitmoot")
 		engine := testEngine(store)
 		engine.InjectUpstreamDepContext = inject
 
 		insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-			Repo:      "jerryfane/gitmoot",
+			Repo:      "gitmoot/gitmoot",
 			Branch:    "task-419",
 			TaskID:    "task-419",
 			TaskTitle: "Parent",
@@ -483,14 +483,14 @@ func TestAdvanceDelegationsRetryUpstreamFlagOffByteIdentical(t *testing.T) {
 func TestAdvanceDelegationsUpstreamIdempotentReEnqueue(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "researcher", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "writer", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "researcher", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "writer", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.InjectUpstreamDepContext = true
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-419",
 		TaskID:    "task-419",
 		TaskTitle: "Parent",
@@ -542,11 +542,11 @@ func TestAdvanceDelegationsUpstreamIdempotentReEnqueue(t *testing.T) {
 // engine fixtures but with Artifacts + an ArtifactBody so the manifest exists.
 func seedManifestParent(t *testing.T, store *db.Store) {
 	t.Helper()
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "researcher", []string{"review"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "writer", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "researcher", []string{"review"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "writer", []string{"review"}, "gitmoot/gitmoot")
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-438",
 		TaskID:    "task-438",
 		TaskTitle: "Parent",

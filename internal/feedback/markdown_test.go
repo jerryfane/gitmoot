@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/artifact"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/artifact"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func TestMarkdownCollectorWriteAndImportPacket(t *testing.T) {

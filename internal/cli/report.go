@@ -8,9 +8,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/report"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/report"
 )
 
 type reportGitHubClient interface {
@@ -23,7 +23,7 @@ var newReportGitHubClient = func() reportGitHubClient {
 	return github.NewClient("")
 }
 
-var reportIssueRepo = github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+var reportIssueRepo = github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 
 func runReport(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {

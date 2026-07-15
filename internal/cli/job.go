@@ -15,10 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/cockpit"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/transcript"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/cockpit"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/transcript"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 func runJob(args []string, stdout, stderr io.Writer) int {

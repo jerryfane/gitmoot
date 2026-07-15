@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/memory"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/memory"
 )
 
 // seedClusterCorpus seeds two clearly separable communities (database facts vs

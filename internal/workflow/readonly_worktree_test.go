@@ -10,7 +10,7 @@ import (
 
 	"database/sql"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func TestReadOnlyFanoutNeedsWorktree(t *testing.T) {
@@ -361,9 +361,9 @@ func TestRecordReadOnlyWorktreeReclaimOnAbort(t *testing.T) {
 func TestDispatchDelegationsTwoReadOnlySiblingsGetSeparateDetachedWorktrees(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit-a", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit-b", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit-a", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit-b", []string{"ask"}, "gitmoot/gitmoot")
 	home := t.TempDir()
 	manager := &fakeWorktreeManager{}
 	engine := testEngine(store)
@@ -372,7 +372,7 @@ func TestDispatchDelegationsTwoReadOnlySiblingsGetSeparateDetachedWorktrees(t *t
 	engine.DelegationWorktrees = manager
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -400,8 +400,8 @@ func TestDispatchDelegationsTwoReadOnlySiblingsGetSeparateDetachedWorktrees(t *t
 		t.Fatalf("unmarshalPayload(d2) returned error: %v", err)
 	}
 
-	wantPathOne := filepath.Join(home, "worktrees", "jerryfane--gitmoot", "delegations", "parent-job", "d1")
-	wantPathTwo := filepath.Join(home, "worktrees", "jerryfane--gitmoot", "delegations", "parent-job", "d2")
+	wantPathOne := filepath.Join(home, "worktrees", "gitmoot--gitmoot", "delegations", "parent-job", "d1")
+	wantPathTwo := filepath.Join(home, "worktrees", "gitmoot--gitmoot", "delegations", "parent-job", "d2")
 	if payloadOne.WorktreePath != wantPathOne {
 		t.Fatalf("d1 worktree path = %q, want %q", payloadOne.WorktreePath, wantPathOne)
 	}
@@ -459,8 +459,8 @@ func TestDispatchDelegationsTwoReadOnlySiblingsGetSeparateDetachedWorktrees(t *t
 func TestDispatchDelegationsSingleReadOnlyDelegationStaysInSharedCheckout(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"ask"}, "gitmoot/gitmoot")
 	home := t.TempDir()
 	manager := &fakeWorktreeManager{}
 	engine := testEngine(store)
@@ -469,7 +469,7 @@ func TestDispatchDelegationsSingleReadOnlyDelegationStaysInSharedCheckout(t *tes
 	engine.DelegationWorktrees = manager
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",
@@ -508,14 +508,14 @@ func TestDispatchDelegationsSingleReadOnlyDelegationStaysInSharedCheckout(t *tes
 func TestDispatchDelegationsReadOnlyFanoutWithoutManagerEmitsSkippedEvent(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit-a", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit-b", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit-a", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit-b", []string{"ask"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	// No engine.Home / engine.DelegationWorktrees: detached isolation unavailable.
 
 	insertCompletedJob(t, store, db.Job{ID: "parent-job", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-005",
 		TaskID:    "task-5",
 		TaskTitle: "Parent",

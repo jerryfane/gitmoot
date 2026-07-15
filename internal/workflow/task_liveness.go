@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // FindLiveTaskJob returns one job that still owns lifecycle progress for task.

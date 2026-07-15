@@ -17,8 +17,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/prompts"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/prompts"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // jsonFieldNames returns the JSON field names declared on v's struct type, in
@@ -42,7 +42,7 @@ func jsonFieldNames(v any) []string {
 
 func renderedJob() string {
 	return prompts.RenderJob(prompts.JobPrompt{
-		Repo:         "jerryfane/gitmoot",
+		Repo:         "gitmoot/gitmoot",
 		Branch:       "task-422",
 		Action:       "implement",
 		Instructions: "single-source the contract",

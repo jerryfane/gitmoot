@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // captureKimiRunner records the argv of each invocation and, so an oversize-prompt
@@ -57,7 +57,7 @@ func kimiTestAgent() Agent {
 		Role:           "reviewer",
 		Runtime:        KimiRuntime,
 		RuntimeRef:     "session_550e8400-e29b-41d4-a716-446655440001",
-		RepoScope:      "jerryfane/gitmoot",
+		RepoScope:      "gitmoot/gitmoot",
 		AutonomyPolicy: AutonomyPolicyReadOnly,
 	}
 }
@@ -224,7 +224,7 @@ func TestKimiStartLongPromptUsesTempFile(t *testing.T) {
 	stream := `{"role":"meta","type":"session.resume_hint","session_id":"session_550e8400-e29b-41d4-a716-446655440000"}` + "\n"
 	runner := &captureKimiRunner{result: subprocess.Result{Stdout: stream}}
 	adapter := KimiAdapter{Runner: runner, Dir: "/repo"}
-	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "jerryfane/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
+	agent := Agent{Name: "lead", Role: "implementer", Runtime: KimiRuntime, RepoScope: "gitmoot/gitmoot", AutonomyPolicy: AutonomyPolicyReadOnly}
 	prompt := strings.Repeat("Q", kimiMaxArgvPromptBytes+10)
 	if _, err := adapter.Start(context.Background(), StartRequest{Agent: agent, Prompt: prompt}); err != nil {
 		t.Fatalf("Start: %v", err)

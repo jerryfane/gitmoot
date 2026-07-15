@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/skillopt"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/skillopt"
 )
 
 // binaryLessonsSetYAML gives the seeded question ids their human wording so the
@@ -301,7 +301,7 @@ func TestSkillOptBinaryLessonsApplyExportsCleanly(t *testing.T) {
 	if err := store.UpsertAgentTemplate(context.Background(), db.AgentTemplate{
 		ID:             "planner",
 		Name:           "Planner",
-		SourceRepo:     "jerryfane/gitmoot",
+		SourceRepo:     "gitmoot/gitmoot",
 		SourceRef:      "main",
 		SourcePath:     "skills/gitmoot/agent-templates/planner.md",
 		ResolvedCommit: "deadbeef",

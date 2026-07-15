@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/mention"
+	"github.com/gitmoot/gitmoot/internal/mention"
 )
 
 type Command struct {

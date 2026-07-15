@@ -335,7 +335,7 @@ Human approval stays **explicit** for these ambiguous or high-stakes evaluator
 outcomes: the view surfaces them and links to the action, but nothing is auto-approved.
 
 The same failed-check and binary-verdict payloads back the planned Slack/media
-bridge ([#519](https://github.com/jerryfane/gitmoot/issues/519)), which needs
+bridge ([#519](https://github.com/gitmoot/gitmoot/issues/519)), which needs
 compact human-action status to post into a thread. Two read-only endpoints expose
 them for bridge consumers: `GET /api/job/{id}/checks` (a job's failed result checks
 + policy mode) and `GET /api/run/{id}/verdicts` (a SkillOpt run's per-question

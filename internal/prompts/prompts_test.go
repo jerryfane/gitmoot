@@ -8,7 +8,7 @@ import (
 
 func TestRenderJobIncludesContextAndContract(t *testing.T) {
 	prompt := RenderJob(JobPrompt{
-		Repo:                   "jerryfane/gitmoot",
+		Repo:                   "gitmoot/gitmoot",
 		Branch:                 "task-005",
 		PullRequest:            5,
 		Task:                   "task-5: Job Mailbox",
@@ -26,7 +26,7 @@ func TestRenderJobIncludesContextAndContract(t *testing.T) {
 		"Template source commit: abc123",
 		"Template instructions:\nReview deeply.",
 		"Job context:",
-		"Repo: jerryfane/gitmoot",
+		"Repo: gitmoot/gitmoot",
 		"Branch: task-005",
 		"Pull request: #5",
 		"Task: task-5: Job Mailbox",
@@ -44,7 +44,7 @@ func TestRenderJobIncludesContextAndContract(t *testing.T) {
 
 func TestRenderJobIncludesDelegationArtifacts(t *testing.T) {
 	prompt := RenderJob(JobPrompt{
-		Repo:                  "jerryfane/gitmoot",
+		Repo:                  "gitmoot/gitmoot",
 		Branch:                "task-005",
 		Action:                "implement",
 		Instructions:          "build the api",
@@ -64,7 +64,7 @@ func TestRenderJobIncludesDelegationArtifacts(t *testing.T) {
 
 func TestRenderJobOmitsDelegationArtifactsWhenUnset(t *testing.T) {
 	prompt := RenderJob(JobPrompt{
-		Repo:         "jerryfane/gitmoot",
+		Repo:         "gitmoot/gitmoot",
 		Branch:       "task-005",
 		Action:       "implement",
 		Instructions: "build the api",
@@ -81,7 +81,7 @@ func TestRenderJobOmitsDelegationArtifactsWhenUnset(t *testing.T) {
 func TestRenderJobCommitContractLine(t *testing.T) {
 	const contract = "Gitmoot commits and delivers your changes after you finish; do not run git commit or git push."
 	base := JobPrompt{
-		Repo:         "jerryfane/gitmoot",
+		Repo:         "gitmoot/gitmoot",
 		Branch:       "task-005",
 		Instructions: "build the api",
 	}
@@ -148,7 +148,7 @@ func TestRenderRepairPromptIncludesSchemaHelpHint(t *testing.T) {
 
 func TestRenderJobIncludesDelegationValidationHint(t *testing.T) {
 	prompt := RenderJob(JobPrompt{
-		Repo:         "jerryfane/gitmoot",
+		Repo:         "gitmoot/gitmoot",
 		Branch:       "task-005",
 		Action:       "implement",
 		Instructions: "build the api",

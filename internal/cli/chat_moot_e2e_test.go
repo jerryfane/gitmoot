@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // This file is the no-LLM, no-network end-to-end proof for the #534 V1.5 MOOT
@@ -31,7 +31,7 @@ import (
 func buildGitmootBinaryForTest(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "gitmoot")
-	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "github.com/jerryfane/gitmoot/cmd/gitmoot")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "github.com/gitmoot/gitmoot/cmd/gitmoot")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build gitmoot binary: %v\n%s", err, out)
 	}

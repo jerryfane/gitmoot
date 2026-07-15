@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	dashboard "github.com/jerryfane/gitmoot-dashboard"
+	dashboard "github.com/gitmoot/gitmoot-dashboard"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/update"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/update"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // seedWebDashboardTree seeds a coordinator with two delegation children (one
@@ -541,10 +541,10 @@ func TestWebDataSourceGraph(t *testing.T) {
 
 func TestParseRunKindAgent(t *testing.T) {
 	cases := []struct {
-		rootID     string
-		root       db.Job
-		wantKind   string
-		wantAgent  string
+		rootID    string
+		root      db.Job
+		wantKind  string
+		wantAgent string
 	}{
 		{"local-ask-project-lead-18bde5e13a42d5a7", db.Job{}, "ask", "project-lead"},
 		{"local-review-acme-reviewer-abcdef123456", db.Job{}, "review", "acme-reviewer"},
@@ -1464,7 +1464,7 @@ func TestWebDataSourceUpdateCheckCache(t *testing.T) {
 		calls++
 		return update.CheckResult{
 			CurrentVersion: "v1.0.0", LatestVersion: "v2.0.0",
-			ReleaseURL: "https://github.com/jerryfane/gitmoot/releases/tag/v2.0.0", UpToDate: false,
+			ReleaseURL: "https://github.com/gitmoot/gitmoot/releases/tag/v2.0.0", UpToDate: false,
 		}, nil
 	}
 

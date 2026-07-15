@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // recordingHardVerifierDispatcher is a stub HardVerifierDispatcher that records the
@@ -36,7 +36,7 @@ func (r *recordingHardVerifierDispatcher) Verify(_ context.Context, job db.Job, 
 func TestEngineDispatchesHardVerifierLegOnMerge(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	harvester := &recordingHarvester{}
@@ -45,7 +45,7 @@ func TestEngineDispatchesHardVerifierLegOnMerge(t *testing.T) {
 		ok: true,
 		outcome: Outcome{
 			Kind: OutcomeReviewed, HardVerifier: true, HardPassed: true,
-			Repo: "jerryfane/gitmoot", PullRequest: 7,
+			Repo: "gitmoot/gitmoot", PullRequest: 7,
 			Rubric: map[string]float64{"go test ./...": 1.0},
 		},
 	}
@@ -85,7 +85,7 @@ func TestEngineDispatchesHardVerifierLegOnMerge(t *testing.T) {
 func TestEngineNilHardVerifierDispatcherIsByteIdentical(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	engine.OutcomeHarvester = &recordingHarvester{}
@@ -109,7 +109,7 @@ func TestEngineNilHardVerifierDispatcherIsByteIdentical(t *testing.T) {
 func TestEngineHardVerifierDispatchErrorNeverFailsMerge(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	engine.OutcomeHarvester = &recordingHarvester{}
@@ -141,7 +141,7 @@ func TestEngineHardVerifierDispatchErrorNeverFailsMerge(t *testing.T) {
 func TestEngineHardVerifierDispatchSkipWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	harvester := &recordingHarvester{}
@@ -170,7 +170,7 @@ type blockingHardVerifierDispatcher struct {
 func (b *blockingHardVerifierDispatcher) Verify(_ context.Context, _ db.Job, _ JobPayload, _ string) (Outcome, bool, error) {
 	b.once.Do(func() { close(b.started) })
 	<-b.release
-	return Outcome{Kind: OutcomeReviewed, HardVerifier: true, HardPassed: true, Repo: "jerryfane/gitmoot", PullRequest: 7, Rubric: map[string]float64{"go test ./...": 1.0}}, true, nil
+	return Outcome{Kind: OutcomeReviewed, HardVerifier: true, HardPassed: true, Repo: "gitmoot/gitmoot", PullRequest: 7, Rubric: map[string]float64{"go test ./...": 1.0}}, true, nil
 }
 
 // TestEngineHardVerifierLegDoesNotBlockAdvanceJob is the detach regression: even when
@@ -181,7 +181,7 @@ func (b *blockingHardVerifierDispatcher) Verify(_ context.Context, _ db.Job, _ J
 func TestEngineHardVerifierLegDoesNotBlockAdvanceJob(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	// Build an engine with the PRODUCTION default async spawn (no synchronous
 	// HardVerifierSpawner override), so the detached goroutine is exercised for real.
 	engine := Engine{

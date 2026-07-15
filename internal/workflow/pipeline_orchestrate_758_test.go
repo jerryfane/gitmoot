@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // #758 CORE: an orchestrate pipeline stage IS a bounded agent sub-tree ROOT. This
@@ -20,7 +20,7 @@ import (
 // byte-identically, so the relaxation is gated strictly on the flag and never on
 // sender-sniffing.
 
-const orchestrateStageRepo = "jerryfane/gitmoot"
+const orchestrateStageRepo = "gitmoot/gitmoot"
 
 // orchestrateDelegatingResult is the coordinator's shell stand-in output: a healthy
 // approved result that fans out ONE named-agent review child. No real LLM.

@@ -9,7 +9,7 @@ const config: Config = {
 
   url: 'https://gitmoot.io',
   baseUrl: '/docs/',
-  organizationName: 'jerryfane',
+  organizationName: 'gitmoot',
   projectName: 'gitmoot',
 
   onBrokenLinks: 'throw',
@@ -53,7 +53,7 @@ const config: Config = {
         docs: {
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/jerryfane/gitmoot/tree/main/website/',
+          editUrl: 'https://github.com/gitmoot/gitmoot/tree/main/website/',
         },
         blog: false,
         theme: {
@@ -92,7 +92,7 @@ const config: Config = {
           position: 'right',
         },
         {
-          href: 'https://github.com/jerryfane/gitmoot',
+          href: 'https://github.com/gitmoot/gitmoot',
           label: 'GitHub',
           position: 'right',
         },
@@ -117,7 +117,7 @@ const config: Config = {
         {label: 'SKILL.md', href: 'https://gitmoot.io/SKILL.md'},
         {label: 'llms.txt', href: 'https://gitmoot.io/llms.txt'},
         {label: 'Website', href: 'https://gitmoot.io'},
-        {label: 'GitHub', href: 'https://github.com/jerryfane/gitmoot'},
+        {label: 'GitHub', href: 'https://github.com/gitmoot/gitmoot'},
         {label: 'Discord', href: 'https://discord.gg/TTFRHFyDXf'},
       ],
       copyright: `© ${new Date().getFullYear()} Gitmoot`,

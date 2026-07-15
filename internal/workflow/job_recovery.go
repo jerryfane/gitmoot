@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // recordReadOnlyWorktreeReclaimOnAbort marks a job's dispatch-allocated read-only

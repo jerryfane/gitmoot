@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // TestDeterministicCheckerFullChain is the FULL-CHAIN integration test for #485. It
@@ -75,8 +75,8 @@ func TestDeterministicCheckerFullChain(t *testing.T) {
 	if floor.ItemID == checker.ItemID {
 		t.Fatalf("floor and checker share item id %q (checker overwrote the floor)", floor.ItemID)
 	}
-	if checker.ItemID != "checker#jerryfane/gitmoot#7" {
-		t.Fatalf("checker item id = %q, want checker#jerryfane/gitmoot#7", checker.ItemID)
+	if checker.ItemID != "checker#gitmoot/gitmoot#7" {
+		t.Fatalf("checker item id = %q, want checker#gitmoot/gitmoot#7", checker.ItemID)
 	}
 
 	// The checker item carries objective=true and the deterministic diff_size

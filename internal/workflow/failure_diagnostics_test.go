@@ -6,14 +6,14 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // shellCrashAgent builds a shell-runtime agent whose session command is the
 // given script, delivered by the REAL shell adapter (real process, real exit
 // code) so the crash-diagnostics capture is proven at the runtime boundary.
 func shellCrashAgent(script string) runtime.Agent {
-	return runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: script, RepoScope: "jerryfane/gitmoot", Role: "reviewer"}
+	return runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: script, RepoScope: "gitmoot/gitmoot", Role: "reviewer"}
 }
 
 func TestMailboxRunCapturesCrashDiagnosticsOnNonZeroExit(t *testing.T) {
@@ -22,7 +22,7 @@ func TestMailboxRunCapturesCrashDiagnosticsOnNonZeroExit(t *testing.T) {
 	mailbox := Mailbox{Store: store}
 	agent := shellCrashAgent(`echo "api_key=super-secret-crash-value" >&2; echo "runtime exploded" >&2; exit 7`)
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-crash", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-crash", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-crash", agent, runtime.ShellAdapter{}); err == nil {
@@ -70,7 +70,7 @@ func TestMailboxRunCrashDiagnosticsStreamingPhase(t *testing.T) {
 	mailbox := Mailbox{Store: store}
 	agent := shellCrashAgent(`echo "partial stdout"; echo "died mid-stream" >&2; exit 3`)
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-stream", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-stream", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-stream", agent, runtime.ShellAdapter{}); err == nil {
@@ -106,7 +106,7 @@ func TestMailboxRunRecordsResultParseDiagnostics(t *testing.T) {
 	mailbox := Mailbox{Store: store}
 	agent := shellCrashAgent(`echo "no envelope from me"; echo "warned on stderr" >&2`)
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-parse", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-parse", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-parse", agent, runtime.ShellAdapter{}); err == nil {
@@ -145,7 +145,7 @@ func TestMailboxRunSuccessStoresNoFailureDiagnostics(t *testing.T) {
 	mailbox := Mailbox{Store: store}
 	agent := shellCrashAgent(`echo '{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}'`)
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-ok", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-ok", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-ok", agent, runtime.ShellAdapter{}); err != nil {
@@ -177,7 +177,7 @@ func TestMailboxRunClearsStaleFailureDiagnosticsOnRetry(t *testing.T) {
 	mailbox := Mailbox{Store: store}
 	agent := shellCrashAgent(`echo '{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}'`)
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-retry", Agent: "audit", Action: "review", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-retry", Agent: "audit", Action: "review", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("Enqueue returned error: %v", err)
 	}
 	// Seed a stale crash report from a previous run onto the queued payload.

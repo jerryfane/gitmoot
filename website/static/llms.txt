@@ -59,4 +59,4 @@ full expanded context.
 - [v0.8.6 Release Notes](https://gitmoot.io/docs/release-notes/v0.8.6): Codex token usage captured correctly for every session shape (#658/#661/#662/#664/#669); memory confirmed pool fills from ordinary jobs (#647); session jobs `job open/close/record` (#660/#676); daemon boot_id reboot recovery (#668); config-driven runtime metadata registry (#674/#679); dashboard Learning section (#672/#677/#680).
 - [Raw SKILL.md](https://gitmoot.io/SKILL.md): Agent skill entrypoint.
 - [Full LLM Context](https://gitmoot.io/llms-full.txt): Expanded Markdown context for agents.
-- [GitHub Repository](https://github.com/jerryfane/gitmoot): Source code and releases.
+- [GitHub Repository](https://github.com/gitmoot/gitmoot): Source code and releases.

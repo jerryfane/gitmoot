@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 // TestRoutingTelemetryRecordsRuntimeDefaultModel proves the recorded model matches
@@ -18,8 +18,8 @@ import (
 func TestRoutingTelemetryRecordsRuntimeDefaultModel(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "impl", []string{"implement"}, "jerryfane/gitmoot")
-	agent := runtime.Agent{Name: "impl", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	seedAgent(t, store, "impl", []string{"implement"}, "gitmoot/gitmoot")
+	agent := runtime.Agent{Name: "impl", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`,
 	}}
@@ -29,7 +29,7 @@ func TestRoutingTelemetryRecordsRuntimeDefaultModel(t *testing.T) {
 		}
 		return ""
 	}}
-	if _, err := m.Enqueue(ctx, JobRequest{ID: "impl-job", Agent: "impl", Action: "implement", Repo: "jerryfane/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Impl"}); err != nil {
+	if _, err := m.Enqueue(ctx, JobRequest{ID: "impl-job", Agent: "impl", Action: "implement", Repo: "gitmoot/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Impl"}); err != nil {
 		t.Fatalf("Enqueue error: %v", err)
 	}
 	if _, err := m.Run(ctx, "impl-job", agent, adapter); err != nil {
@@ -54,11 +54,11 @@ func TestRoutingTelemetryRecordsRuntimeDefaultModel(t *testing.T) {
 func TestRoutingTelemetryRecordsAdapterFailure(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "flaky", []string{"implement"}, "jerryfane/gitmoot")
-	agent := runtime.Agent{Name: "flaky", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	seedAgent(t, store, "flaky", []string{"implement"}, "gitmoot/gitmoot")
+	agent := runtime.Agent{Name: "flaky", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	adapter := &fakeDelivery{err: errors.New("adapter boom")}
 	m := Mailbox{Store: store}
-	if _, err := m.Enqueue(ctx, JobRequest{ID: "flaky-job", Agent: "flaky", Action: "implement", Repo: "jerryfane/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Flaky"}); err != nil {
+	if _, err := m.Enqueue(ctx, JobRequest{ID: "flaky-job", Agent: "flaky", Action: "implement", Repo: "gitmoot/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Flaky"}); err != nil {
 		t.Fatalf("Enqueue error: %v", err)
 	}
 	if _, err := m.Run(ctx, "flaky-job", agent, adapter); err == nil {
@@ -86,9 +86,9 @@ func TestRoutingTelemetryRecordsAdapterFailure(t *testing.T) {
 func TestRunJobRecordsRoutingTelemetry(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
-	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	agent := runtime.Agent{Name: "audit", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	adapter := &fakeDelivery{outputs: []string{
 		`{"gitmoot_result":{"decision":"approved","summary":"looks good","findings":[],"changes_made":[],"tests_run":["go test"],"needs":[],"delegations":[]}}`,
 	}}
@@ -96,7 +96,7 @@ func TestRunJobRecordsRoutingTelemetry(t *testing.T) {
 		ID:        "review-job",
 		Agent:     "audit",
 		Action:    "review",
-		Repo:      "jerryfane/gitmoot",
+		Repo:      "gitmoot/gitmoot",
 		Branch:    "task-9",
 		TaskID:    "task-9",
 		TaskTitle: "Review",
@@ -117,7 +117,7 @@ func TestRunJobRecordsRoutingTelemetry(t *testing.T) {
 		t.Fatalf("routing_telemetry rows = %d, want 1", len(rows))
 	}
 	got := rows[0]
-	if got.JobID != "review-job" || got.Repo != "jerryfane/gitmoot" || got.Action != "review" ||
+	if got.JobID != "review-job" || got.Repo != "gitmoot/gitmoot" || got.Action != "review" ||
 		got.Phase != "verify" || got.Runtime != runtime.ShellRuntime || got.Agent != "audit" ||
 		got.JobState != string(JobSucceeded) || got.Decision != "approved" || !got.Approved || got.TestsRun != 1 {
 		t.Fatalf("telemetry row mismatch: %+v", got)
@@ -145,7 +145,7 @@ func TestRoutingTelemetryFailureIsSwallowed(t *testing.T) {
 	m.recordRoutingTelemetry(ctx,
 		db.Job{ID: "j1", Agent: "audit", Type: "review"},
 		agent,
-		JobPayload{Repo: "jerryfane/gitmoot"},
+		JobPayload{Repo: "gitmoot/gitmoot"},
 		AgentResult{Decision: "approved"},
 		JobSucceeded,
 		0)
@@ -159,20 +159,20 @@ func TestRoutingTelemetryFailureIsSwallowed(t *testing.T) {
 func TestRouterContextOffByDefaultIdenticalPrompt(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"review"}, "gitmoot/gitmoot")
 
 	// Seed observed performance for this repo so an enabled build would inject.
 	for i := 0; i < 3; i++ {
 		if err := store.InsertRoutingTelemetry(ctx, db.RoutingTelemetry{
-			Repo: "jerryfane/gitmoot", Action: "implement", Runtime: "codex", Model: "gpt-5.5",
+			Repo: "gitmoot/gitmoot", Action: "implement", Runtime: "codex", Model: "gpt-5.5",
 			JobState: "succeeded", Approved: true, DurationMS: 100,
 		}); err != nil {
 			t.Fatalf("seed telemetry error: %v", err)
 		}
 	}
 
-	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
-	req := JobRequest{ID: "coord", Agent: "lead", Action: "review", Repo: "jerryfane/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Coordinate"}
+	agent := runtime.Agent{Name: "lead", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
+	req := JobRequest{ID: "coord", Agent: "lead", Action: "review", Repo: "gitmoot/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Coordinate"}
 
 	// OFF (default construction): prompt has no router block.
 	offAdapter := &fakeDelivery{outputs: []string{`{"gitmoot_result":{"decision":"approved","summary":"ok","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`}}
@@ -226,15 +226,15 @@ func TestRouterContextOffByDefaultIdenticalPrompt(t *testing.T) {
 func TestRouterContextSkippedForDelegationChild(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "worker", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "worker", []string{"review"}, "gitmoot/gitmoot")
 	if err := store.InsertRoutingTelemetry(ctx, db.RoutingTelemetry{
-		Repo: "jerryfane/gitmoot", Action: "implement", Runtime: "codex", JobState: "succeeded", Approved: true,
+		Repo: "gitmoot/gitmoot", Action: "implement", Runtime: "codex", JobState: "succeeded", Approved: true,
 	}); err != nil {
 		t.Fatalf("seed telemetry error: %v", err)
 	}
-	agent := runtime.Agent{Name: "worker", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "agent"}
+	agent := runtime.Agent{Name: "worker", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "agent"}
 	if _, err := (Mailbox{Store: store}).Enqueue(ctx, JobRequest{
-		ID: "child", Agent: "worker", Action: "review", Repo: "jerryfane/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Child",
+		ID: "child", Agent: "worker", Action: "review", Repo: "gitmoot/gitmoot", Branch: "task-1", TaskID: "task-1", TaskTitle: "Child",
 		ParentJobID: "some-parent", DelegationID: "d1",
 	}); err != nil {
 		t.Fatalf("Enqueue child error: %v", err)

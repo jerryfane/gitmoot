@@ -13,11 +13,11 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
-const DefaultRepo = "jerryfane/gitmoot"
+const DefaultRepo = "gitmoot/gitmoot"
 
 var ErrNoRelease = errors.New("no GitHub release found")
 

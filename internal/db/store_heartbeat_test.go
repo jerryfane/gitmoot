@@ -87,7 +87,7 @@ func TestCountActiveJobsByFingerprint(t *testing.T) {
 	mustJob("j1", "queued", `{"fingerprint":"heartbeat:repo-maintainer/daily"}`)
 	mustJob("j2", "running", `{"fingerprint":"heartbeat:repo-maintainer/daily"}`)
 	mustJob("j3", "succeeded", `{"fingerprint":"heartbeat:repo-maintainer/daily"}`) // terminal: not counted
-	mustJob("j4", "queued", `{"fingerprint":"heartbeat:other/x"}`)                   // different fp
+	mustJob("j4", "queued", `{"fingerprint":"heartbeat:other/x"}`)                  // different fp
 	mustJob("j5", "queued", `not-json`)                                             // malformed: tolerated, skipped
 
 	count, err := store.CountActiveJobsByFingerprint(ctx, fp)

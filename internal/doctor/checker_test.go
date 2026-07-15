@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/presence"
-	"github.com/jerryfane/gitmoot/internal/runtime"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/presence"
+	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 type fakeRunner struct {
@@ -41,9 +41,9 @@ func TestCheckerRun(t *testing.T) {
 			"gh --version":              {Stdout: "gh version 2\n"},
 			"codex --version":           {Stdout: "codex 1\n"},
 			"gh auth status":            {Stdout: "Logged in\n"},
-			"git remote get-url origin": {Stdout: "https://github.com/jerryfane/gitmoot.git\n"},
-			"gh repo view jerryfane/gitmoot --json nameWithOwner": {Stdout: `{"nameWithOwner":"jerryfane/gitmoot"}`},
-			"git branch --show-current":                           {Stdout: "main\n"},
+			"git remote get-url origin": {Stdout: "https://github.com/gitmoot/gitmoot.git\n"},
+			"gh repo view gitmoot/gitmoot --json nameWithOwner": {Stdout: `{"nameWithOwner":"gitmoot/gitmoot"}`},
+			"git branch --show-current":                         {Stdout: "main\n"},
 		},
 	}
 
@@ -424,9 +424,9 @@ func TestRepoChecksAgainstCheckoutPath(t *testing.T) {
 		want: "/checkout",
 		fakeRunner: fakeRunner{
 			runs: map[string]subprocess.Result{
-				"git remote get-url origin":                           {Stdout: "https://github.com/jerryfane/gitmoot.git\n"},
-				"gh repo view jerryfane/gitmoot --json nameWithOwner": {Stdout: `{"nameWithOwner":"jerryfane/gitmoot"}`},
-				"git branch --show-current":                           {Stdout: "main\n"},
+				"git remote get-url origin":                         {Stdout: "https://github.com/gitmoot/gitmoot.git\n"},
+				"gh repo view gitmoot/gitmoot --json nameWithOwner": {Stdout: `{"nameWithOwner":"gitmoot/gitmoot"}`},
+				"git branch --show-current":                         {Stdout: "main\n"},
 			},
 		},
 	}

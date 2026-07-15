@@ -3,7 +3,7 @@ package cli
 import (
 	"sync"
 
-	"github.com/jerryfane/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 // admissionBudget is the process-global, memory-aware concurrency gate the daemon

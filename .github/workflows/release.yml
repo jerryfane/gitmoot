@@ -40,7 +40,7 @@ jobs:
           mkdir -p dist
           COMMIT="$(git rev-parse HEAD)"
           DATE="$(git show -s --format=%cI HEAD)"
-          PKG=github.com/jerryfane/gitmoot/internal/buildinfo
+          PKG=github.com/gitmoot/gitmoot/internal/buildinfo
           LDFLAGS="-s -w -X ${PKG}.Version=${VERSION} -X ${PKG}.Commit=${COMMIT} -X ${PKG}.Date=${DATE}"
           for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             os="${t%/*}"; arch="${t#*/}"

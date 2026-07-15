@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/skills"
+	"github.com/gitmoot/gitmoot/skills"
 )
 
 // TestPackagedTemplateExamplesPassValidation guards every packaged coordinator

@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func runInteractive(args []string, stdout, stderr io.Writer) int {

@@ -43,14 +43,14 @@ func TestBinaryQuestionSetValidateDuplicateID(t *testing.T) {
 
 func TestBinaryQuestionSetValidateErrors(t *testing.T) {
 	cases := map[string]BinaryQuestionSet{
-		"bad version":        {Version: 2, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{ID: "q", Text: "t"}}}}},
-		"no dimensions":      {Version: 1},
-		"empty dim name":     {Version: 1, Dimensions: []BinaryDimension{{Questions: []BinaryQuestion{{ID: "q", Text: "t"}}}}},
-		"dup dim":            {Version: 1, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{ID: "q1", Text: "t"}}}, {Name: "a", Questions: []BinaryQuestion{{ID: "q2", Text: "t"}}}}},
-		"empty question id":  {Version: 1, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{Text: "t"}}}}},
-		"empty text":         {Version: 1, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{ID: "q"}}}}},
+		"bad version":         {Version: 2, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{ID: "q", Text: "t"}}}}},
+		"no dimensions":       {Version: 1},
+		"empty dim name":      {Version: 1, Dimensions: []BinaryDimension{{Questions: []BinaryQuestion{{ID: "q", Text: "t"}}}}},
+		"dup dim":             {Version: 1, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{ID: "q1", Text: "t"}}}, {Name: "a", Questions: []BinaryQuestion{{ID: "q2", Text: "t"}}}}},
+		"empty question id":   {Version: 1, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{Text: "t"}}}}},
+		"empty text":          {Version: 1, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{ID: "q"}}}}},
 		"no questions in dim": {Version: 1, Dimensions: []BinaryDimension{{Name: "a"}}},
-		"bad regex":          {Version: 1, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{ID: "q", Text: "t", Regex: "("}}}}},
+		"bad regex":           {Version: 1, Dimensions: []BinaryDimension{{Name: "a", Questions: []BinaryQuestion{{ID: "q", Text: "t", Regex: "("}}}}},
 	}
 	for name, set := range cases {
 		t.Run(name, func(t *testing.T) {

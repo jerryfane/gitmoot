@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func TestWriteDelegationArtifactsWritesBriefAndManifest(t *testing.T) {
@@ -202,7 +202,7 @@ func TestBuildEnrichedManifestEntrySucceededDepPopulatesFields(t *testing.T) {
 	e := Engine{InjectUpstreamDepContext: true, ArtifactRoot: "/home/.gitmoot"}
 	children := map[string]db.Job{
 		"research": childJobWith(t, "parent/delegation/research", "researcher", "review", JobPayload{
-			Repo:        "jerryfane/gitmoot",
+			Repo:        "gitmoot/gitmoot",
 			PullRequest: 42,
 			Result: &AgentResult{
 				Decision:     "approved",
@@ -227,7 +227,7 @@ func TestBuildEnrichedManifestEntrySucceededDepPopulatesFields(t *testing.T) {
 	if entry.ChangesMade != 2 {
 		t.Fatalf("changes_made = %d, want 2", entry.ChangesMade)
 	}
-	if entry.PullRequest != "https://github.com/jerryfane/gitmoot/pull/42" {
+	if entry.PullRequest != "https://github.com/gitmoot/gitmoot/pull/42" {
 		t.Fatalf("pull_request = %q", entry.PullRequest)
 	}
 	if want := e.inlineBriefPath("parent/delegation/research"); entry.OutputPath != want {
@@ -339,7 +339,7 @@ func TestAugmentDelegationManifestRoundTrip(t *testing.T) {
 
 	children := map[string]db.Job{
 		"research": childJobWith(t, "parent-job/delegation/research", "researcher", "review", JobPayload{
-			Repo:        "jerryfane/gitmoot",
+			Repo:        "gitmoot/gitmoot",
 			PullRequest: 7,
 			Result: &AgentResult{
 				Decision:    "approved",
@@ -376,7 +376,7 @@ func TestAugmentDelegationManifestRoundTrip(t *testing.T) {
 	if research.Decision != "approved" || research.SummaryPreview != "RESEARCH_SUMMARY" || research.ChangesMade != 3 {
 		t.Fatalf("research entry not enriched: %+v", research)
 	}
-	if research.PullRequest != "https://github.com/jerryfane/gitmoot/pull/7" {
+	if research.PullRequest != "https://github.com/gitmoot/gitmoot/pull/7" {
 		t.Fatalf("research pull_request = %q", research.PullRequest)
 	}
 	if want := e.inlineBriefPath("parent-job/delegation/research"); research.OutputPath != want {

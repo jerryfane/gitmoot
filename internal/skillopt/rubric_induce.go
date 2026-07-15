@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // Offline rubric induction (#347, AutoLibra-style — 2505.02820).

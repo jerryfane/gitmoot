@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 const delegatingResult = `{"gitmoot_result":{"decision":"approved","summary":"done","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[{"id":"d","agent":"a","action":"review","prompt":"go"}]}}`
@@ -18,10 +18,10 @@ func TestMailboxRunStripsPipelineStageDelegations(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "pipeline-runner"}
+	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "pipeline-runner"}
 	adapter := &fakeDelivery{outputs: []string{delegatingResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-1", Agent: "pipeline-x-runner", Action: "ask", Repo: "jerryfane/gitmoot", Sender: PipelineJobSender}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-1", Agent: "pipeline-x-runner", Action: "ask", Repo: "gitmoot/gitmoot", Sender: PipelineJobSender}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "stage-1", agent, adapter); err != nil {
@@ -50,10 +50,10 @@ func TestMailboxRunKeepsNonPipelineDelegations(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "coord", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "coordinator"}
+	agent := runtime.Agent{Name: "coord", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "coordinator"}
 	adapter := &fakeDelivery{outputs: []string{delegatingResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "coord", Action: "ask", Repo: "jerryfane/gitmoot", Sender: "user"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-1", Agent: "coord", Action: "ask", Repo: "gitmoot/gitmoot", Sender: "user"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-1", agent, adapter); err != nil {
@@ -86,10 +86,10 @@ func TestMailboxRunStripsPipelineStageHumanQuestions(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "pipeline-runner"}
+	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "pipeline-runner"}
 	adapter := &fakeDelivery{outputs: []string{askingResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-q", Agent: "pipeline-x-runner", Action: "ask", Repo: "jerryfane/gitmoot", Sender: PipelineJobSender}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-q", Agent: "pipeline-x-runner", Action: "ask", Repo: "gitmoot/gitmoot", Sender: PipelineJobSender}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "stage-q", agent, adapter); err != nil {
@@ -123,10 +123,10 @@ func TestMailboxRunKeepsNonPipelineHumanQuestions(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "coord", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "coordinator"}
+	agent := runtime.Agent{Name: "coord", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "coordinator"}
 	adapter := &fakeDelivery{outputs: []string{askingResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-q", Agent: "coord", Action: "ask", Repo: "jerryfane/gitmoot", Sender: "user"}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "job-q", Agent: "coord", Action: "ask", Repo: "gitmoot/gitmoot", Sender: "user"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "job-q", agent, adapter); err != nil {
@@ -157,10 +157,10 @@ func TestMailboxRunSkipsJobGatesForPipelineStages(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "pipeline-runner"}
+	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "pipeline-runner"}
 	adapter := &fakeDelivery{outputs: []string{blockedNeedsResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-b", Agent: "pipeline-x-runner", Action: "ask", Repo: "jerryfane/gitmoot", Sender: PipelineJobSender}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-b", Agent: "pipeline-x-runner", Action: "ask", Repo: "gitmoot/gitmoot", Sender: PipelineJobSender}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "stage-b", agent, adapter); err != nil {
@@ -191,10 +191,10 @@ func TestMaybeResumeOnGatesClearedRefusesPipelineStages(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	mailbox := Mailbox{Store: store}
-	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "jerryfane/gitmoot", Role: "pipeline-runner"}
+	agent := runtime.Agent{Name: "pipeline-x-runner", Runtime: runtime.ShellRuntime, RuntimeRef: "printf ok", RepoScope: "gitmoot/gitmoot", Role: "pipeline-runner"}
 	adapter := &fakeDelivery{outputs: []string{blockedNeedsResult}}
 
-	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-g", Agent: "pipeline-x-runner", Action: "ask", Repo: "jerryfane/gitmoot", Sender: PipelineJobSender}); err != nil {
+	if _, err := mailbox.Enqueue(ctx, JobRequest{ID: "stage-g", Agent: "pipeline-x-runner", Action: "ask", Repo: "gitmoot/gitmoot", Sender: PipelineJobSender}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if _, err := mailbox.Run(ctx, "stage-g", agent, adapter); err != nil {

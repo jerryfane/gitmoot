@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // TestAgentHeartbeatAddListShowEnableDisableRemove exercises the full write-side
@@ -23,7 +23,7 @@ func TestAgentHeartbeatAddListShowEnableDisableRemove(t *testing.T) {
 	}
 
 	out, errOut, code := run("agent", "heartbeat", "add", "repo-maintainer", "daily",
-		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--jitter", "15m",
+		"--repo", "gitmoot/gitmoot", "--interval", "24h", "--jitter", "15m",
 		"--prompt", "Review open issues and PRs.", "--enabled")
 	if code != 0 {
 		t.Fatalf("add exit=%d stderr=%s", code, errOut)
@@ -92,7 +92,7 @@ func TestAgentHeartbeatAddPreservesAgentType(t *testing.T) {
 		t.Fatalf("type set exit=%d stderr=%s", code, errOut)
 	}
 	if errOut, code := run("agent", "heartbeat", "add", "planner", "daily",
-		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--prompt", "p"); code != 0 {
+		"--repo", "gitmoot/gitmoot", "--interval", "24h", "--prompt", "p"); code != 0 {
 		t.Fatalf("heartbeat add exit=%d stderr=%s", code, errOut)
 	}
 	// Both the agent type and the heartbeat must survive.
@@ -127,7 +127,7 @@ func TestAgentHeartbeatAddReviewRejectsMissingCapability(t *testing.T) {
 	// Register an agent WITHOUT review capability.
 	if err := withStore(home, func(store *db.Store) error {
 		return store.UpsertAgent(context.Background(), db.Agent{
-			Name: "asker", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+			Name: "asker", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 			Capabilities: []string{"ask"}, RuntimeRef: "last",
 		})
 	}); err != nil {
@@ -135,7 +135,7 @@ func TestAgentHeartbeatAddReviewRejectsMissingCapability(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"agent", "heartbeat", "add", "asker", "stale",
-		"--repo", "jerryfane/gitmoot", "--interval", "12h", "--action", "review",
+		"--repo", "gitmoot/gitmoot", "--interval", "12h", "--action", "review",
 		"--prompt", "p", "--home", home}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for review heartbeat without capability")
@@ -158,7 +158,7 @@ func TestAgentHeartbeatAddReviewSucceedsWithCapability(t *testing.T) {
 	home := t.TempDir()
 	if err := withStore(home, func(store *db.Store) error {
 		return store.UpsertAgent(context.Background(), db.Agent{
-			Name: "reviewer", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+			Name: "reviewer", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 			Capabilities: []string{"ask", "review"}, RuntimeRef: "last",
 		})
 	}); err != nil {
@@ -166,7 +166,7 @@ func TestAgentHeartbeatAddReviewSucceedsWithCapability(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"agent", "heartbeat", "add", "reviewer", "stale",
-		"--repo", "jerryfane/gitmoot", "--interval", "12h", "--action", "review",
+		"--repo", "gitmoot/gitmoot", "--interval", "12h", "--action", "review",
 		"--prompt", "Review stale PRs.", "--home", home}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("review add exit=%d stderr=%s", code, stderr.String())
@@ -184,7 +184,7 @@ func TestAgentHeartbeatAddImplementRejectsReadOnlyPolicy(t *testing.T) {
 	home := t.TempDir()
 	if err := withStore(home, func(store *db.Store) error {
 		return store.UpsertAgent(context.Background(), db.Agent{
-			Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+			Name: "builder", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 			Capabilities: []string{"ask", "implement"}, AutonomyPolicy: "auto", RuntimeRef: "last",
 		})
 	}); err != nil {
@@ -192,7 +192,7 @@ func TestAgentHeartbeatAddImplementRejectsReadOnlyPolicy(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"agent", "heartbeat", "add", "builder", "nightly",
-		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--action", "implement",
+		"--repo", "gitmoot/gitmoot", "--interval", "24h", "--action", "implement",
 		"--prompt", "p", "--home", home}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for implement heartbeat under read-only policy")
@@ -215,7 +215,7 @@ func TestAgentHeartbeatAddImplementRejectsMissingCapability(t *testing.T) {
 	home := t.TempDir()
 	if err := withStore(home, func(store *db.Store) error {
 		return store.UpsertAgent(context.Background(), db.Agent{
-			Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+			Name: "builder", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 			Capabilities: []string{"ask"}, AutonomyPolicy: "danger-full-access", RuntimeRef: "last",
 		})
 	}); err != nil {
@@ -223,7 +223,7 @@ func TestAgentHeartbeatAddImplementRejectsMissingCapability(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"agent", "heartbeat", "add", "builder", "nightly",
-		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--action", "implement",
+		"--repo", "gitmoot/gitmoot", "--interval", "24h", "--action", "implement",
 		"--prompt", "p", "--home", home}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for implement heartbeat without implement capability")
@@ -241,7 +241,7 @@ func TestAgentHeartbeatAddImplementSucceedsWithWritePolicy(t *testing.T) {
 	home := t.TempDir()
 	if err := withStore(home, func(store *db.Store) error {
 		return store.UpsertAgent(context.Background(), db.Agent{
-			Name: "builder", Runtime: "codex", RepoScope: "jerryfane/gitmoot",
+			Name: "builder", Runtime: "codex", RepoScope: "gitmoot/gitmoot",
 			Capabilities: []string{"ask", "implement"}, AutonomyPolicy: "danger-full-access", RuntimeRef: "last",
 		})
 	}); err != nil {
@@ -249,7 +249,7 @@ func TestAgentHeartbeatAddImplementSucceedsWithWritePolicy(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"agent", "heartbeat", "add", "builder", "nightly",
-		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--action", "implement",
+		"--repo", "gitmoot/gitmoot", "--interval", "24h", "--action", "implement",
 		"--runtime", "claude", "--prompt", "Fix the top lint error.", "--home", home}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("implement add exit=%d stderr=%s", code, stderr.String())
@@ -281,7 +281,7 @@ func TestAgentHeartbeatAddRejectsBadRuntime(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"agent", "heartbeat", "add", "repo-maintainer", "daily",
-		"--repo", "jerryfane/gitmoot", "--interval", "24h", "--runtime", "shell",
+		"--repo", "gitmoot/gitmoot", "--interval", "24h", "--runtime", "shell",
 		"--prompt", "p", "--home", home}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for shell runtime override")
@@ -322,7 +322,7 @@ func TestDaemonHeartbeatLinesSurfacesState(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+`
 [agents.repo-maintainer.heartbeats.daily]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 prompt = "p"
 `), 0o600); err != nil {
@@ -357,14 +357,14 @@ func TestDaemonHeartbeatLinesSurfacesRuntimeOverride(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+`
 [agents.repo-maintainer.heartbeats.override]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 runtime = "claude"
 prompt = "p"
 
 [agents.repo-maintainer.heartbeats.plain]
 enabled = true
-repo = "jerryfane/gitmoot"
+repo = "gitmoot/gitmoot"
 interval = "24h"
 prompt = "p"
 `), 0o600); err != nil {

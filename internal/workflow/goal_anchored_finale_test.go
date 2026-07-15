@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // TestContinuationPromptAnchorsGoalAndReconcileFraming pins the #418 core: a
@@ -166,8 +166,8 @@ func TestBudgetPressureLine(t *testing.T) {
 func TestNestedContinuationAnchorsGoalFromRoot(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "coord", []string{"ask"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "w", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "coord", []string{"ask"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "w", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 
 	const rootGoal = "ROOT_GOAL_SENTINEL: build a tic-tac-toe AI and report its win rate"
@@ -175,7 +175,7 @@ func TestNestedContinuationAnchorsGoalFromRoot(t *testing.T) {
 	// Generation 0: the root coordinator carries the user's goal in Instructions and
 	// delegates one child.
 	insertCompletedJob(t, store, db.Job{ID: "root", Agent: "coord", Type: "ask"}, JobPayload{
-		Repo:         "jerryfane/gitmoot",
+		Repo:         "gitmoot/gitmoot",
 		Branch:       "task-1",
 		TaskID:       "task-1",
 		Sender:       "coord",

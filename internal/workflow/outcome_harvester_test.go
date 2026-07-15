@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 // recordingHarvester captures OutcomeHarvester.Harvest calls for the engine
@@ -46,7 +46,7 @@ func seedImplementJobForHarvest(t *testing.T, store *db.Store) {
 		Agent: "lead",
 		Type:  "implement",
 	}, JobPayload{
-		Repo:                   "jerryfane/gitmoot",
+		Repo:                   "gitmoot/gitmoot",
 		Branch:                 "task-7",
 		PullRequest:            7,
 		TaskID:                 "task-7",
@@ -64,7 +64,7 @@ func seedImplementJobForHarvest(t *testing.T, store *db.Store) {
 func TestEngineHarvestsMergedOutcomeOnce(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	harvester := &recordingHarvester{}
@@ -75,7 +75,7 @@ func TestEngineHarvestsMergedOutcomeOnce(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		HeadSHA:     "head123",
@@ -103,7 +103,7 @@ func TestEngineHarvestsMergedOutcomeOnce(t *testing.T) {
 	if got[0].HeadSHA != "head123" {
 		t.Fatalf("outcome head sha = %q, want the PR head SHA head123", got[0].HeadSHA)
 	}
-	if got[0].PullRequest != 7 || got[0].Repo != "jerryfane/gitmoot" {
+	if got[0].PullRequest != 7 || got[0].Repo != "gitmoot/gitmoot" {
 		t.Fatalf("outcome attribution = %+v", got[0])
 	}
 	if harvester.jobIDs[0] != "implement-job" {
@@ -117,7 +117,7 @@ func TestEngineHarvestsMergedOutcomeOnce(t *testing.T) {
 func TestEngineHarvestsBlockedOutcomeOnce(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Reason: "external CI failed", BlockClass: MergeBlockQuality}}
 	harvester := &recordingHarvester{}
@@ -128,7 +128,7 @@ func TestEngineHarvestsBlockedOutcomeOnce(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -159,7 +159,7 @@ func TestEngineHarvestsBlockedOutcomeOnce(t *testing.T) {
 func TestEngineSkipsTransientBlockHarvest(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{
 		Reason:     "pull request is not mergeable; rebase or update the branch",
@@ -173,7 +173,7 @@ func TestEngineSkipsTransientBlockHarvest(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -197,8 +197,8 @@ func TestEngineSkipsTransientBlockHarvest(t *testing.T) {
 func TestEngineHarvestsChangesRequestedOnce(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
-	seedAgent(t, store, "audit", []string{"review"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
+	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	harvester := &recordingHarvester{}
 	engine.OutcomeHarvester = harvester
@@ -208,7 +208,7 @@ func TestEngineHarvestsChangesRequestedOnce(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -240,7 +240,7 @@ func TestEngineHarvestsChangesRequestedOnce(t *testing.T) {
 func TestEngineHarvestErrorDoesNotFailAdvance(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	engine.OutcomeHarvester = &recordingHarvester{err: errors.New("harvest boom")}
@@ -250,7 +250,7 @@ func TestEngineHarvestErrorDoesNotFailAdvance(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",
@@ -285,7 +285,7 @@ func TestEngineHarvestErrorDoesNotFailAdvance(t *testing.T) {
 func TestEngineNilHarvesterIsByteIdentical(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
 	engine.MergeGate = &fakeMergeGate{decision: MergeDecision{Ready: true, Merged: true, MergeCommitSHA: "merge123"}}
 	// No OutcomeHarvester.
@@ -295,7 +295,7 @@ func TestEngineNilHarvesterIsByteIdentical(t *testing.T) {
 		Agent: "audit",
 		Type:  "review",
 	}, JobPayload{
-		Repo:        "jerryfane/gitmoot",
+		Repo:        "gitmoot/gitmoot",
 		Branch:      "task-7",
 		PullRequest: 7,
 		TaskID:      "task-7",

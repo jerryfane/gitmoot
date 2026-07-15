@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/github"
 )
 
 func TestPipelineAutoMergerEvaluateCheckStates(t *testing.T) {

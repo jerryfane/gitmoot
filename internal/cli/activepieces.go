@@ -22,8 +22,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/activepieces"
-	"github.com/jerryfane/gitmoot/internal/cli/style"
+	"github.com/gitmoot/gitmoot/internal/activepieces"
+	"github.com/gitmoot/gitmoot/internal/cli/style"
 )
 
 const (

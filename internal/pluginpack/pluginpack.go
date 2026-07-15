@@ -11,15 +11,15 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/skills"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/skills"
 )
 
 const (
 	PluginName      = "gitmoot"
 	DisplayName     = "Gitmoot"
 	Description     = "Local-first GitHub PR agent coordination."
-	RepositoryURL   = "https://github.com/jerryfane/gitmoot"
+	RepositoryURL   = "https://github.com/gitmoot/gitmoot"
 	HomepageURL     = "https://gitmoot.io"
 	PrivacyURL      = "https://gitmoot.io/privacy"
 	TermsURL        = "https://gitmoot.io/terms"

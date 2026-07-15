@@ -9,15 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 func TestPollOnceCreatesJobAndAcknowledgement(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgentTemplate(ctx, db.AgentTemplate{
 		ID:             "thermo-nuclear-code-quality-review",
 		Name:           "Thermo-Nuclear Code Quality Review",
@@ -47,7 +47,7 @@ func TestPollOnceCreatesJobAndAcknowledgement(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -99,7 +99,7 @@ func TestPollOnceCreatesJobAndAcknowledgement(t *testing.T) {
 func TestPollOnceAcknowledgesAgentWithoutRepoAccess(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "audit",
 		Role:           "reviewer",
@@ -116,7 +116,7 @@ func TestPollOnceAcknowledgesAgentWithoutRepoAccess(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -143,7 +143,7 @@ func TestPollOnceAcknowledgesAgentWithoutRepoAccess(t *testing.T) {
 func TestPollOnceRoutesPullRequestUpdatesToWorkflow(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -179,7 +179,7 @@ func TestPollOnceRoutesPullRequestUpdatesToWorkflow(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -223,7 +223,7 @@ func TestPollOnceRoutesPullRequestUpdatesToWorkflow(t *testing.T) {
 func TestHandlePullRequestWorkflowSkipsReviewFanoutWhenLockSet(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -281,7 +281,7 @@ func TestHandlePullRequestWorkflowSkipsReviewFanoutWhenLockSet(t *testing.T) {
 		Number:  7,
 		Title:   "Task 7",
 		State:   "open",
-		URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+		URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 		HeadRef: "task-7",
 		BaseRef: "main",
 		HeadSHA: "abc123",
@@ -312,7 +312,7 @@ func TestHandlePullRequestWorkflowSkipsReviewFanoutWhenLockSet(t *testing.T) {
 func TestHandlePullRequestWorkflowFansOutWhenLockUnset(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -363,7 +363,7 @@ func TestHandlePullRequestWorkflowFansOutWhenLockUnset(t *testing.T) {
 		Number:  7,
 		Title:   "Task 7",
 		State:   "open",
-		URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+		URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 		HeadRef: "task-7",
 		BaseRef: "main",
 		HeadSHA: "abc123",
@@ -379,7 +379,7 @@ func TestHandlePullRequestWorkflowFansOutWhenLockUnset(t *testing.T) {
 func TestPollOnceRetriesPullRequestWorkflowAfterRoutingFailure(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -400,7 +400,7 @@ func TestPollOnceRetriesPullRequestWorkflowAfterRoutingFailure(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -458,7 +458,7 @@ func TestPollOnceRetriesPullRequestWorkflowAfterRoutingFailure(t *testing.T) {
 func TestPollOnceRecordsAlreadyRoutedPullRequestWithoutDuplicateReviewRound(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -544,7 +544,7 @@ func TestPollOnceRecordsAlreadyRoutedPullRequestWithoutDuplicateReviewRound(t *t
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -577,7 +577,7 @@ func TestPollOnceRecordsAlreadyRoutedPullRequestWithoutDuplicateReviewRound(t *t
 func TestPollOnceReroutesLegacyReviewWithoutHeadSHA(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -640,7 +640,7 @@ func TestPollOnceReroutesLegacyReviewWithoutHeadSHA(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -688,7 +688,7 @@ func TestPollOnceReroutesLegacyReviewWithoutHeadSHA(t *testing.T) {
 func TestPollOnceReconcilesReviewingPullRequestWithApprovedCurrentReview(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -765,7 +765,7 @@ func TestPollOnceReconcilesReviewingPullRequestWithApprovedCurrentReview(t *test
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -794,7 +794,7 @@ func TestPollOnceReconcilesReviewingPullRequestWithApprovedCurrentReview(t *test
 func TestPollOnceRetriesReadyToMergePullRequestWithoutHeadChange(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-7",
 		RepoFullName: repo.FullName(),
@@ -823,7 +823,7 @@ func TestPollOnceRetriesReadyToMergePullRequestWithoutHeadChange(t *testing.T) {
 	if err := store.UpsertPullRequest(ctx, db.PullRequest{
 		RepoFullName: repo.FullName(),
 		Number:       7,
-		URL:          "https://github.com/jerryfane/gitmoot/pull/7",
+		URL:          "https://github.com/gitmoot/gitmoot/pull/7",
 		HeadBranch:   "task-7",
 		BaseBranch:   "main",
 		HeadSHA:      "abc123",
@@ -836,7 +836,7 @@ func TestPollOnceRetriesReadyToMergePullRequestWithoutHeadChange(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -858,7 +858,7 @@ func TestPollOnceRetriesReadyToMergePullRequestWithoutHeadChange(t *testing.T) {
 func TestPollOnceDoesNotRetryReadyToMergeWhenNativeFanoutSkipped(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-7",
 		RepoFullName: repo.FullName(),
@@ -890,7 +890,7 @@ func TestPollOnceDoesNotRetryReadyToMergeWhenNativeFanoutSkipped(t *testing.T) {
 	if err := store.UpsertPullRequest(ctx, db.PullRequest{
 		RepoFullName: repo.FullName(),
 		Number:       7,
-		URL:          "https://github.com/jerryfane/gitmoot/pull/7",
+		URL:          "https://github.com/gitmoot/gitmoot/pull/7",
 		HeadBranch:   "task-7",
 		BaseBranch:   "main",
 		HeadSHA:      "abc123",
@@ -903,7 +903,7 @@ func TestPollOnceDoesNotRetryReadyToMergeWhenNativeFanoutSkipped(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -925,7 +925,7 @@ func TestPollOnceDoesNotRetryReadyToMergeWhenNativeFanoutSkipped(t *testing.T) {
 func TestPollOnceRetriesReadyToMergePullRequestAfterBranchUpdateHeadChange(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-7",
 		RepoFullName: repo.FullName(),
@@ -954,7 +954,7 @@ func TestPollOnceRetriesReadyToMergePullRequestAfterBranchUpdateHeadChange(t *te
 	if err := store.UpsertPullRequest(ctx, db.PullRequest{
 		RepoFullName: repo.FullName(),
 		Number:       7,
-		URL:          "https://github.com/jerryfane/gitmoot/pull/7",
+		URL:          "https://github.com/gitmoot/gitmoot/pull/7",
 		HeadBranch:   "task-7",
 		BaseBranch:   "main",
 		HeadSHA:      "old123",
@@ -967,7 +967,7 @@ func TestPollOnceRetriesReadyToMergePullRequestAfterBranchUpdateHeadChange(t *te
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "old123",
@@ -997,7 +997,7 @@ func TestPollOnceRetriesReadyToMergePullRequestAfterBranchUpdateHeadChange(t *te
 func TestPollOnceRetriesClosedReadyToMergePullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-7",
 		RepoFullName: repo.FullName(),
@@ -1014,7 +1014,7 @@ func TestPollOnceRetriesClosedReadyToMergePullRequest(t *testing.T) {
 	if err := store.UpsertPullRequest(ctx, db.PullRequest{
 		RepoFullName: repo.FullName(),
 		Number:       7,
-		URL:          "https://github.com/jerryfane/gitmoot/pull/7",
+		URL:          "https://github.com/gitmoot/gitmoot/pull/7",
 		HeadBranch:   "task-7",
 		BaseBranch:   "main",
 		HeadSHA:      "abc123",
@@ -1030,7 +1030,7 @@ func TestPollOnceRetriesClosedReadyToMergePullRequest(t *testing.T) {
 				Title:   "Task 7 old",
 				State:   "closed",
 				Merged:  true,
-				URL:     "https://github.com/jerryfane/gitmoot/pull/6",
+				URL:     "https://github.com/gitmoot/gitmoot/pull/6",
 				HeadRef: "task-7",
 				BaseRef: "main",
 				HeadSHA: "old123",
@@ -1039,7 +1039,7 @@ func TestPollOnceRetriesClosedReadyToMergePullRequest(t *testing.T) {
 				Title:   "Task 7",
 				State:   "closed",
 				Merged:  true,
-				URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+				URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 				HeadRef: "task-7",
 				BaseRef: "main",
 				HeadSHA: "abc123",
@@ -1066,7 +1066,7 @@ func TestPollOnceRetriesClosedReadyToMergePullRequest(t *testing.T) {
 func TestPollOnceDoesNotOverwriteNoReviewerAutoMerge(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -1087,7 +1087,7 @@ func TestPollOnceDoesNotOverwriteNoReviewerAutoMerge(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -1100,7 +1100,7 @@ func TestPollOnceDoesNotOverwriteNoReviewerAutoMerge(t *testing.T) {
 			if err := store.UpsertPullRequest(ctx, db.PullRequest{
 				RepoFullName:   request.Repo,
 				Number:         int64(request.PullRequest),
-				URL:            "https://github.com/jerryfane/gitmoot/pull/7",
+				URL:            "https://github.com/gitmoot/gitmoot/pull/7",
 				HeadBranch:     request.Branch,
 				BaseBranch:     "main",
 				HeadSHA:        request.HeadSHA,
@@ -1129,7 +1129,7 @@ func TestPollOnceDoesNotOverwriteNoReviewerAutoMerge(t *testing.T) {
 func TestPollOnceRoutesPullRequestWithEmptyStoredHeadSHA(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -1170,7 +1170,7 @@ func TestPollOnceRoutesPullRequestWithEmptyStoredHeadSHA(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -1203,7 +1203,7 @@ func TestPollOnceRoutesPullRequestWithEmptyStoredHeadSHA(t *testing.T) {
 func TestPollOnceDoesNotTreatManualReviewJobAsWorkflowRoute(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "lead",
 		Role:           "lead",
@@ -1264,7 +1264,7 @@ func TestPollOnceDoesNotTreatManualReviewJobAsWorkflowRoute(t *testing.T) {
 			Number:  7,
 			Title:   "Task 7",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 			HeadRef: "task-7",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -1297,7 +1297,7 @@ func TestPollOnceDoesNotTreatManualReviewJobAsWorkflowRoute(t *testing.T) {
 func TestPollOnceDedupesSeenComments(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "audit",
 		Role:           "reviewer",
@@ -1332,7 +1332,7 @@ func TestPollOnceDedupesSeenComments(t *testing.T) {
 func TestPollOnceQueuesRepeatedCommandsInOneComment(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "audit",
 		Role:           "reviewer",
@@ -1370,7 +1370,7 @@ func TestPollOnceQueuesRepeatedCommandsInOneComment(t *testing.T) {
 func TestPollOnceAcknowledgesUnknownAgentWithoutJob(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	client := &fakeGitHub{
 		pulls: []github.PullRequest{{Number: 4, Title: "Task 4", State: "open", HeadRef: "task-4", BaseRef: "main"}},
 		comments: map[int64][]github.IssueComment{
@@ -1394,7 +1394,7 @@ func TestPollOnceAcknowledgesUnknownAgentWithoutJob(t *testing.T) {
 func TestPollOnceRejectsUnauthorizedCommenter(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "audit",
 		Role:           "reviewer",
@@ -1438,7 +1438,7 @@ func TestPollOnceRejectsUnauthorizedCommenter(t *testing.T) {
 func TestPollOnceAcknowledgesMissingCapabilityWithoutJob(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "builder",
 		Role:           "builder",
@@ -1471,7 +1471,7 @@ func TestPollOnceAcknowledgesMissingCapabilityWithoutJob(t *testing.T) {
 func TestPollOnceRejectsImplementWithoutBranchLock(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "builder",
 		Role:           "builder",
@@ -1507,7 +1507,7 @@ func TestPollOnceRejectsImplementWithoutBranchLock(t *testing.T) {
 func TestPollOnceReportsStatusCommand(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-010",
 		RepoFullName: repo.FullName(),
@@ -1562,7 +1562,7 @@ func TestPollOnceReportsStatusCommand(t *testing.T) {
 func TestPollOnceReportsHelpCommand(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "audit",
 		Role:           "reviewer",
@@ -1580,7 +1580,7 @@ func TestPollOnceReportsHelpCommand(t *testing.T) {
 			Number:  10,
 			Title:   "Task 10",
 			State:   "open",
-			URL:     "https://github.com/jerryfane/gitmoot/pull/10",
+			URL:     "https://github.com/gitmoot/gitmoot/pull/10",
 			HeadRef: "task-10",
 			BaseRef: "main",
 			HeadSHA: "abc123",
@@ -1596,7 +1596,7 @@ func TestPollOnceReportsHelpCommand(t *testing.T) {
 	if len(client.posted) != 1 {
 		t.Fatalf("posted = %+v, want one help comment", client.posted)
 	}
-	for _, want := range []string{"Gitmoot help for `jerryfane/gitmoot` PR #10", "`audit`: review,ask", "/gitmoot <agent> <review|implement|ask>"} {
+	for _, want := range []string{"Gitmoot help for `gitmoot/gitmoot` PR #10", "`audit`: review,ask", "/gitmoot <agent> <review|implement|ask>"} {
 		if !strings.Contains(client.posted[0].body, want) {
 			t.Fatalf("help output missing %q:\n%s", want, client.posted[0].body)
 		}
@@ -1606,7 +1606,7 @@ func TestPollOnceReportsHelpCommand(t *testing.T) {
 func TestPollOnceRetriesJobFromComment(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	payload, err := json.Marshal(workflow.JobPayload{
 		Repo:        repo.FullName(),
 		Branch:      "task-10",
@@ -1650,7 +1650,7 @@ func TestPollOnceRetriesJobFromComment(t *testing.T) {
 func TestPollOnceCancelsJobFromComment(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	payload, err := json.Marshal(workflow.JobPayload{
 		Repo:        repo.FullName(),
 		Branch:      "task-10",
@@ -1693,7 +1693,7 @@ func TestPollOnceCancelsJobFromComment(t *testing.T) {
 func TestPollRecoveryCommandsOnceOnlyHandlesJobRecovery(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	payload, err := json.Marshal(workflow.JobPayload{
 		Repo:        repo.FullName(),
 		Branch:      "task-10",
@@ -1758,7 +1758,7 @@ func TestPollRecoveryCommandsOnceOnlyHandlesJobRecovery(t *testing.T) {
 func TestPollOnceDoesNotRetryRunningJobCancelledInSameComment(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	payload, err := json.Marshal(workflow.JobPayload{
 		Repo:        repo.FullName(),
 		Branch:      "task-10",
@@ -1801,7 +1801,7 @@ func TestPollOnceDoesNotRetryRunningJobCancelledInSameComment(t *testing.T) {
 func TestPollOnceRejectsJobRecoveryForDifferentPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	payload, err := json.Marshal(workflow.JobPayload{
 		Repo:        repo.FullName(),
 		Branch:      "task-11",
@@ -1836,7 +1836,7 @@ func TestPollOnceRejectsJobRecoveryForDifferentPullRequest(t *testing.T) {
 	if job.State != string(workflow.JobFailed) {
 		t.Fatalf("job state = %q, want failed", job.State)
 	}
-	if len(client.posted) != 1 || !strings.Contains(client.posted[0].body, "belongs to jerryfane/gitmoot PR #11") {
+	if len(client.posted) != 1 || !strings.Contains(client.posted[0].body, "belongs to gitmoot/gitmoot PR #11") {
 		t.Fatalf("posted acknowledgements = %+v", client.posted)
 	}
 }
@@ -1844,7 +1844,7 @@ func TestPollOnceRejectsJobRecoveryForDifferentPullRequest(t *testing.T) {
 func TestPollOnceReportsStatusCommandCountsUnregisteredPRJobs(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	payload, err := json.Marshal(workflow.JobPayload{
 		Repo:        repo.FullName(),
 		Branch:      "task-10",
@@ -1883,7 +1883,7 @@ func TestPollOnceReportsStatusCommandCountsUnregisteredPRJobs(t *testing.T) {
 func TestPollOnceMergeCommandRunsMergeGate(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-010",
 		RepoFullName: repo.FullName(),
@@ -1956,7 +1956,7 @@ func TestPollOnceMergeCommandRunsMergeGate(t *testing.T) {
 func TestPollOnceMergeCommandRefusesSkipNativeFanoutBranch(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-010",
 		RepoFullName: repo.FullName(),
@@ -1996,7 +1996,7 @@ func TestPollOnceMergeCommandRefusesSkipNativeFanoutBranch(t *testing.T) {
 func TestPollOnceMergeCommandRequiresReadyTask(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertTask(ctx, db.Task{
 		ID:           "task-010",
 		RepoFullName: repo.FullName(),
@@ -2033,7 +2033,7 @@ func TestPollOnceMergeCommandRequiresReadyTask(t *testing.T) {
 func TestPollOnceQueuesImplementWithBranchLock(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "builder",
 		Role:           "builder",
@@ -2080,7 +2080,7 @@ func TestPollOnceQueuesImplementWithBranchLock(t *testing.T) {
 func TestPollOnceRetriesUnseenCommentAfterAckFailure(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "audit",
 		Role:           "reviewer",
@@ -2133,7 +2133,7 @@ func TestRunReturnsOnCancellation(t *testing.T) {
 	store := testStore(t)
 	client := &fakeGitHub{}
 	daemon := Daemon{
-		Repo:         github.Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:         github.Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Store:        store,
 		GitHub:       client,
 		PollInterval: time.Hour,
@@ -2160,7 +2160,7 @@ func TestRunContinuesAfterPollError(t *testing.T) {
 	client := &fakeGitHub{listPullRequestsErrs: []error{errors.New("rate limited"), nil}}
 	var sleeps int
 	daemon := Daemon{
-		Repo:         github.Repository{Owner: "jerryfane", Name: "gitmoot"},
+		Repo:         github.Repository{Owner: "gitmoot", Name: "gitmoot"},
 		Store:        store,
 		GitHub:       client,
 		PollInterval: time.Second,
@@ -2188,7 +2188,7 @@ func TestRunContinuesAfterPollError(t *testing.T) {
 func TestPollOnceWithoutWatchIssuesIgnoresIssues(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "researcher",
 		Role:           "researcher",
@@ -2228,7 +2228,7 @@ func TestPollOnceWithoutWatchIssuesIgnoresIssues(t *testing.T) {
 func TestPollIssuesOnceRoutesAskAndDedupes(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "researcher",
 		Role:           "researcher",
@@ -2318,7 +2318,7 @@ func TestPollIssuesOnceRoutesAskAndDedupes(t *testing.T) {
 func TestPollIssuesOnceCollapsesToSingleRepoWideCommentCall(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "researcher",
 		Role:           "researcher",
@@ -2432,7 +2432,7 @@ func TestPollIssuesOnceCollapsesToSingleRepoWideCommentCall(t *testing.T) {
 func TestPollIssuesOnceIgnoresNonAskAndUnknownAgent(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	client := &fakeGitHub{
 		issues: []github.Issue{{Number: 7, Title: "Issue 7", State: "open"}},
 		comments: map[int64][]github.IssueComment{
@@ -2468,7 +2468,7 @@ func TestPollIssuesOnceIgnoresNonAskAndUnknownAgent(t *testing.T) {
 func TestHandleIssueCommentRoutesMentionForm(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name:           "helper",
 		Role:           "helper",

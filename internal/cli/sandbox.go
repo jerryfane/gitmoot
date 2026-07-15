@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/sandbox"
+	"github.com/gitmoot/gitmoot/internal/sandbox"
 )
 
 func runSandbox(args []string, stdout, stderr io.Writer) int {

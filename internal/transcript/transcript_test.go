@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	gitmootruntime "github.com/jerryfane/gitmoot/internal/runtime"
+	gitmootruntime "github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 func TestRuntimeRendererGoldens(t *testing.T) {

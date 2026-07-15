@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/agenttemplate"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/agenttemplate"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func TestAgentTemplateUpdateInstallsThermoTemplate(t *testing.T) {
@@ -937,7 +937,7 @@ func TestRetiredPlannerHereTemplateIsHiddenAndBlocked(t *testing.T) {
 		ID:             retiredID,
 		Name:           "Retired Planner",
 		Description:    "Old cached builtin",
-		SourceRepo:     "jerryfane/gitmoot",
+		SourceRepo:     "gitmoot/gitmoot",
 		SourceRef:      "main",
 		SourcePath:     "skills/gitmoot/agent-templates/" + retiredID + ".md",
 		ResolvedCommit: "old",

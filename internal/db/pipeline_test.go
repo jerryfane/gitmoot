@@ -22,7 +22,7 @@ func openPipelineStore(t *testing.T) *Store {
 func samplePipeline() Pipeline {
 	return Pipeline{
 		Name:     "deploy-flow",
-		Repo:     "jerryfane/gitmoot",
+		Repo:     "gitmoot/gitmoot",
 		SpecYAML: "name: deploy-flow\nstages:\n  - {id: a, cmd: echo}\n",
 		SpecHash: "abc123",
 		Interval: "24h",
@@ -47,7 +47,7 @@ func TestPipelineFreshCRUD(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("GetPipeline: ok=%v err=%v", ok, err)
 	}
-	if got.Repo != "jerryfane/gitmoot" || got.SpecHash != "abc123" || got.Interval != "24h" || got.Jitter != "15m" {
+	if got.Repo != "gitmoot/gitmoot" || got.SpecHash != "abc123" || got.Interval != "24h" || got.Jitter != "15m" {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
 	if got.Enabled {

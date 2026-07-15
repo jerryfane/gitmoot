@@ -436,7 +436,7 @@ the redacted draft, and create an issue only when the user explicitly asks or
 the active workflow policy already permits filing reports. Non-interactive
 creation requires `--create --yes`.
 
-Created reports target `jerryfane/gitmoot`, include the labels
+Created reports target `gitmoot/gitmoot`, include the labels
 `gitmoot-dashboard-report` and `bug`, and carry a fingerprint marker in the
 body so duplicate open issues can be reused instead of creating another report.
 If duplicate search fails in the CLI path, Gitmoot prints a warning and still
@@ -1836,7 +1836,7 @@ transaction), and cross-pool promote-and-retire pairs. Content is never edited,
 and applying is idempotent (already-retired ids skip; a group whose rows changed
 state skips whole). A ready-to-register
 nightly proposal pipeline lives under
-[`docs/examples/memory-groom-nightly`](https://github.com/jerryfane/gitmoot/tree/main/docs/examples/memory-groom-nightly).
+[`docs/examples/memory-groom-nightly`](https://github.com/gitmoot/gitmoot/tree/main/docs/examples/memory-groom-nightly).
 
 `memory clusters` groups confirmed facts into **emergent communities** over the
 fact-similarity graph (the same bm25 + id-tiebreak signal the vault `[[links]]` use),

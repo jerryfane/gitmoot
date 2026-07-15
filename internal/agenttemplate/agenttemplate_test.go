@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
-	"github.com/jerryfane/gitmoot/skills"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/skills"
 )
 
 func TestBuiltinsIncludesPlannerAndThermoTemplates(t *testing.T) {
@@ -35,7 +35,7 @@ func TestBuiltinsIncludesPlannerAndThermoTemplates(t *testing.T) {
 	if !planner.Mutation || planner.DefaultRole != "planner" || !reflect.DeepEqual(planner.DefaultCapabilities, []string{"ask"}) {
 		t.Fatalf("planner definition = %+v", planner)
 	}
-	if planner.SourceRepo != "jerryfane/gitmoot" || planner.SourcePath != "skills/gitmoot/agent-templates/planner.md" {
+	if planner.SourceRepo != "gitmoot/gitmoot" || planner.SourcePath != "skills/gitmoot/agent-templates/planner.md" {
 		t.Fatalf("planner source = %+v", planner)
 	}
 	reviewPanel, ok := Lookup(ReviewPanelTemplateID)
@@ -45,7 +45,7 @@ func TestBuiltinsIncludesPlannerAndThermoTemplates(t *testing.T) {
 	if reviewPanel.Mutation || reviewPanel.DefaultRole != "coordinator" || !reflect.DeepEqual(reviewPanel.DefaultCapabilities, []string{"ask", "review"}) {
 		t.Fatalf("review-panel definition = %+v", reviewPanel)
 	}
-	if reviewPanel.SourceRepo != "jerryfane/gitmoot" || reviewPanel.SourcePath != "skills/gitmoot/agent-templates/review-panel.md" {
+	if reviewPanel.SourceRepo != "gitmoot/gitmoot" || reviewPanel.SourcePath != "skills/gitmoot/agent-templates/review-panel.md" {
 		t.Fatalf("review-panel source = %+v", reviewPanel)
 	}
 	decompose, ok := Lookup(DecomposeAndVerifyTemplateID)
@@ -55,7 +55,7 @@ func TestBuiltinsIncludesPlannerAndThermoTemplates(t *testing.T) {
 	if !decompose.Mutation || decompose.DefaultRole != "coordinator" || !reflect.DeepEqual(decompose.DefaultCapabilities, []string{"ask", "review", "implement"}) {
 		t.Fatalf("decompose-and-verify definition = %+v", decompose)
 	}
-	if decompose.SourceRepo != "jerryfane/gitmoot" || decompose.SourcePath != "skills/gitmoot/agent-templates/decompose-and-verify.md" {
+	if decompose.SourceRepo != "gitmoot/gitmoot" || decompose.SourcePath != "skills/gitmoot/agent-templates/decompose-and-verify.md" {
 		t.Fatalf("decompose-and-verify source = %+v", decompose)
 	}
 	verifier, ok := Lookup(VerifierTemplateID)
@@ -65,7 +65,7 @@ func TestBuiltinsIncludesPlannerAndThermoTemplates(t *testing.T) {
 	if !verifier.Mutation || verifier.DefaultRole != "coordinator" || !reflect.DeepEqual(verifier.DefaultCapabilities, []string{"ask", "review", "implement"}) {
 		t.Fatalf("verifier definition = %+v", verifier)
 	}
-	if verifier.SourceRepo != "jerryfane/gitmoot" || verifier.SourcePath != "skills/gitmoot/agent-templates/verifier.md" {
+	if verifier.SourceRepo != "gitmoot/gitmoot" || verifier.SourcePath != "skills/gitmoot/agent-templates/verifier.md" {
 		t.Fatalf("verifier source = %+v", verifier)
 	}
 }
@@ -86,7 +86,7 @@ func TestEmbeddedAgentTemplatesMatchBuiltins(t *testing.T) {
 	// Map every gitmoot-sourced built-in by its embedded source path.
 	builtinByPath := map[string]Definition{}
 	for _, def := range Builtins() {
-		if def.SourceRepo != "jerryfane/gitmoot" {
+		if def.SourceRepo != "gitmoot/gitmoot" {
 			continue
 		}
 		if !strings.HasPrefix(def.SourcePath, "skills/"+dir+"/") {
@@ -120,7 +120,7 @@ func TestEmbeddedAgentTemplatesMatchBuiltins(t *testing.T) {
 
 func TestEmbeddedBuiltinTemplatesParseAndValidate(t *testing.T) {
 	for _, def := range Builtins() {
-		if def.SourceRepo != "jerryfane/gitmoot" {
+		if def.SourceRepo != "gitmoot/gitmoot" {
 			continue
 		}
 		path := strings.TrimPrefix(def.SourcePath, "skills/")
@@ -169,7 +169,7 @@ func TestUpdatePlannerTemplate(t *testing.T) {
 	if updated.ID != PlannerTemplateID || updated.ResolvedCommit != "def456" || updated.Content != content || !strings.Contains(updated.MetadataJSON, `"id":"planner"`) || !strings.Contains(updated.MetadataJSON, `"outputs":["response"]`) {
 		t.Fatalf("updated planner template = %+v", updated)
 	}
-	if updated.SourceRepo != "jerryfane/gitmoot" || updated.SourcePath != "skills/gitmoot/agent-templates/planner.md" {
+	if updated.SourceRepo != "gitmoot/gitmoot" || updated.SourcePath != "skills/gitmoot/agent-templates/planner.md" {
 		t.Fatalf("updated source = %+v", updated)
 	}
 }

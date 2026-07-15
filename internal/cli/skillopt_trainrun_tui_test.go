@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/db"
 )
 
 func replaceSkillOptTrainRunTUI(capable bool, run func(home, sessionID string, stdout, stderr io.Writer) int) func() {
@@ -150,7 +150,7 @@ func TestCreateSkillOptTrainRunSession(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	cfgPath := filepath.Join(scaffold, "config.toml")
-	cfg := "name = \"runsess\"\ntemplate = \"planner\"\ntemplate_version = \"planner@v1\"\nreview_repo = \"jerryfane/gitmoot\"\ntask_kind = \"custom\"\nartifact_kind = \"text\"\npreview = \"none\"\nmode = \"explore\"\n"
+	cfg := "name = \"runsess\"\ntemplate = \"planner\"\ntemplate_version = \"planner@v1\"\nreview_repo = \"gitmoot/gitmoot\"\ntask_kind = \"custom\"\nartifact_kind = \"text\"\npreview = \"none\"\nmode = \"explore\"\n"
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestCreateSkillOptTrainRunSession(t *testing.T) {
 	}
 
 	// Stub GitHub so --create-repos does not hit the network.
-	restore := replaceSkillOptGitHubClient(&repoCreateFakeGitHub{existing: map[string]bool{"jerryfane/gitmoot": true, "jerryfane/gitmoot-ws": true}})
+	restore := replaceSkillOptGitHubClient(&repoCreateFakeGitHub{existing: map[string]bool{"gitmoot/gitmoot": true, "jerryfane/gitmoot-ws": true}})
 	defer restore()
 
 	id, err := createSkillOptTrainRunSession(home, cfgPath, "jerryfane/gitmoot-ws", &bytes.Buffer{})

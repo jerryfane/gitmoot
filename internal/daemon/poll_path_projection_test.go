@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/github"
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // seedLargeNonReviewJob inserts a non-review job carrying a ~1MB payload — a stand
@@ -66,7 +66,7 @@ func reviewPull(headSHA string) github.PullRequest {
 		Number:  7,
 		Title:   "Task 7",
 		State:   "open",
-		URL:     "https://github.com/jerryfane/gitmoot/pull/7",
+		URL:     "https://github.com/gitmoot/gitmoot/pull/7",
 		HeadRef: "task-7",
 		BaseRef: "main",
 		HeadSHA: headSHA,
@@ -95,7 +95,7 @@ func (c *countingReviewLister) ListJobsByType(ctx context.Context, jobType strin
 func TestPollOnceFetchesReviewJobsOncePerPoll(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 
 	// Three open PRs, each already stored with a matching head, so pullRequestChanged
 	// takes the unchanged-head path that inspects the review-job list for staleness on
@@ -104,7 +104,7 @@ func TestPollOnceFetchesReviewJobsOncePerPoll(t *testing.T) {
 	for i := int64(1); i <= 3; i++ {
 		pull := github.PullRequest{
 			Number: i, Title: fmt.Sprintf("Task %d", i), State: "open",
-			URL:     fmt.Sprintf("https://github.com/jerryfane/gitmoot/pull/%d", i),
+			URL:     fmt.Sprintf("https://github.com/gitmoot/gitmoot/pull/%d", i),
 			HeadRef: fmt.Sprintf("task-%d", i), BaseRef: "main", HeadSHA: fmt.Sprintf("head-%d", i),
 		}
 		pulls = append(pulls, pull)
@@ -141,7 +141,7 @@ func TestPollOnceFetchesReviewJobsOncePerPoll(t *testing.T) {
 func TestSupersedeStaleReviewJobsSkipsLargeNonReviewPayload(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	seedLargeNonReviewJob(t, store)
 	seedReviewJob(t, store, repo.FullName(), "review-stale", "old-head", workflow.JobQueued, nil)
 
@@ -184,7 +184,7 @@ func TestSupersedeStaleReviewJobsSkipsLargeNonReviewPayload(t *testing.T) {
 // stale detection is unchanged by the projection swap.
 func TestPullRequestWorkflowRoutingStaleAmongLargeNonReviewPayload(t *testing.T) {
 	ctx := context.Background()
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 
 	t.Run("stale head routes stale", func(t *testing.T) {
 		store := testStore(t)
@@ -222,7 +222,7 @@ func TestPullRequestWorkflowRoutingStaleAmongLargeNonReviewPayload(t *testing.T)
 func TestReconcileReviewingPullRequestAdvancesAmongLargeNonReviewPayload(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	repo := github.Repository{Owner: "jerryfane", Name: "gitmoot"}
+	repo := github.Repository{Owner: "gitmoot", Name: "gitmoot"}
 	if err := store.UpsertAgent(ctx, db.Agent{
 		Name: "lead", Role: "lead", Runtime: "codex", RuntimeRef: "last",
 		RepoScope: repo.FullName(), Capabilities: []string{"implement"},

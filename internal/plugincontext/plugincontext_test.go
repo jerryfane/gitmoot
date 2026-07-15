@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/buildinfo"
-	"github.com/jerryfane/gitmoot/internal/config"
-	"github.com/jerryfane/gitmoot/internal/presence"
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/buildinfo"
+	"github.com/gitmoot/gitmoot/internal/config"
+	"github.com/gitmoot/gitmoot/internal/presence"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 func TestReadHookInputEmptyFallsBack(t *testing.T) {
@@ -97,14 +97,14 @@ func TestBuildDetectsGitHubRepo(t *testing.T) {
 		Paths: config.Paths{Home: "/home/user/.gitmoot"},
 		Runner: fakeGitRunner{
 			root:   "/work",
-			remote: "https://github.com/jerryfane/gitmoot.git",
+			remote: "https://github.com/gitmoot/gitmoot.git",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
 	}
 
-	if !strings.Contains(contextText, "- repo: \"jerryfane/gitmoot\" (root: \"/work\")") {
+	if !strings.Contains(contextText, "- repo: \"gitmoot/gitmoot\" (root: \"/work\")") {
 		t.Fatalf("context missing repo detection:\n%s", contextText)
 	}
 }
@@ -116,13 +116,13 @@ func TestBuildIncludesReadOnlySnapshotWhenRepoDetected(t *testing.T) {
 		Paths: config.Paths{Home: "/home/user/.gitmoot"},
 		Runner: fakeGitRunner{
 			root:   "/work",
-			remote: "https://github.com/jerryfane/gitmoot.git",
+			remote: "https://github.com/gitmoot/gitmoot.git",
 		},
 		SnapshotLoader: func(_ context.Context, paths config.Paths, repo string) (presence.Snapshot, error) {
 			if paths.Home != "/home/user/.gitmoot" {
 				t.Fatalf("snapshot paths home = %q", paths.Home)
 			}
-			if repo != "jerryfane/gitmoot" {
+			if repo != "gitmoot/gitmoot" {
 				t.Fatalf("snapshot repo = %q", repo)
 			}
 			return presence.Snapshot{
@@ -157,7 +157,7 @@ func TestBuildSnapshotFailureIsNonFatal(t *testing.T) {
 		Paths: config.Paths{Home: "/home/user/.gitmoot"},
 		Runner: fakeGitRunner{
 			root:   "/work",
-			remote: "https://github.com/jerryfane/gitmoot.git",
+			remote: "https://github.com/gitmoot/gitmoot.git",
 		},
 		SnapshotLoader: func(context.Context, config.Paths, string) (presence.Snapshot, error) {
 			return presence.Snapshot{}, errors.New("db unavailable")
@@ -201,7 +201,7 @@ func TestBuildQuotesPathMetadata(t *testing.T) {
 		Paths: config.Paths{Home: home},
 		Runner: fakeGitRunner{
 			root:   root,
-			remote: "https://github.com/jerryfane/gitmoot.git",
+			remote: "https://github.com/gitmoot/gitmoot.git",
 		},
 	})
 	if err != nil {

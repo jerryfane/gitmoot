@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/db"
-	"github.com/jerryfane/gitmoot/internal/events"
+	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/events"
 )
 
 // TestOpenExternalJobCreatesRunningNoQueue proves `job open` (clock-in) creates a
@@ -16,13 +16,13 @@ import (
 func TestOpenExternalJobCreatesRunningNoQueue(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"ask"}, "gitmoot/gitmoot")
 
 	job, err := (Mailbox{Store: store}).OpenExternalJob(ctx, JobRequest{
 		ID:     "session-ask-lead-1",
 		Agent:  "lead",
 		Action: "ask",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 	})
 	if err != nil {
 		t.Fatalf("OpenExternalJob returned error: %v", err)
@@ -77,7 +77,7 @@ func TestCloseExternalJobAppliesDecision(t *testing.T) {
 		t.Run(tc.decision, func(t *testing.T) {
 			ctx := context.Background()
 			store := openEngineStore(t)
-			seedAgent(t, store, "lead", []string{"ask"}, "jerryfane/gitmoot")
+			seedAgent(t, store, "lead", []string{"ask"}, "gitmoot/gitmoot")
 			sink := &recordingSink{}
 			engine := testEngine(store)
 			engine.EventSink = sink
@@ -86,7 +86,7 @@ func TestCloseExternalJobAppliesDecision(t *testing.T) {
 				ID:     "session-job",
 				Agent:  "lead",
 				Action: "ask",
-				Repo:   "jerryfane/gitmoot",
+				Repo:   "gitmoot/gitmoot",
 			}); err != nil {
 				t.Fatalf("OpenExternalJob returned error: %v", err)
 			}
@@ -144,13 +144,13 @@ func TestCloseExternalJobAppliesDecision(t *testing.T) {
 func TestCloseExternalJobRecordsPRAndBranch(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 
 	if _, err := (Mailbox{Store: store}).OpenExternalJob(ctx, JobRequest{
 		ID:     "session-impl",
 		Agent:  "lead",
 		Action: "implement",
-		Repo:   "jerryfane/gitmoot",
+		Repo:   "gitmoot/gitmoot",
 	}); err != nil {
 		t.Fatalf("OpenExternalJob returned error: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestCloseExternalJobRecordsPRAndBranch(t *testing.T) {
 func TestCloseExternalJobErrors(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"ask"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"ask"}, "gitmoot/gitmoot")
 	mb := Mailbox{Store: store}
 
 	// Unknown id.
@@ -197,7 +197,7 @@ func TestCloseExternalJobErrors(t *testing.T) {
 	}
 
 	// Open then close, then double-close.
-	if _, err := mb.OpenExternalJob(ctx, JobRequest{ID: "sess", Agent: "lead", Action: "ask", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mb.OpenExternalJob(ctx, JobRequest{ID: "sess", Agent: "lead", Action: "ask", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("OpenExternalJob returned error: %v", err)
 	}
 	if _, err := mb.CloseExternalJob(ctx, "sess", AgentResult{Decision: "approved"}, 0, ""); err != nil {
@@ -217,10 +217,10 @@ func TestCloseExternalJobErrors(t *testing.T) {
 func TestRetryJobRefusesSessionJob(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
-	seedAgent(t, store, "lead", []string{"implement"}, "jerryfane/gitmoot")
+	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 
 	mb := Mailbox{Store: store}
-	if _, err := mb.OpenExternalJob(ctx, JobRequest{ID: "sess-retry", Agent: "lead", Action: "implement", Repo: "jerryfane/gitmoot"}); err != nil {
+	if _, err := mb.OpenExternalJob(ctx, JobRequest{ID: "sess-retry", Agent: "lead", Action: "implement", Repo: "gitmoot/gitmoot"}); err != nil {
 		t.Fatalf("OpenExternalJob returned error: %v", err)
 	}
 	// Close it into a retry-eligible terminal state (failed).

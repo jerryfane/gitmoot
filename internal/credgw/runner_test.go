@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/gitmoot/internal/subprocess"
+	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
 
 // envCapture is an EnvRunner that records the env it was handed and runs nothing.

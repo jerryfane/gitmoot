@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
-	"github.com/jerryfane/gitmoot/internal/cli/style"
-	"github.com/jerryfane/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/cli/style"
+	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
 var authReadSecret = func(prompt io.Writer) (string, error) {

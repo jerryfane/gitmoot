@@ -30,7 +30,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/jerryfane/gitmoot/internal/workflow"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // fieldAnnotation carries the hand-curated prose for a single JSON field that
