@@ -29,6 +29,7 @@ group: Release Automation   # optional display section on /pipelines and `pipeli
                             #   free-form, decoupled from repo (one group may span repos,
                             #   one repo may split across groups); unset falls back to repo.
                             #   Built-in memory pipelines ship under "Gitmoot System".
+description: Syncs nightly data for deployment. # optional detail-page purpose (multiline, max 500 chars)
 schedule:                   # optional; auto-runs every interval once enabled
   interval: 24h             #   positive Go duration (required with a schedule block)
   jitter: 15m               #   optional random [0, jitter] added to each next_due

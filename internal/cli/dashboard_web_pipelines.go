@@ -225,6 +225,7 @@ func (d *webDataSource) PipelineDetail(ctx context.Context, name string) (dashbo
 		spec, specParsed := pipeline.Spec{}, false
 		if loaded, lerr := pipeline.Load([]byte(rec.SpecYAML)); lerr == nil {
 			spec, specParsed = loaded, true
+			out.Description = spec.Description
 			// Agent runtimes resolve best-effort so the declared preview can label
 			// agent stages even for a pipeline that has never run (#873).
 			agents := pipelineStageAgents(ctx, store, rec)

@@ -50,13 +50,17 @@ func TestPipelineInstallDefaultsIdempotentAndPreservesUserEdits(t *testing.T) {
 	}
 }
 
-func TestPipelineInstallDefaultsUseGitmootSystemGroup(t *testing.T) {
+func TestPipelineInstallDefaultsCarryDisplayMetadata(t *testing.T) {
 	home, _, store := heartbeatLoopE2EHome(t)
 	checkout := createDaemonWorkerGitCheckout(t, "main")
 	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
 	runInstallDefaults(t, home)
 
-	for _, name := range []string{defaultMemoryIngestSweepPipeline, defaultMemoryGroomProposePipeline} {
+	descriptions := map[string]string{
+		defaultMemoryIngestSweepPipeline:  defaultMemoryIngestSweepPipelineDescription,
+		defaultMemoryGroomProposePipeline: defaultMemoryGroomProposePipelineDescription,
+	}
+	for name, description := range descriptions {
 		rec, ok, err := store.GetPipeline(context.Background(), name)
 		if err != nil || !ok {
 			t.Fatalf("GetPipeline %s: ok=%v err=%v", name, ok, err)
@@ -70,6 +74,12 @@ func TestPipelineInstallDefaultsUseGitmootSystemGroup(t *testing.T) {
 		}
 		if !strings.Contains(rec.SpecYAML, "group: "+defaultMemoryPipelineGroup) {
 			t.Fatalf("%s stored spec missing group:\n%s", name, rec.SpecYAML)
+		}
+		if spec.Description != description {
+			t.Fatalf("%s description = %q, want %q", name, spec.Description, description)
+		}
+		if !strings.Contains(rec.SpecYAML, "description: "+description) {
+			t.Fatalf("%s stored spec missing description:\n%s", name, rec.SpecYAML)
 		}
 	}
 }

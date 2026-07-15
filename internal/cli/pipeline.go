@@ -1030,6 +1030,7 @@ func pipelinePromptPreview(prompt string) string {
 }
 
 func printPipeline(stdout io.Writer, record db.Pipeline, agents map[string]db.Agent, upstreamMissing ...bool) {
+	spec, specErr := pipeline.Load([]byte(record.SpecYAML))
 	writeLine(stdout, "name: %s", record.Name)
 	writeLine(stdout, "repo: %s", firstNonEmpty(record.Repo, "-"))
 	group, defaulted := resolvedPipelineGroup(record)
@@ -1038,6 +1039,12 @@ func printPipeline(stdout io.Writer, record db.Pipeline, agents map[string]db.Ag
 		group += " (default)"
 	}
 	writeLine(stdout, "group: %s", group)
+	if specErr == nil && spec.Description != "" {
+		writeLine(stdout, "description:")
+		for _, line := range strings.Split(spec.Description, "\n") {
+			writeLine(stdout, "  %s", line)
+		}
+	}
 	writeLine(stdout, "enabled: %t", record.Enabled)
 	writeLine(stdout, "mode: %s", pipelineDisplayMode(record, upstreamMissing...))
 	writeLine(stdout, "interval: %s", firstNonEmpty(record.Interval, "-"))
@@ -1049,9 +1056,8 @@ func printPipeline(stdout io.Writer, record db.Pipeline, agents map[string]db.Ag
 	writeLine(stdout, "last_run_id: %s", firstNonEmpty(record.LastRunID, "-"))
 	writeLine(stdout, "trigger_binding: %s", firstNonEmpty(triggerBindingState(record.TriggerBinding), "-"))
 	writeLine(stdout, "stages:")
-	spec, err := pipeline.Load([]byte(record.SpecYAML))
-	if err != nil {
-		writeLine(stdout, "  (unparseable stored spec: %v)", err)
+	if specErr != nil {
+		writeLine(stdout, "  (unparseable stored spec: %v)", specErr)
 		return
 	}
 	for _, stage := range spec.Stages {

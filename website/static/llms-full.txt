@@ -13332,6 +13332,7 @@ name: nightly-sync
 repo: owner/repo            # required to run (stages need a managed repo)
 group: Release Automation   # optional display section (falls back to repo when unset;
                             #   built-in memory pipelines ship under "Gitmoot System")
+description: Syncs nightly data for deployment. # optional detail-page purpose (multiline, max 500 chars)
 schedule:                   # optional; auto-runs every interval once enabled
   interval: 24h
   jitter: 15m

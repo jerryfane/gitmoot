@@ -71,6 +71,9 @@ type Spec struct {
 	// Group is optional display metadata used to organize pipelines independently
 	// of their repo. Empty means callers should fall back to Repo for display.
 	Group string `yaml:"group,omitempty"`
+	// Description is optional display metadata explaining a pipeline's purpose.
+	// It is shown verbatim on detail surfaces and has no execution semantics.
+	Description string `yaml:"description,omitempty"`
 	// Schedule, when present, drives interval-based auto-runs (heartbeat idiom: an
 	// interval plus optional jitter; no cron in v1).
 	Schedule *Schedule `yaml:"schedule,omitempty"`
