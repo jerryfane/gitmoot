@@ -54,16 +54,18 @@ live work but activity within 30 minutes are recent; failed/blocked workflows
 with an unacknowledged failure and 30 minutes to 24 hours of silence are stalled;
 older or otherwise terminal workflows are settled.
 
-At kickoff, give the campaign a human-readable one-line summary alongside its
-journal:
+Give the campaign a stable description; Gitmoot also auto-seeds one from a
+referenced local issue title, the first note sentence, or the label campaign:
 
 ```sh
-gitmoot workflow note fable/dashboard-redesign "Kickoff." \
-  --author coordinator --summary "Coordinate and ship the dashboard redesign."
+gitmoot workflow describe fable/dashboard-redesign "Coordinate and ship the dashboard redesign."
+gitmoot workflow note fable/dashboard-redesign "Kickoff." --author coordinator --status "Implementation started"
 ```
 
-Later notes can omit `--summary` without erasing it. Passing another value
-replaces the summary, while `--summary ""` clears it.
+Legacy `workflow note --summary` remains an alias for description. Status is the
+live line: the daemon updates it and adds deduped `daemon` notes for linked PR
+open, checks-green, merge, and closed-without-merging transitions. Use
+`workflow note --status` only as a manual escape hatch.
 
 ## They compose
 

@@ -200,11 +200,13 @@ can discover Gitmoot through an installed runtime plugin. Use
 `gitmoot plugin codex-launch --repo <path>` to print a Codex launch command that
 adds the resolved `.gitmoot` home to the sandbox on Linux, macOS, and Windows.
 Use `gitmoot goal template` when
-writing a standard task-by-task goal file. Use
-`gitmoot workflow list`, `gitmoot workflow show`, and `gitmoot workflow note`
-to inspect external-coordinator workflow
-groups, add verbatim journal entries, and optionally stage a note in persistent
-memory. Jobs join a group through `--workflow <label>` on agent
+writing a standard task-by-task goal file. Use `gitmoot workflow list`, `gitmoot
+workflow show`, `gitmoot workflow describe`, and `gitmoot workflow note` to
+inspect external-coordinator workflow groups, set their stable description, add
+verbatim journal entries, set a manual status escape hatch, and optionally stage
+a note in persistent memory. Linked PR lifecycle transitions also add deduped
+`daemon` journal notes and advance live status. Jobs join a group through
+`--workflow <label>` on agent
 ask/run/review/implement, orchestrate, or `job open`; orchestration descendants
 inherit the label automatically. Use
 `gitmoot report bug --job <job-id> --preview` to inspect a redacted GitHub issue

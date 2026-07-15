@@ -108,3 +108,39 @@ func TestReconcilePROpenTasksNoPulls(t *testing.T) {
 		t.Fatalf("reconcilePROpenTasks(nil pulls): %v", err)
 	}
 }
+
+func TestReconcilePROpenTasksJournalsWorkflowOnce(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	repo := github.Repository{Owner: "owner", Name: "repo"}
+	seedStaleRepo(t, store, repo)
+	const (
+		workflowID = "release/lifecycle"
+		branch     = "feat/lifecycle"
+	)
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-lifecycle", RepoFullName: repo.FullName(), State: string(workflow.TaskImplementing), Branch: branch}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateJob(ctx, db.Job{ID: "job-lifecycle", Agent: "worker", Type: "implement", State: "succeeded",
+		Payload: `{"workflow_id":"release/lifecycle","repo":"owner/repo","branch":"feat/lifecycle","pull_request":958}`}); err != nil {
+		t.Fatal(err)
+	}
+	d := Daemon{Repo: repo, Store: store}
+	pull := github.PullRequest{Number: 958, HeadRef: branch}
+	for i := 0; i < 2; i++ {
+		if err := d.reconcilePROpenTasks(ctx, []github.PullRequest{pull}); err != nil {
+			t.Fatalf("reconcilePROpenTasks pass %d: %v", i+1, err)
+		}
+	}
+	notes, err := store.ListWorkflowNotes(ctx, workflowID, 0)
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("notes = %+v, err=%v; want one deduped breadcrumb", notes, err)
+	}
+	if notes[0].Author != db.WorkflowAutoNoteAuthor || notes[0].Body != "[auto:pr:958:opened] PR #958 opened (feat/lifecycle)" {
+		t.Fatalf("auto note = %+v", notes[0])
+	}
+	meta, err := store.GetWorkflowMeta(ctx, workflowID)
+	if err != nil || meta.Status != "PR #958 open" || meta.Description != "lifecycle" {
+		t.Fatalf("meta = %+v, err=%v", meta, err)
+	}
+}

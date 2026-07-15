@@ -610,9 +610,13 @@ skill text.
 ## External coordinator grouping
 
 Attach `--workflow <lowercase-slug>` to agent ask/run/review/implement,
-`orchestrate`, or `job open`. Use `gitmoot workflow list`, `show`, and `note` for
-the indexed group and append-only journal. Orchestration descendants inherit the
-label. `workflow note --remember` stages low-trust memory in the shared pool by
+`orchestrate`, or `job open`. Use `gitmoot workflow list`, `show`, `describe`,
+and `note` for the indexed group and append-only journal. Each workflow has a
+stable `description`, auto-seeded from a referenced local issue title, the first
+note sentence, or the label campaign, plus a live `status`. The daemon appends
+deduped `daemon` notes and advances status when a linked PR opens, becomes ready
+to merge, or closes. Orchestration descendants inherit the label.
+`workflow note --remember` stages low-trust memory in the shared pool by
 default, infers one repo (or requires `--repo`), and atomically writes the note
 and observation after prefiltering.
 
@@ -6593,8 +6597,11 @@ The **index** groups every known explicit workflow by derived lifecycle: **stall
 pinned on top ("needs a look"), then **active**, **recent**, and **settled**.
 Active means work is currently running or queued. Recent means no work is live,
 but a job or journal note touched the workflow within the last 30 minutes.
-A coordinator-provided one-line summary identifies the campaign beside its
-journal activity.
+The workflow API exposes a stable `description` and live `status` separately.
+Gitmoot auto-seeds description from a referenced local issue title, the
+kickoff-note sentence, or the label campaign. The bundled frontend continues to
+receive the compatibility `summary` field until its separate rendering follow-up
+adopts the two new fields.
 A workflow is stalled only when a failure has gone **unacknowledged** — nothing
 is running, the goal was not reached, and no journal note has been written
 since the last failure (a failure alone is not an alarm; the silence after it
@@ -6604,11 +6611,13 @@ The **detail page** reads as a mission log: journal notes and run trees
 interleaved in reverse-chronological order — the coordinator's intent next to
 the runs it produced. Run blocks expand inline to their child jobs; a
 "view as graph" link opens the classic per-run node graph as a drill-down.
-The header carries the human summary and coordinator identity (author, herdr
-pane, session id), and a stalled workflow shows a go-here card with the pane,
+The detail API carries description, status, and coordinator identity (author,
+herdr pane, session id). A stalled workflow shows a go-here card with the pane,
 the session id, and a copyable resume command — the dashboard tells you where
-to intervene; it never intervenes itself. Coordinators should set the summary
-at kickoff with `gitmoot workflow note ... --summary "<one sentence>"`.
+to intervene; it never intervenes itself. Override description with `gitmoot
+workflow describe <label> "<text>"`; legacy `workflow note --summary` is an
+alias. Linked PR transitions add `[auto:pr:...]` notes as `daemon` and update
+status automatically; `workflow note --status` is the manual escape hatch.
 Inside Herdr, omitted pane/session/workdir flags are detected from the current
 pane. The resume command is shown only when the stored session id is a full
 UUID; legacy shortened values remain visible in the workflow index but cannot
@@ -8950,11 +8959,13 @@ can discover Gitmoot through an installed runtime plugin. Use
 `gitmoot plugin codex-launch --repo <path>` to print a Codex launch command that
 adds the resolved `.gitmoot` home to the sandbox on Linux, macOS, and Windows.
 Use `gitmoot goal template` when
-writing a standard task-by-task goal file. Use
-`gitmoot workflow list`, `gitmoot workflow show`, and `gitmoot workflow note`
-to inspect external-coordinator workflow
-groups, add verbatim journal entries, and optionally stage a note in persistent
-memory. Jobs join a group through `--workflow <label>` on agent
+writing a standard task-by-task goal file. Use `gitmoot workflow list`, `gitmoot
+workflow show`, `gitmoot workflow describe`, and `gitmoot workflow note` to
+inspect external-coordinator workflow groups, set their stable description, add
+verbatim journal entries, set a manual status escape hatch, and optionally stage
+a note in persistent memory. Linked PR lifecycle transitions also add deduped
+`daemon` journal notes and advance live status. Jobs join a group through
+`--workflow <label>` on agent
 ask/run/review/implement, orchestrate, or `job open`; orchestration descendants
 inherit the label automatically. Use
 `gitmoot report bug --job <job-id> --preview` to inspect a redacted GitHub issue
@@ -10327,7 +10338,8 @@ gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo -
 gitmoot job list --workflow fable/dashboard-redesign
 gitmoot workflow list
 gitmoot workflow show fable/dashboard-redesign --limit 100
-gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --summary "Coordinate and ship the dashboard redesign."
+gitmoot workflow describe fable/dashboard-redesign "Coordinate and ship the dashboard redesign."
+gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --status "Implementation started"
 ```
 
 `workflow list` reports per-state counts, note count, first/last activity, and
@@ -10346,10 +10358,20 @@ is fail-open and never prevents a note, and it does not infer `--author`.
 Dashboard resume commands require a full UUID; legacy short session values stay
 visible in the workflow index as context but are not rendered into a broken
 command. Author defaults to the newest note author.
-Coordinators should set a one-line human summary at kickoff with `--summary`.
-Omitting that flag preserves the stored summary, a non-empty value replaces it,
-and `--summary ""` clears it. Summary input is stored verbatim and limited to
-300 bytes.
+Each workflow has a stable `description` and live `status`, both shown by
+`workflow show`. Description is seeded automatically from a referenced local
+issue title, else the first kickoff-note sentence, else the label campaign.
+`workflow describe <label> "<text>"` overrides it. Legacy `workflow note
+--summary` remains an alias for description and also mirrors the value into the
+retained summary field for older clients. `workflow note --status "..."` is the
+manual status escape hatch. Each field is stored verbatim and limited to 300
+bytes.
+
+For a workflow-linked PR, the daemon adds a structured `[auto:pr:...]` note as
+author `daemon` and advances status when the PR opens, checks turn green, and it
+merges or closes without merging. The structured workflow/PR/transition key
+deduplicates repeated polls; these system breadcrumbs remain distinct from
+coordinator handoff notes and never overwrite description.
 Labels may be reused; timestamps expose the reuse. `workflow note` stores body
 and author verbatim (10 KiB and 128-byte limits) and rejects labels with no jobs.
 `workflow show --json` returns those verbatim bytes; plain-text output strips
@@ -12392,16 +12414,26 @@ and continuations inherit it.
 
 ```sh
 gitmoot orchestrate planner "Run release checks." --repo owner/repo --workflow release-42
-gitmoot workflow note release-42 "Kickoff." --author operator --summary "Validate and ship release 42."
+gitmoot workflow describe release-42 "Validate and ship release 42."
+gitmoot workflow note release-42 "Kickoff." --author operator --status "Release checks running"
 gitmoot workflow note release-42 "Canary passed." --author operator --remember
 gitmoot workflow show release-42
 ```
 
-At kickoff, coordinators should set a short human-readable summary with
-`--summary`. The latest summary appears beside the journal in the dashboard's
-workflow index and detail views. Omitting the flag preserves it; a new non-empty
-value replaces it; `--summary ""` clears it. Summaries are stored verbatim with
-a 300-byte limit.
+`description` is the stable human "what/why" line. Gitmoot seeds it on the first
+note from a referenced issue title available in local workflow jobs, otherwise
+the first note sentence, otherwise the campaign portion of the label. Override
+it with `workflow describe <label> "<text>"`. The legacy note flag `--summary`
+remains an alias for description and mirrors the value into the retained
+`summary` field for older clients; omitting it preserves both, while an explicit
+empty value clears them until a later note seeds description again.
+
+`status` is the live line. `workflow note --status "..."` is the manual escape
+hatch. For workflow-linked PRs, the daemon writes visibly marked `[auto:pr:...]`
+notes as author `daemon` and updates status at open, checks-green/ready-to-merge,
+and merged or closed-without-merging transitions. Repeated polls do not duplicate
+the same workflow/PR/transition note. Description and status are stored verbatim
+with independent 300-byte limits.
 
 When `workflow note` runs inside Herdr and `--pane`, `--session`, or `--workdir`
 is omitted, it fills each omitted value from `herdr pane current --current`.

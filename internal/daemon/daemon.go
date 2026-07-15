@@ -358,9 +358,6 @@ func (d Daemon) reconcilePROpenTasks(ctx context.Context, pulls []github.PullReq
 		}
 		byBranch[branch] = append(byBranch[branch], task)
 	}
-	if len(byBranch) == 0 {
-		return nil
-	}
 	var firstErr error
 	for _, pull := range pulls {
 		headRepo := strings.TrimSpace(pull.HeadRepoFullName)
@@ -381,6 +378,16 @@ func (d Daemon) reconcilePROpenTasks(ctx context.Context, pulls []github.PullReq
 			if changed {
 				d.logf("task %s promoted %s -> pr_open: open PR #%d on %s", task.ID, task.State, pull.Number, pull.HeadRef)
 			}
+		}
+		// This is deliberately attempted on every open-PR observation, including
+		// the replay after task promotion. The structured receipt makes it
+		// at-most-once and lets a transient journal failure heal next tick.
+		if _, err := workflow.RecordPullRequestWorkflowTransition(ctx, d.Store, workflow.PullRequestEvent{
+			Repo:        d.Repo.FullName(),
+			Branch:      pull.HeadRef,
+			PullRequest: int(pull.Number),
+		}, workflow.PullRequestJournalOpened); err != nil {
+			d.logf("workflow journal PR-open breadcrumb failed for %s#%d: %v", d.Repo.FullName(), pull.Number, err)
 		}
 	}
 	return firstErr
@@ -456,6 +463,22 @@ func (d Daemon) reconcileExternallyMergedTasks(ctx context.Context, openPullNumb
 			continue
 		}
 		if !pullRequestListedAsMerged(pull) {
+			// The PR left the open set without merging. If it is closed
+			// (abandoned), record a closed status breadcrumb for any linked
+			// workflow so a pr_open/changes_requested task does not leave its
+			// workflow status frozen at "open". This is observability only, with
+			// NO task state change: the #953 conservatism against advancing or
+			// un-blocking a task on an abandoned PR is preserved. Idempotent and
+			// non-fatal.
+			if strings.EqualFold(strings.TrimSpace(pull.State), "closed") {
+				if _, err := workflow.RecordPullRequestWorkflowTransition(ctx, d.Store, workflow.PullRequestEvent{
+					Repo:        d.Repo.FullName(),
+					Branch:      strings.TrimSpace(pull.HeadRef),
+					PullRequest: int(group.number),
+				}, workflow.PullRequestJournalClosed); err != nil {
+					d.logf("workflow journal PR-closed breadcrumb failed for %s#%d: %v", d.Repo.FullName(), group.number, err)
+				}
+			}
 			continue
 		}
 		for _, task := range group.tasks {

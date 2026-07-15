@@ -362,7 +362,7 @@ func TestDashboardCachedHandlersMatchModuleBytes(t *testing.T) {
 	uncached := dashboard.Serve(&webDataSource{home: home})
 	for _, path := range []string{
 		"/api/jobs", "/api/charts?days=30", "/api/charts?days=0",
-		"/api/overview", "/api/attention", "/api/agents", "/api/tasks", "/api/workflows",
+		"/api/overview", "/api/attention", "/api/agents", "/api/tasks",
 	} {
 		want := httptest.NewRecorder()
 		uncached.ServeHTTP(want, httptest.NewRequest(http.MethodGet, path, nil))
@@ -377,6 +377,49 @@ func TestDashboardCachedHandlersMatchModuleBytes(t *testing.T) {
 				t.Fatalf("%s cache outcome = %q, want %q", path, outcome, wantOutcome)
 			}
 		}
+	}
+
+	// #958: /api/workflows is a deliberate SUPERSET of the pinned module output
+	// (it adds description + status), so it is validated apart from the strict
+	// module-byte-parity loop above. Two invariants still hold: the cached shadow
+	// is cache-stable (miss==hit and equals the widened builder), and it diverges
+	// from the module ONLY by the two added fields — same order, same common
+	// values (proving the widening did not reorder or alter anything else).
+	wantWidened, err := (&webDataSource{home: home}).workflowsJSON(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wantOutcome := range []string{"miss", "hit"} {
+		got := httptest.NewRecorder()
+		cached.ServeHTTP(got, httptest.NewRequest(http.MethodGet, "/api/workflows", nil))
+		if got.Code != http.StatusOK || !bytes.Equal(got.Body.Bytes(), wantWidened) {
+			t.Fatalf("/api/workflows %s differs from widened builder\nwant:\n%s\ngot:\n%s", wantOutcome, wantWidened, got.Body.Bytes())
+		}
+		if outcome := got.Header().Get(dashboardCacheHeader); outcome != wantOutcome {
+			t.Fatalf("/api/workflows cache outcome = %q, want %q", outcome, wantOutcome)
+		}
+	}
+	moduleRec := httptest.NewRecorder()
+	uncached.ServeHTTP(moduleRec, httptest.NewRequest(http.MethodGet, "/api/workflows", nil))
+	var widenedEntries, moduleEntries []map[string]any
+	if err := json.Unmarshal(wantWidened, &widenedEntries); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(moduleRec.Body.Bytes(), &moduleEntries); err != nil {
+		t.Fatal(err)
+	}
+	for i := range widenedEntries {
+		if _, ok := widenedEntries[i]["description"]; !ok {
+			t.Fatalf("widened workflows entry %d missing description", i)
+		}
+		if _, ok := widenedEntries[i]["status"]; !ok {
+			t.Fatalf("widened workflows entry %d missing status", i)
+		}
+		delete(widenedEntries[i], "description")
+		delete(widenedEntries[i], "status")
+	}
+	if !reflect.DeepEqual(widenedEntries, moduleEntries) {
+		t.Fatalf("workflows widening diverged beyond description/status\nmodule:\n%s\nwidened-minus-two:\n%+v", moduleRec.Body.Bytes(), widenedEntries)
 	}
 
 	legacy, err := legacyDashboardJobs(home)

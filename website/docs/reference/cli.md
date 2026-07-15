@@ -970,7 +970,8 @@ gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo -
 gitmoot job list --workflow fable/dashboard-redesign
 gitmoot workflow list
 gitmoot workflow show fable/dashboard-redesign --limit 100
-gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --summary "Coordinate and ship the dashboard redesign."
+gitmoot workflow describe fable/dashboard-redesign "Coordinate and ship the dashboard redesign."
+gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --status "Implementation started"
 ```
 
 List/show include state counts, notes, first/last activity, and best-effort token
@@ -987,10 +988,17 @@ disables detection. Missing Herdr state, command failures, timeouts, and invalid
 output are ignored so the note still succeeds, and author is not inferred.
 Only a full UUID is eligible for the dashboard resume command. If coordinator
 author metadata is empty, the newest note author is used.
-Coordinators should set a one-line human summary at kickoff with `--summary`.
-Omitting that flag preserves the stored summary, a non-empty value replaces it,
-and `--summary ""` clears it. Summary input is stored verbatim and limited to
-300 bytes.
+Each workflow has a stable `description` and live `status`. Description is
+auto-seeded from a referenced local issue title, else the first note sentence,
+else the label campaign; override it with `workflow describe`. Legacy
+`workflow note --summary` remains a description alias and mirrors the retained
+summary field for older clients. `workflow note --status` is the manual status
+escape hatch. Each field is limited to 300 bytes.
+
+Linked PR transitions add structured `[auto:pr:...]` notes as author `daemon`
+and advance status at open, checks-green/ready-to-merge, and merged or
+closed-without-merging. The workflow/PR/transition key deduplicates poll replays,
+and automatic updates never overwrite description.
 `--remember` stages low-trust memory in the shared pool by default; `--agent
 NAME` selects a registered agent's private pool. A single repo is inferred,
 otherwise `--repo` is required.

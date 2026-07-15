@@ -51,18 +51,50 @@ func deriveDashboardWorkflowState(now time.Time, activity dashboardWorkflowActiv
 
 // Workflows returns one deterministic index row for every explicit workflow
 // label. Unlabeled jobs are omitted from the workflow index.
+// workflowAPIEntries returns the widened (description/status) index entries.
+// It is the source for both the cached /api/workflows shadow (workflowsJSON)
+// and any caller needing the server-owned extension fields.
+func (d *webDataSource) workflowAPIEntries(ctx context.Context) ([]dashboardWorkflowAPIEntry, error) {
+	var out []dashboardWorkflowAPIEntry
+	err := withStore(d.home, func(store *db.Store) error {
+		entries, err := dashboardWorkflowEntries(ctx, store, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		out = entries
+		return nil
+	})
+	return out, err
+}
+
 func (d *webDataSource) Workflows(ctx context.Context) ([]dashboard.WorkflowIndexEntry, error) {
 	out := []dashboard.WorkflowIndexEntry{}
 	now := time.Now().UTC()
 	err := withStore(d.home, func(store *db.Store) error {
-		var err error
-		out, err = dashboardWorkflowEntries(ctx, store, now)
+		entries, err := dashboardWorkflowEntries(ctx, store, now)
+		if err != nil {
+			return err
+		}
+		out = make([]dashboard.WorkflowIndexEntry, 0, len(entries))
+		for _, entry := range entries {
+			out = append(out, entry.WorkflowIndexEntry)
+		}
 		return err
 	})
 	return out, err
 }
 
-func dashboardWorkflowEntries(ctx context.Context, store *db.Store, now time.Time) ([]dashboard.WorkflowIndexEntry, error) {
+// dashboardWorkflowAPIEntry is the server-owned extension of the pinned
+// dashboard module's index contract. Keeping the widening here avoids changing
+// or vendoring the separate frontend repository while exposing the new wire
+// fields immediately.
+type dashboardWorkflowAPIEntry struct {
+	dashboard.WorkflowIndexEntry
+	Description string `json:"description"`
+	Status      string `json:"status"`
+}
+
+func dashboardWorkflowEntries(ctx context.Context, store *db.Store, now time.Time) ([]dashboardWorkflowAPIEntry, error) {
 	summaries, err := store.ListWorkflowSummaries(ctx)
 	if err != nil {
 		return nil, err
@@ -75,15 +107,17 @@ func dashboardWorkflowEntries(ctx context.Context, store *db.Store, now time.Tim
 	if err != nil {
 		return nil, err
 	}
-	out := make([]dashboard.WorkflowIndexEntry, 0, len(summaries))
+	out := make([]dashboardWorkflowAPIEntry, 0, len(summaries))
 	for _, summary := range summaries {
 		out = append(out, dashboardWorkflowEntry(now, summary, metaByWorkflow[summary.WorkflowID], reposByWorkflow[summary.WorkflowID]))
 	}
-	sort.SliceStable(out, func(i, j int) bool { return dashboardWorkflowIndexLess(out[i], out[j]) })
+	sort.SliceStable(out, func(i, j int) bool {
+		return dashboardWorkflowIndexLess(out[i].WorkflowIndexEntry, out[j].WorkflowIndexEntry)
+	})
 	return out, nil
 }
 
-func dashboardWorkflowEntry(now time.Time, summary db.WorkflowSummary, meta db.WorkflowMeta, repos []string) dashboard.WorkflowIndexEntry {
+func dashboardWorkflowEntry(now time.Time, summary db.WorkflowSummary, meta db.WorkflowMeta, repos []string) dashboardWorkflowAPIEntry {
 	lastAt := parseJobTimeMillis(summary.LastAt)
 	state, stalledFor := deriveDashboardWorkflowState(now, dashboardWorkflowActivity{
 		Queued: summary.Queued, Running: summary.Running, Failed: summary.Failed,
@@ -96,22 +130,27 @@ func dashboardWorkflowEntry(now time.Time, summary db.WorkflowSummary, meta db.W
 		author = strings.TrimSpace(summary.LastAuthor)
 	}
 	namespace, campaign := splitDashboardWorkflowLabel(summary.WorkflowID)
-	return dashboard.WorkflowIndexEntry{
-		Label: summary.WorkflowID, Namespace: namespace, Campaign: campaign, Auto: false,
-		Summary: meta.Summary,
-		Coordinator: dashboard.WorkflowCoordinator{
-			Author: author, Pane: strings.TrimSpace(meta.Pane), SessionID: strings.TrimSpace(meta.SessionID),
+	description := workflowDisplayDescription(summary.WorkflowID, meta.Description)
+	return dashboardWorkflowAPIEntry{
+		Description: description,
+		Status:      meta.Status,
+		WorkflowIndexEntry: dashboard.WorkflowIndexEntry{
+			Label: summary.WorkflowID, Namespace: namespace, Campaign: campaign, Auto: false,
+			Summary: firstNonEmpty(meta.Summary, description),
+			Coordinator: dashboard.WorkflowCoordinator{
+				Author: author, Pane: strings.TrimSpace(meta.Pane), SessionID: strings.TrimSpace(meta.SessionID),
+			},
+			State: state, StalledForS: stalledFor,
+			Counts: dashboard.WorkflowCounts{
+				Jobs: summary.JobCount, Running: summary.Running, Queued: summary.Queued,
+				Succeeded: summary.Succeeded, Failed: summary.Failed, Blocked: summary.Blocked,
+				Notes: summary.NoteCount,
+			},
+			TokensIn: summary.InputTokens, TokensOut: summary.OutputTokens,
+			FirstAt: parseJobTimeMillis(summary.FirstAt), LastAt: lastAt,
+			LastNote: dashboardWorkflowOneLine(summary.LastNote),
+			Repos:    append([]string(nil), repos...),
 		},
-		State: state, StalledForS: stalledFor,
-		Counts: dashboard.WorkflowCounts{
-			Jobs: summary.JobCount, Running: summary.Running, Queued: summary.Queued,
-			Succeeded: summary.Succeeded, Failed: summary.Failed, Blocked: summary.Blocked,
-			Notes: summary.NoteCount,
-		},
-		TokensIn: summary.InputTokens, TokensOut: summary.OutputTokens,
-		FirstAt: parseJobTimeMillis(summary.FirstAt), LastAt: lastAt,
-		LastNote: dashboardWorkflowOneLine(summary.LastNote),
-		Repos:    append([]string(nil), repos...),
 	}
 }
 

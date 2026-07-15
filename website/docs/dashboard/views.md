@@ -201,8 +201,11 @@ The **index** groups every known explicit workflow by derived lifecycle: **stall
 pinned on top ("needs a look"), then **active**, **recent**, and **settled**.
 Active means work is currently running or queued. Recent means no work is live,
 but a job or journal note touched the workflow within the last 30 minutes.
-A coordinator-provided one-line summary identifies the campaign beside its
-journal activity.
+The workflow API exposes a stable `description` and live `status` separately.
+Gitmoot auto-seeds description from a referenced local issue title, the
+kickoff-note sentence, or the label campaign. The bundled frontend continues to
+receive the compatibility `summary` field until its separate rendering follow-up
+adopts the two new fields.
 A workflow is stalled only when a failure has gone **unacknowledged** — nothing
 is running, the goal was not reached, and no journal note has been written
 since the last failure (a failure alone is not an alarm; the silence after it
@@ -212,11 +215,13 @@ The **detail page** reads as a mission log: journal notes and run trees
 interleaved in reverse-chronological order — the coordinator's intent next to
 the runs it produced. Run blocks expand inline to their child jobs; a
 "view as graph" link opens the classic per-run node graph as a drill-down.
-The header carries the human summary and coordinator identity (author, herdr
-pane, session id), and a stalled workflow shows a go-here card with the pane,
+The detail API carries description, status, and coordinator identity (author,
+herdr pane, session id). A stalled workflow shows a go-here card with the pane,
 the session id, and a copyable resume command — the dashboard tells you where
-to intervene; it never intervenes itself. Coordinators should set the summary
-at kickoff with `gitmoot workflow note ... --summary "<one sentence>"`.
+to intervene; it never intervenes itself. Override description with `gitmoot
+workflow describe <label> "<text>"`; legacy `workflow note --summary` is an
+alias. Linked PR transitions add `[auto:pr:...]` notes as `daemon` and update
+status automatically; `workflow note --status` is the manual escape hatch.
 Inside Herdr, omitted pane/session/workdir flags are detected from the current
 pane. The resume command is shown only when the stored session id is a full
 UUID; legacy shortened values remain visible in the workflow index but cannot

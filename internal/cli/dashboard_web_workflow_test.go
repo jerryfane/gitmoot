@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -492,6 +493,60 @@ func TestCappedWorkflowLimitDefaultsAndCaps(t *testing.T) {
 				t.Fatalf("cappedWorkflowLimit(%d, %d) = %d, want %d", tc.value, tc.cap, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDashboardWorkflowDescriptionStatusAPI(t *testing.T) {
+	home, store := workflowJournalTestHome(t)
+	ctx := context.Background()
+	const label = "release/api-fields"
+	description := strings.Repeat("d", db.WorkflowMetaTextMax)
+	status := strings.Repeat("s", db.WorkflowMetaTextMax)
+	payload, err := json.Marshal(workflow.JobPayload{WorkflowID: label, Repo: "acme/widget", TaskTitle: "API fields"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateJob(ctx, db.Job{ID: "api-fields", Agent: "worker", Type: "ask", State: "running", Payload: string(payload)}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	jobOnlySummary, err := store.WorkflowSummary(ctx, label)
+	if err != nil {
+		t.Fatalf("WorkflowSummary before metadata: %v", err)
+	}
+	if got := dashboardWorkflowEntry(time.Now().UTC(), jobOnlySummary, db.WorkflowMeta{}, nil).Description; got != "api-fields" {
+		t.Fatalf("job-only description = %q, want campaign fallback", got)
+	}
+	if _, err := store.InsertWorkflowNoteWithMeta(ctx,
+		db.WorkflowNote{WorkflowID: label, Author: "operator", Body: "kickoff"},
+		db.WorkflowMeta{Author: "operator", Description: description, DescriptionSet: true, Status: status, StatusSet: true}); err != nil {
+		t.Fatalf("InsertWorkflowNoteWithMeta: %v", err)
+	}
+
+	handler := newDashboardWebHandler(&webDataSource{home: home})
+	indexRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(indexRecorder, httptest.NewRequest(http.MethodGet, "/api/workflows", nil))
+	if indexRecorder.Code != http.StatusOK {
+		t.Fatalf("index status=%d body=%s", indexRecorder.Code, indexRecorder.Body.String())
+	}
+	var entries []dashboardWorkflowAPIEntry
+	if err := json.Unmarshal(indexRecorder.Body.Bytes(), &entries); err != nil || len(entries) != 1 {
+		t.Fatalf("index entries=%+v err=%v body=%s", entries, err, indexRecorder.Body.String())
+	}
+	if entries[0].Description != description || entries[0].Status != status || entries[0].Summary != description {
+		t.Fatalf("index entry lost untruncated fields: description=%d status=%d entry=%+v", len(entries[0].Description), len(entries[0].Status), entries[0])
+	}
+
+	detailRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/workflow/release%2Fapi-fields", nil))
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detailRecorder.Code, detailRecorder.Body.String())
+	}
+	var detail dashboardWorkflowAPIView
+	if err := json.Unmarshal(detailRecorder.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail decode: %v body=%s", err, detailRecorder.Body.String())
+	}
+	if detail.Description != description || detail.Status != status || detail.Summary.Label != label {
+		t.Fatalf("detail lost fields: %+v", detail)
 	}
 }
 
