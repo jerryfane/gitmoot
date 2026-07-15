@@ -49,6 +49,15 @@ The gateway authenticates the placeholder, replaces it with the real upstream
 credential, streams the response, and revokes the placeholder when delivery
 ends. Unknown and revoked placeholders receive `401`.
 
+Because Claude Code prefers a cached `~/.claude/.credentials.json` over the
+`CLAUDE_CODE_OAUTH_TOKEN` env var, the child is also pointed at a per-home
+`CLAUDE_CONFIG_DIR` under the Gitmoot home that mirrors the operator's real
+Claude config (settings, skills, commands, `CLAUDE.md`) but omits the cached
+credential. Without this the child would authenticate from the cached
+credential and ignore the placeholder — the gateway would then `401` the
+delivery (#936). The mirror never contains a credential; the operator's real
+config is only read, never modified.
+
 The feature is off by default and currently covers Claude only. A populated
 `runtime-auth.env` is required while it is enabled; Gitmoot fails the delivery
 instead of falling back to ambient auth, Claude's credential store, or direct
@@ -108,11 +117,13 @@ The model gateway is credential custody, policy, and attribution, not a hard
 egress boundary. These two limits are deliberate:
 
 1. env-var routing is cooperative, not a hard egress boundary — a malicious
-   agent can unset it; this buys credential custody/policy/attribution, not
-   enforcement.
+   agent can unset `ANTHROPIC_BASE_URL`, or point `CLAUDE_CONFIG_DIR` back at
+   the operator's real `~/.claude` to read the cached credential directly. This
+   buys credential custody/policy/attribution against a prompt-injected or
+   misbehaving agent, not enforcement against one that actively evades.
 2. The strong "agents never hold real credentials" claim also requires
-   Landlock read-rules for `runtime-auth.env` (same-UID read is currently
-   possible) — that is P3.
+   Landlock read-rules for `runtime-auth.env` and `~/.claude/.credentials.json`
+   (same-UID read is currently possible) — that is P3.
 
 Codex/Kimi custody, MITM CA support, corporate proxy/`NO_PROXY` interoperability,
 Landlock read restrictions, and hard egress enforcement remain P3. SSH keys,

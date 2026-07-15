@@ -13870,8 +13870,11 @@ job-scoped placeholder; the daemon snapshots the real `runtime-auth.env`
 credential, attaches it only on the allowlisted upstream request, and revokes
 the placeholder when delivery returns. Unknown/revoked placeholders fail with
 `401`, and an unavailable gateway or unallowlisted upstream fails the delivery
-without direct-auth fallback. It is off by default and does not cover Codex or
-Kimi.
+without direct-auth fallback. The child is also pointed at a credential-free
+`CLAUDE_CONFIG_DIR` (a per-home mirror of the real Claude config minus
+`.credentials.json`), because Claude Code otherwise prefers its cached
+credential over the placeholder and the gateway would `401` every job (#936).
+It is off by default and does not cover Codex or Kimi.
 
 ### Runtime ambient credential hygiene
 
@@ -13885,11 +13888,13 @@ runtime exceptions, and `env_passthrough` syntax.
 The gateway has two explicit limits:
 
 1. env-var routing is cooperative, not a hard egress boundary — a malicious
-   agent can unset it; this buys credential custody/policy/attribution, not
-   enforcement.
+   agent can unset `ANTHROPIC_BASE_URL`, or point `CLAUDE_CONFIG_DIR` back at
+   the real `~/.claude` to read the cached credential. This buys credential
+   custody/policy/attribution against a prompt-injected or misbehaving agent,
+   not enforcement against one that actively evades.
 2. The strong "agents never hold real credentials" claim also requires
-   Landlock read-rules for `runtime-auth.env` (same-UID read is currently
-   possible) — that is P3.
+   Landlock read-rules for `runtime-auth.env` and `~/.claude/.credentials.json`
+   (same-UID read is currently possible) — that is P3.
 
 Codex/Kimi custody, Landlock read rules, MITM CA support, corporate
 proxy/`NO_PROXY` interoperability, and hard egress enforcement remain P3.

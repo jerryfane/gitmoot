@@ -28,6 +28,12 @@ func buildModelGatewayRunner(home string, cfg config.CredentialsConfig, auth run
 	if err != nil {
 		return nil, fmt.Errorf("start Claude model gateway: %w", err)
 	}
+	// Without a credential-free config dir the child reads ~/.claude/.credentials.json
+	// and ignores the placeholder — the gateway would then 401 every job (#936).
+	configDir, err := buildClaudeGatewayConfigDir(home)
+	if err != nil {
+		return nil, fmt.Errorf("prepare Claude gateway config dir: %w", err)
+	}
 	return &credgw.Runner{
 		Inner:      inner,
 		Gateway:    gateway,
@@ -36,6 +42,7 @@ func buildModelGatewayRunner(home string, cfg config.CredentialsConfig, auth run
 			Upstream:     modelGatewayUpstreamURL,
 			AllowedHosts: append([]string{}, cfg.ModelGatewayAllowHosts...),
 		},
+		ChildConfigDir: configDir,
 	}, nil
 }
 

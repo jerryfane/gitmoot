@@ -82,6 +82,7 @@ model_gateway_allow_hosts = ["api.anthropic.com"]
 			t.Setenv(runtime.ClaudeOAuthTokenEnv, "ambient-oauth-must-not-reach-child")
 			t.Setenv(runtime.AnthropicAPIKeyEnv, "ambient-api-key-must-not-reach-child")
 			t.Setenv(runtime.AnthropicAuthTokenEnv, "ambient-auth-token-must-not-reach-child")
+			t.Setenv(runtime.ClaudeConfigDirEnv, t.TempDir()) // isolate: never mirror the box's real ~/.claude
 
 			registry := credgw.NewRegistry()
 			previousRegistry := modelGatewayRegistry
@@ -240,6 +241,19 @@ model_gateway_allow_hosts = [%q]
 	t.Setenv(runtime.ClaudeOAuthTokenEnv, "ambient-credential-must-not-win")
 	t.Setenv(runtime.AnthropicAPIKeyEnv, "ambient-api-key-must-not-win")
 
+	// The heart of #936: a real Claude config with a CACHED CREDENTIAL. Claude
+	// prefers this file over the env token, so the child must be pointed at a
+	// mirror that excludes it — otherwise the placeholder injection is moot.
+	sourceConfig := t.TempDir()
+	cachedCredential := "sk-ant-oat01-cached-credentials-file-must-not-reach-child"
+	if err := os.WriteFile(filepath.Join(sourceConfig, claudeCredentialsFile), []byte(cachedCredential), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceConfig, "settings.json"), []byte(`{"agent":"keep me"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(runtime.ClaudeConfigDirEnv, sourceConfig)
+
 	previousRegistry := modelGatewayRegistry
 	previousUpstream := modelGatewayUpstreamURL
 	previousLogf := modelGatewayLogf
@@ -291,15 +305,31 @@ model_gateway_allow_hosts = [%q]
 	if !strings.Contains(dumpText, "CLAUDE_CODE_OAUTH_TOKEN=gitmoot-kc-gateway-e2e-job-") || !strings.Contains(dumpText, "ANTHROPIC_BASE_URL=http://127.0.0.1:") {
 		t.Fatalf("child env dump = %q", dumpText)
 	}
+
+	// #936: the child must be pointed at a config dir that is NOT the operator's
+	// real one, and that dir must not contain the cached credential — otherwise
+	// claude would authenticate from the credential and ignore the placeholder.
+	childConfigDir := envDumpValue(dumpText, runtime.ClaudeConfigDirEnv)
+	if childConfigDir == "" || childConfigDir == sourceConfig {
+		t.Fatalf("child CLAUDE_CONFIG_DIR = %q, want a mirror distinct from the real config", childConfigDir)
+	}
+	if _, err := os.Lstat(filepath.Join(childConfigDir, claudeCredentialsFile)); !os.IsNotExist(err) {
+		t.Fatalf("cached credential present in child config dir: err=%v", err)
+	}
+	if got := readThrough(t, filepath.Join(childConfigDir, "settings.json")); got != `{"agent":"keep me"}` {
+		t.Fatalf("child lost its settings through the mirror: %q", got)
+	}
+
 	// Wait for the gateway's own request log before asserting on log contents:
 	// it is written by the request goroutine after the response is proxied back,
 	// so reading too early would make these leak checks vacuous.
 	logged := logs.waitFor(t, "job_id=gateway-e2e-job")
-	for _, secret := range []string{realToken, "ambient-credential-must-not-win", "ambient-api-key-must-not-win"} {
+	for _, secret := range []string{realToken, cachedCredential, "ambient-credential-must-not-win", "ambient-api-key-must-not-win"} {
 		if strings.Contains(dumpText, secret) || strings.Contains(logged, secret) {
 			t.Fatalf("credential leaked through child env/logs")
 		}
 	}
+	assertNoCredentialUnder(t, childConfigDir, cachedCredential)
 	placeholder := envDumpValue(dumpText, runtime.ClaudeOAuthTokenEnv)
 	if placeholder == "" || strings.Contains(logged, placeholder) {
 		t.Fatalf("placeholder missing or logged: logs=%q", logged)
@@ -322,11 +352,12 @@ func TestClaudeModelGatewayShimProcess(t *testing.T) {
 	}
 	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
 	placeholder := os.Getenv(runtime.ClaudeOAuthTokenEnv)
-	dump := fmt.Sprintf("%s=%s\n%s=%s\n%s=%s\nANTHROPIC_BASE_URL=%s\n",
+	dump := fmt.Sprintf("%s=%s\n%s=%s\n%s=%s\nANTHROPIC_BASE_URL=%s\n%s=%s\n",
 		runtime.ClaudeOAuthTokenEnv, placeholder,
 		runtime.AnthropicAPIKeyEnv, os.Getenv(runtime.AnthropicAPIKeyEnv),
 		runtime.AnthropicAuthTokenEnv, os.Getenv(runtime.AnthropicAuthTokenEnv),
 		baseURL,
+		runtime.ClaudeConfigDirEnv, os.Getenv(runtime.ClaudeConfigDirEnv),
 	)
 	if err := os.WriteFile(os.Getenv("GITMOOT_CLAUDE_GATEWAY_ENV_DUMP"), []byte(dump), 0o600); err != nil {
 		os.Exit(2)
