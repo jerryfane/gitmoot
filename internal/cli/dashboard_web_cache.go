@@ -136,7 +136,19 @@ func (c *dashboardJSONCache) get(
 	c.flights[key] = flight
 	c.mu.Unlock()
 
-	body, err := compute(ctx)
+	// The shared compute serves every waiter, so it must not die with the
+	// leader: detach from the leader's request context (a client disconnect
+	// otherwise aborts all waiters) and convert a compute panic into an error
+	// (an escaped panic would skip close(flight.done) and strand waiters
+	// forever).
+	body, err := func() (b []byte, e error) {
+		defer func() {
+			if r := recover(); r != nil {
+				e = fmt.Errorf("dashboard cache compute panicked: %v", r)
+			}
+		}()
+		return compute(context.WithoutCancel(ctx))
+	}()
 	computedAt := c.now()
 	c.mu.Lock()
 	flight.body, flight.err = body, err

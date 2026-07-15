@@ -380,3 +380,40 @@ func TestDashboardHealthSeesLockMutationOnNextResponse(t *testing.T) {
 		t.Fatalf("next locks = %+v", locks)
 	}
 }
+
+func TestDashboardCacheComputePanicReleasesWaiters(t *testing.T) {
+	cache := newDashboardJSONCache(nil)
+	policy := dashboardCachePolicy{endpoint: "jobs", retain: true, maxAge: time.Minute}
+	_, _, err := cache.get(context.Background(), "k", "c1", policy, func(context.Context) ([]byte, error) {
+		panic("boom")
+	})
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("panic not converted to error: %v", err)
+	}
+	// The flight must be released: a follow-up compute succeeds normally.
+	body, state, err := cache.get(context.Background(), "k", "c1", policy, func(context.Context) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+	if err != nil || string(body) != "ok" || state != "miss" {
+		t.Fatalf("post-panic serve = %q, %q, %v", body, state, err)
+	}
+}
+
+func TestDashboardCacheLeaderDisconnectDoesNotAbortCompute(t *testing.T) {
+	cache := newDashboardJSONCache(nil)
+	policy := dashboardCachePolicy{endpoint: "jobs", retain: true, maxAge: time.Minute}
+	leaderCtx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	go func() { <-started; cancel() }()
+	body, _, err := cache.get(leaderCtx, "k2", "c1", policy, func(ctx context.Context) ([]byte, error) {
+		close(started)
+		time.Sleep(50 * time.Millisecond)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return []byte("survived"), nil
+	})
+	if err != nil || string(body) != "survived" {
+		t.Fatalf("leader cancellation aborted the shared compute: %q, %v", body, err)
+	}
+}
