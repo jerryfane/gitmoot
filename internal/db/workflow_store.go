@@ -3,10 +3,25 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
+
+const (
+	// WorkflowMetaTextMax is the byte cap shared by summary, description, and
+	// status. It is enforced in the store so daemon and CLI writes cannot diverge.
+	WorkflowMetaTextMax = 300
+	// WorkflowAutoNoteAuthor makes machine lifecycle breadcrumbs visibly distinct
+	// from coordinator handoff notes and scopes the partial dedupe index.
+	WorkflowAutoNoteAuthor = "daemon"
+)
+
+var workflowIssueReferencePattern = regexp.MustCompile(`#([1-9][0-9]*)`)
 
 // WorkflowNote is one append-only external-coordinator journal entry.
 type WorkflowNote struct {
@@ -30,8 +45,12 @@ type WorkflowMeta struct {
 	Summary    string `json:"summary,omitempty"`
 	// SummarySet distinguishes an omitted --summary flag from an explicit empty
 	// value, which clears the stored summary.
-	SummarySet bool   `json:"-"`
-	UpdatedAt  string `json:"updated_at,omitempty"`
+	SummarySet     bool   `json:"-"`
+	Description    string `json:"description,omitempty"`
+	DescriptionSet bool   `json:"-"`
+	Status         string `json:"status,omitempty"`
+	StatusSet      bool   `json:"-"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
 }
 
 // WorkflowSummary is the indexed jobs aggregate rendered by workflow list/show.
@@ -52,10 +71,14 @@ type WorkflowSummary struct {
 	LastAt       string `json:"last_activity"`
 	LastNote     string `json:"last_note,omitempty"`
 	LastAuthor   string `json:"last_author,omitempty"`
-	// LastFailureAt/LastNoteAt let the dashboard's stalled derivation apply the
-	// acknowledgment rule: a failure with a LATER journal note is not an alarm.
-	LastFailureAt string `json:"last_failure_at,omitempty"`
-	LastNoteAt    string `json:"last_note_at,omitempty"`
+	// LastNote and LastAuthor describe the literal latest journal entry, including
+	// daemon receipts. LastFailureAt/LastHumanNoteAt let the dashboard apply the
+	// acknowledgment rule: daemon lifecycle receipts remain activity, but only a
+	// non-daemon note acknowledges a failure.
+	LastFailureAt   string `json:"last_failure_at,omitempty"`
+	LastNoteAt      string `json:"last_note_at,omitempty"`
+	LastHumanAuthor string `json:"last_human_author,omitempty"`
+	LastHumanNoteAt string `json:"last_human_note_at,omitempty"`
 }
 
 // Exported query constants keep production SQL and EXPLAIN regression tests on
@@ -91,7 +114,11 @@ const workflowSummarySelectSQL = `WITH job_summary AS (
 			ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1), '') AS last_note,
 		COALESCE((SELECT latest.author FROM workflow_notes latest
 			WHERE latest.workflow_id = n.workflow_id
-			ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1), '') AS last_author
+			ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1), '') AS last_author,
+		COALESCE((SELECT latest.author FROM workflow_notes latest
+			WHERE latest.workflow_id = n.workflow_id AND latest.author != 'daemon'
+			ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1), '') AS last_human_author,
+		MAX(CASE WHEN n.author != 'daemon' THEN n.created_at END) AS last_human_at
 	FROM workflow_notes n INDEXED BY idx_workflow_notes_wid
 	GROUP BY n.workflow_id
 ), labels AS (
@@ -114,8 +141,8 @@ SELECT labels.workflow_id,
 		WHEN n.last_at IS NULL THEN j.last_at
 		WHEN j.last_at >= n.last_at THEN j.last_at ELSE n.last_at
 	END AS last_at,
-	COALESCE(n.last_note, ''), COALESCE(n.last_author, ''),
-	COALESCE(j.last_failure_at, ''), COALESCE(n.last_at, '')
+	COALESCE(n.last_note, ''), COALESCE(n.last_author, ''), COALESCE(n.last_human_author, ''),
+	COALESCE(j.last_failure_at, ''), COALESCE(n.last_at, ''), COALESCE(n.last_human_at, '')
 FROM labels
 LEFT JOIN job_summary j ON j.workflow_id = labels.workflow_id
 LEFT JOIN note_summary n ON n.workflow_id = labels.workflow_id`
@@ -166,14 +193,19 @@ func workflowQueryLimit(limit int) int {
 }
 
 func (s *Store) InsertWorkflowNote(ctx context.Context, note WorkflowNote) (WorkflowNote, error) {
-	res, err := s.db.ExecContext(ctx, `
-INSERT INTO workflow_notes(workflow_id, author, body, repo, memory_observation_id)
-VALUES (?, ?, ?, ?, ?)`, note.WorkflowID, note.Author, note.Body, note.Repo, note.MemoryObservationID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return WorkflowNote{}, fmt.Errorf("insert workflow note: %w", err)
+		return WorkflowNote{}, err
 	}
-	id, err := res.LastInsertId()
+	defer func() { _ = tx.Rollback() }()
+	id, err := insertWorkflowNoteTx(ctx, tx, note)
 	if err != nil {
+		return WorkflowNote{}, err
+	}
+	if err := ensureWorkflowDescriptionTx(ctx, tx, note.WorkflowID); err != nil {
+		return WorkflowNote{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return WorkflowNote{}, err
 	}
 	return s.getWorkflowNote(ctx, id)
@@ -195,10 +227,75 @@ func (s *Store) InsertWorkflowNoteWithMeta(ctx context.Context, note WorkflowNot
 	if err := upsertWorkflowMetaTx(ctx, tx, meta); err != nil {
 		return WorkflowNote{}, err
 	}
+	if !meta.DescriptionSet {
+		if err := ensureWorkflowDescriptionTx(ctx, tx, note.WorkflowID); err != nil {
+			return WorkflowNote{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return WorkflowNote{}, err
 	}
 	return s.getWorkflowNote(ctx, noteID)
+}
+
+// InsertWorkflowAutoNoteWithMeta atomically appends one structured daemon note
+// and updates metadata. The partial unique index makes the bracketed receipt
+// prefix an at-most-once key across repeated polls and concurrent writers.
+// inserted=false is a successful replay and leaves a later manual status alone.
+func (s *Store) InsertWorkflowAutoNoteWithMeta(ctx context.Context, note WorkflowNote, meta WorkflowMeta) (stored WorkflowNote, inserted bool, err error) {
+	if note.Author != WorkflowAutoNoteAuthor || !strings.HasPrefix(note.Body, "[auto:pr:") || !strings.Contains(note.Body, "]") {
+		return WorkflowNote{}, false, fmt.Errorf("workflow auto note requires author %q and a bracketed [auto:pr: receipt", WorkflowAutoNoteAuthor)
+	}
+	if err := validateWorkflowMeta(meta); err != nil {
+		return WorkflowNote{}, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkflowNote{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO workflow_notes(workflow_id, author, body, repo, memory_observation_id)
+VALUES (?, ?, ?, ?, ?)`, note.WorkflowID, note.Author, note.Body, note.Repo, note.MemoryObservationID)
+	if err != nil {
+		return WorkflowNote{}, false, fmt.Errorf("insert workflow auto note: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return WorkflowNote{}, false, err
+	}
+	if affected == 0 {
+		return WorkflowNote{}, false, tx.Commit()
+	}
+	noteID, err := result.LastInsertId()
+	if err != nil {
+		return WorkflowNote{}, false, err
+	}
+	meta.WorkflowID = note.WorkflowID
+	if err := upsertWorkflowMetaTx(ctx, tx, meta); err != nil {
+		return WorkflowNote{}, false, err
+	}
+	if !meta.DescriptionSet {
+		if err := ensureWorkflowDescriptionTx(ctx, tx, note.WorkflowID); err != nil {
+			return WorkflowNote{}, false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return WorkflowNote{}, false, err
+	}
+	stored, err = s.getWorkflowNote(ctx, noteID)
+	return stored, err == nil, err
+}
+
+// WorkflowAutoNoteExists checks one structured receipt key using the same
+// expression as idx_workflow_notes_daemon_auto.
+func (s *Store) WorkflowAutoNoteExists(ctx context.Context, workflowID, key string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+	SELECT 1 FROM workflow_notes
+	WHERE workflow_id = ? AND author = ?
+		AND substr(body, 1, instr(body, ']')) = ?
+)`, strings.TrimSpace(workflowID), WorkflowAutoNoteAuthor, strings.TrimSpace(key)).Scan(&exists)
+	return exists, err
 }
 
 // InsertWorkflowNoteWithObservation atomically appends a journal note and its
@@ -228,6 +325,11 @@ func (s *Store) insertWorkflowNoteWithObservationAndMeta(ctx context.Context, no
 	if writeMeta {
 		meta.WorkflowID = note.WorkflowID
 		if err := upsertWorkflowMetaTx(ctx, tx, meta); err != nil {
+			return WorkflowNote{}, MemoryObservation{}, err
+		}
+	}
+	if !writeMeta || !meta.DescriptionSet {
+		if err := ensureWorkflowDescriptionTx(ctx, tx, note.WorkflowID); err != nil {
 			return WorkflowNote{}, MemoryObservation{}, err
 		}
 	}
@@ -263,30 +365,241 @@ VALUES (?, ?, ?, ?, ?)`, note.WorkflowID, note.Author, note.Body, note.Repo, not
 }
 
 func upsertWorkflowMetaTx(ctx context.Context, tx *sql.Tx, meta WorkflowMeta) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO workflow_meta(workflow_id, author, pane, session_id, workdir, summary, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	if err := validateWorkflowMeta(meta); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO workflow_meta(workflow_id, author, pane, session_id, workdir, summary, description, status, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(workflow_id) DO UPDATE SET
-	author = excluded.author,
+	author = CASE WHEN excluded.author != '' THEN excluded.author ELSE workflow_meta.author END,
 	pane = CASE WHEN excluded.pane != '' THEN excluded.pane ELSE workflow_meta.pane END,
 	session_id = CASE WHEN excluded.session_id != '' THEN excluded.session_id ELSE workflow_meta.session_id END,
 	workdir = CASE WHEN excluded.workdir != '' THEN excluded.workdir ELSE workflow_meta.workdir END,
 	summary = CASE WHEN ? THEN excluded.summary ELSE workflow_meta.summary END,
-	updated_at = CURRENT_TIMESTAMP`, meta.WorkflowID, meta.Author, meta.Pane, meta.SessionID, meta.WorkDir, meta.Summary, meta.SummarySet)
+	description = CASE WHEN ? THEN excluded.description ELSE workflow_meta.description END,
+	status = CASE WHEN ? THEN excluded.status ELSE workflow_meta.status END,
+	updated_at = CURRENT_TIMESTAMP`, meta.WorkflowID, meta.Author, meta.Pane, meta.SessionID, meta.WorkDir,
+		meta.Summary, meta.Description, meta.Status, meta.SummarySet, meta.DescriptionSet, meta.StatusSet)
 	return err
+}
+
+func validateWorkflowMeta(meta WorkflowMeta) error {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "summary", value: meta.Summary},
+		{name: "description", value: meta.Description},
+		{name: "status", value: meta.Status},
+	} {
+		if len(field.value) > WorkflowMetaTextMax {
+			return fmt.Errorf("workflow %s must be at most %d bytes", field.name, WorkflowMetaTextMax)
+		}
+	}
+	return nil
+}
+
+// SetWorkflowDescription updates the stable human intent and mirrors it into
+// legacy summary so older CLI/API consumers keep seeing the human "what" line.
+func (s *Store) SetWorkflowDescription(ctx context.Context, workflowID, description string) error {
+	if len(description) > WorkflowMetaTextMax {
+		return fmt.Errorf("workflow description must be at most %d bytes", WorkflowMetaTextMax)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO workflow_meta(workflow_id, summary, description, updated_at)
+VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(workflow_id) DO UPDATE SET
+	summary = excluded.summary,
+	description = excluded.description,
+	updated_at = CURRENT_TIMESTAMP`, strings.TrimSpace(workflowID), description, description)
+	return err
+}
+
+// WorkflowIDForPullRequest resolves the newest workflow-linked job for a PR.
+// The indexed workflow subset is small; branch remains payload-only, so it is
+// decoded only for rows in the requested repo. Pull-request equality wins and
+// the head branch is the compatibility fallback for pre-finalizer job payloads.
+func (s *Store) WorkflowIDForPullRequest(ctx context.Context, repo string, pullRequest int, branch string) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT workflow_id, pull_request, payload
+FROM jobs INDEXED BY idx_jobs_workflow_id
+WHERE workflow_id != '' AND repo = ?
+ORDER BY updated_at DESC, id DESC`, strings.TrimSpace(repo))
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	branch = strings.TrimSpace(branch)
+	// Pull-request equality wins over the head-branch fallback: an exact PR
+	// number match returns immediately, while the first (most-recent) branch-only
+	// match is only remembered and returned if no PR match is found anywhere.
+	// A single early-return-on-either loop could let a newer branch-only job in a
+	// different workflow (a reused branch name) beat the correct PR-stamped job.
+	branchMatch := ""
+	for rows.Next() {
+		var workflowID, payloadRaw string
+		var storedPullRequest int
+		if err := rows.Scan(&workflowID, &storedPullRequest, &payloadRaw); err != nil {
+			return "", err
+		}
+		if pullRequest > 0 && storedPullRequest == pullRequest {
+			return workflowID, nil
+		}
+		if branch == "" || branchMatch != "" {
+			continue
+		}
+		var payload struct {
+			Branch string `json:"branch"`
+		}
+		if json.Unmarshal([]byte(payloadRaw), &payload) == nil && strings.TrimSpace(payload.Branch) == branch {
+			branchMatch = workflowID
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return branchMatch, nil
+}
+
+func ensureWorkflowDescriptionTx(ctx context.Context, tx *sql.Tx, workflowID string) error {
+	workflowID = strings.TrimSpace(workflowID)
+	if workflowID == "" {
+		return nil
+	}
+	var description, legacySummary string
+	err := tx.QueryRowContext(ctx, `SELECT description, summary FROM workflow_meta WHERE workflow_id = ?`, workflowID).Scan(&description, &legacySummary)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if strings.TrimSpace(description) != "" {
+		return nil
+	}
+	seed := strings.TrimSpace(legacySummary)
+	if seed == "" {
+		var kickoff string
+		_ = tx.QueryRowContext(ctx, `SELECT body FROM workflow_notes
+WHERE workflow_id = ? AND author != ? ORDER BY created_at, id LIMIT 1`, workflowID, WorkflowAutoNoteAuthor).Scan(&kickoff)
+		seed = workflowDescriptionSeedTx(ctx, tx, workflowID, kickoff)
+	}
+	seed = truncateWorkflowMetaText(seed)
+	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_meta(workflow_id, description, updated_at)
+VALUES (?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(workflow_id) DO UPDATE SET
+	description = CASE WHEN workflow_meta.description = '' THEN excluded.description ELSE workflow_meta.description END,
+	updated_at = CASE WHEN workflow_meta.description = '' THEN CURRENT_TIMESTAMP ELSE workflow_meta.updated_at END`, workflowID, seed)
+	return err
+}
+
+func workflowDescriptionSeedTx(ctx context.Context, tx *sql.Tx, workflowID, kickoff string) string {
+	for _, candidate := range []string{workflowID, kickoff} {
+		for _, match := range workflowIssueReferencePattern.FindAllStringSubmatch(candidate, -1) {
+			if len(match) == 2 {
+				if title := workflowIssueTitleTx(ctx, tx, workflowID, match[1]); title != "" {
+					return title
+				}
+			}
+		}
+	}
+	if sentence := firstWorkflowSentence(kickoff); sentence != "" {
+		return sentence
+	}
+	if _, campaign, ok := strings.Cut(workflowID, "/"); ok {
+		return strings.TrimSpace(campaign)
+	}
+	return workflowID
+}
+
+func workflowIssueTitleTx(ctx context.Context, tx *sql.Tx, workflowID, issueNumber string) string {
+	rows, err := tx.QueryContext(ctx, `SELECT payload FROM jobs INDEXED BY idx_jobs_workflow_id
+WHERE workflow_id != '' AND workflow_id = ? ORDER BY created_at, id`, workflowID)
+	if err != nil {
+		return ""
+	}
+	var taskIDs []string
+	for rows.Next() {
+		var raw string
+		if rows.Scan(&raw) != nil {
+			return ""
+		}
+		var payload struct {
+			TaskID       string `json:"task_id"`
+			TaskTitle    string `json:"task_title"`
+			Instructions string `json:"instructions"`
+		}
+		if json.Unmarshal([]byte(raw), &payload) != nil {
+			continue
+		}
+		if textReferencesWorkflowIssue(payload.TaskID, issueNumber) || textReferencesWorkflowIssue(payload.Instructions, issueNumber) {
+			if title := strings.TrimSpace(payload.TaskTitle); title != "" {
+				_ = rows.Close()
+				return title
+			}
+			if taskID := strings.TrimSpace(payload.TaskID); taskID != "" {
+				taskIDs = append(taskIDs, taskID)
+			}
+		}
+	}
+	_ = rows.Close()
+	// Imported task rows are another cheap local title source. They cover jobs
+	// whose payload carries task_id but predates the task_title projection.
+	for _, taskID := range taskIDs {
+		var title string
+		if tx.QueryRowContext(ctx, `SELECT title FROM tasks WHERE id = ?`, taskID).Scan(&title) == nil && strings.TrimSpace(title) != "" {
+			return strings.TrimSpace(title)
+		}
+	}
+	return ""
+}
+
+func textReferencesWorkflowIssue(value, issueNumber string) bool {
+	for _, match := range workflowIssueReferencePattern.FindAllStringSubmatch(value, -1) {
+		if len(match) == 2 && match[1] == issueNumber {
+			return true
+		}
+	}
+	needle := "issue-" + issueNumber
+	lower := strings.ToLower(value)
+	index := strings.Index(lower, needle)
+	if index < 0 {
+		return false
+	}
+	end := index + len(needle)
+	return end == len(lower) || lower[end] < '0' || lower[end] > '9'
+}
+
+func firstWorkflowSentence(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	for i, r := range value {
+		if r == '.' || r == '!' || r == '?' {
+			return strings.TrimSpace(value[:i+1])
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+func truncateWorkflowMetaText(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= WorkflowMetaTextMax {
+		return value
+	}
+	value = value[:WorkflowMetaTextMax]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return strings.TrimSpace(value)
 }
 
 // GetWorkflowMeta returns one workflow's latest coordinator handoff metadata.
 func (s *Store) GetWorkflowMeta(ctx context.Context, workflowID string) (WorkflowMeta, error) {
 	var meta WorkflowMeta
-	err := s.db.QueryRowContext(ctx, `SELECT workflow_id, author, pane, session_id, workdir, summary, updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT workflow_id, author, pane, session_id, workdir, summary, description, status, updated_at
 FROM workflow_meta WHERE workflow_id = ?`, strings.TrimSpace(workflowID)).Scan(
-		&meta.WorkflowID, &meta.Author, &meta.Pane, &meta.SessionID, &meta.WorkDir, &meta.Summary, &meta.UpdatedAt)
+		&meta.WorkflowID, &meta.Author, &meta.Pane, &meta.SessionID, &meta.WorkDir,
+		&meta.Summary, &meta.Description, &meta.Status, &meta.UpdatedAt)
 	return meta, err
 }
 
 // ListWorkflowMeta returns all coordinator metadata keyed by workflow id.
 func (s *Store) ListWorkflowMeta(ctx context.Context) (map[string]WorkflowMeta, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT workflow_id, author, pane, session_id, workdir, summary, updated_at FROM workflow_meta ORDER BY workflow_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT workflow_id, author, pane, session_id, workdir, summary, description, status, updated_at FROM workflow_meta ORDER BY workflow_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +607,8 @@ func (s *Store) ListWorkflowMeta(ctx context.Context) (map[string]WorkflowMeta, 
 	out := map[string]WorkflowMeta{}
 	for rows.Next() {
 		var meta WorkflowMeta
-		if err := rows.Scan(&meta.WorkflowID, &meta.Author, &meta.Pane, &meta.SessionID, &meta.WorkDir, &meta.Summary, &meta.UpdatedAt); err != nil {
+		if err := rows.Scan(&meta.WorkflowID, &meta.Author, &meta.Pane, &meta.SessionID, &meta.WorkDir,
+			&meta.Summary, &meta.Description, &meta.Status, &meta.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out[meta.WorkflowID] = meta
@@ -341,7 +655,8 @@ func (s *Store) ListWorkflowSummaries(ctx context.Context) ([]WorkflowSummary, e
 		if err := rows.Scan(&item.WorkflowID, &item.JobCount, &item.Queued, &item.Running,
 			&item.Succeeded, &item.Failed, &item.Blocked, &item.Cancelled,
 			&item.InputTokens, &item.OutputTokens, &item.NoteCount, &item.FirstAt, &item.LastAt,
-			&item.LastNote, &item.LastAuthor, &item.LastFailureAt, &item.LastNoteAt); err != nil {
+			&item.LastNote, &item.LastAuthor, &item.LastHumanAuthor, &item.LastFailureAt,
+			&item.LastNoteAt, &item.LastHumanNoteAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -437,7 +752,7 @@ func (s *Store) WorkflowSummary(ctx context.Context, workflowID string) (Workflo
 		&item.WorkflowID, &item.JobCount, &item.Queued, &item.Running, &item.Succeeded,
 		&item.Failed, &item.Blocked, &item.Cancelled, &item.InputTokens,
 		&item.OutputTokens, &item.NoteCount, &firstAt, &lastAt, &item.LastNote, &item.LastAuthor,
-		&item.LastFailureAt, &item.LastNoteAt)
+		&item.LastHumanAuthor, &item.LastFailureAt, &item.LastNoteAt, &item.LastHumanNoteAt)
 	if err != nil {
 		return WorkflowSummary{}, err
 	}

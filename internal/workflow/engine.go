@@ -1108,6 +1108,9 @@ func (e Engine) HandlePullRequestReadyToMerge(ctx context.Context, event PullReq
 	if err := validatePullRequestEvent(event); err != nil {
 		return err
 	}
+	// Best-effort observability: CI readiness must never block or roll back the
+	// primary merge-gate path. Repeated polls are deduped durably by the store.
+	_, _ = RecordPullRequestWorkflowTransition(ctx, e.Store, event, PullRequestJournalReady)
 	ref := taskRefFromPullRequest(event)
 	_, err := e.runMergeGate(ctx, "", JobPayload{
 		Repo:        event.Repo,
@@ -1214,6 +1217,13 @@ func (e Engine) HandleReviewPullRequestClosed(ctx context.Context, event PullReq
 		// merged branch cleans up.
 		e.reconcileMergedCleanup(ctx, event.Repo, task)
 	}
+	transition := PullRequestJournalClosed
+	if merged {
+		transition = PullRequestJournalMerged
+	}
+	// The task/PR transition above is already durable. Journal failures are
+	// intentionally swallowed so observability can never undo lifecycle state.
+	_, _ = RecordPullRequestWorkflowTransition(ctx, e.Store, event, transition)
 	return nil
 }
 

@@ -347,7 +347,54 @@ func TestWorkflowMetaLastWriteWinsAndObservationFailureRollsBack(t *testing.T) {
 	}
 }
 
-func TestWorkflowMetaSummarySetPreserveAndClear(t *testing.T) {
+func TestWorkflowAutoNotePreservesCoordinatorAuthor(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	const workflowID = "fable/dashboard-redesign"
+	if _, err := store.InsertWorkflowNoteWithMeta(ctx,
+		WorkflowNote{WorkflowID: workflowID, Author: "fable", Body: "kickoff"},
+		WorkflowMeta{Author: "fable", Pane: "Gitmoot2", SessionID: "full-session", WorkDir: "/work/fable"}); err != nil {
+		t.Fatalf("InsertWorkflowNoteWithMeta kickoff: %v", err)
+	}
+
+	// Production auto-note writers update only status: Author is deliberately
+	// empty so a daemon receipt cannot replace the coordinator identity.
+	_, inserted, err := store.InsertWorkflowAutoNoteWithMeta(ctx,
+		WorkflowNote{WorkflowID: workflowID, Author: WorkflowAutoNoteAuthor, Body: "[auto:pr:958:opened] PR #958 opened (feature/958)"},
+		WorkflowMeta{WorkflowID: workflowID, Status: "PR #958 open", StatusSet: true})
+	if err != nil || !inserted {
+		t.Fatalf("InsertWorkflowAutoNoteWithMeta = (inserted=%v, err=%v)", inserted, err)
+	}
+
+	meta, err := store.GetWorkflowMeta(ctx, workflowID)
+	if err != nil || meta.Author != "fable" || meta.Pane != "Gitmoot2" || meta.SessionID != "full-session" || meta.WorkDir != "/work/fable" || meta.Status != "PR #958 open" {
+		t.Fatalf("metadata after production-shaped auto note = %+v, err=%v", meta, err)
+	}
+}
+
+func TestWorkflowSummarySeparatesDaemonNotesFromHumanAcknowledgment(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	const workflowID = "release/958"
+	if _, err := store.InsertWorkflowNote(ctx, WorkflowNote{WorkflowID: workflowID, Author: "coordinator", Body: "human handoff"}); err != nil {
+		t.Fatalf("InsertWorkflowNote: %v", err)
+	}
+	if _, inserted, err := store.InsertWorkflowAutoNoteWithMeta(ctx,
+		WorkflowNote{WorkflowID: workflowID, Author: WorkflowAutoNoteAuthor, Body: "[auto:pr:958:closed] PR #958 closed without merging"},
+		WorkflowMeta{WorkflowID: workflowID, Status: "PR #958 closed without merging", StatusSet: true}); err != nil || !inserted {
+		t.Fatalf("InsertWorkflowAutoNoteWithMeta = (inserted=%v, err=%v)", inserted, err)
+	}
+
+	summary, err := store.WorkflowSummary(ctx, workflowID)
+	if err != nil {
+		t.Fatalf("WorkflowSummary: %v", err)
+	}
+	if summary.LastAuthor != WorkflowAutoNoteAuthor || summary.LastHumanAuthor != "coordinator" || summary.LastNoteAt == "" || summary.LastHumanNoteAt == "" {
+		t.Fatalf("summary = %+v; want daemon last author and coordinator last human author", summary)
+	}
+}
+
+func TestWorkflowMetaTextSetPreserveClearAndLimit(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	ctx := context.Background()
 	workflowID := "fable/dashboard-redesign"
@@ -359,28 +406,48 @@ func TestWorkflowMetaSummarySetPreserveAndClear(t *testing.T) {
 		}
 	}
 
-	write("kickoff", WorkflowMeta{Author: "coord", Summary: "Ship the dashboard redesign.", SummarySet: true})
+	write("kickoff", WorkflowMeta{
+		Author: "coord", Summary: "Ship the dashboard redesign.", SummarySet: true,
+		Description: "Stable intent", DescriptionSet: true,
+		Status: "Starting", StatusSet: true,
+	})
 	write("progress", WorkflowMeta{Author: "coord"})
 	meta, err := store.GetWorkflowMeta(ctx, workflowID)
-	if err != nil || meta.Summary != "Ship the dashboard redesign." {
-		t.Fatalf("summary after omitted update = %q, err=%v", meta.Summary, err)
+	if err != nil || meta.Summary != "Ship the dashboard redesign." || meta.Description != "Stable intent" || meta.Status != "Starting" {
+		t.Fatalf("metadata after omitted update = %+v, err=%v", meta, err)
 	}
 
-	write("clear", WorkflowMeta{Author: "coord", SummarySet: true})
+	write("clear", WorkflowMeta{Author: "coord", SummarySet: true, DescriptionSet: true, StatusSet: true})
 	meta, err = store.GetWorkflowMeta(ctx, workflowID)
-	if err != nil || meta.Summary != "" {
-		t.Fatalf("summary after explicit clear = %q, err=%v", meta.Summary, err)
+	if err != nil || meta.Summary != "" || meta.Description != "" || meta.Status != "" {
+		t.Fatalf("metadata after explicit clear = %+v, err=%v", meta, err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		meta WorkflowMeta
+	}{
+		{name: "summary", meta: WorkflowMeta{Summary: strings.Repeat("s", WorkflowMetaTextMax+1), SummarySet: true}},
+		{name: "description", meta: WorkflowMeta{Description: strings.Repeat("d", WorkflowMetaTextMax+1), DescriptionSet: true}},
+		{name: "status", meta: WorkflowMeta{Status: strings.Repeat("x", WorkflowMetaTextMax+1), StatusSet: true}},
+	} {
+		t.Run(tc.name+"_over_limit", func(t *testing.T) {
+			if _, err := store.InsertWorkflowNoteWithMeta(ctx,
+				WorkflowNote{WorkflowID: workflowID, Author: "coord", Body: tc.name}, tc.meta); err == nil || !strings.Contains(err.Error(), "at most 300 bytes") {
+				t.Fatalf("over-limit %s error = %v", tc.name, err)
+			}
+		})
 	}
 }
 
-func TestWorkflowMetaSummaryMigration(t *testing.T) {
+func TestWorkflowMetaTextMigrations(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(workflow_meta)`)
 	if err != nil {
 		t.Fatalf("PRAGMA table_info(workflow_meta): %v", err)
 	}
 	defer rows.Close()
-	found := false
+	found := map[string]bool{}
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
@@ -388,15 +455,122 @@ func TestWorkflowMetaSummaryMigration(t *testing.T) {
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 			t.Fatal(err)
 		}
-		if name == "summary" {
-			found = columnType == "TEXT" && notNull == 1 && defaultValue.Valid && defaultValue.String == "''"
+		if name == "summary" || name == "description" || name == "status" {
+			found[name] = columnType == "TEXT" && notNull == 1 && defaultValue.Valid && defaultValue.String == "''"
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if !found {
-		t.Fatal("summary is missing TEXT NOT NULL DEFAULT '' in PRAGMA table_info(workflow_meta)")
+	for _, name := range []string{"summary", "description", "status"} {
+		if !found[name] {
+			t.Fatalf("%s is missing TEXT NOT NULL DEFAULT '' in PRAGMA table_info(workflow_meta)", name)
+		}
+	}
+}
+
+func TestWorkflowDescriptionMigrationSeedsLegacySummary(t *testing.T) {
+	ctx := context.Background()
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy-workflow-meta.db"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer raw.Close()
+	store := &Store{db: raw}
+	for version, migration := range migrations[:len(migrations)-2] {
+		if err := store.applyMigration(ctx, version+1, migration); err != nil {
+			t.Fatalf("applyMigration(%d): %v", version+1, err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO workflow_meta(workflow_id, summary) VALUES ('release/legacy', 'Legacy human intent')`); err != nil {
+		t.Fatalf("insert legacy meta: %v", err)
+	}
+	for offset, migration := range migrations[len(migrations)-2:] {
+		if err := store.applyMigration(ctx, len(migrations)-1+offset, migration); err != nil {
+			t.Fatalf("apply new workflow migration %d: %v", offset, err)
+		}
+	}
+	meta, err := store.GetWorkflowMeta(ctx, "release/legacy")
+	if err != nil || meta.Description != "Legacy human intent" || meta.Status != "" {
+		t.Fatalf("migrated meta = %+v, err=%v", meta, err)
+	}
+}
+
+func TestWorkflowDescriptionAutoSeedPriorityAndPreservation(t *testing.T) {
+	tests := []struct {
+		name       string
+		workflowID string
+		payload    string
+		body       string
+		human      string
+		want       string
+	}{
+		{
+			name: "issue title", workflowID: "release/#42",
+			payload: `{"workflow_id":"release/#42","repo":"acme/widget","task_id":"issue-42"}`,
+			body:    "Kickoff for #42. Then verify rollout.", want: "Repair login redirects",
+		},
+		{
+			name: "first sentence", workflowID: "release/kickoff",
+			payload: `{"workflow_id":"release/kickoff","repo":"acme/widget"}`,
+			body:    "Ship the canary safely. Then watch metrics.", want: "Ship the canary safely.",
+		},
+		{
+			name: "label campaign", workflowID: "release/canary-rollout",
+			payload: `{"workflow_id":"release/canary-rollout","repo":"acme/widget"}`,
+			body:    "", want: "canary-rollout",
+		},
+		{
+			name: "human preserved", workflowID: "release/human",
+			payload: `{"workflow_id":"release/human","repo":"acme/widget"}`,
+			body:    "A later kickoff must not win.", human: "Human-set stable intent", want: "Human-set stable intent",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openWorkflowTestStore(t)
+			ctx := context.Background()
+			if tc.name == "issue title" {
+				if err := store.UpsertTask(ctx, Task{ID: "issue-42", RepoFullName: "acme/widget", Title: "Repair login redirects", State: "planned"}); err != nil {
+					t.Fatalf("UpsertTask: %v", err)
+				}
+			}
+			if err := store.CreateJob(ctx, Job{ID: "job", Agent: "worker", Type: "ask", State: "running", Payload: tc.payload}); err != nil {
+				t.Fatalf("CreateJob: %v", err)
+			}
+			if tc.human != "" {
+				if err := store.SetWorkflowDescription(ctx, tc.workflowID, tc.human); err != nil {
+					t.Fatalf("SetWorkflowDescription: %v", err)
+				}
+			}
+			body := tc.body
+			author := "coord"
+			if body == "" {
+				body, author = "[auto:pr:7:opened] PR #7 opened (branch)", WorkflowAutoNoteAuthor
+			}
+			if _, err := store.InsertWorkflowNoteWithMeta(ctx,
+				WorkflowNote{WorkflowID: tc.workflowID, Author: author, Body: body}, WorkflowMeta{Author: author}); err != nil {
+				t.Fatalf("InsertWorkflowNoteWithMeta: %v", err)
+			}
+			meta, err := store.GetWorkflowMeta(ctx, tc.workflowID)
+			if err != nil || meta.Description != tc.want {
+				t.Fatalf("description = %q, want %q, err=%v", meta.Description, tc.want, err)
+			}
+		})
+	}
+}
+
+func TestWorkflowDescriptionAutoSeedCapsUTF8Bytes(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	seedWorkflowJob(t, store, "job", "release/long", "running", "acme/widget", 0, 0)
+	body := strings.Repeat("é", WorkflowMetaTextMax) // 600 bytes
+	if _, err := store.InsertWorkflowNote(ctx, WorkflowNote{WorkflowID: "release/long", Body: body}); err != nil {
+		t.Fatalf("InsertWorkflowNote: %v", err)
+	}
+	meta, err := store.GetWorkflowMeta(ctx, "release/long")
+	if err != nil || len(meta.Description) > WorkflowMetaTextMax || !strings.HasPrefix(body, meta.Description) {
+		t.Fatalf("capped description bytes=%d valid-prefix=%v err=%v", len(meta.Description), strings.HasPrefix(body, meta.Description), err)
 	}
 }
 
@@ -448,4 +622,34 @@ func TestWorkflowMigrationDefaultsExistingJobsToUnlabelled(t *testing.T) {
 		t.Fatalf("upgraded job payload=%q workflow_id=%q repo=%q pull_request=%d", gotPayload, workflowID, repo, pullRequest)
 	}
 	_ = raw.Close()
+}
+
+// TestWorkflowIDForPullRequestPrefersPullNumberOverReusedBranch proves the
+// documented "pull-request equality wins" guarantee: an exact PR-number match in
+// the correct workflow must beat a NEWER branch-only job in a different workflow
+// that reuses the same head branch name. A single early-return-on-either scan
+// (ordered newest-first) would wrongly return the reused-branch workflow.
+func TestWorkflowIDForPullRequestPrefersPullNumberOverReusedBranch(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkflowTestStore(t)
+	// Older job carries the PR number in the correct workflow.
+	if err := store.CreateJob(ctx, Job{ID: "job-a", Agent: "worker", Type: "implement", State: "succeeded",
+		Payload: `{"workflow_id":"wfA","repo":"owner/repo","branch":"shared","pull_request":42}`}); err != nil {
+		t.Fatalf("CreateJob a: %v", err)
+	}
+	// Newer job reuses the same branch name in a different workflow, no PR number.
+	if err := store.CreateJob(ctx, Job{ID: "job-b", Agent: "worker", Type: "implement", State: "succeeded",
+		Payload: `{"workflow_id":"wfB","repo":"owner/repo","branch":"shared"}`}); err != nil {
+		t.Fatalf("CreateJob b: %v", err)
+	}
+
+	got, err := store.WorkflowIDForPullRequest(ctx, "owner/repo", 42, "shared")
+	if err != nil || got != "wfA" {
+		t.Fatalf("WorkflowIDForPullRequest(42) = %q, err=%v; want wfA (PR number wins over newer reused branch)", got, err)
+	}
+	// With no PR-number match, the newest branch-only job is the correct fallback.
+	got, err = store.WorkflowIDForPullRequest(ctx, "owner/repo", 999, "shared")
+	if err != nil || got != "wfB" {
+		t.Fatalf("WorkflowIDForPullRequest(999) branch fallback = %q, err=%v; want wfB", got, err)
+	}
 }

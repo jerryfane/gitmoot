@@ -9155,4 +9155,20 @@ DELETE FROM job_events
 WHERE kind = 'advance_retry'
   AND id NOT IN (SELECT MAX(id) FROM job_events WHERE kind = 'advance_retry' GROUP BY job_id);
 	`,
+	// #958 stable workflow intent. Existing human summaries become the initial
+	// description once; later writes keep the legacy summary column only as a
+	// compatibility mirror.
+	`
+ALTER TABLE workflow_meta ADD COLUMN description TEXT NOT NULL DEFAULT '';
+UPDATE workflow_meta SET description = summary WHERE description = '' AND summary != '';
+	`,
+	// #958 live workflow status plus the durable at-most-once guard for daemon PR
+	// lifecycle breadcrumbs. The structured prefix through the first ] is the
+	// stable (workflow, PR, transition) key; human-readable text after it may vary.
+	`
+ALTER TABLE workflow_meta ADD COLUMN status TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX idx_workflow_notes_daemon_auto
+	ON workflow_notes(workflow_id, substr(body, 1, instr(body, ']')))
+	WHERE author = 'daemon' AND substr(body, 1, 9) = '[auto:pr:';
+	`,
 }

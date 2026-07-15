@@ -426,7 +426,7 @@ func workflowHerdrStubCalls(t *testing.T, path string) int {
 	return len(strings.Fields(string(body)))
 }
 
-func TestWorkflowNoteSummarySetPreserveClearAndLimit(t *testing.T) {
+func TestWorkflowNoteDescriptionStatusSetPreserveClearAndLimit(t *testing.T) {
 	home, store := workflowJournalTestHome(t)
 	ctx := context.Background()
 	const workflowID = "fable/dashboard-redesign"
@@ -445,29 +445,31 @@ func TestWorkflowNoteSummarySetPreserveClearAndLimit(t *testing.T) {
 		return code
 	}
 
-	runNote("kickoff", "--summary", "Ship the dashboard redesign.")
+	runNote("kickoff", "--summary", "Ship the dashboard redesign.", "--status", "Implementation started")
 	meta, err := store.GetWorkflowMeta(ctx, workflowID)
-	if err != nil || meta.Summary != "Ship the dashboard redesign." {
-		t.Fatalf("summary after set = %q, err=%v", meta.Summary, err)
+	if err != nil || meta.Summary != "Ship the dashboard redesign." || meta.Description != meta.Summary || meta.Status != "Implementation started" {
+		t.Fatalf("metadata after set = %+v, err=%v", meta, err)
 	}
 	var stdout, stderr bytes.Buffer
 	if code := runWorkflowShow([]string{workflowID, "--home", home}, &stdout, &stderr); code != 0 {
 		t.Fatalf("workflow show exit=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "summary: Ship the dashboard redesign.\n") {
-		t.Fatalf("workflow show missing summary header: %q", stdout.String())
+	if !strings.Contains(stdout.String(), "description: Ship the dashboard redesign.\n") ||
+		!strings.Contains(stdout.String(), "status: Implementation started\n") ||
+		!strings.Contains(stdout.String(), "summary: Ship the dashboard redesign.\n") {
+		t.Fatalf("workflow show missing metadata headers: %q", stdout.String())
 	}
 
 	runNote("progress")
 	meta, err = store.GetWorkflowMeta(ctx, workflowID)
-	if err != nil || meta.Summary != "Ship the dashboard redesign." {
-		t.Fatalf("summary after absent flag = %q, err=%v", meta.Summary, err)
+	if err != nil || meta.Description != "Ship the dashboard redesign." || meta.Status != "Implementation started" {
+		t.Fatalf("metadata after absent flags = %+v, err=%v", meta, err)
 	}
 
-	runNote("clear", "--summary", "")
+	runNote("clear", "--summary", "", "--status", "")
 	meta, err = store.GetWorkflowMeta(ctx, workflowID)
-	if err != nil || meta.Summary != "" {
-		t.Fatalf("summary after clear = %q, err=%v", meta.Summary, err)
+	if err != nil || meta.Summary != "" || meta.Description != "" || meta.Status != "" {
+		t.Fatalf("metadata after clear = %+v, err=%v", meta, err)
 	}
 
 	stdout.Reset()
@@ -477,6 +479,42 @@ func TestWorkflowNoteSummarySetPreserveClearAndLimit(t *testing.T) {
 	}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "workflow note summary must be at most 300 bytes") {
 		t.Fatalf("over-length summary exit=%d stderr=%q", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runWorkflowJournal([]string{
+		"note", workflowID, "too long", "--status", strings.Repeat("x", workflowSummaryMax+1), "--home", home,
+	}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "workflow note status must be at most 300 bytes") {
+		t.Fatalf("over-length status exit=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestWorkflowDescribeSetsDescriptionAndShowJSONMeta(t *testing.T) {
+	home, store := workflowJournalTestHome(t)
+	ctx := context.Background()
+	const workflowID = "fable/dashboard-redesign"
+	if err := store.CreateJob(ctx, db.Job{ID: "describe-job", Agent: "coord", Type: "ask", State: "running", Payload: `{"repo":"acme/widget","workflow_id":"fable/dashboard-redesign"}`}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runWorkflowJournal([]string{"describe", workflowID, "Coordinate and ship the redesign.", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("workflow describe exit=%d stderr=%q", code, stderr.String())
+	}
+	meta, err := store.GetWorkflowMeta(ctx, workflowID)
+	if err != nil || meta.Description != "Coordinate and ship the redesign." || meta.Summary != meta.Description {
+		t.Fatalf("described metadata = %+v, err=%v", meta, err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWorkflowShow([]string{workflowID, "--home", home, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("workflow show exit=%d stderr=%q", code, stderr.String())
+	}
+	var out workflowShowJSON
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil || out.Meta.Description != meta.Description || out.Meta.Status != "" {
+		t.Fatalf("workflow show JSON = %+v, err=%v raw=%s", out, err, stdout.String())
 	}
 }
 

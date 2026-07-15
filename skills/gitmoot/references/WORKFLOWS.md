@@ -28,16 +28,26 @@ and continuations inherit it.
 
 ```sh
 gitmoot orchestrate planner "Run release checks." --repo owner/repo --workflow release-42
-gitmoot workflow note release-42 "Kickoff." --author operator --summary "Validate and ship release 42."
+gitmoot workflow describe release-42 "Validate and ship release 42."
+gitmoot workflow note release-42 "Kickoff." --author operator --status "Release checks running"
 gitmoot workflow note release-42 "Canary passed." --author operator --remember
 gitmoot workflow show release-42
 ```
 
-At kickoff, coordinators should set a short human-readable summary with
-`--summary`. The latest summary appears beside the journal in the dashboard's
-workflow index and detail views. Omitting the flag preserves it; a new non-empty
-value replaces it; `--summary ""` clears it. Summaries are stored verbatim with
-a 300-byte limit.
+`description` is the stable human "what/why" line. Gitmoot seeds it on the first
+note from a referenced issue title available in local workflow jobs, otherwise
+the first note sentence, otherwise the campaign portion of the label. Override
+it with `workflow describe <label> "<text>"`. The legacy note flag `--summary`
+remains an alias for description and mirrors the value into the retained
+`summary` field for older clients; omitting it preserves both, while an explicit
+empty value clears them until a later note seeds description again.
+
+`status` is the live line. `workflow note --status "..."` is the manual escape
+hatch. For workflow-linked PRs, the daemon writes visibly marked `[auto:pr:...]`
+notes as author `daemon` and updates status at open, checks-green/ready-to-merge,
+and merged or closed-without-merging transitions. Repeated polls do not duplicate
+the same workflow/PR/transition note. Description and status are stored verbatim
+with independent 300-byte limits.
 
 When `workflow note` runs inside Herdr and `--pane`, `--session`, or `--workdir`
 is omitted, it fills each omitted value from `herdr pane current --current`.

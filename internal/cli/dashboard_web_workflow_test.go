@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,8 +31,9 @@ func TestDeriveDashboardWorkflowState(t *testing.T) {
 		{name: "recent terminal is recent", activity: dashboardWorkflowActivity{LastActivity: now.Add(-10 * time.Minute)}, state: "recent"},
 		{name: "unacknowledged failure is stalled", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-31 * time.Minute), LastFailure: now.Add(-31 * time.Minute)}, state: "stalled", stalled: 31 * 60},
 		{name: "unacknowledged block is stalled", activity: dashboardWorkflowActivity{Blocked: 1, LastActivity: now.Add(-23 * time.Hour), LastFailure: now.Add(-23 * time.Hour)}, state: "stalled", stalled: 23 * 60 * 60},
-		{name: "note before failure does not acknowledge", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-40 * time.Minute), LastFailure: now.Add(-40 * time.Minute), LastNote: now.Add(-2 * time.Hour)}, state: "stalled", stalled: 40 * 60},
-		{name: "acknowledged failure is settled", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-31 * time.Minute), LastFailure: now.Add(-1 * time.Hour), LastNote: now.Add(-31 * time.Minute)}, state: "settled"},
+		{name: "human note before failure does not acknowledge", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-40 * time.Minute), LastFailure: now.Add(-40 * time.Minute), LastHumanNote: now.Add(-2 * time.Hour)}, state: "stalled", stalled: 40 * 60},
+		{name: "daemon note after failure does not acknowledge", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-40 * time.Minute), LastFailure: now.Add(-1 * time.Hour)}, state: "stalled", stalled: 40 * 60},
+		{name: "human note after failure acknowledges", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-31 * time.Minute), LastFailure: now.Add(-1 * time.Hour), LastHumanNote: now.Add(-31 * time.Minute)}, state: "settled"},
 		{name: "failure without timestamp is settled", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-31 * time.Minute)}, state: "settled"},
 		{name: "successful quiet is settled", activity: dashboardWorkflowActivity{LastActivity: now.Add(-45 * time.Minute)}, state: "settled"},
 		{name: "stalled ages out at horizon", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-24 * time.Hour), LastFailure: now.Add(-24 * time.Hour)}, state: "settled"},
@@ -466,6 +468,72 @@ func TestWebDataSourceWorkflowsIndexLifecycleCoordinatorAndSlashDetail(t *testin
 	}
 }
 
+func TestDashboardWorkflowDaemonNotesDoNotAcknowledgeFailuresOrImpersonateCoordinator(t *testing.T) {
+	home := dashboardTestHome(t)
+	paths := config.PathsForHome(home)
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	const label = "ops/needs-attention"
+	mustCreateJob(t, store, db.Job{
+		ID: "failed-job", Agent: "worker", Type: "implement", State: "failed",
+		Payload: mustJSON(t, workflow.JobPayload{WorkflowID: label, Repo: "acme/ops", TaskTitle: "failed work"}),
+	}, "", "")
+	human, err := store.InsertWorkflowNoteWithMeta(ctx,
+		db.WorkflowNote{WorkflowID: label, Author: "coordinator", Body: "human handoff before failure"},
+		db.WorkflowMeta{Author: "coordinator", Pane: "ops-pane", SessionID: workflowCoordinatorTestSession, WorkDir: "/work/ops"})
+	if err != nil {
+		t.Fatalf("Insert human note: %v", err)
+	}
+	auto, inserted, err := store.InsertWorkflowAutoNoteWithMeta(ctx,
+		db.WorkflowNote{WorkflowID: label, Author: db.WorkflowAutoNoteAuthor, Body: "[auto:pr:958:closed] PR #958 closed without merging"},
+		db.WorkflowMeta{WorkflowID: label, Status: "PR #958 closed without merging", StatusSet: true})
+	if err != nil || !inserted {
+		t.Fatalf("Insert daemon note = (inserted=%v, err=%v)", inserted, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	format := func(value time.Time) string { return value.Format("2006-01-02 15:04:05") }
+	setJobTimes(t, home, "failed-job", format(now.Add(-2*time.Hour)), format(now.Add(-2*time.Hour)))
+	raw, err := sql.Open("sqlite", paths.Database)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for id, stamp := range map[int64]string{
+		human.ID: format(now.Add(-3 * time.Hour)),
+		auto.ID:  format(now.Add(-40 * time.Minute)),
+	} {
+		if _, err := raw.Exec(`UPDATE workflow_notes SET created_at = ? WHERE id = ?`, stamp, id); err != nil {
+			t.Fatalf("UPDATE workflow note %d: %v", id, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("raw Close: %v", err)
+	}
+
+	ds := &webDataSource{home: home}
+	entries, err := ds.Workflows(ctx)
+	if err != nil {
+		t.Fatalf("Workflows: %v", err)
+	}
+	entry := workflowIndexEntryByLabel(t, entries, label)
+	if entry.State != "stalled" || entry.Coordinator.Author != "coordinator" || entry.LastNote != "[auto:pr:958:closed] PR #958 closed without merging" {
+		t.Fatalf("index entry = %+v; want stalled workflow with human coordinator and daemon receipt", entry)
+	}
+	detail, err := ds.Workflow(ctx, label, dashboard.WorkflowQuery{})
+	if err != nil {
+		t.Fatalf("Workflow: %v", err)
+	}
+	if detail.State != "stalled" || detail.Coordinator.Author != "coordinator" {
+		t.Fatalf("detail = %+v; want stalled workflow with human coordinator", detail)
+	}
+}
+
 func workflowIndexEntryByLabel(t *testing.T, entries []dashboard.WorkflowIndexEntry, label string) dashboard.WorkflowIndexEntry {
 	t.Helper()
 	for _, entry := range entries {
@@ -492,6 +560,60 @@ func TestCappedWorkflowLimitDefaultsAndCaps(t *testing.T) {
 				t.Fatalf("cappedWorkflowLimit(%d, %d) = %d, want %d", tc.value, tc.cap, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDashboardWorkflowDescriptionStatusAPI(t *testing.T) {
+	home, store := workflowJournalTestHome(t)
+	ctx := context.Background()
+	const label = "release/api-fields"
+	description := strings.Repeat("d", db.WorkflowMetaTextMax)
+	status := strings.Repeat("s", db.WorkflowMetaTextMax)
+	payload, err := json.Marshal(workflow.JobPayload{WorkflowID: label, Repo: "acme/widget", TaskTitle: "API fields"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateJob(ctx, db.Job{ID: "api-fields", Agent: "worker", Type: "ask", State: "running", Payload: string(payload)}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	jobOnlySummary, err := store.WorkflowSummary(ctx, label)
+	if err != nil {
+		t.Fatalf("WorkflowSummary before metadata: %v", err)
+	}
+	if got := dashboardWorkflowEntry(time.Now().UTC(), jobOnlySummary, db.WorkflowMeta{}, nil).Description; got != "api-fields" {
+		t.Fatalf("job-only description = %q, want campaign fallback", got)
+	}
+	if _, err := store.InsertWorkflowNoteWithMeta(ctx,
+		db.WorkflowNote{WorkflowID: label, Author: "operator", Body: "kickoff"},
+		db.WorkflowMeta{Author: "operator", Description: description, DescriptionSet: true, Status: status, StatusSet: true}); err != nil {
+		t.Fatalf("InsertWorkflowNoteWithMeta: %v", err)
+	}
+
+	handler := newDashboardWebHandler(&webDataSource{home: home})
+	indexRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(indexRecorder, httptest.NewRequest(http.MethodGet, "/api/workflows", nil))
+	if indexRecorder.Code != http.StatusOK {
+		t.Fatalf("index status=%d body=%s", indexRecorder.Code, indexRecorder.Body.String())
+	}
+	var entries []dashboardWorkflowAPIEntry
+	if err := json.Unmarshal(indexRecorder.Body.Bytes(), &entries); err != nil || len(entries) != 1 {
+		t.Fatalf("index entries=%+v err=%v body=%s", entries, err, indexRecorder.Body.String())
+	}
+	if entries[0].Description != description || entries[0].Status != status || entries[0].Summary != description {
+		t.Fatalf("index entry lost untruncated fields: description=%d status=%d entry=%+v", len(entries[0].Description), len(entries[0].Status), entries[0])
+	}
+
+	detailRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/workflow/release%2Fapi-fields", nil))
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detailRecorder.Code, detailRecorder.Body.String())
+	}
+	var detail dashboardWorkflowAPIView
+	if err := json.Unmarshal(detailRecorder.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail decode: %v body=%s", err, detailRecorder.Body.String())
+	}
+	if detail.Description != description || detail.Status != status || detail.Summary.Label != label {
+		t.Fatalf("detail lost fields: %+v", detail)
 	}
 }
 

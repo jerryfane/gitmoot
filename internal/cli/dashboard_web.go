@@ -70,9 +70,10 @@ func runDashboardWeb(home, addr string, stdout, stderr io.Writer) int {
 	}
 }
 
-// newDashboardWebHandler shadows only the expensive endpoints covered by the
-// frozen #948/#956 policies plus the already-local knowledge handler. Every
-// other route remains owned by the pinned dashboard module.
+// newDashboardWebHandler shadows the bounded endpoints covered by the frozen
+// #948/#956 cache policies plus the already-local knowledge handler, and serves
+// #958's widened workflow JSON (description/status) through the cached workflows
+// route. Every other route remains owned by the pinned dashboard module.
 func newDashboardWebHandler(ds *webDataSource) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/jobs", ds.handleJobs)
@@ -82,10 +83,80 @@ func newDashboardWebHandler(ds *webDataSource) http.Handler {
 	mux.HandleFunc("GET /api/attention", ds.handleAttention)
 	mux.HandleFunc("GET /api/agents", ds.handleAgents)
 	mux.HandleFunc("GET /api/tasks", ds.handleTasks)
+	// #958 widens this cached shadow: workflowsJSON now emits description/status,
+	// and the "workflows" cache key already includes the workflow-note-id so a
+	// status change busts the cache.
 	mux.HandleFunc("GET /api/workflows", ds.handleWorkflows)
 	mux.HandleFunc("GET /api/learning/knowledge", ds.handleLearningKnowledge)
+	// #958 single-label detail widening (no module cache policy for this route).
+	mux.HandleFunc("GET /api/workflow/{label}", ds.handleWorkflowAPI)
 	mux.Handle("/", dashboard.Serve(ds))
 	return mux
+}
+
+type dashboardWorkflowAPIView struct {
+	dashboard.WorkflowView
+	Description string `json:"description"`
+	Status      string `json:"status"`
+}
+
+func (d *webDataSource) handleWorkflowAPI(w http.ResponseWriter, r *http.Request) {
+	label := strings.TrimSpace(r.PathValue("label"))
+	if label == "" {
+		http.Error(w, "missing workflow label", http.StatusBadRequest)
+		return
+	}
+	view, err := d.Workflow(r.Context(), label, dashboard.WorkflowQuery{
+		RunCursor:  r.URL.Query().Get("runCursor"),
+		NoteCursor: r.URL.Query().Get("noteCursor"),
+		MaxRuns:    dashboardAPIWorkflowLimit(r.URL.Query().Get("maxRuns"), dashboardWorkflowMaxRuns),
+		MaxNotes:   dashboardAPIWorkflowLimit(r.URL.Query().Get("maxNotes"), dashboardWorkflowMaxNotes),
+	})
+	if err != nil {
+		d.writeDashboardAPIJSON(w, nil, err)
+		return
+	}
+	var meta db.WorkflowMeta
+	err = withStore(d.home, func(store *db.Store) error {
+		var err error
+		meta, err = store.GetWorkflowMeta(r.Context(), label)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
+	d.writeDashboardAPIJSON(w, dashboardWorkflowAPIView{
+		WorkflowView: view,
+		Description:  workflowDisplayDescription(label, meta.Description),
+		Status:       meta.Status,
+	}, err)
+}
+
+func dashboardAPIWorkflowLimit(raw string, cap int) int {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 || value > cap {
+		return cap
+	}
+	return value
+}
+
+func (d *webDataSource) writeDashboardAPIJSON(w http.ResponseWriter, value any, err error) {
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, dashboard.ErrWorkflowNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	body, err := marshalDashboardJSON(value)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // webDataSource implements dashboard.DataSource over a local Gitmoot home. It
@@ -306,17 +377,18 @@ func (d *webDataSource) Workflow(ctx context.Context, label string, q dashboard.
 		out.State, out.StalledForS = deriveDashboardWorkflowState(now, dashboardWorkflowActivity{
 			Queued: summary.Queued, Running: summary.Running, Failed: summary.Failed,
 			Blocked: summary.Blocked, LastActivity: workflowMillisTime(out.Summary.LastAt),
-			LastFailure: workflowMillisTime(parseJobTimeMillis(summary.LastFailureAt)),
-			LastNote:    workflowMillisTime(parseJobTimeMillis(summary.LastNoteAt)),
+			LastFailure:   workflowMillisTime(parseJobTimeMillis(summary.LastFailureAt)),
+			LastHumanNote: workflowMillisTime(parseJobTimeMillis(summary.LastHumanNoteAt)),
 		})
 		meta, metaErr := store.GetWorkflowMeta(ctx, label)
 		if metaErr != nil && !errors.Is(metaErr, sql.ErrNoRows) {
 			return metaErr
 		}
-		out.Summary.Summary = meta.Summary
+		description := workflowDisplayDescription(label, meta.Description)
+		out.Summary.Summary = firstNonEmpty(meta.Summary, description)
 		author := strings.TrimSpace(meta.Author)
 		if author == "" {
-			author = strings.TrimSpace(summary.LastAuthor)
+			author = strings.TrimSpace(summary.LastHumanAuthor)
 		}
 		out.Coordinator = dashboard.WorkflowCoordinator{
 			Author: author, Pane: strings.TrimSpace(meta.Pane), SessionID: dashboardWorkflowResumeSessionID(meta.SessionID),

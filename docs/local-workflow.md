@@ -3,9 +3,13 @@
 ## External coordinator grouping
 
 Attach `--workflow <lowercase-slug>` to agent ask/run/review/implement,
-`orchestrate`, or `job open`. Use `gitmoot workflow list`, `show`, and `note` for
-the indexed group and append-only journal. Orchestration descendants inherit the
-label. `workflow note --remember` stages low-trust memory in the shared pool by
+`orchestrate`, or `job open`. Use `gitmoot workflow list`, `show`, `describe`,
+and `note` for the indexed group and append-only journal. Each workflow has a
+stable `description`, auto-seeded from a referenced local issue title, the first
+note sentence, or the label campaign, plus a live `status`. The daemon appends
+deduped `daemon` notes and advances status when a linked PR opens, becomes ready
+to merge, or closes. Orchestration descendants inherit the label.
+`workflow note --remember` stages low-trust memory in the shared pool by
 default, infers one repo (or requires `--repo`), and atomically writes the note
 and observation after prefiltering.
 

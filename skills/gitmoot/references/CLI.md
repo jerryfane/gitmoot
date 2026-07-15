@@ -1108,7 +1108,8 @@ gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo -
 gitmoot job list --workflow fable/dashboard-redesign
 gitmoot workflow list
 gitmoot workflow show fable/dashboard-redesign --limit 100
-gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --summary "Coordinate and ship the dashboard redesign."
+gitmoot workflow describe fable/dashboard-redesign "Coordinate and ship the dashboard redesign."
+gitmoot workflow note fable/dashboard-redesign "Kickoff." --author operator --status "Implementation started"
 ```
 
 `workflow list` reports per-state counts, note count, first/last activity, and
@@ -1127,10 +1128,20 @@ is fail-open and never prevents a note, and it does not infer `--author`.
 Dashboard resume commands require a full UUID; legacy short session values stay
 visible in the workflow index as context but are not rendered into a broken
 command. Author defaults to the newest note author.
-Coordinators should set a one-line human summary at kickoff with `--summary`.
-Omitting that flag preserves the stored summary, a non-empty value replaces it,
-and `--summary ""` clears it. Summary input is stored verbatim and limited to
-300 bytes.
+Each workflow has a stable `description` and live `status`, both shown by
+`workflow show`. Description is seeded automatically from a referenced local
+issue title, else the first kickoff-note sentence, else the label campaign.
+`workflow describe <label> "<text>"` overrides it. Legacy `workflow note
+--summary` remains an alias for description and also mirrors the value into the
+retained summary field for older clients. `workflow note --status "..."` is the
+manual status escape hatch. Each field is stored verbatim and limited to 300
+bytes.
+
+For a workflow-linked PR, the daemon adds a structured `[auto:pr:...]` note as
+author `daemon` and advances status when the PR opens, checks turn green, and it
+merges or closes without merging. The structured workflow/PR/transition key
+deduplicates repeated polls; these system breadcrumbs remain distinct from
+coordinator handoff notes and never overwrite description.
 Labels may be reused; timestamps expose the reuse. `workflow note` stores body
 and author verbatim (10 KiB and 128-byte limits) and rejects labels with no jobs.
 `workflow show --json` returns those verbatim bytes; plain-text output strips

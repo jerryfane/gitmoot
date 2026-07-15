@@ -494,12 +494,16 @@ func (d *webDataSource) handleWorkflows(w http.ResponseWriter, r *http.Request) 
 }
 
 func (d *webDataSource) workflowsJSON(ctx context.Context) ([]byte, error) {
-	entries, err := d.Workflows(ctx)
+	// #958: serve the widened entries (description/status) rather than the
+	// stripped dashboard.WorkflowIndexEntry. dashboardWorkflowAPIEntry embeds
+	// WorkflowIndexEntry, so the module-parity sort and field access below are
+	// unchanged; only the marshaled wire gains the two fields.
+	entries, err := d.workflowAPIEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if entries == nil {
-		entries = []dashboard.WorkflowIndexEntry{}
+		entries = []dashboardWorkflowAPIEntry{}
 	}
 	for i := range entries {
 		entries[i].Namespace, entries[i].Campaign = splitDashboardWorkflowLabel(entries[i].Label)

@@ -8,6 +8,7 @@ several jobs. It works on agent ask/run/review/implement, `orchestrate`, and
 
 ```sh
 gitmoot orchestrate planner "Run release checks." --repo owner/repo --workflow fable/release-42
+gitmoot workflow describe fable/release-42 "Validate and ship release 42."
 gitmoot workflow note fable/release-42 "Canary passed." --author operator --remember
 gitmoot workflow show fable/release-42
 ```
@@ -22,14 +23,18 @@ handoff used by the dashboard's resume card. Inside Herdr, omitted handoff flags
 default to the current pane label, full agent session UUID, and working
 directory. Explicit flags override detection; `--no-auto` disables it. Detection
 fails open without blocking the note and never invents an author. Resume
-commands are emitted only for full UUID session ids.
+commands are emitted only for full UUID session ids. The workflow header carries
+a stable auto-seeded description and live status. Override the former with
+`workflow describe`; set the latter manually with `workflow note --status` when
+there is no linked PR lifecycle to advance it. Linked PR transitions write
+deduped `[auto:pr:...]` notes as author `daemon`.
 
 Journal text and authors are stored verbatim. JSON keeps them verbatim, while
 terminal text output sanitizes escapes/control bytes and caps each field to one
 line. `--remember` uses low-trust prefiltering,
 defaults to shared memory, and accepts `--agent NAME` for a private pool. A
 single repo is inferred; otherwise pass `--repo`. Rejection writes no note, and
-note plus observation commit atomically. V1 has no lifecycle controls.
+note plus observation commit atomically.
 
 Coordinator recipes are built-in agent templates that turn the
 [Orchestra pattern](../reference/result-contract.md#delegations-orchestration)

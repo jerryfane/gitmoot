@@ -20,7 +20,7 @@ import (
 const (
 	workflowNoteBodyMax   = 10 * 1024
 	workflowNoteAuthorMax = 128
-	workflowSummaryMax    = 300
+	workflowSummaryMax    = db.WorkflowMetaTextMax
 )
 
 func runWorkflowJournal(args []string, stdout, stderr io.Writer) int {
@@ -33,6 +33,8 @@ func runWorkflowJournal(args []string, stdout, stderr io.Writer) int {
 		return runWorkflowList(args[1:], stdout, stderr)
 	case "show":
 		return runWorkflowShow(args[1:], stdout, stderr)
+	case "describe":
+		return runWorkflowDescribe(args[1:], stdout, stderr)
 	case "note":
 		return runWorkflowNote(args[1:], stdout, stderr)
 	default:
@@ -48,7 +50,8 @@ func printWorkflowJournalUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  gitmoot workflow list [--json]")
 	fmt.Fprintln(w, "  gitmoot workflow show <label> [--json] [--limit N]")
-	fmt.Fprintln(w, "  gitmoot workflow note <label> \"<body>\" [--author A] [--pane P] [--session ID] [--workdir PATH] [--no-auto] [--summary S] [--remember [--remember-status] [--agent NAME] [--repo R]]")
+	fmt.Fprintln(w, "  gitmoot workflow describe <label> \"<text>\" [--json]")
+	fmt.Fprintln(w, "  gitmoot workflow note <label> \"<body>\" [--author A] [--pane P] [--session ID] [--workdir PATH] [--no-auto] [--summary DESCRIPTION] [--status STATUS] [--remember [--remember-status] [--agent NAME] [--repo R]]")
 }
 
 func runWorkflowList(args []string, stdout, stderr io.Writer) int {
@@ -114,6 +117,7 @@ type workflowJobJSON struct {
 
 type workflowShowJSON struct {
 	Summary db.WorkflowSummary      `json:"summary"`
+	Meta    db.WorkflowMeta         `json:"meta"`
 	Entries []workflowTimelineEntry `json:"entries"`
 }
 
@@ -180,7 +184,8 @@ func runWorkflowShow(args []string, stdout, stderr io.Writer) int {
 	if *limit > 0 && len(entries) > *limit {
 		entries = entries[:*limit]
 	}
-	out := workflowShowJSON{Summary: summary, Entries: entries}
+	out := workflowShowJSON{Summary: summary, Meta: meta, Entries: entries}
+	out.Meta.Description = workflowDisplayDescription(summary.WorkflowID, out.Meta.Description)
 	if *jsonOutput {
 		if err := writeJSON(stdout, out); err != nil {
 			fmt.Fprintf(stderr, "workflow show: %v\n", err)
@@ -189,6 +194,8 @@ func runWorkflowShow(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(stdout, "workflow: %s\n", summary.WorkflowID)
+	fmt.Fprintf(stdout, "description: %s\n", terminalSafeWorkflowText(out.Meta.Description))
+	fmt.Fprintf(stdout, "status: %s\n", terminalSafeWorkflowText(meta.Status))
 	if meta.Summary != "" {
 		fmt.Fprintf(stdout, "summary: %s\n", terminalSafeWorkflowText(meta.Summary))
 	}
@@ -203,6 +210,74 @@ func runWorkflowShow(args []string, stdout, stderr io.Writer) int {
 				terminalSafeWorkflowText(entry.Note.Author), terminalSafeWorkflowText(entry.Note.Body))
 		}
 	}
+	return 0
+}
+
+// workflowDisplayDescription keeps pre-metadata/job-only workflows useful on
+// read surfaces. Once a note or explicit metadata write occurs, the store
+// persists the richer issue-title/first-note/label seed instead.
+func workflowDisplayDescription(label, description string) string {
+	if description = strings.TrimSpace(description); description != "" {
+		return description
+	}
+	_, campaign := splitDashboardWorkflowLabel(strings.TrimSpace(label))
+	return strings.TrimSpace(campaign)
+}
+
+type workflowDescribeOutput struct {
+	WorkflowID  string `json:"workflow_id"`
+	Description string `json:"description"`
+}
+
+func runWorkflowDescribe(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("workflow describe", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "", "home directory to use instead of the current user's home")
+	jsonOutput := fs.Bool("json", false, "print the updated description as JSON")
+	if len(args) < 2 || args[0] == "-h" || args[0] == "--help" {
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "workflow describe requires a label and text")
+			return 2
+		}
+		return 0
+	}
+	label, description := strings.TrimSpace(args[0]), strings.TrimSpace(args[1])
+	if err := workflowpkg.ValidateWorkflowID(label); err != nil {
+		fmt.Fprintf(stderr, "workflow describe: %v\n", err)
+		return 2
+	}
+	if err := fs.Parse(args[2:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 || description == "" || len(description) > workflowSummaryMax {
+		fmt.Fprintf(stderr, "workflow describe requires one label and non-empty text of at most %d bytes\n", workflowSummaryMax)
+		return 2
+	}
+	if err := withStore(*home, func(store *db.Store) error {
+		ctx := context.Background()
+		if _, err := store.WorkflowSummary(ctx, label); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("workflow %q not found", label)
+			}
+			return err
+		}
+		return store.SetWorkflowDescription(ctx, label, description)
+	}); err != nil {
+		fmt.Fprintf(stderr, "workflow describe: %v\n", err)
+		return 1
+	}
+	out := workflowDescribeOutput{WorkflowID: label, Description: description}
+	if *jsonOutput {
+		if err := writeJSON(stdout, out); err != nil {
+			fmt.Fprintf(stderr, "workflow describe: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "described workflow %s\n", label)
 	return 0
 }
 
@@ -294,7 +369,8 @@ func runWorkflowNote(args []string, stdout, stderr io.Writer) int {
 	sessionID := fs.String("session", "", "coordinator runtime session id")
 	workdir := fs.String("workdir", "", "coordinator working directory")
 	noAuto := fs.Bool("no-auto", false, "disable Herdr coordinator identity detection")
-	summary := fs.String("summary", "", "one-line human workflow summary")
+	summary := fs.String("summary", "", "legacy alias for the stable workflow description")
+	status := fs.String("status", "", "live workflow status escape hatch")
 	remember := fs.Bool("remember", false, "also stage the note as persistent memory")
 	rememberStatus := fs.Bool("remember-status", false, "explicitly allow a shipping-status-shaped note into memory")
 	agent := fs.String("agent", "", "registered agent whose private pool receives memory")
@@ -327,6 +403,7 @@ func runWorkflowNote(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	summarySet := false
+	statusSet := false
 	paneSet := false
 	sessionSet := false
 	workdirSet := false
@@ -334,6 +411,8 @@ func runWorkflowNote(args []string, stdout, stderr io.Writer) int {
 		switch f.Name {
 		case "summary":
 			summarySet = true
+		case "status":
+			statusSet = true
 		case "pane":
 			paneSet = true
 		case "session":
@@ -358,6 +437,10 @@ func runWorkflowNote(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "workflow note summary must be at most %d bytes\n", workflowSummaryMax)
 		return 2
 	}
+	if len(*status) > workflowSummaryMax {
+		fmt.Fprintf(stderr, "workflow note status must be at most %d bytes\n", workflowSummaryMax)
+		return 2
+	}
 	if !*remember && (strings.TrimSpace(*agent) != "" || strings.TrimSpace(*repo) != "" || *rememberStatus) {
 		fmt.Fprintln(stderr, "workflow note: --agent, --repo, and --remember-status require --remember")
 		return 2
@@ -379,13 +462,17 @@ func runWorkflowNote(args []string, stdout, stderr io.Writer) int {
 		}
 		note := db.WorkflowNote{WorkflowID: label, Author: *author, Body: body}
 		meta := db.WorkflowMeta{
-			WorkflowID: label,
-			Author:     *author,
-			Pane:       strings.TrimSpace(*pane),
-			SessionID:  strings.TrimSpace(*sessionID),
-			WorkDir:    strings.TrimSpace(*workdir),
-			Summary:    *summary,
-			SummarySet: summarySet,
+			WorkflowID:     label,
+			Author:         *author,
+			Pane:           strings.TrimSpace(*pane),
+			SessionID:      strings.TrimSpace(*sessionID),
+			WorkDir:        strings.TrimSpace(*workdir),
+			Summary:        *summary,
+			SummarySet:     summarySet,
+			Description:    *summary,
+			DescriptionSet: summarySet,
+			Status:         *status,
+			StatusSet:      statusSet,
 		}
 		if !*remember {
 			out.Note, err = store.InsertWorkflowNoteWithMeta(ctx, note, meta)

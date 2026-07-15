@@ -195,7 +195,7 @@ func TestDashboardOverviewTasksAndWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dashboardWorkflowEntries: %v", err)
 	}
-	workflowByLabel := make(map[string]dashboard.WorkflowIndexEntry, len(workflows))
+	workflowByLabel := make(map[string]dashboardWorkflowAPIEntry, len(workflows))
 	for _, entry := range workflows {
 		if entry.Auto {
 			t.Fatalf("workflow entry has auto flag set: %+v", entry)

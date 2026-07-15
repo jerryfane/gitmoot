@@ -55,6 +55,10 @@ func TestBlockedTaskExternalMergeReconcileE2E(t *testing.T) {
 	repo := github.Repository{Owner: "owner", Name: "repo"}
 	store := testStore(t)
 	seedExternalMergeTask(t, store, repo, "blocked-task", "feature/blocked", workflow.TaskBlocked, 953)
+	if err := store.CreateJob(ctx, db.Job{ID: "workflow-job", Agent: "worker", Type: "implement", State: "succeeded",
+		Payload: `{"workflow_id":"gitmoot4/blocked-reconcile-953","repo":"owner/repo","branch":"feature/blocked","pull_request":953}`}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
 	client := &fakeGitHub{
 		pullsByState:  map[string][]github.PullRequest{"open": nil, "closed": nil},
 		pullsByNumber: map[int64]github.PullRequest{953: mergedPull(953, "feature/blocked")},
@@ -66,7 +70,18 @@ func TestBlockedTaskExternalMergeReconcileE2E(t *testing.T) {
 	if err := daemon.PollOnce(ctx); err != nil {
 		t.Fatalf("PollOnce: %v", err)
 	}
+	if err := daemon.PollOnce(ctx); err != nil {
+		t.Fatalf("second PollOnce: %v", err)
+	}
 	assertExternalMergeState(t, store, repo.FullName(), "blocked-task", 953, workflow.TaskMerged, "merged")
+	notes, err := store.ListWorkflowNotes(ctx, "gitmoot4/blocked-reconcile-953", 0)
+	if err != nil || len(notes) != 1 || notes[0].Author != db.WorkflowAutoNoteAuthor || notes[0].Body != "[auto:pr:953:merged] PR #953 merged" {
+		t.Fatalf("workflow notes after two ticks = %+v, err=%v", notes, err)
+	}
+	meta, err := store.GetWorkflowMeta(ctx, "gitmoot4/blocked-reconcile-953")
+	if err != nil || meta.Status != "PR #953 merged" || meta.Description != "blocked-reconcile-953" {
+		t.Fatalf("workflow meta after two ticks = %+v, err=%v", meta, err)
+	}
 }
 
 func TestExternalMergeCandidateState(t *testing.T) {
@@ -108,6 +123,52 @@ func TestPollOnceLeavesClosedUnmergedPullRequestOpenTaskUnchanged(t *testing.T) 
 		t.Fatalf("PollOnce: %v", err)
 	}
 	assertExternalMergeState(t, store, repo.FullName(), "task-7", 7, workflow.TaskPullRequestOpen, "open")
+}
+
+// TestPollOnceRecordsClosedBreadcrumbForWorkflowLinkedPROpenTask covers #958's
+// acceptance criterion that a closed-unmerged PR reads as "closed" on the
+// workflow view even when the task never entered `reviewing`. The task state
+// must NOT change (an abandoned PR does not advance/un-block a pr_open task —
+// the #953 conservatism), only the workflow status breadcrumb is emitted, and
+// it must be idempotent across ticks and never imply success.
+func TestPollOnceRecordsClosedBreadcrumbForWorkflowLinkedPROpenTask(t *testing.T) {
+	t.Setenv("HERDR_SOCKET_PATH", "/tmp/throwaway")
+	t.Setenv("HERDR_ENV", "")
+
+	ctx := context.Background()
+	repo := github.Repository{Owner: "owner", Name: "repo"}
+	store := testStore(t)
+	seedExternalMergeTask(t, store, repo, "task-7", "feature/seven", workflow.TaskPullRequestOpen, 7)
+	if err := store.CreateJob(ctx, db.Job{ID: "wf-job", Agent: "worker", Type: "implement", State: "succeeded",
+		Payload: `{"workflow_id":"gitmoot4/selfdesc-958","repo":"owner/repo","branch":"feature/seven","pull_request":7}`}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	client := &fakeGitHub{
+		pullsByState:  map[string][]github.PullRequest{"open": nil, "closed": nil},
+		pullsByNumber: map[int64]github.PullRequest{7: {Number: 7, State: "closed", HeadRef: "feature/seven", HeadSHA: "head-7"}},
+		comments:      map[int64][]github.IssueComment{},
+	}
+	engine := workflow.Engine{Store: store}
+	daemon := Daemon{Repo: repo, Store: store, GitHub: client, Workflow: &engine}
+
+	if err := daemon.PollOnce(ctx); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if err := daemon.PollOnce(ctx); err != nil {
+		t.Fatalf("second PollOnce: %v", err)
+	}
+
+	// Abandoned PR must not change task state; only the workflow view updates.
+	assertExternalMergeState(t, store, repo.FullName(), "task-7", 7, workflow.TaskPullRequestOpen, "open")
+
+	notes, err := store.ListWorkflowNotes(ctx, "gitmoot4/selfdesc-958", 0)
+	if err != nil || len(notes) != 1 || notes[0].Author != db.WorkflowAutoNoteAuthor || notes[0].Body != "[auto:pr:7:closed] PR #7 closed without merging" {
+		t.Fatalf("workflow notes after two ticks = %+v, err=%v", notes, err)
+	}
+	meta, err := store.GetWorkflowMeta(ctx, "gitmoot4/selfdesc-958")
+	if err != nil || meta.Status != "PR #7 closed without merging" {
+		t.Fatalf("workflow meta after two ticks = %+v, err=%v", meta, err)
+	}
 }
 
 func TestPollOnceReconcilesEmptyBranchReviewTaskByPullRequestNumber(t *testing.T) {
