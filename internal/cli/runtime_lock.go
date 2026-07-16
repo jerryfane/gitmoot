@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gitmoot/gitmoot/internal/db"
@@ -81,6 +83,52 @@ func acquireRuntimeSessionLockWithKey(ctx context.Context, store *db.Store, jobI
 		_, err := store.ReleaseResourceLock(releaseCtx, key, jobID, ownerToken)
 		return err
 	}, true, key, ownerToken, nil
+}
+
+func startRuntimeSessionLockHeartbeat(ctx context.Context, store *db.Store, lockKey string, ownerToken string, ttl time.Duration) func() {
+	cadence := ttl / 3
+	if cadence < 5*time.Second {
+		cadence = 5 * time.Second
+	}
+	return startRuntimeSessionLockHeartbeatWithCadence(ctx, store, lockKey, ownerToken, ttl, cadence, os.Stderr)
+}
+
+func startRuntimeSessionLockHeartbeatWithCadence(ctx context.Context, store *db.Store, lockKey string, ownerToken string, ttl time.Duration, cadence time.Duration, stderr io.Writer) func() {
+	if strings.TrimSpace(lockKey) == "" || strings.TrimSpace(ownerToken) == "" || ttl <= 0 {
+		return func() {}
+	}
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	var logOnce sync.Once
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(cadence)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case now := <-ticker.C:
+				updated, err := store.HeartbeatResourceLock(context.Background(), lockKey, ownerToken, now.UTC().Add(ttl))
+				if err != nil {
+					logOnce.Do(func() {
+						writeLine(stderr, "runtime session lock %s heartbeat failed: %v", lockKey, err)
+					})
+					continue
+				}
+				if !updated {
+					return
+				}
+			}
+		}
+	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			cancel()
+			<-done
+		})
+	}
 }
 
 func runtimeSessionResourceKey(agent runtime.Agent) (string, bool) {

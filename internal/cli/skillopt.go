@@ -5165,7 +5165,7 @@ func startSkillOptTrainOptimizerLockHeartbeat(ctx context.Context, store *db.Sto
 			case <-heartbeatCtx.Done():
 				return
 			case now := <-ticker.C:
-				_, _ = store.HeartbeatResourceLock(context.Background(), key, ownerJobID, ownerToken, now.UTC(), now.UTC().Add(leaseTTL))
+				_, _ = store.HeartbeatResourceLock(context.Background(), key, ownerToken, now.UTC().Add(leaseTTL))
 			}
 		}
 	}()
@@ -5364,7 +5364,7 @@ func acquireSkillOptTrainGenerationLock(ctx context.Context, store *db.Store, se
 	// outlive the upfront estimate (called from the per-option progress hook).
 	extend = func() error {
 		extendNow := time.Now().UTC()
-		_, err := store.HeartbeatResourceLock(context.Background(), key, ownerJobID, token, extendNow, extendNow.Add(ttl))
+		_, err := store.HeartbeatResourceLock(context.Background(), key, token, extendNow.Add(ttl))
 		return err
 	}
 	return release, extend, true, nil

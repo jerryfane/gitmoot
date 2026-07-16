@@ -5264,6 +5264,8 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 			writeLine(w.Stdout, "job %s runtime lock release failed: %v", job.ID, err)
 		}
 	}()
+	stopRuntimeLockHeartbeat := startRuntimeSessionLockHeartbeat(ctx, w.Store, lockKey, ownerToken, lockTTL)
+	defer stopRuntimeLockHeartbeat()
 	// Thread the owner token into the context so the terminal worktree cleanup
 	// (which runs inside RunJob -> AdvanceJob while THIS lock is still held — it is
 	// released only by the defer above, after RunJob returns) recognizes the run's
@@ -6443,6 +6445,8 @@ func (w jobWorker) runWithTempWorker(ctx context.Context, job db.Job, payload wo
 			writeLine(w.Stdout, "job %s temp runtime lock release failed: %v", delegatedJob.ID, err)
 		}
 	}()
+	stopRuntimeLockHeartbeat := startRuntimeSessionLockHeartbeat(ctx, w.Store, lockKey, ownerToken, tempLockTTL)
+	defer stopRuntimeLockHeartbeat()
 	// See runQueuedJob: thread the owner token so terminal cleanup recognizes this
 	// run's own still-held lock and does not refuse the healthy-path cleanup (#536).
 	ctx = workflow.WithRuntimeSelfOwnerToken(ctx, ownerToken)

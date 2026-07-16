@@ -6495,11 +6495,11 @@ func (s *Store) ListExpiredRuntimeSessionLocks(ctx context.Context, now time.Tim
 	return locks, rows.Err()
 }
 
-func (s *Store) HeartbeatResourceLock(ctx context.Context, resourceKey string, ownerJobID string, ownerToken string, now time.Time, expiresAt time.Time) (bool, error) {
+func (s *Store) HeartbeatResourceLock(ctx context.Context, resourceKey string, ownerToken string, expiresAt time.Time) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE resource_locks
-		SET updated_at = ?, expires_at = ?
-		WHERE resource_key = ? AND owner_job_id = ? AND owner_token = ?`,
-		formatResourceLockTime(now), formatResourceLockTime(expiresAt), strings.TrimSpace(resourceKey), strings.TrimSpace(ownerJobID), strings.TrimSpace(ownerToken))
+		SET expires_at = ?, updated_at = ?
+		WHERE resource_key = ? AND owner_token = ?`,
+		formatResourceLockTime(expiresAt), formatResourceLockTime(time.Now().UTC()), strings.TrimSpace(resourceKey), strings.TrimSpace(ownerToken))
 	if err != nil {
 		return false, err
 	}
