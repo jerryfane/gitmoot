@@ -152,8 +152,8 @@ gitmoot key add <NAME> --mode injected|proxied [--json]
 gitmoot key configure <NAME> --upstream <https-url> --auth bearer|header:<HeaderName> [--json]
 gitmoot key list [--json]
 gitmoot key show <NAME> [--json]
-gitmoot key grant <NAME> --pipeline <pipeline> [--json]
-gitmoot key revoke <NAME> --pipeline <pipeline> [--json]
+gitmoot key grant <NAME> (--pipeline <pipeline> | --agent <seat>) [--json]
+gitmoot key revoke <NAME> (--pipeline <pipeline> | --agent <seat>) [--json]
 gitmoot key rm <NAME> [--force] [--json]
 ```
 
@@ -215,6 +215,31 @@ not enforcement. The strong "agents never hold real credentials" claim also
 requires Landlock read-rules for `runtime-auth.env` (same-UID read is currently
 possible) — that is P3. Codex/Kimi custody and hard egress enforcement also
 remain P3.
+
+## Transcript Retention
+
+Runtime transcript retention is opt-in and invalid or missing configuration
+fails closed to disabled capture:
+
+```toml
+[transcripts]
+enabled = true
+retain = "168h"
+max_total_bytes = 2147483648
+```
+
+Enabled capture appends every engine-delivered job attempt (foreground, daemon,
+temporary session, ephemeral, and delegated jobs) to a private canonical log
+under `<home>/logs/jobs/`. Externally driven session jobs have no runtime
+subprocess and therefore no log. A home-scoped sweep removes settled logs after
+`retain`, then evicts the oldest settled logs when the total exceeds
+`max_total_bytes`; queued/running jobs and recently finalized jobs are protected.
+Seat logs remain transient. Expect roughly 440 MB/week at this host's observed
+rate, though workload output varies.
+
+Raw retained logs are mode `0600` and **unredacted on disk**. Treat the Gitmoot
+home as sensitive. JSONL exports redact known credential patterns best-effort,
+but that redaction is not a vault and cannot guarantee removal of every secret.
 
 ## Runtime Launch Sandbox
 
@@ -1303,7 +1328,8 @@ gitmoot job list --repo owner/repo   # add --json for machine-readable rows
 gitmoot job show <job-id>            # add --json for the full job + why-stuck detail
 gitmoot job watch <job-id>
 gitmoot job watch <job-id> --transcript [--log-path <path>] [--runtime codex|claude|kimi|kimi-cli|shell]
-gitmoot job transcript <job-id> --export md [--output <path>] [--log-path <path>] [--runtime codex|claude|kimi|kimi-cli|shell]
+gitmoot job transcript <job-id> --export md|jsonl [--output <path>] [--log-path <path>] [--runtime codex|claude|kimi|kimi-cli|shell]
+gitmoot job transcript --all [--state succeeded,failed] [--since 720h] --export jsonl [--output <path>]
 gitmoot job events <job-id>
 gitmoot job retry <job-id>
 gitmoot job gates <job-id>                                         # list resumable gates; add --json
@@ -1346,12 +1372,18 @@ completion; shell output passes through as redacted raw lines. Usage is labeled
 Malformed or unknown lines degrade individually to redacted capped raw output
 without stopping later lines.
 
-`job transcript <job-id> --export md` reads the same tee log as a snapshot and
-writes deterministic, ANSI-free Markdown to stdout. Add `--output <path>` to
-write a mode-`0600` file instead. The export includes user/assistant headings,
-model and elapsed details when reported, and fenced tool input/output. It does
-not fall back to lifecycle events: cockpit tee logs are removed after delivery
-today, so export fails clearly when the requested log is no longer retained.
+`job transcript <job-id> --export md` remains the deterministic, ANSI-free
+Markdown snapshot. `--export jsonl` emits schema-versioned, self-contained
+trajectory rows for every normalized event. Bulk export requires the explicit
+`--all` guard; `--state` and `--since` filter the created-time-then-id ordered
+stream. Bulk mode skips pre-retention or GC-missing logs and reports counts on
+stderr, while explicit single-job absence is an error. `--output <path>` uses a
+mode-`0600` temporary file plus atomic rename. Oversized runtime lines become
+marked truncated raw steps instead of aborting the export.
+
+JSONL export redacts every text-bearing event field with Gitmoot's best-effort
+credential masker and has no raw bypass. The source log remains unredacted and
+mode `0600`; best-effort export masking is not a vault.
 
 Verified Codex command/file-change events and Kimi function tool calls/results
 render as typed compact lines; unrecognized shapes keep the generic/raw
@@ -2823,16 +2855,22 @@ its `needs` stages' result summaries are prepended to the prompt, and a repo-bou
 agent stage runs in its own detached read-only worktree so same-repo agent stages
 parallelize without touching the live checkout.
 
-Shell stages can opt into pipeline-owned or granted shared environment values
-with `env_keys`. Source files must be absolute, operator-owned regular files
+Shell and agent stages can opt into scoped key access with `env_keys`. Source
+files must be absolute, operator-owned regular files
 with mode exactly `0600`, outside the Gitmoot home and every managed checkout;
-inline `env` is for non-secret defaults. Agent/gate stages cannot set
-`env_keys`; a shell stage with no list gets nothing. Resolution is own
+inline `env` is for non-secret defaults. A shell stage with no list gets
+nothing. Its resolution is own
 `env_file`, then a shared `injected` or configured `proxied` key granted with
 `gitmoot key grant`, then inline default. Registered but ungranted names do not
 match exact or glob selectors. Structural errors always fail add; unresolved
 names warn only while the pipeline remains disabled, then hard-fail
 add-with-enable, enable, manual run, and scheduled/triggered preflight.
+
+Agent stages resolve only configured `proxied` registry keys granted to their
+registered seat. The seat grant and the stage selector are both required;
+injected agent grants, pipeline files/defaults/grants, and gate-stage selectors
+are refused. Ordinary agent jobs receive no keys, and delegation children do
+not inherit the parent stage's key access.
 
 Sources are revalidated and reread at delivery, so rotation applies without a
 daemon restart. Each payload audits `PipelineName` and names-only
@@ -2842,7 +2880,9 @@ delivery: revocation fails closed and never switches to another source. Gitmoot
 internal `GITMOOT_*` entries remain final. Injected mode exposes the value to
 that shell process. Proxied mode puts a per-job placeholder in `<KEY>` and a
 loopback endpoint in `GITMOOT_PROXY_<KEY>_URL`; every request rereads the value,
-rechecks the grant, and is constrained to the configured upstream/base path.
+rechecks the pipeline or agent-seat grant, and is constrained to the configured
+upstream/base path. For agent stages the real value never enters the process,
+but the authorized agent can exercise it against that pinned upstream.
 The lease is revoked when delivery ends.
 
 Proxied mode hides key bytes; it does **not** prevent an authorized child from

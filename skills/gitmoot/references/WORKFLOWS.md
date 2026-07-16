@@ -1002,9 +1002,11 @@ its progress; children inherit the cockpit setting from their parent, so one
 `--cockpit` on the root lights up the whole orchestra. The same panes are visible
 in the terminal (open the Herdr workspace) and on Telegram via the herdres bridge.
 
-The pane reads the cockpit-only tee log through `job watch --transcript`; this
-does not alter runtime invocation, result parsing, or the pipeline progress
-stream. Codex JSONL is readable live. Kimi stream-json is turn-buffered (and
+The pane reads its explicitly selected job or seat tee log through `job watch
+--transcript`; this does not alter runtime invocation, result parsing, or the
+pipeline progress stream. With opt-in `[transcripts]`, the same universal tee
+retains a private per-job append log even when no cockpit exists; seat logs stay
+transient. Codex JSONL is readable live. Kimi stream-json is turn-buffered (and
 kimi-code 0.19.2 emits no usage). Claude currently emits one final JSON envelope,
 so its pane remains quiet until completion and then shows final text and usage.
 Shell output is redacted raw passthrough. Unknown or malformed lines fail open
@@ -1014,6 +1016,11 @@ use typed compact lines; other shapes retain the generic/raw path. Render-time
 redaction is per-line best-effort defense in depth: a secret split across
 physical lines may be only partially masked, and the raw log plus external tail
 fallback remain unredacted.
+
+For offline trajectories, use `job transcript <id> --export jsonl` or the
+guarded bulk form `job transcript --all --state succeeded,failed --since 720h
+--export jsonl`. Exports are best-effort redacted (not a vault); retained source
+logs are unredacted `0600` files and retention has real disk cost.
 
 A cockpit pane is a **view, not the job**: closing a pane (in the terminal or
 from Telegram) tears down the visible surface but does NOT cancel the underlying
@@ -1098,13 +1105,20 @@ RUN=$(gitmoot pipeline run nightly-sync)          # or trigger a manual run now
 gitmoot pipeline show "$RUN"                       # watch the text funnel
 ```
 
-`env_keys` is a shell-stage-only allowlist of exact names or globs resolved from
-the pipeline's `env_file` and inline non-secret `env`. No list means no injected
-values, and agent stages cannot request them. `pipeline add` requires the file
+`env_keys` is a deny-by-default allowlist of exact names or globs. Shell stages
+resolve the pipeline's `env_file`, pipeline-granted shared keys, and inline
+non-secret `env`. Agent stages resolve only configured proxied keys granted to
+their registered seat; the grant and explicit stage selector are both required,
+and the real value never enters the agent process. Gates reject the field. No
+list means no key access. `pipeline add` requires the file
 to be absolute, operator-owned `0600`, and outside Gitmoot state/checkouts; it
 also refuses missing keys and reserved `GITMOOT_*` names. Values are read fresh
 at stage delivery for restart-free rotation. The job audit stores the path and
 expanded names only, not file values.
+
+Ordinary agent jobs receive no pipeline-stage keys, and a coordinator's
+delegation children inherit nothing. A proxied agent can exercise the credential
+against its pinned upstream even though it never receives the underlying bytes.
 
 The pipeline detail **Keys** tab exposes this authorization as names only: every
 stage appears in spec order with each resolved key's `own`, `shared`, or
