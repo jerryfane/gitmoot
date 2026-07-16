@@ -84,7 +84,14 @@ editing the file later never mutates an in-flight run.
 
 ### Give each shell stage only the keys it needs
 
-Declare secrets in a pipeline-owned file and select them per shell stage:
+Declare secrets in a pipeline-owned file or the shared keychain and select them
+per shell stage. The key CLI manages names and grants, never values:
+
+```sh
+gitmoot key path
+gitmoot key add REDDIT_CLIENT_SECRET --mode injected
+gitmoot key grant REDDIT_CLIENT_SECRET --pipeline trend-scout
+```
 
 ```yaml
 env_file: /root/.config/trend-scout/env
@@ -101,18 +108,21 @@ stages:
 
 No `env_keys` means no injected values. Exact names and globs expand only for
 shell stages; agent and gate stages cannot request them. At registration,
-Gitmoot requires the absolute `env_file` to be operator-owned, mode exactly
-`0600`, and outside its home and managed checkouts. Missing keys, malformed
-files, and reserved `GITMOOT_*` names fail `pipeline add` without printing
-values.
+Gitmoot requires each source file to be operator-owned, mode exactly `0600`, and
+outside its home and managed checkouts. Structural errors always fail. An
+unresolved name only warns while the pipeline remains disabled; add-with-enable,
+enable, manual run, and scheduled/triggered preflight fail closed and point to
+`gitmoot key grant`.
 
-Gitmoot reads the file again immediately before each stage process starts, so
-rotation needs no daemon restart. File values beat inline non-secret defaults,
-selected values beat inherited daemon environment, and Gitmoot's internal
-`GITMOOT_*` entries remain final. The stage job payload audits the file path and
-expanded key names only; file values never enter SQLite. The selected shell can
-still read an injected key. This is separate from the Claude model gateway,
-which keeps its proxied real credential out of the child.
+Gitmoot reads the selected source again immediately before each stage process
+starts, so rotation needs no daemon restart. Pipeline-owned values beat granted
+shared keys, which beat inline non-secret defaults; Gitmoot's internal
+`GITMOOT_*` entries remain final. Registered but ungranted names do not match
+exact or glob selectors. The stage job payload and `pipeline show --json` audit
+only `{stage,name,source,mode}` rows. Delivery rechecks shared grants, so a
+post-enqueue revoke fails closed without switching sources. The selected shell
+can still read an injected key. `proxied` mode is reserved for future gateway
+composition and is refused for pipelines; the Claude model gateway is separate.
 
 ### Chain pipelines on success
 

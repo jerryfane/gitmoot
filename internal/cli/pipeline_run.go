@@ -755,6 +755,13 @@ func triggerOnePipeline(ctx context.Context, store *db.Store, rec db.Pipeline, n
 	if err != nil || !found {
 		return err
 	}
+	environment, err := resolvePipelineEnvironment(ctx, store, "", spec)
+	if err != nil {
+		return err
+	}
+	if err := pipelineEnvironmentResolutionError(spec, environment.Unresolved); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(map[string]string{
 		"upstream_pipeline": spec.Trigger.Pipeline,
 		"upstream_run_id":   upstreamRun.ID,
@@ -895,6 +902,16 @@ func scheduleOnePipeline(ctx context.Context, store *db.Store, rec db.Pipeline, 
 		// A stored spec that no longer parses can't be run (`pipeline add` validates,
 		// so this is defensive); advance next_due so a broken spec does not hot-loop.
 		return store.AdvancePipelineNextDue(ctx, rec.Name, nextDue)
+	}
+	environment, envErr := resolvePipelineEnvironment(ctx, store, "", spec)
+	if envErr == nil {
+		envErr = pipelineEnvironmentResolutionError(spec, environment.Unresolved)
+	}
+	if envErr != nil {
+		if advanceErr := store.AdvancePipelineNextDue(ctx, rec.Name, nextDue); advanceErr != nil {
+			return fmt.Errorf("pipeline %s environment preflight: %v (advance next_due: %w)", rec.Name, envErr, advanceErr)
+		}
+		return envErr
 	}
 	if _, err := createPipelineRun(ctx, store, rec, spec, "schedule", "{}", now); err != nil {
 		return err
@@ -1113,13 +1130,17 @@ func advancePipelineRunWithAutoMerge(ctx context.Context, store *db.Store, enque
 		skipNativeReviewFanout := stage.Kind() == pipeline.StageKindAgentImplement && pipelineImplementHasSourceBoundReview(spec, stage.ID)
 		request := pipelineStageJobRequest(rec, stage, run, row.Attempt, upstreamContext, binding, skipNativeReviewFanout)
 		if stage.Kind() == pipeline.StageKindShell {
-			access, envErr := resolvePipelineStageEnvAccess(ctx, store, filepath.Dir(store.DatabasePath()), spec, stage)
+			access, envErr := resolvePipelineStageEnvAccess(ctx, store, "", spec, stage)
 			if envErr != nil {
 				return run, envErr
 			}
-			request.PipelineEnvFile = access.File
-			request.PipelineEnvKeys = access.Keys
-			request.PipelineEnv = access.Defaults
+			if len(access.Access) > 0 {
+				request.PipelineName = rec.Name
+				request.PipelineKeyAccess = access.Access
+				request.PipelineEnvFile = access.File
+				request.PipelineEnvKeys = access.Keys
+				request.PipelineEnv = access.Defaults
+			}
 		}
 		job, err := enqueuePipelineStageJob(ctx, store, enqueue, request, pipelineStageSourceBoundReviewRequest(request))
 		if err != nil {

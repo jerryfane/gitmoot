@@ -162,21 +162,32 @@ func (s *Store) SetPipelineTriggerBinding(ctx context.Context, name, binding str
 	return nil
 }
 
-// DeletePipeline removes a pipeline row, returning whether a row was deleted.
-// It does not touch the pipeline's runner agent or any run rows — the CLI removes
-// the runner agent best-effort, and run/stage rows live in separate tables added
-// by the run/advancer step.
+// DeletePipeline removes a pipeline row and its keychain grants atomically,
+// returning whether a pipeline row was deleted. It does not touch the pipeline's
+// runner agent or any run rows — the CLI removes the runner agent best-effort,
+// and run/stage rows live in separate tables added by the run/advancer step.
 func (s *Store) DeletePipeline(ctx context.Context, name string) (bool, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return false, errors.New("pipeline name is required")
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM pipelines WHERE name = ?`, name)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM keychain_grants WHERE consumer_kind = 'pipeline' AND consumer_id = ?`, name); err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM pipelines WHERE name = ?`, name)
 	if err != nil {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
 		return false, err
 	}
 	return affected > 0, nil

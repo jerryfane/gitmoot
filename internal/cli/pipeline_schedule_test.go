@@ -177,6 +177,63 @@ func TestPipelineSuccessTriggerActiveRunDefersWithoutCursorAdvance(t *testing.T)
 	}
 }
 
+func TestPipelineEnvironmentPreflightScheduleAdvancesAndTriggerRetries(t *testing.T) {
+	ctx := context.Background()
+	store := pipelineAdvanceStore(t)
+	base := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+
+	scheduledYAML := "name: scheduled-env\nrepo: owner/repo\nstages: [{id: run, cmd: echo, env_keys: [MISSING]}]\n"
+	scheduled := db.Pipeline{
+		Name: "scheduled-env", Repo: "owner/repo", SpecYAML: scheduledYAML,
+		SpecHash: pipeline.Hash([]byte(scheduledYAML)), Interval: "1h", Enabled: true,
+	}
+	if err := store.CreateOrUpdatePipeline(ctx, scheduled); err != nil {
+		t.Fatal(err)
+	}
+	scheduled, _, _ = store.GetPipeline(ctx, scheduled.Name)
+	if err := scheduleOnePipeline(ctx, store, scheduled, base); err == nil || !strings.Contains(err.Error(), "gitmoot key grant MISSING --pipeline scheduled-env") {
+		t.Fatalf("schedule preflight error=%v", err)
+	}
+	updated, _, err := store.GetPipeline(ctx, scheduled.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.NextDueAt.After(base) {
+		t.Fatalf("schedule next_due=%v, want after %v", updated.NextDueAt, base)
+	}
+	if runs := pipelineRunCount(t, store, scheduled.Name); len(runs) != 0 {
+		t.Fatalf("schedule created unusable runs: %+v", runs)
+	}
+
+	upstreamYAML := "name: upstream-env\nstages: [{id: run, cmd: echo}]\n"
+	if err := store.CreateOrUpdatePipeline(ctx, db.Pipeline{Name: "upstream-env", SpecYAML: upstreamYAML, SpecHash: pipeline.Hash([]byte(upstreamYAML))}); err != nil {
+		t.Fatal(err)
+	}
+	triggeredYAML := "name: triggered-env\nrepo: owner/repo\ntrigger: {kind: pipeline, pipeline: upstream-env}\nstages: [{id: run, cmd: echo, env_keys: [MISSING]}]\n"
+	triggered := db.Pipeline{Name: "triggered-env", Repo: "owner/repo", SpecYAML: triggeredYAML, SpecHash: pipeline.Hash([]byte(triggeredYAML)), Enabled: true}
+	if err := store.CreateOrUpdatePipeline(ctx, triggered); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ArmPipelineTrigger(ctx, triggered.Name, "upstream-env", base); err != nil {
+		t.Fatal(err)
+	}
+	seedPipelineRunState(t, store, "prun-upstream-env", "upstream-env", pipeline.RunSucceeded, base.Add(time.Minute))
+	triggered, _, _ = store.GetPipeline(ctx, triggered.Name)
+	if err := triggerOnePipeline(ctx, store, triggered, base.Add(2*time.Minute)); err == nil || !strings.Contains(err.Error(), "gitmoot key grant MISSING --pipeline triggered-env") {
+		t.Fatalf("trigger preflight error=%v", err)
+	}
+	state, found, err := store.GetPipelineTriggerState(ctx, triggered.Name)
+	if err != nil || !found {
+		t.Fatalf("trigger state found=%v err=%v", found, err)
+	}
+	if state.Cursor != "" {
+		t.Fatalf("trigger cursor advanced to %q", state.Cursor)
+	}
+	if runs := pipelineRunCount(t, store, triggered.Name); len(runs) != 0 {
+		t.Fatalf("trigger created unusable runs: %+v", runs)
+	}
+}
+
 func TestPipelineSuccessTriggerArmsAtAddAndReenable(t *testing.T) {
 	home := t.TempDir()
 	upstreamFile := writeSpec(t, "name: upstream\nstages: [{id: run, cmd: echo}]\n")

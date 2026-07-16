@@ -11,6 +11,7 @@ env_passthrough = ["GOCACHE", "NPM_*"]
 github = "deny"
 model_gateway = false
 model_gateway_allow_hosts = ["api.anthropic.com"]
+# keychain_path = "/absolute/operator/path/keychain.env"
 ```
 
 `env_curation = false` preserves the historical behavior: runtime commands
@@ -38,6 +39,38 @@ from ambient managed variables once. Existing files are never overwritten.
 For systemd deployments, keep `daemon.env` for operational values such as
 `PATH`; do not duplicate Claude secrets there after bootstrap.
 
+## Injected key registry and grants
+
+The shared injected-key source is an operator-owned env file. Its default path
+is `<base-home>/.config/gitmoot/keychain.env`; `gitmoot key path` prints the
+resolved path and validation status. `[credentials] keychain_path` can select a
+different absolute path. The file must be regular, owned by the current uid,
+mode exactly `0600`, and outside the Gitmoot home and managed checkouts. Gitmoot
+revalidates and rereads it at every registration, preflight, and delivery, so an
+atomic rewrite rotates values without a daemon restart.
+
+The `key` commands manage names, modes, and grants only. They never accept or
+print values:
+
+```sh
+gitmoot key path
+gitmoot key add SOURCE_API_TOKEN --mode injected
+gitmoot key grant SOURCE_API_TOKEN --pipeline nightly-sync
+gitmoot key list --json
+gitmoot key show SOURCE_API_TOKEN
+gitmoot key revoke SOURCE_API_TOKEN --pipeline nightly-sync
+gitmoot key rm SOURCE_API_TOKEN       # refuses while grants remain
+gitmoot key rm SOURCE_API_TOKEN --force
+```
+
+`rm` removes registry metadata and grants, not the operator's file entry.
+`proxied` mode is reserved for future gateway composition and cannot be granted
+to a pipeline. Pipeline shell stages may request granted `injected` names with
+`env_keys`; agent and gate stages remain ineligible. Resolution is Gitmoot's
+reserved `GITMOOT_*` namespace, then the pipeline's own `env_file`, then a
+granted shared key, then inline non-secret `env`. Registered but ungranted names
+are not visible to exact or glob selectors.
+
 ## Claude model gateway
 
 `model_gateway = true` opts Claude deliveries into a daemon-owned loopback
@@ -58,11 +91,12 @@ credential and ignore the placeholder — the gateway would then `401` the
 delivery (#936). The mirror never contains a credential; the operator's real
 config is only read, never modified.
 
-Pipeline `env_file` + per-stage `env_keys` are a separate **injected** mode for
-opaque API credentials whose shell script must present the real value. Gitmoot
-scopes those values to selected shell stages and audits names only, but the
-selected process necessarily receives the real credential. Enabling or using
-this feature does not alter the Claude gateway or its placeholder flow.
+Pipeline-owned `env_file` values and granted shared keychain values are a
+separate **injected** mode for opaque API credentials whose shell script must
+present the real value. Gitmoot scopes those values to selected shell stages
+and audits names, sources, and modes only, but the selected process necessarily
+receives the real credential. This does not alter the Claude gateway or its
+placeholder flow.
 
 The feature is off by default and currently covers Claude only. A populated
 `runtime-auth.env` is required while it is enabled; Gitmoot fails the delivery

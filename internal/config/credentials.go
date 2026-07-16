@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -22,6 +23,9 @@ type CredentialsConfig struct {
 	GitHub                 string
 	ModelGateway           bool
 	ModelGatewayAllowHosts []string
+	// KeychainPath optionally overrides the base-home-derived
+	// ~/.config/gitmoot/keychain.env path. Empty selects that default.
+	KeychainPath string
 }
 
 // DefaultCredentialsConfig preserves direct auth and full-environment inheritance.
@@ -90,6 +94,12 @@ func LoadCredentialsConfig(paths Paths) (CredentialsConfig, error) {
 				return CredentialsConfig{}, fmt.Errorf("parse [credentials].model_gateway_allow_hosts: %w", err)
 			}
 			cfg.ModelGatewayAllowHosts = parsed
+		case "keychain_path":
+			parsed, err := parseConfigString(value)
+			if err != nil {
+				return CredentialsConfig{}, fmt.Errorf("parse [credentials].keychain_path: %w", err)
+			}
+			cfg.KeychainPath = strings.TrimSpace(parsed)
 		default:
 			// Ignore unknown keys so the section remains forward-compatible.
 		}
@@ -118,6 +128,9 @@ func validateCredentialsConfig(cfg CredentialsConfig) error {
 		if err := validateModelGatewayHost(host); err != nil {
 			return fmt.Errorf("invalid [credentials].model_gateway_allow_hosts entry %q: %w", host, err)
 		}
+	}
+	if cfg.KeychainPath != "" && !filepath.IsAbs(cfg.KeychainPath) {
+		return fmt.Errorf("[credentials].keychain_path must be absolute")
 	}
 	return nil
 }

@@ -80,6 +80,7 @@ artifact_blobs = %q
 # github = "deny"
 # model_gateway = false
 # model_gateway_allow_hosts = ["api.anthropic.com"]
+# keychain_path = "" # default: <base-home>/.config/gitmoot/keychain.env
 
 [parallel_sessions]
 same_session = "fork_temp_session"
