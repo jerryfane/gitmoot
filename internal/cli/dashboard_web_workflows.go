@@ -23,11 +23,12 @@ const (
 type dashboardWorkflowActivity struct {
 	Queued, Running, Failed, Blocked int
 	LastActivity                     time.Time
-	// LastFailure/LastHumanNote drive the acknowledgment rule: a failure is only
-	// an alarm while no human journal note has been written AFTER it. Daemon PR
-	// receipts remain ordinary activity but cannot acknowledge an alarm.
-	LastFailure   time.Time
-	LastHumanNote time.Time
+	// LastFailure, LastHumanNote, and LastMergedReceipt drive the acknowledgment
+	// rule. Ordinary daemon PR receipts remain activity, but a merged receipt may
+	// acknowledge an alarm like a human journal note.
+	LastFailure       time.Time
+	LastHumanNote     time.Time
+	LastMergedReceipt time.Time
 }
 
 // deriveDashboardWorkflowState is the single lifecycle definition shared by
@@ -37,8 +38,14 @@ func deriveDashboardWorkflowState(now time.Time, activity dashboardWorkflowActiv
 	if activity.Queued > 0 || activity.Running > 0 {
 		return "active", 0
 	}
-	failureUnacknowledged := !activity.LastFailure.IsZero() &&
-		(activity.LastHumanNote.IsZero() || activity.LastHumanNote.Before(activity.LastFailure))
+	// A merged receipt records the daemon's observation time (note created_at),
+	// not the true GitHub merge time. A failure landing in the poll window before
+	// that receipt is therefore acknowledged; the bias is bounded by the poll
+	// interval, the same as a human note. A failure newer than the receipt
+	// re-stalls the workflow.
+	humanAcknowledges := !activity.LastHumanNote.IsZero() && !activity.LastHumanNote.Before(activity.LastFailure)
+	mergedReceiptAcknowledges := !activity.LastMergedReceipt.IsZero() && !activity.LastMergedReceipt.Before(activity.LastFailure)
+	failureUnacknowledged := !activity.LastFailure.IsZero() && !humanAcknowledges && !mergedReceiptAcknowledges
 	if (activity.Failed > 0 || activity.Blocked > 0) && failureUnacknowledged &&
 		age > dashboardWorkflowActiveWindow && age < dashboardWorkflowStalledHorizon {
 		return "stalled", max(0, int64(age/time.Second))
@@ -122,8 +129,9 @@ func dashboardWorkflowEntry(now time.Time, summary db.WorkflowSummary, meta db.W
 	state, stalledFor := deriveDashboardWorkflowState(now, dashboardWorkflowActivity{
 		Queued: summary.Queued, Running: summary.Running, Failed: summary.Failed,
 		Blocked: summary.Blocked, LastActivity: workflowMillisTime(lastAt),
-		LastFailure:   workflowMillisTime(parseJobTimeMillis(summary.LastFailureAt)),
-		LastHumanNote: workflowMillisTime(parseJobTimeMillis(summary.LastHumanNoteAt)),
+		LastFailure:       workflowMillisTime(parseJobTimeMillis(summary.LastFailureAt)),
+		LastHumanNote:     workflowMillisTime(parseJobTimeMillis(summary.LastHumanNoteAt)),
+		LastMergedReceipt: workflowMillisTime(parseJobTimeMillis(summary.LastMergedReceiptAt)),
 	})
 	author := strings.TrimSpace(meta.Author)
 	if author == "" {

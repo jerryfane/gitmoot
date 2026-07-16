@@ -89,6 +89,7 @@ func TestDashboardOverviewTasksAndWorkflows(t *testing.T) {
 	seedJob("live-queued", "beta", "queued", "fable/redesign", "acme/app", "Queued review", time.Hour, 10*time.Minute, 0, 0)
 	seedJob("unlabelled-running", "beta", "running", "", "acme/misc", "Unattended work", 45*time.Minute, 5*time.Minute, 3, 5)
 	seedJob("stalled-failed", "alpha", "failed", "ops/stalled", "acme/ops", "Deploy failed", 90*time.Minute, time.Hour, 7, 11)
+	seedJob("merge-settled-failed", "alpha", "failed", "ops/merge-settled", "acme/ops", "Merge resolved failure", 90*time.Minute, time.Hour, 0, 0)
 	seedJob("finished-ok", "alpha", "succeeded", "release/done", "acme/app", "Release complete", 3*time.Hour, 2*time.Hour, 13, 17)
 	seedJob("finished-cancelled", "beta", "cancelled", "release/cancelled", "acme/app", "Cancelled experiment", 4*time.Hour, 3*time.Hour, 19, 23)
 	seedJob("finished-old", "alpha", "succeeded", "archive/old", "acme/app", "Old completion", 26*time.Hour, 25*time.Hour, 101, 103)
@@ -108,6 +109,12 @@ func TestDashboardOverviewTasksAndWorkflows(t *testing.T) {
 		db.WorkflowMeta{Author: "lead", Pane: "ops-pane", SessionID: "ops-session", WorkDir: "/work/ops"})
 	if err != nil {
 		t.Fatalf("InsertWorkflowNoteWithMeta: %v", err)
+	}
+	mergedReceipt, inserted, err := store.InsertWorkflowAutoNoteWithMeta(ctx,
+		db.WorkflowNote{WorkflowID: "ops/merge-settled", Author: db.WorkflowAutoNoteAuthor, Body: "[auto:pr:987:merged] PR #987 merged"},
+		db.WorkflowMeta{WorkflowID: "ops/merge-settled", Status: "PR #987 merged", StatusSet: true})
+	if err != nil || !inserted {
+		t.Fatalf("InsertWorkflowAutoNoteWithMeta = (inserted=%v, err=%v)", inserted, err)
 	}
 
 	seedTestPipeline(t, store, db.Pipeline{
@@ -144,6 +151,9 @@ func TestDashboardOverviewTasksAndWorkflows(t *testing.T) {
 	if _, err := raw.Exec(`UPDATE workflow_notes SET created_at = ? WHERE id = ?`, stamp(2*time.Hour), note.ID); err != nil {
 		t.Fatalf("update workflow note: %v", err)
 	}
+	if _, err := raw.Exec(`UPDATE workflow_notes SET created_at = ? WHERE id = ?`, stamp(45*time.Minute), mergedReceipt.ID); err != nil {
+		t.Fatalf("update merged workflow receipt: %v", err)
+	}
 	if err := raw.Close(); err != nil {
 		t.Fatalf("close raw DB: %v", err)
 	}
@@ -170,6 +180,11 @@ func TestDashboardOverviewTasksAndWorkflows(t *testing.T) {
 	}
 	if len(overview.NeedsYou) != 3 || overview.NeedsYou[0].Kind != "stalled_workflow" || overview.NeedsYou[0].Label != "ops/stalled" || overview.NeedsYou[0].Pane != "ops-pane" || overview.NeedsYou[1].Kind != "pr_awaiting_merge" || overview.NeedsYou[1].Ref != "#42" || overview.NeedsYou[2].Kind != "blocked_job" || overview.NeedsYou[2].Title != "waiting on deployment credentials" {
 		t.Fatalf("needs_you = %+v", overview.NeedsYou)
+	}
+	for _, item := range overview.NeedsYou {
+		if item.Kind == "stalled_workflow" && item.Label == "ops/merge-settled" {
+			t.Fatalf("merge-settled workflow appeared in needs_you: %+v", overview.NeedsYou)
+		}
 	}
 	if len(overview.Activity.Workflows) != 1 || overview.Activity.Workflows[0].Label != "fable/redesign" || overview.Activity.Workflows[0].Running != 1 || !reflect.DeepEqual(overview.Activity.Workflows[0].Agents, []string{"alpha", "beta"}) || overview.Activity.Queued != 1 || overview.Activity.UnattendedNote != "1 active job without a workflow label" {
 		t.Fatalf("activity = %+v", overview.Activity)

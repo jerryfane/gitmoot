@@ -207,9 +207,11 @@ kickoff-note sentence, or the label campaign. The bundled frontend continues to
 receive the compatibility `summary` field until its separate rendering follow-up
 adopts the two new fields.
 A workflow is stalled only when a failure has gone **unacknowledged** — nothing
-is running, the goal was not reached, and no journal note has been written
-since the last failure (a failure alone is not an alarm; the silence after it
-is). Stalled entries age into settled history after a day of silence.
+is running, the goal was not reached, and neither a journal note from anyone but
+the daemon nor a merged-PR daemon receipt has landed since the last failure
+(a failure alone is not an alarm; the silence after it is; other daemon receipts
+such as `opened` or `closed` never acknowledge). Stalled entries age into
+settled history after a day of silence.
 
 The **detail page** reads as a mission log: journal notes and run trees
 interleaved in reverse-chronological order — the coordinator's intent next to

@@ -34,6 +34,11 @@ func TestDeriveDashboardWorkflowState(t *testing.T) {
 		{name: "human note before failure does not acknowledge", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-40 * time.Minute), LastFailure: now.Add(-40 * time.Minute), LastHumanNote: now.Add(-2 * time.Hour)}, state: "stalled", stalled: 40 * 60},
 		{name: "daemon note after failure does not acknowledge", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-40 * time.Minute), LastFailure: now.Add(-1 * time.Hour)}, state: "stalled", stalled: 40 * 60},
 		{name: "human note after failure acknowledges", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-31 * time.Minute), LastFailure: now.Add(-1 * time.Hour), LastHumanNote: now.Add(-31 * time.Minute)}, state: "settled"},
+		{name: "merged receipt after failure acknowledges", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-1 * time.Hour), LastFailure: now.Add(-2 * time.Hour), LastMergedReceipt: now.Add(-1 * time.Hour)}, state: "settled"},
+		{name: "merged receipt before failure does not acknowledge", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-1 * time.Hour), LastFailure: now.Add(-1 * time.Hour), LastMergedReceipt: now.Add(-2 * time.Hour)}, state: "stalled", stalled: 60 * 60},
+		{name: "merged receipt tied with failure acknowledges", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-1 * time.Hour), LastFailure: now.Add(-1 * time.Hour), LastMergedReceipt: now.Add(-1 * time.Hour)}, state: "settled"},
+		{name: "merged receipt acknowledges blocked workflow", activity: dashboardWorkflowActivity{Blocked: 1, LastActivity: now.Add(-1 * time.Hour), LastFailure: now.Add(-2 * time.Hour), LastMergedReceipt: now.Add(-1 * time.Hour)}, state: "settled"},
+		{name: "merged receipt without failure remains settled", activity: dashboardWorkflowActivity{LastActivity: now.Add(-1 * time.Hour), LastMergedReceipt: now.Add(-1 * time.Hour)}, state: "settled"},
 		{name: "failure without timestamp is settled", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-31 * time.Minute)}, state: "settled"},
 		{name: "successful quiet is settled", activity: dashboardWorkflowActivity{LastActivity: now.Add(-45 * time.Minute)}, state: "settled"},
 		{name: "stalled ages out at horizon", activity: dashboardWorkflowActivity{Failed: 1, LastActivity: now.Add(-24 * time.Hour), LastFailure: now.Add(-24 * time.Hour)}, state: "settled"},
@@ -531,6 +536,46 @@ func TestDashboardWorkflowDaemonNotesDoNotAcknowledgeFailuresOrImpersonateCoordi
 	}
 	if detail.State != "stalled" || detail.Coordinator.Author != "coordinator" {
 		t.Fatalf("detail = %+v; want stalled workflow with human coordinator", detail)
+	}
+
+	store, err = db.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	merged, inserted, err := store.InsertWorkflowAutoNoteWithMeta(ctx,
+		db.WorkflowNote{WorkflowID: label, Author: db.WorkflowAutoNoteAuthor, Body: "[auto:pr:958:merged] PR #958 merged"},
+		db.WorkflowMeta{WorkflowID: label, Status: "PR #958 merged", StatusSet: true})
+	if err != nil || !inserted {
+		t.Fatalf("Insert merged daemon note = (inserted=%v, err=%v)", inserted, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close reopened store: %v", err)
+	}
+	raw, err = sql.Open("sqlite", paths.Database)
+	if err != nil {
+		t.Fatalf("reopen raw DB: %v", err)
+	}
+	if _, err := raw.Exec(`UPDATE workflow_notes SET created_at = ? WHERE id = ?`, format(now.Add(-40*time.Minute)), merged.ID); err != nil {
+		t.Fatalf("UPDATE merged workflow note: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close reopened raw DB: %v", err)
+	}
+
+	entries, err = ds.Workflows(ctx)
+	if err != nil {
+		t.Fatalf("Workflows after merged receipt: %v", err)
+	}
+	entry = workflowIndexEntryByLabel(t, entries, label)
+	if entry.State != "settled" || entry.StalledForS != 0 {
+		t.Fatalf("index entry after merged receipt = %+v; want settled workflow", entry)
+	}
+	detail, err = ds.Workflow(ctx, label, dashboard.WorkflowQuery{})
+	if err != nil {
+		t.Fatalf("Workflow after merged receipt: %v", err)
+	}
+	if detail.State != "settled" || detail.StalledForS != 0 {
+		t.Fatalf("detail after merged receipt = %+v; want settled workflow", detail)
 	}
 }
 
