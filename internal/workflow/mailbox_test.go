@@ -187,7 +187,8 @@ func TestMailboxRejectsProduceGrantsOnNonProduceRequests(t *testing.T) {
 		req  JobRequest
 		want string
 	}{
-		{"paths", JobRequest{WritablePaths: []string{"/data"}}, "writable_paths"},
+		{"writable paths", JobRequest{WritablePaths: []string{"/data"}}, "writable_paths"},
+		{"readable paths", JobRequest{ReadablePaths: []string{"/input"}}, "readable_paths"},
 		{"network", JobRequest{Network: true}, "network access"},
 	}
 	for _, tc := range cases {
@@ -201,6 +202,30 @@ func TestMailboxRejectsProduceGrantsOnNonProduceRequests(t *testing.T) {
 				t.Fatalf("Enqueue error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestMailboxPersistsProduceReadablePaths(t *testing.T) {
+	mailbox := Mailbox{Store: openTestStore(t)}
+	job, err := mailbox.Enqueue(context.Background(), JobRequest{
+		ID:            "produce-readable",
+		Agent:         "producer",
+		Action:        "produce",
+		Repo:          "owner/repo",
+		Sender:        PipelineJobSender,
+		PipelineName:  "nightly",
+		WritablePaths: []string{"/output"},
+		ReadablePaths: []string{" /input ", ""},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := unmarshalPayload(job.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.PipelineName != "nightly" || len(payload.ReadablePaths) != 1 || payload.ReadablePaths[0] != "/input" {
+		t.Fatalf("produce payload = %+v", payload)
 	}
 }
 

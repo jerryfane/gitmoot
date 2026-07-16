@@ -754,6 +754,7 @@ func TestIsClaudeSessionMissing(t *testing.T) {
 func TestCodexSandboxArgsProduceGrants(t *testing.T) {
 	agent := Agent{
 		AutonomyPolicy: AutonomyPolicyWorkspaceWrite,
+		ReadablePaths:  []string{"/input/one"},
 		WritablePaths:  []string{"/data/one", "/data/two"},
 		ProduceNetwork: true,
 	}
@@ -783,15 +784,17 @@ func TestCodexSandboxArgsProduceGrants(t *testing.T) {
 func TestClaudeKimiProducePermissionArgs(t *testing.T) {
 	agent := Agent{
 		AutonomyPolicy: AutonomyPolicyWorkspaceWrite,
+		ReadablePaths:  []string{"/input/one"},
 		WritablePaths:  []string{"/data/one", " ", "/data/two"},
 	}
-	if got, want := claudePermissionArgs(agent), []string{"--permission-mode", "acceptEdits", "--add-dir", "/data/one", "--add-dir", "/data/two"}; !reflect.DeepEqual(got, want) {
+	if got, want := claudePermissionArgs(agent), []string{"--permission-mode", "acceptEdits", "--add-dir", "/data/one", "--add-dir", "/data/two", "--add-dir", "/input/one"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("claudePermissionArgs = %v, want %v", got, want)
 	}
-	if got, want := kimiPermissionArgs(agent), []string{"--add-dir", "/data/one", "--add-dir", "/data/two"}; !reflect.DeepEqual(got, want) {
+	if got, want := kimiPermissionArgs(agent), []string{"--add-dir", "/data/one", "--add-dir", "/data/two", "--add-dir", "/input/one"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("kimiPermissionArgs = %v, want %v", got, want)
 	}
 	withoutPaths := agent
+	withoutPaths.ReadablePaths = nil
 	withoutPaths.WritablePaths = nil
 	if got, want := claudePermissionArgs(withoutPaths), []string{"--permission-mode", "acceptEdits"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("non-produce Claude args = %v, want %v", got, want)

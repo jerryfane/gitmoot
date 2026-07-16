@@ -21,8 +21,8 @@ const MinimumABI = 3
 
 // Exec applies Gitmoot's strict filesystem ruleset to the current process and
 // replaces it with argv. Landlock restrictions survive execve, so the runtime
-// and every descendant inherit the same write confinement.
-func Exec(writePaths []string, argv []string) error {
+// and every descendant inherit the same filesystem confinement.
+func Exec(readPaths, writePaths []string, argv []string) error {
 	if len(argv) == 0 || strings.TrimSpace(argv[0]) == "" {
 		return errors.New("sandbox target command is required")
 	}
@@ -32,6 +32,10 @@ func Exec(writePaths []string, argv []string) error {
 	}
 	if abi < MinimumABI {
 		return fmt.Errorf("Landlock ABI v%d is unavailable; v%d or newer is required", abi, MinimumABI)
+	}
+	executable, err := execLookPath(argv[0])
+	if err != nil {
+		return fmt.Errorf("resolve sandbox target %q: %w", argv[0], err)
 	}
 
 	workdir, err := os.Getwd()
@@ -43,7 +47,18 @@ func Exec(writePaths []string, argv []string) error {
 		return err
 	}
 
-	rules := []landlock.Rule{landlock.RODirs("/")}
+	var rules []landlock.Rule
+	if len(readPaths) == 0 {
+		// Preserve the original write-confinement contract for existing produce
+		// stages: the filesystem is readable while writes remain allowlisted.
+		rules = append(rules, landlock.RODirs("/"))
+	} else {
+		readable, err := readableRoots(readPaths, executable)
+		if err != nil {
+			return err
+		}
+		rules = append(rules, landlock.RODirs(readable...))
+	}
 	if len(writable) > 0 {
 		// WithRefer permits rename/link operations only when both the source and
 		// destination are covered by the writable rules. It does not widen the
@@ -62,11 +77,64 @@ func Exec(writePaths []string, argv []string) error {
 	if err := landlock.V3.RestrictPaths(rules...); err != nil {
 		return fmt.Errorf("apply strict Landlock ruleset: %w", err)
 	}
-	path, err := execLookPath(argv[0])
-	if err != nil {
-		return fmt.Errorf("resolve sandbox target %q: %w", argv[0], err)
+	return syscall.Exec(executable, argv, os.Environ())
+}
+
+// readableRoots returns the explicit read-only inputs plus the fixed host roots
+// needed to execute a runtime. Writable roots are intentionally absent: their
+// stronger RWDirs rules already include read rights. Existing stages with no
+// reads declaration bypass this helper and retain the historical RO `/` rule.
+func readableRoots(paths []string, executable string) ([]string, error) {
+	roots := make([]string, 0, len(paths)+12)
+	seen := make(map[string]struct{}, len(paths)+12)
+	add := func(candidate string, required bool) error {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return nil
+		}
+		if !filepath.IsAbs(candidate) {
+			return fmt.Errorf("sandbox read path %q must be absolute", candidate)
+		}
+		candidate = filepath.Clean(candidate)
+		info, err := os.Stat(candidate)
+		if err != nil {
+			if !required && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("sandbox read path %q: %w", candidate, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("sandbox read path %q is not a directory", candidate)
+		}
+		if _, ok := seen[candidate]; !ok {
+			seen[candidate] = struct{}{}
+			roots = append(roots, candidate)
+		}
+		return nil
 	}
-	return syscall.Exec(path, argv, os.Environ())
+	for _, candidate := range paths {
+		if err := add(candidate, true); err != nil {
+			return nil, err
+		}
+	}
+	for _, candidate := range []string{"/bin", "/sbin", "/usr", "/lib", "/lib64", "/etc", "/dev", "/proc", "/sys", "/run", "/opt"} {
+		if err := add(candidate, false); err != nil {
+			return nil, err
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if err := add(filepath.Join(home, ".local"), false); err != nil {
+			return nil, err
+		}
+	}
+	resolvedExecutable := executable
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		resolvedExecutable = resolved
+	}
+	if err := add(filepath.Dir(resolvedExecutable), true); err != nil {
+		return nil, err
+	}
+	return roots, nil
 }
 
 func writableRoots(paths []string, workdir string) ([]string, error) {

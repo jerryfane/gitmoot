@@ -17,12 +17,12 @@ import (
 
 func TestPipelineProduceStageJobRequestShapeAndRetryNote(t *testing.T) {
 	retries := 2
-	stage := pipeline.Stage{ID: "export", Agent: "producer", Action: "produce", Prompt: "Write data.", Write: true, Writes: []string{"/data/a", "/data/b"}, Network: true, Check: "test -s /data/a/out", CheckRetries: &retries}
+	stage := pipeline.Stage{ID: "export", Agent: "producer", Action: "produce", Prompt: "Write data.", Write: true, Writes: []string{"/data/a", "/data/b"}, Reads: []string{"/input/a"}, Network: true, Check: "test -s /data/a/out", CheckRetries: &retries}
 	req := pipelineStageJobRequest(db.Pipeline{Name: "p", Repo: "owner/repo"}, stage, db.PipelineRun{ID: "prun-p-1"}, 1, "UPSTREAM\n", pipelineStagePRBinding{}, false)
 	if req.Action != "produce" || req.Sender != workflow.PipelineJobSender || req.Branch != "" || req.TaskID != "" || req.PullRequest != 0 {
 		t.Fatalf("produce request identity fields = %+v", req)
 	}
-	if len(req.WritablePaths) != 2 || !req.Network || req.CheckRetries != 2 || req.Check == "" {
+	if len(req.WritablePaths) != 2 || len(req.ReadablePaths) != 1 || req.ReadablePaths[0] != "/input/a" || req.PipelineName != "p" || !req.Network || req.CheckRetries != 2 || req.Check == "" {
 		t.Fatalf("produce request options = %+v", req)
 	}
 	if !strings.Contains(req.Instructions, "previous attempt may have written partial data") {
@@ -91,6 +91,63 @@ func TestApplyProduceRuntimeGrantsRevalidatesSymlinkAndScopesByAction(t *testing
 	err = applyProduceRuntimeGrants(context.Background(), store, home, db.Job{ID: "p2", Type: "produce"}, payload, &agent)
 	if err == nil || !strings.Contains(err.Error(), "produce writable path preflight failed") || len(agent.WritablePaths) != 0 {
 		t.Fatalf("retargeted symlink preflight = %v agent=%+v", err, agent)
+	}
+}
+
+func TestApplyProduceRuntimeReadableGrantsRevalidateAtDelivery(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	paths := config.PathsForHome(home)
+	if err := os.MkdirAll(paths.Home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keychainPath := filepath.Join(base, "operator-keychain", "keychain.env")
+	if err := os.MkdirAll(filepath.Dir(keychainPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configBody := config.DefaultConfig(paths) + "\n[credentials]\nkeychain_path = \"" + keychainPath + "\"\n"
+	if err := os.WriteFile(paths.ConfigFile, []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	readTarget := filepath.Join(base, "input")
+	writeTarget := filepath.Join(base, "output")
+	for _, dir := range []string{readTarget, writeTarget} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readLink := filepath.Join(base, "read-link")
+	if err := os.Symlink(readTarget, readLink); err != nil {
+		t.Fatal(err)
+	}
+	specYAML := "name: p\nstages:\n  - id: export\n    agent: p\n    action: produce\n    prompt: x\n    write: true\n    writes: [" + writeTarget + "]\n    reads: [" + readLink + "]\n"
+	if err := store.CreateOrUpdatePipeline(context.Background(), db.Pipeline{Name: "p", SpecYAML: specYAML}); err != nil {
+		t.Fatal(err)
+	}
+	payload := workflow.JobPayload{PipelineName: "p", WritablePaths: []string{writeTarget}, ReadablePaths: []string{readLink}}
+	agent := runtime.Agent{Name: "p"}
+	if err := applyProduceRuntimeGrants(context.Background(), store, home, db.Job{ID: "produce-read", Type: "produce"}, payload, &agent); err != nil {
+		t.Fatalf("safe delivery preflight: %v", err)
+	}
+	if len(agent.ReadablePaths) != 1 || agent.ReadablePaths[0] != readTarget || len(agent.WritablePaths) != 1 || agent.WritablePaths[0] != writeTarget {
+		t.Fatalf("runtime grants = reads %v writes %v", agent.ReadablePaths, agent.WritablePaths)
+	}
+
+	if err := os.Remove(readLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(paths.Home, readLink); err != nil {
+		t.Fatal(err)
+	}
+	agent = runtime.Agent{Name: "p"}
+	err = applyProduceRuntimeGrants(context.Background(), store, home, db.Job{ID: "produce-read", Type: "produce"}, payload, &agent)
+	if err == nil || !strings.Contains(err.Error(), "produce readable path preflight failed") || len(agent.ReadablePaths) != 0 {
+		t.Fatalf("retargeted read symlink preflight = %v agent=%+v", err, agent)
 	}
 }
 
@@ -184,6 +241,84 @@ func TestValidatePipelineProducePathsRejectsProtectedAndSymlinkedTargets(t *test
 			spec := pipeline.Spec{Name: "p", Stages: []pipeline.Stage{{ID: "a", Agent: "p", Action: "produce", Prompt: "x", Write: true, Writes: []string{target}}}}
 			if err := validatePipelineProducePaths(context.Background(), store, home, spec); err == nil {
 				t.Fatalf("target %q was accepted", target)
+			}
+		})
+	}
+}
+
+func TestValidatePipelineProduceReadPaths(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "operator-home")
+	paths := config.PathsForHome(home)
+	if err := os.MkdirAll(paths.Home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keychainPath := filepath.Join(base, "operator-keychain", "keychain.env")
+	if err := os.MkdirAll(filepath.Dir(keychainPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configBody := config.DefaultConfig(paths) + "\n[credentials]\nkeychain_path = \"" + keychainPath + "\"\n"
+	if err := os.WriteFile(paths.ConfigFile, []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	writeDir := filepath.Join(base, "outputs")
+	readDir := filepath.Join(base, "inputs")
+	writeInsideRead := filepath.Join(base, "shared", "outputs")
+	for _, dir := range []string{writeDir, readDir, writeInsideRead} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(keychainPath, []byte("TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envDir := filepath.Join(base, "pipeline-env")
+	if err := os.MkdirAll(envDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	envFile := filepath.Join(envDir, "secrets.env")
+	if err := os.WriteFile(envFile, []byte("OTHER=secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		reads   []string
+		writes  []string
+		envFile string
+		want    string
+	}{
+		{name: "inside home", reads: []string{filepath.Join(paths.Home, "state")}, writes: []string{writeDir}, want: "Gitmoot home"},
+		{name: "contains keychain", reads: []string{filepath.Dir(keychainPath)}, writes: []string{writeDir}, want: "keychain_path"},
+		{name: "contains env file", reads: []string{envDir}, writes: []string{writeDir}, envFile: envFile, want: "env_file"},
+		{name: "equals write", reads: []string{writeDir}, writes: []string{writeDir}, want: "contains a declared writes path"},
+		{name: "contains write", reads: []string{filepath.Dir(writeInsideRead)}, writes: []string{writeInsideRead}, want: "contains a declared writes path"},
+		{name: "valid", reads: []string{readDir}, writes: []string{writeDir}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := pipeline.Spec{Name: "p", EnvFile: tt.envFile, Stages: []pipeline.Stage{{
+				ID: "produce", Agent: "p", Action: "produce", Prompt: "x", Write: true,
+				Writes: tt.writes, Reads: tt.reads,
+			}}}
+			err := validatePipelineProducePaths(context.Background(), store, home, spec)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("valid read path rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+			if (tt.name == "contains keychain" && strings.Contains(err.Error(), keychainPath)) || (tt.name == "contains env file" && strings.Contains(err.Error(), envFile)) {
+				t.Fatalf("secret source path leaked in error: %v", err)
 			}
 		})
 	}

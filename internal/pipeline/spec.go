@@ -205,6 +205,10 @@ type Stage struct {
 	// replace Codex's default writable roots. Required on produce and rejected on
 	// every other stage kind.
 	Writes []string `yaml:"writes,omitempty"`
+	// Reads declares additional absolute input directories an action: produce
+	// stage may read but never write. Claude/Kimi permission hints make these paths
+	// visible while Gitmoot's Landlock wrapper keeps them read-only.
+	Reads []string `yaml:"reads,omitempty"`
 	// Network opts a produce stage into Codex workspace-write network access.
 	Network bool `yaml:"network,omitempty"`
 	// Check is a trusted operator command run after each valid produce result. A

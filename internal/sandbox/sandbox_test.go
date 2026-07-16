@@ -80,6 +80,54 @@ func TestSandboxExecKernelE2E(t *testing.T) {
 	}
 }
 
+func TestSandboxExecReadOnlyInputE2E(t *testing.T) {
+	requireLandlockABI(t)
+	gitmoot := buildGitmootBinary(t)
+	base, err := os.MkdirTemp(".", ".gitmoot-sandbox-read-e2e-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err = filepath.Abs(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	workdir := filepath.Join(base, "worktree")
+	readDir := filepath.Join(base, "input")
+	writeDir := filepath.Join(base, "output")
+	outsideDir := filepath.Join(base, "outside")
+	for _, dir := range []string{workdir, readDir, writeDir, outsideDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := filepath.Join(readDir, "source.txt")
+	outside := filepath.Join(outsideDir, "hidden.txt")
+	output := filepath.Join(writeDir, "result.txt")
+	if err := os.WriteFile(input, []byte("source-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("outside-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `set -eu
+cat "$1" > "$2"
+if { printf denied > "$1"; } 2>/dev/null; then exit 41; fi
+if cat "$3" >/dev/null 2>&1; then exit 42; fi
+`
+	command := exec.Command(gitmoot, "sandbox-exec", "--read", readDir, "--write", writeDir, "--", "/bin/sh", "-c", script, "gitmoot-test", input, output, outside)
+	command.Dir = workdir
+	if combined, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("read-only produce sandbox failed: %v\n%s", err, combined)
+	}
+	if data, err := os.ReadFile(output); err != nil || string(data) != "source-data" {
+		t.Fatalf("output = %q, err=%v", data, err)
+	}
+	if data, err := os.ReadFile(input); err != nil || string(data) != "source-data" {
+		t.Fatalf("read-only input changed to %q, err=%v", data, err)
+	}
+}
+
 func resetProbeCache(t *testing.T) {
 	t.Helper()
 	probeOnce = sync.Once{}
