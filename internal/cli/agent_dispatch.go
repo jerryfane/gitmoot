@@ -373,6 +373,8 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	defer func() {
 		_ = releaseLock(context.Background())
 	}()
+	stopRuntimeLockHeartbeat := startRuntimeSessionLockHeartbeat(ctx, store, lockKey, ownerToken, lockTTL)
+	defer stopRuntimeLockHeartbeat()
 	// Thread the owner token so a foreground run's terminal cleanup (RunJob ->
 	// AdvanceJob, which fires while this lock is still held) recognizes its own lock
 	// and does not refuse the healthy-path cleanup as a foreign live owner (#536).

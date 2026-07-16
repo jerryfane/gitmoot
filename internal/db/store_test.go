@@ -1461,17 +1461,23 @@ func TestResourceLockMethods(t *testing.T) {
 	if stored.ExpiresAt != formatResourceLockTime(now.Add(time.Minute)) {
 		t.Fatalf("resource lock expiry = %q, want fixed-width timestamp", stored.ExpiresAt)
 	}
-	if updated, err := store.HeartbeatResourceLock(ctx, lock.ResourceKey, "job-a", "wrong-token", now.Add(20*time.Second), now.Add(2*time.Minute)); err != nil || updated {
+	if updated, err := store.HeartbeatResourceLock(ctx, lock.ResourceKey, "wrong-token", now.Add(2*time.Minute)); err != nil || updated {
 		t.Fatalf("wrong-token HeartbeatResourceLock returned updated=%v err=%v", updated, err)
 	}
-	if updated, err := store.HeartbeatResourceLock(ctx, lock.ResourceKey, "job-a", "token-a", now.Add(30*time.Second), now.Add(2*time.Minute)); err != nil || !updated {
+	heartbeatBefore := time.Now().UTC()
+	if updated, err := store.HeartbeatResourceLock(ctx, lock.ResourceKey, "token-a", now.Add(2*time.Minute)); err != nil || !updated {
 		t.Fatalf("HeartbeatResourceLock returned updated=%v err=%v", updated, err)
 	}
+	heartbeatAfter := time.Now().UTC()
 	stored, err = store.GetResourceLock(ctx, lock.ResourceKey)
 	if err != nil {
 		t.Fatalf("GetResourceLock after heartbeat returned error: %v", err)
 	}
-	if stored.UpdatedAt != formatResourceLockTime(now.Add(30*time.Second)) || stored.ExpiresAt != formatResourceLockTime(now.Add(2*time.Minute)) {
+	updatedAt, err := time.Parse(time.RFC3339Nano, stored.UpdatedAt)
+	if err != nil {
+		t.Fatalf("parse heartbeat updated_at %q: %v", stored.UpdatedAt, err)
+	}
+	if updatedAt.Before(heartbeatBefore) || updatedAt.After(heartbeatAfter) || stored.ExpiresAt != formatResourceLockTime(now.Add(2*time.Minute)) {
 		t.Fatalf("heartbeat lock times = updated %q expires %q", stored.UpdatedAt, stored.ExpiresAt)
 	}
 	released, err := store.ReleaseResourceLock(ctx, lock.ResourceKey, "job-b", "token-a")
