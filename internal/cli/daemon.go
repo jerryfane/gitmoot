@@ -31,6 +31,7 @@ import (
 	"github.com/gitmoot/gitmoot/internal/events"
 	gitutil "github.com/gitmoot/gitmoot/internal/git"
 	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/pipeline"
 	"github.com/gitmoot/gitmoot/internal/runtime"
 	"github.com/gitmoot/gitmoot/internal/sandbox"
 	"github.com/gitmoot/gitmoot/internal/subprocess"
@@ -5472,11 +5473,35 @@ func applyProduceRuntimeGrants(ctx context.Context, store *db.Store, home string
 	if agent == nil {
 		return errors.New("produce runtime agent is required")
 	}
-	resolved, err := canonicalizePipelineProducePaths(ctx, store, home, fmt.Sprintf("job %q", job.ID), payload.WritablePaths)
+	subject := fmt.Sprintf("job %q", job.ID)
+	writable, err := canonicalizePipelineProducePaths(ctx, store, home, subject, payload.WritablePaths)
 	if err != nil {
 		return fmt.Errorf("produce writable path preflight failed: %w", err)
 	}
-	agent.WritablePaths = resolved
+	envFile := ""
+	if len(payload.ReadablePaths) > 0 {
+		if strings.TrimSpace(payload.PipelineName) == "" {
+			return errors.New("produce readable path preflight failed: pipeline name is required")
+		}
+		record, found, err := store.GetPipeline(ctx, payload.PipelineName)
+		if err != nil {
+			return fmt.Errorf("produce readable path preflight failed: load pipeline: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("produce readable path preflight failed: pipeline %q is unavailable", payload.PipelineName)
+		}
+		spec, err := pipeline.Load([]byte(record.SpecYAML))
+		if err != nil {
+			return fmt.Errorf("produce readable path preflight failed: load pipeline spec: %w", err)
+		}
+		envFile = spec.EnvFile
+	}
+	readable, err := canonicalizePipelineProduceReadPaths(ctx, store, home, subject, payload.ReadablePaths, writable, envFile)
+	if err != nil {
+		return fmt.Errorf("produce readable path preflight failed: %w", err)
+	}
+	agent.WritablePaths = writable
+	agent.ReadablePaths = readable
 	agent.ProduceNetwork = payload.Network
 	return nil
 }
@@ -5542,7 +5567,7 @@ func wrapProduceSandboxAdapter(action string, agent runtime.Agent, adapter workf
 	if agent.Runtime != runtime.ClaudeRuntime && agent.Runtime != runtime.KimiRuntime {
 		return adapter, nil
 	}
-	paths, env, err := produceRuntimeSandboxGrants(agent.Runtime, agent.WritablePaths)
+	reads, writes, env, err := produceRuntimeSandboxGrants(agent.Runtime, agent.ReadablePaths, agent.WritablePaths)
 	if err != nil {
 		return nil, err
 	}
@@ -5559,26 +5584,26 @@ func wrapProduceSandboxAdapter(action string, agent runtime.Agent, adapter workf
 		a.Adapter = runtimeAdapter
 		return a, nil
 	case runtime.ClaudeAdapter:
-		a.Runner = landlockProduceRunner(a.Runner, paths, env)
+		a.Runner = landlockProduceRunner(a.Runner, reads, writes, env)
 		return a, nil
 	case *runtime.ClaudeAdapter:
-		a.Runner = landlockProduceRunner(a.Runner, paths, env)
+		a.Runner = landlockProduceRunner(a.Runner, reads, writes, env)
 		return a, nil
 	case runtime.KimiAdapter:
-		a.Runner = landlockProduceRunner(a.Runner, paths, env)
+		a.Runner = landlockProduceRunner(a.Runner, reads, writes, env)
 		return a, nil
 	case *runtime.KimiAdapter:
-		a.Runner = landlockProduceRunner(a.Runner, paths, env)
+		a.Runner = landlockProduceRunner(a.Runner, reads, writes, env)
 		return a, nil
 	default:
 		return nil, fmt.Errorf("produce Landlock sandbox cannot wrap %s adapter %T", agent.Runtime, adapter)
 	}
 }
 
-func produceRuntimeSandboxGrants(runtimeName string, declared []string) ([]string, []string, error) {
+func produceRuntimeSandboxGrants(runtimeName string, readable, writable []string) ([]string, []string, []string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve runtime state home: %w", err)
+		return nil, nil, nil, fmt.Errorf("resolve runtime state home: %w", err)
 	}
 	home = filepath.Clean(home)
 	var statePaths []string
@@ -5588,7 +5613,7 @@ func produceRuntimeSandboxGrants(runtimeName string, declared []string) ([]strin
 		stateDir := filepath.Join(home, ".claude")
 		cacheRoot, err := os.UserCacheDir()
 		if err != nil {
-			return nil, nil, fmt.Errorf("resolve Claude cache root: %w", err)
+			return nil, nil, nil, fmt.Errorf("resolve Claude cache root: %w", err)
 		}
 		cacheDir := filepath.Join(cacheRoot, "claude-cli-nodejs")
 		statePaths = []string{stateDir, cacheDir}
@@ -5596,15 +5621,16 @@ func produceRuntimeSandboxGrants(runtimeName string, declared []string) ([]strin
 	case runtime.KimiRuntime:
 		statePaths = []string{filepath.Join(home, ".kimi-code")}
 	default:
-		return append([]string(nil), declared...), nil, nil
+		return compactCleanPaths(readable), compactCleanPaths(writable), nil, nil
 	}
 	for _, path := range statePaths {
 		if err := os.MkdirAll(path, 0o700); err != nil {
-			return nil, nil, fmt.Errorf("create %s runtime state directory %q: %w", runtimeName, path, err)
+			return nil, nil, nil, fmt.Errorf("create %s runtime state directory %q: %w", runtimeName, path, err)
 		}
 	}
-	paths := compactCleanPaths(append(append([]string(nil), declared...), statePaths...))
-	return paths, env, nil
+	reads := compactCleanPaths(readable)
+	writes := compactCleanPaths(append(append([]string(nil), writable...), statePaths...))
+	return reads, writes, env, nil
 }
 
 func compactCleanPaths(paths []string) []string {
@@ -5625,8 +5651,9 @@ func compactCleanPaths(paths []string) []string {
 	return out
 }
 
-func landlockProduceRunner(runner subprocess.Runner, paths, env []string) subprocess.Runner {
-	writable := append([]string(nil), paths...)
+func landlockProduceRunner(runner subprocess.Runner, reads, writes, env []string) subprocess.Runner {
+	readable := append([]string(nil), reads...)
+	writable := append([]string(nil), writes...)
 	runtimeEnv := append([]string(nil), env...)
 	if tee, ok := runner.(subprocess.TeeRunner); ok {
 		inner := tee.Inner
@@ -5634,7 +5661,7 @@ func landlockProduceRunner(runner subprocess.Runner, paths, env []string) subpro
 			inner = subprocess.GroupRunner{}
 		}
 		if _, wrapped := inner.(subprocess.WrappingRunner); !wrapped {
-			tee.Inner = subprocess.WrappingRunner{Inner: inner, WritablePaths: writable, Env: runtimeEnv}
+			tee.Inner = subprocess.WrappingRunner{Inner: inner, ReadablePaths: readable, WritablePaths: writable, Env: runtimeEnv}
 		}
 		return tee
 	}
@@ -5644,7 +5671,7 @@ func landlockProduceRunner(runner subprocess.Runner, paths, env []string) subpro
 			inner = subprocess.GroupRunner{}
 		}
 		if _, wrapped := inner.(subprocess.WrappingRunner); !wrapped {
-			tee.Inner = subprocess.WrappingRunner{Inner: inner, WritablePaths: writable, Env: runtimeEnv}
+			tee.Inner = subprocess.WrappingRunner{Inner: inner, ReadablePaths: readable, WritablePaths: writable, Env: runtimeEnv}
 		}
 		return tee
 	}
@@ -5654,7 +5681,7 @@ func landlockProduceRunner(runner subprocess.Runner, paths, env []string) subpro
 	if _, wrapped := runner.(subprocess.WrappingRunner); wrapped {
 		return runner
 	}
-	return subprocess.WrappingRunner{Inner: runner, WritablePaths: writable, Env: runtimeEnv}
+	return subprocess.WrappingRunner{Inner: runner, ReadablePaths: readable, WritablePaths: writable, Env: runtimeEnv}
 }
 
 // configPaths resolves this worker's config.Paths for READ-ONLY policy loading
@@ -6993,12 +7020,12 @@ func buildRuntimeAdapter(home string, agent runtime.Agent, checkout string, runn
 		return nil, err
 	}
 	gatewayRunner, _ := runner.(*credgw.Runner)
-	if len(agent.WritablePaths) > 0 && (agent.Runtime == runtime.ClaudeRuntime || agent.Runtime == runtime.KimiRuntime) {
-		paths, env, err := produceRuntimeSandboxGrants(agent.Runtime, agent.WritablePaths)
+	if (len(agent.WritablePaths) > 0 || len(agent.ReadablePaths) > 0) && (agent.Runtime == runtime.ClaudeRuntime || agent.Runtime == runtime.KimiRuntime) {
+		reads, writes, env, err := produceRuntimeSandboxGrants(agent.Runtime, agent.ReadablePaths, agent.WritablePaths)
 		if err != nil {
 			return nil, err
 		}
-		runner = landlockProduceRunner(runner, paths, env)
+		runner = landlockProduceRunner(runner, reads, writes, env)
 	}
 	var adapter runtime.Adapter
 	switch agent.Runtime {

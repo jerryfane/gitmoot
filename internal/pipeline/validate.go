@@ -64,6 +64,7 @@ func (s *Spec) normalize() {
 		s.Stages[i].Timeout = strings.TrimSpace(s.Stages[i].Timeout)
 		s.Stages[i].Check = strings.TrimSpace(s.Stages[i].Check)
 		s.Stages[i].Writes = trimAll(s.Stages[i].Writes)
+		s.Stages[i].Reads = trimAll(s.Stages[i].Reads)
 		s.Stages[i].Needs = trimAll(s.Stages[i].Needs)
 		s.Stages[i].EnvKeys = trimAll(s.Stages[i].EnvKeys)
 		s.Stages[i].SuccessDecisions = trimAll(s.Stages[i].SuccessDecisions)
@@ -563,6 +564,14 @@ func validateProduceStage(pipelineName string, stage Stage) error {
 			return fmt.Errorf("pipeline %q stage %q writes path %q must be cleaned (use %q)", pipelineName, stage.ID, path, filepath.Clean(path))
 		}
 	}
+	for _, path := range stage.Reads {
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("pipeline %q stage %q reads path %q must be absolute", pipelineName, stage.ID, path)
+		}
+		if filepath.Clean(path) != path {
+			return fmt.Errorf("pipeline %q stage %q reads path %q must be cleaned (use %q)", pipelineName, stage.ID, path, filepath.Clean(path))
+		}
+	}
 	if stage.CheckRetries != nil {
 		if *stage.CheckRetries < 0 {
 			return fmt.Errorf("pipeline %q stage %q check_retries must be >= 0", pipelineName, stage.ID)
@@ -635,6 +644,9 @@ func (s Spec) validateMutatingStage(stage Stage) error {
 	if !isProduce {
 		if len(stage.Writes) > 0 {
 			return fmt.Errorf("pipeline %q stage %q sets writes but is not an action: produce stage", s.Name, stage.ID)
+		}
+		if len(stage.Reads) > 0 {
+			return fmt.Errorf("pipeline %q stage %q sets reads but is not an action: produce stage", s.Name, stage.ID)
 		}
 		if stage.Network {
 			return fmt.Errorf("pipeline %q stage %q sets network: true but is not an action: produce stage", s.Name, stage.ID)

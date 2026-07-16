@@ -2805,6 +2805,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `stages[].action`           | stage        | no       | `ask` (default), `review`, `implement`, or `produce`. Produce writes operator-owned data but never the repo or a PR. |
 | `stages[].write`            | stage        | cond.    | Required acknowledgement for both mutating actions: `implement` and `produce`; rejected elsewhere. |
 | `stages[].writes`           | stage        | cond.    | Required non-empty list for `produce`. Paths must be absolute and cleaned. At add time symlinks are resolved and overlap with `/`, the Gitmoot home, or any managed checkout is rejected in either direction. Rejected elsewhere. |
+| `stages[].reads`            | stage        | no       | Produce-only read-only input directories. Paths must be absolute and cleaned; `/`, Gitmoot state, the configured keychain, the pipeline `env_file`, and read roots that contain a declared write root are rejected after symlink resolution. |
 | `stages[].network`          | stage        | no       | Produce-only opt-in to Codex workspace-write network access. Default `false`. |
 | `stages[].check`            | stage        | no       | Produce-only trusted operator command run with `sh -c` after a valid result, in the stage cwd with the daemon environment. |
 | `stages[].check_retries`    | stage        | no       | Produce-only count of same-session correction turns after a non-zero `check` (`>= 0`, default `0`). |
@@ -2815,7 +2816,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `stages[].needs`            | stage        | no       | Ids of sibling stages that must **succeed** before this stage is enqueued. Must reference known stages, never the stage itself, and form no cycle. |
 | `stages[].timeout`          | stage        | no       | Per-stage job timeout (positive Go duration). |
 | `stages[].retry`            | stage        | no       | How many times a **failed** stage may be re-attempted (`>= 0`, default `0`). |
-| `stages[].env_keys`         | stage        | no       | Exact names or globs (for example `REDDIT_*`) selected from the pipeline's `env_file`, granted shared registry keys, or inline `env`. Shell stages only; no entry means no key access. |
+| `stages[].env_keys`         | stage        | no       | Exact names or globs (for example `REDDIT_*`) selected from the pipeline's `env_file`, granted shared registry keys, or inline `env`. Shell stages only; no entry means no injected values. |
 | `stages[].success_decisions`| stage        | no       | Per-stage override of the pipeline default. |
 
 `gitmoot pipeline add` validates the whole spec **at add time** — unknown keys, a
@@ -2841,9 +2842,6 @@ keys must be registered and granted separately:
 gitmoot key path # edit this 0600 file; the CLI never accepts values
 gitmoot key add REDDIT_CLIENT_SECRET --mode injected
 gitmoot key grant REDDIT_CLIENT_SECRET --pipeline trend-scout
-gitmoot key add PARTNER_API_TOKEN --mode proxied
-gitmoot key configure PARTNER_API_TOKEN --upstream https://api.partner.example/v1 --auth bearer
-gitmoot key grant PARTNER_API_TOKEN --pipeline trend-scout
 ```
 
 ```yaml
@@ -2878,21 +2876,8 @@ same rows. Delivery rechecks every shared grant and its registry mode; revoking
 after enqueue fails the stage rather than switching to another source. Inline
 `env` is stored in the pipeline spec and is therefore for non-secrets only. An
 injected key is visible to its shell process; this is scoping and audit, not a
-vault.
-
-A configured `proxied` shared key instead gives the shell a per-job placeholder
-in `<KEY>` and a loopback endpoint in `GITMOOT_PROXY_<KEY>_URL`. The endpoint is
-pinned to the configured HTTPS origin and normalized base path. Gitmoot places
-the real credential as either bearer auth or an approved custom header, rereads
-the keychain and rechecks the grant on every request, and revokes the lease when
-delivery ends. Rotation therefore applies to the next request; revocation
-returns `401` without contacting the upstream. Agent and gate stages remain
-ineligible, and the Claude model gateway remains independent.
-
-Proxied mode hides key bytes; it does **not** prevent an authorized child from
-exercising the credential on the pinned upstream. Curated upstreams and base
-paths are part of the model. Configure only trusted upstreams because an
-upstream can observe and potentially reflect the credential.
+vault. `proxied` registry mode is stored for future gateway composition but is
+refused for pipeline grants. The Claude model gateway remains independent.
 
 On `pipeline add --enable`, Gitmoot publishes the owned flow. An unavailable
 Activepieces instance leaves a pending binding; run
@@ -2985,7 +2970,7 @@ are four agent-stage kinds, all sharing the mechanics in this section:
 | ---- | ----------- | ------------ |
 | **ask** / **review** (#757) | `agent` + `action: ask\|review` | Read-only leaf: looks + decides, never mutates. |
 | **implement** (#768) | `agent` + `action: implement` + `write: true` | Mutates the repo + opens a PR (fold-on-PR-opened). See [Implement stages](#implement-stages). |
-| **produce** (#814/#825) | `agent` + `action: produce` + `write: true` + `writes:` | Sandboxed data writer: Codex everywhere it is supported, plus Claude/Kimi on Landlock-capable Linux; never creates a branch, task, commit, or PR. |
+| **produce** (#814/#825) | `agent` + `action: produce` + `write: true` + `writes:` (+ optional `reads:`) | Sandboxed data writer: Codex everywhere it is supported, plus Claude/Kimi on Landlock-capable Linux; never creates a branch, task, commit, or PR. |
 | **orchestrate** (#758) | `agent` + `orchestrate: true` | Sub-tree coordinator: fans out owned children, waits for the tree, folds the synthesis. See [Orchestrate stages](#orchestrate-stages). |
 | **gate** (#768) | `gate:` (no `agent`) | Jobless waiter: folds when an external predicate holds (e.g. a PR merges). See [Gate stages](#gate-stages). |
 
@@ -3059,6 +3044,8 @@ must advertise the `produce` capability and use a `workspace-write` or
     agent: dataset-writer
     action: produce
     write: true
+    reads:
+      - /srv/datasets/source
     writes:
       - /srv/datasets/nightly
     network: true
@@ -3067,18 +3054,27 @@ must advertise the `produce` capability and use a `workspace-write` or
     prompt: Reconcile and atomically replace tonight's dataset export.
 ```
 
-Each declared path becomes an additive runtime `--add-dir` grant. For Claude/Kimi,
-that polite CLI hint is backed by the kernel-enforced Landlock allowlist: writes are
-limited to the declared directories, the disposable workdir, `/tmp`/`$TMPDIR`, the
-runtime's own state, and the standard `/dev` files needed by CLI children; reads and
-execution remain broadly available for runtime auth/config. Runtime state is writable
+`writes:` is the required output allowlist. Optional `reads:` entries expose absolute
+input directories without granting write access. Read paths must be cleaned; Gitmoot
+resolves symlinks and rejects `/`, its own home, the configured keychain path, the
+pipeline's `env_file`, and a read root that equals or contains a declared write root.
+The worker repeats those checks immediately before delivery. Declared directories
+must exist when delivery begins.
+
+For Claude/Kimi, both lists become runtime `--add-dir` visibility hints, while the
+kernel-enforced Landlock rules distinguish them: `reads:` receives `RODirs` only and
+`writes:` receives `RWDirs`. When `reads:` is present, unrelated host data is no
+longer broadly readable; the runtime retains only fixed system/executable roots,
+its state, the disposable workdir, temp space, writes, and the declared inputs.
+Without `reads:`, the pre-existing broadly-readable/write-confined policy is
+preserved. Runtime state is writable
 by design: Claude receives `$HOME/.claude` plus its empirically used
 `$XDG_CACHE_HOME/claude-cli-nodejs` cache (and Gitmoot sets
 `CLAUDE_CONFIG_DIR=$HOME/.claude`); Kimi receives `$HOME/.kimi-code`. Apart from
-those runtime-owned locations and device nodes, the declared data paths, disposable
-workdir, and temp roots are the only writable filesystem locations. Declared
-directories must exist when delivery begins. Codex stays exactly as before: its own
-workspace-write defaults remain
+those runtime-owned locations and device nodes, the declared write paths, disposable
+workdir, and temp roots are the only writable filesystem locations. Codex stays
+exactly as before: its native sandbox supplies read access, and Gitmoot never turns
+`reads:` into Codex's writable `--add-dir`; its workspace-write defaults remain
 writable, and danger-full-access receives no add-dir/network arguments. A produce
 stage runs from a disposable detached worktree so accidental repo writes land in
 throwaway state; its request never carries branch/task/PR fields and Gitmoot never
@@ -3088,7 +3084,9 @@ checkout.
 
 Landlock governs filesystem access only in this feature. It does **not** implement
 the stage's network policy; network behavior remains whatever the selected runtime
-and its CLI policy enforce.
+and its CLI policy enforce. There is no advisory fallback for Claude/Kimi: if
+Landlock is unavailable, produce dispatch is refused. Codex continues to use its
+native sandbox.
 
 The worker repeats the same symlink resolution and protected-root containment check
 immediately before delivery. If a path was retargeted after `pipeline add`, the job
@@ -9464,7 +9462,6 @@ defaulting to `<base-home>/.config/gitmoot/keychain.env` (override with
 ```sh
 gitmoot key path [--json]
 gitmoot key add <NAME> --mode injected|proxied [--json]
-gitmoot key configure <NAME> --upstream <https-url> --auth bearer|header:<HeaderName> [--json]
 gitmoot key list [--json]
 gitmoot key show <NAME> [--json]
 gitmoot key grant <NAME> --pipeline <pipeline> [--json]
@@ -9473,9 +9470,9 @@ gitmoot key rm <NAME> [--force] [--json]
 ```
 
 There is deliberately no value flag, stdin value, or value-derived hash.
-`proxied` keys must be configured with a pinned HTTPS origin/base path and
-bearer or approved custom-header placement before they can be granted.
-`rm --force` removes metadata and grants but leaves the file entry untouched.
+`proxied` metadata is reserved for future gateway composition and cannot be
+granted to a pipeline. `rm --force` removes metadata and grants but leaves the
+file entry untouched.
 
 Runtime-child environment curation is off by default. Enable it in
 `config.toml`:
@@ -12117,27 +12114,19 @@ with `env_keys`. Source files must be absolute, operator-owned regular files
 with mode exactly `0600`, outside the Gitmoot home and every managed checkout;
 inline `env` is for non-secret defaults. Agent/gate stages cannot set
 `env_keys`; a shell stage with no list gets nothing. Resolution is own
-`env_file`, then a shared `injected` or configured `proxied` key granted with
-`gitmoot key grant`, then inline default. Registered but ungranted names do not
-match exact or glob selectors. Structural errors always fail add; unresolved
-names warn only while the pipeline remains disabled, then hard-fail
-add-with-enable, enable, manual run, and scheduled/triggered preflight.
+`env_file`, then a shared `injected` key granted with `gitmoot key grant`, then
+inline default. Registered but ungranted names do not match exact or glob
+selectors. Structural errors always fail add; unresolved names warn only while
+the pipeline remains disabled, then hard-fail add-with-enable, enable, manual
+run, and scheduled/triggered preflight.
 
 Sources are revalidated and reread at delivery, so rotation applies without a
 daemon restart. Each payload audits `PipelineName` and names-only
 `PipelineKeyAccess` rows `{stage,name,source,mode}`; `pipeline show --json`
 exposes the same projection. A shared grant is rechecked immediately before
 delivery: revocation fails closed and never switches to another source. Gitmoot
-internal `GITMOOT_*` entries remain final. Injected mode exposes the value to
-that shell process. Proxied mode puts a per-job placeholder in `<KEY>` and a
-loopback endpoint in `GITMOOT_PROXY_<KEY>_URL`; every request rereads the value,
-rechecks the grant, and is constrained to the configured upstream/base path.
-The lease is revoked when delivery ends.
-
-Proxied mode hides key bytes; it does **not** prevent an authorized child from
-exercising the credential on the pinned upstream. Curated upstreams and base
-paths are part of the model. Configure only trusted upstreams. Pipeline key
-delivery stays separate from the Claude model gateway.
+internal `GITMOOT_*` entries remain final. This injected mode exposes the value
+to that shell process and stays separate from the Claude model gateway.
 
 For a non-empty run payload, every agent stage (including roots) receives a
 dynamically fenced, 6000-byte-bounded `UNTRUSTED external data` block before
@@ -13767,16 +13756,21 @@ runtime (claude / codex). Four kinds:
   settle immediately without promising a PR. The implement job never merges. Scheduled
   pipelines also need pipeline-level `allow_scheduled_writes: true`.
 - **produce** (#814) — `action: produce` + `write: true` + absolute cleaned
-  `writes:`. Codex uses its native sandbox; Claude/modern Kimi are supported when
+  `writes:` and optional absolute cleaned read-only `reads:` inputs. Codex uses
+  its native sandbox; Gitmoot never turns a read path into Codex's writable
+  `--add-dir`. Claude/modern Kimi are supported when
   `gitmoot sandbox probe` confirms strict Landlock enforcement. Unsupported hosts
-  retain the Codex-only refusal. Never branch/task/PR state. Optional
+  retain the Codex-only refusal; there is no advisory fallback. Never
+  branch/task/PR state. Optional
   `network: true`, `check`, and bounded same-session `check_retries`. Declared paths
   are additive grants (workdir, `/tmp`, and `$TMPDIR` remain writable). Runtime-owned
   state is writable by design: `$HOME/.claude` plus
   `$XDG_CACHE_HOME/claude-cli-nodejs` for Claude and `$HOME/.kimi-code` for Kimi;
-  apart from that state/cache and device nodes, only declared paths, workdir, and temp
-  roots are writable. Protected Gitmoot/checkouts are rejected after symlink
-  resolution at add and delivery time, Landlock governs filesystem writes rather than network access,
+  apart from that state/cache and device nodes, only `writes:`, workdir, and temp
+  roots are writable. When `reads:` is declared, Landlock gives those paths
+  read-only access and denies unrelated host data. Gitmoot home, keychain, pipeline
+  `env_file`, and read roots containing a write root are rejected after symlink
+  resolution at add and delivery time. Landlock governs filesystem access rather than network access,
   retries must be
   idempotent, and Gitmoot never cleans operator-owned data directories.
 - **orchestrate** (#758) — `orchestrate: true`. Sub-tree **coordinator** (the one
@@ -14272,20 +14266,26 @@ in a stage command or inline `env`. Use an operator-owned `0600` pipeline
 grant it to the pipeline, then select it with the shell stage's `env_keys`
 allowlist.
 
-Pipeline key access is deny-by-default. An `injected` selection gives the shell
-the real value, which it can print or transmit. A configured `proxied` shared
-selection instead gives it a per-job placeholder and loopback URL; Gitmoot
-rereads the value and rechecks the grant on every request, pins forwarding to
-the configured HTTPS origin/base path, and revokes the lease when delivery
-ends. Gitmoot stores only `{stage,name,source,mode}` audit rows, never values or
-hashes. Keychain and pipeline files are revalidated as owner-only `0600` files
-outside Gitmoot state and managed checkouts.
+Produce agent stages have a separate filesystem allowlist. `writes:` grants
+read/write output directories. Optional `reads:` grants external input directories
+read-only: Claude/Kimi receive a cooperative runtime visibility hint, but Landlock
+is the enforcement boundary and installs those paths with read rights only. Gitmoot
+refuses read roots that expose its home, the configured keychain, or the pipeline
+`env_file`, and refuses a read root that contains a write root. Unsupported
+Claude/Kimi hosts fail closed instead of falling back to advisory confinement;
+Codex uses its native sandbox, and read paths are never passed as writable
+`--add-dir` grants.
 
-Proxied mode hides key bytes; it does **not** prevent an authorized child from
-exercising the credential on the pinned upstream. Curated upstreams and base
-paths are part of the model, and only trusted upstreams should be configured.
-Agent and gate stages remain ineligible. This generic pipeline proxy is distinct
-from the Claude model gateway.
+Pipeline injection is deny-by-default but deliberately **opaque**: only a shell
+stage's selected own or granted shared `env_keys` are injected, yet that process
+receives the real values and can print or transmit them. Gitmoot stores only
+`{stage,name,source,mode}` audit rows, never values or hashes. Keychain and
+pipeline files are revalidated as owner-only `0600` files outside Gitmoot state
+and managed checkouts. A shared grant is rechecked at delivery, so revocation
+fails closed without source fallback. `proxied` registry entries cannot be
+granted to pipelines in this phase. This is distinct from the Claude model
+gateway, where the child receives a placeholder and the real model credential
+stays daemon-side.
 
 ## External Contracts
 

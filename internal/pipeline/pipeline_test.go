@@ -698,6 +698,7 @@ stages:
     prompt: Write the export.
     write: true
     writes: [/var/lib/example-data]
+    reads: [" /var/lib/example-input "]
     network: true
     check: test -s /var/lib/example-data/out.json
     check_retries: 2
@@ -706,7 +707,7 @@ stages:
 	if err != nil {
 		t.Fatalf("Load valid produce stage: %v", err)
 	}
-	if loaded.Stages[0].Kind() != StageKindAgentProduce || loaded.Stages[0].CheckRetries == nil || *loaded.Stages[0].CheckRetries != 2 {
+	if loaded.Stages[0].Kind() != StageKindAgentProduce || len(loaded.Stages[0].Reads) != 1 || loaded.Stages[0].Reads[0] != "/var/lib/example-input" || loaded.Stages[0].CheckRetries == nil || *loaded.Stages[0].CheckRetries != 2 {
 		t.Fatalf("produce stage did not round-trip: %+v", loaded.Stages[0])
 	}
 
@@ -720,6 +721,9 @@ stages:
 		{"absolute writes", "name: p\nstages:\n- {id: a, agent: w, action: produce, prompt: x, write: true, writes: [data]}\n", "must be absolute"},
 		{"clean writes", "name: p\nstages:\n- {id: a, agent: w, action: produce, prompt: x, write: true, writes: [/data/../out]}\n", "must be cleaned"},
 		{"writes elsewhere", "name: p\nstages:\n- {id: a, cmd: echo, writes: [/data]}\n", "sets writes"},
+		{"absolute reads", "name: p\nstages:\n- {id: a, agent: w, action: produce, prompt: x, write: true, writes: [/out], reads: [data]}\n", "reads path \"data\" must be absolute"},
+		{"clean reads", "name: p\nstages:\n- {id: a, agent: w, action: produce, prompt: x, write: true, writes: [/out], reads: [/data/../input]}\n", "reads path \"/data/../input\" must be cleaned"},
+		{"reads elsewhere", "name: p\nstages:\n- {id: a, cmd: echo, reads: [/data]}\n", "sets reads"},
 		{"network elsewhere", "name: p\nstages:\n- {id: a, agent: w, prompt: x, network: true}\n", "sets network: true"},
 		{"check elsewhere", "name: p\nstages:\n- {id: a, agent: w, prompt: x, check: true}\n", "sets check"},
 		{"check retries elsewhere", "name: p\nstages:\n- {id: a, agent: w, prompt: x, check_retries: 0}\n", "sets check_retries"},

@@ -352,16 +352,20 @@ func addPipelineCore(ctx context.Context, store *db.Store, spec pipeline.Spec, r
 	return finalEnabled, nil
 }
 
-// validatePipelineProducePaths resolves every declared produce write target at
-// add time and rejects overlap in either direction with Gitmoot-owned state or a
-// managed checkout. Symlink resolution is applied to the deepest existing
-// ancestor so a not-yet-created final directory is still checked safely.
+// validatePipelineProducePaths resolves every declared produce filesystem grant
+// at add time. Writes reject Gitmoot/checkouts; reads reject Gitmoot and secret
+// sources, then reject grants that would subsume an existing write root.
 func validatePipelineProducePaths(ctx context.Context, store *db.Store, homeFlag string, spec pipeline.Spec) error {
 	for _, stage := range spec.Stages {
 		if stage.Kind() != pipeline.StageKindAgentProduce {
 			continue
 		}
-		if _, err := canonicalizePipelineProducePaths(ctx, store, homeFlag, fmt.Sprintf("stage %q", stage.ID), stage.Writes); err != nil {
+		subject := fmt.Sprintf("stage %q", stage.ID)
+		writes, err := canonicalizePipelineProducePaths(ctx, store, homeFlag, subject, stage.Writes)
+		if err != nil {
+			return err
+		}
+		if _, err := canonicalizePipelineProduceReadPaths(ctx, store, homeFlag, subject, stage.Reads, writes, spec.EnvFile); err != nil {
 			return err
 		}
 	}
@@ -478,6 +482,69 @@ func canonicalizePipelineProducePaths(ctx context.Context, store *db.Store, home
 	return resolvedWrites, nil
 }
 
+// canonicalizePipelineProduceReadPaths is the read-only counterpart to the
+// write checker. It resolves symlinks at both add and delivery time, prevents a
+// broad read grant from exposing Gitmoot state or declared credential files,
+// and rejects a read root that would contain an already-readable write root.
+func canonicalizePipelineProduceReadPaths(ctx context.Context, store *db.Store, homeFlag, subject string, reads, resolvedWrites []string, envFile string) ([]string, error) {
+	if len(reads) == 0 {
+		return nil, nil
+	}
+	if store == nil {
+		return nil, errors.New("produce read path validation requires a store")
+	}
+	paths, err := pathsFromFlag(homeFlag)
+	if err != nil {
+		return nil, err
+	}
+	gitmootHome, err := resolveProduceSafetyPath(paths.Home)
+	if err != nil {
+		return nil, fmt.Errorf("resolve gitmoot home: %w", err)
+	}
+	keychainPath, err := resolveKeychainPath(store, homeFlag)
+	if err != nil {
+		return nil, err
+	}
+	keychainPath, err = resolveProduceSafetyPath(keychainPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve configured keychain_path: %w", err)
+	}
+	resolvedEnvFile := ""
+	if strings.TrimSpace(envFile) != "" {
+		resolvedEnvFile, err = resolveProduceSafetyPath(envFile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve pipeline env_file: %w", err)
+		}
+	}
+
+	resolvedReads := make([]string, 0, len(reads))
+	for _, declared := range reads {
+		resolved, err := resolveProduceSafetyPath(declared)
+		if err != nil {
+			return nil, fmt.Errorf("%s reads path %q: %w", subject, declared, err)
+		}
+		if resolved == string(filepath.Separator) {
+			return nil, fmt.Errorf("%s reads path resolves to filesystem root, which is not allowed", subject)
+		}
+		if pathsOverlap(resolved, gitmootHome) {
+			return nil, fmt.Errorf("%s reads path overlaps the Gitmoot home", subject)
+		}
+		if pathsOverlap(resolved, keychainPath) {
+			return nil, fmt.Errorf("%s reads path overlaps the configured keychain_path", subject)
+		}
+		if resolvedEnvFile != "" && pathsOverlap(resolved, resolvedEnvFile) {
+			return nil, fmt.Errorf("%s reads path overlaps the pipeline env_file", subject)
+		}
+		for _, writePath := range resolvedWrites {
+			if pathWithin(writePath, resolved) {
+				return nil, fmt.Errorf("%s reads path equals or contains a declared writes path", subject)
+			}
+		}
+		resolvedReads = append(resolvedReads, resolved)
+	}
+	return resolvedReads, nil
+}
+
 func resolveProduceSafetyPath(path string) (string, error) {
 	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
@@ -547,6 +614,7 @@ type pipelineStageJSON struct {
 	SuccessDecisions []string `json:"success_decisions,omitempty"`
 	Write            bool     `json:"write,omitempty"`
 	Writes           []string `json:"writes,omitempty"`
+	Reads            []string `json:"reads,omitempty"`
 	Network          bool     `json:"network,omitempty"`
 	Check            string   `json:"check,omitempty"`
 	CheckRetries     *int     `json:"check_retries,omitempty"`
@@ -920,6 +988,7 @@ func pipelineToJSON(record db.Pipeline, withStages bool, agents map[string]db.Ag
 					SuccessDecisions: stage.SuccessDecisions,
 					Write:            stage.Write,
 					Writes:           stage.Writes,
+					Reads:            stage.Reads,
 					Network:          stage.Network,
 					Check:            stage.Check,
 					CheckRetries:     stage.CheckRetries,

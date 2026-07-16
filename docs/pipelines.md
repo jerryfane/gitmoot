@@ -92,6 +92,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `stages[].action`           | stage        | no       | `ask` (default), `review`, `implement`, or `produce`. Produce writes operator-owned data but never the repo or a PR. |
 | `stages[].write`            | stage        | cond.    | Required acknowledgement for both mutating actions: `implement` and `produce`; rejected elsewhere. |
 | `stages[].writes`           | stage        | cond.    | Required non-empty list for `produce`. Paths must be absolute and cleaned. At add time symlinks are resolved and overlap with `/`, the Gitmoot home, or any managed checkout is rejected in either direction. Rejected elsewhere. |
+| `stages[].reads`            | stage        | no       | Produce-only read-only input directories. Paths must be absolute and cleaned; `/`, Gitmoot state, the configured keychain, the pipeline `env_file`, and read roots that contain a declared write root are rejected after symlink resolution. |
 | `stages[].network`          | stage        | no       | Produce-only opt-in to Codex workspace-write network access. Default `false`. |
 | `stages[].check`            | stage        | no       | Produce-only trusted operator command run with `sh -c` after a valid result, in the stage cwd with the daemon environment. |
 | `stages[].check_retries`    | stage        | no       | Produce-only count of same-session correction turns after a non-zero `check` (`>= 0`, default `0`). |
@@ -272,7 +273,7 @@ are four agent-stage kinds, all sharing the mechanics in this section:
 | ---- | ----------- | ------------ |
 | **ask** / **review** (#757) | `agent` + `action: ask\|review` | Read-only leaf: looks + decides, never mutates. |
 | **implement** (#768) | `agent` + `action: implement` + `write: true` | Mutates the repo + opens a PR (fold-on-PR-opened). See [Implement stages](#implement-stages). |
-| **produce** (#814/#825) | `agent` + `action: produce` + `write: true` + `writes:` | Sandboxed data writer: Codex everywhere it is supported, plus Claude/Kimi on Landlock-capable Linux; never creates a branch, task, commit, or PR. |
+| **produce** (#814/#825) | `agent` + `action: produce` + `write: true` + `writes:` (+ optional `reads:`) | Sandboxed data writer: Codex everywhere it is supported, plus Claude/Kimi on Landlock-capable Linux; never creates a branch, task, commit, or PR. |
 | **orchestrate** (#758) | `agent` + `orchestrate: true` | Sub-tree coordinator: fans out owned children, waits for the tree, folds the synthesis. See [Orchestrate stages](#orchestrate-stages). |
 | **gate** (#768) | `gate:` (no `agent`) | Jobless waiter: folds when an external predicate holds (e.g. a PR merges). See [Gate stages](#gate-stages). |
 
@@ -346,6 +347,8 @@ must advertise the `produce` capability and use a `workspace-write` or
     agent: dataset-writer
     action: produce
     write: true
+    reads:
+      - /srv/datasets/source
     writes:
       - /srv/datasets/nightly
     network: true
@@ -354,18 +357,27 @@ must advertise the `produce` capability and use a `workspace-write` or
     prompt: Reconcile and atomically replace tonight's dataset export.
 ```
 
-Each declared path becomes an additive runtime `--add-dir` grant. For Claude/Kimi,
-that polite CLI hint is backed by the kernel-enforced Landlock allowlist: writes are
-limited to the declared directories, the disposable workdir, `/tmp`/`$TMPDIR`, the
-runtime's own state, and the standard `/dev` files needed by CLI children; reads and
-execution remain broadly available for runtime auth/config. Runtime state is writable
+`writes:` is the required output allowlist. Optional `reads:` entries expose absolute
+input directories without granting write access. Read paths must be cleaned; Gitmoot
+resolves symlinks and rejects `/`, its own home, the configured keychain path, the
+pipeline's `env_file`, and a read root that equals or contains a declared write root.
+The worker repeats those checks immediately before delivery. Declared directories
+must exist when delivery begins.
+
+For Claude/Kimi, both lists become runtime `--add-dir` visibility hints, while the
+kernel-enforced Landlock rules distinguish them: `reads:` receives `RODirs` only and
+`writes:` receives `RWDirs`. When `reads:` is present, unrelated host data is no
+longer broadly readable; the runtime retains only fixed system/executable roots,
+its state, the disposable workdir, temp space, writes, and the declared inputs.
+Without `reads:`, the pre-existing broadly-readable/write-confined policy is
+preserved. Runtime state is writable
 by design: Claude receives `$HOME/.claude` plus its empirically used
 `$XDG_CACHE_HOME/claude-cli-nodejs` cache (and Gitmoot sets
 `CLAUDE_CONFIG_DIR=$HOME/.claude`); Kimi receives `$HOME/.kimi-code`. Apart from
-those runtime-owned locations and device nodes, the declared data paths, disposable
-workdir, and temp roots are the only writable filesystem locations. Declared
-directories must exist when delivery begins. Codex stays exactly as before: its own
-workspace-write defaults remain
+those runtime-owned locations and device nodes, the declared write paths, disposable
+workdir, and temp roots are the only writable filesystem locations. Codex stays
+exactly as before: its native sandbox supplies read access, and Gitmoot never turns
+`reads:` into Codex's writable `--add-dir`; its workspace-write defaults remain
 writable, and danger-full-access receives no add-dir/network arguments. A produce
 stage runs from a disposable detached worktree so accidental repo writes land in
 throwaway state; its request never carries branch/task/PR fields and Gitmoot never
@@ -375,7 +387,9 @@ checkout.
 
 Landlock governs filesystem access only in this feature. It does **not** implement
 the stage's network policy; network behavior remains whatever the selected runtime
-and its CLI policy enforce.
+and its CLI policy enforce. There is no advisory fallback for Claude/Kimi: if
+Landlock is unavailable, produce dispatch is refused. Codex continues to use its
+native sandbox.
 
 The worker repeats the same symlink resolution and protected-root containment check
 immediately before delivery. If a path was retargeted after `pipeline add`, the job
