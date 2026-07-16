@@ -23,8 +23,8 @@ func TestWebDataSourceChangeCursor(t *testing.T) {
 			t.Fatalf("ChangeCursor = %q, want %q", got, want)
 		}
 	}
-	assertCursor("0.0.0")
-	assertCursor("0.0.0")
+	assertCursor("0.0.0.0")
+	assertCursor("0.0.0.0")
 
 	store, err := db.Open(config.PathsForHome(home).Database)
 	if err != nil {
@@ -37,7 +37,7 @@ func TestWebDataSourceChangeCursor(t *testing.T) {
 		t.Fatalf("CreateJobWithEvent: %v", err)
 	}
 	store.Close()
-	assertCursor("1.0.0")
+	assertCursor("1.0.0.0")
 
 	store, err = db.Open(config.PathsForHome(home).Database)
 	if err != nil {
@@ -48,7 +48,7 @@ func TestWebDataSourceChangeCursor(t *testing.T) {
 		t.Fatalf("InsertWorkflowNote: %v", err)
 	}
 	store.Close()
-	assertCursor("1.1.0")
+	assertCursor("1.1.0.0")
 
 	store, err = db.Open(config.PathsForHome(home).Database)
 	if err != nil {
@@ -63,6 +63,16 @@ func TestWebDataSourceChangeCursor(t *testing.T) {
 		t.Fatalf("AddTaskEvent: %v", err)
 	}
 	store.Close()
-	assertCursor("1.1.1")
-	assertCursor("1.1.1")
+	assertCursor("1.1.1.0")
+	store, err = db.Open(config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatalf("reopen for memory event: %v", err)
+	}
+	if _, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{Owner: db.MemoryOwner{Kind: "agent", Ref: "worker"}, Key: "cursor", Content: "memory cursor"}); err != nil {
+		store.Close()
+		t.Fatalf("UpsertConfirmedMemory: %v", err)
+	}
+	store.Close()
+	assertCursor("1.1.1.1")
+	assertCursor("1.1.1.1")
 }

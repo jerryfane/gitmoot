@@ -1678,6 +1678,9 @@ gitmoot memory retire --provenance-prefix P [--agent NAME] [--dry-run] [--yes] [
 gitmoot memory promote --to-shared <id>... [--json]
 gitmoot memory links backfill [--dry-run] [--json]
 gitmoot memory links list <id> [--json]
+gitmoot memory log [--key K] [--agent A] [--repo R] [--kind k1,k2] [--since 168h] [--limit N] [--json]
+gitmoot memory log --id <memory-id> [--json]
+gitmoot memory log backfill [--dry-run] [--json]
 gitmoot memory groom --propose [--out PLAN.json] [--json]
 gitmoot memory groom --yes --plan PLAN.json [--json]
 gitmoot memory groom --split [--dry-run] [--json]
@@ -1806,6 +1809,11 @@ order; `--dry-run` reports what would be created, and repeat runs create nothing
 new. `memory links list <id>` shows one fact's outgoing persisted links. Vault
 export merges these persisted links with content-derived links and dedupes by
 target in each note's `## Links` section.
+
+`memory log` is the append-only brain changelog. Its filtered feed is
+newest-first; `--id` returns one fact's complete biography oldest-first.
+`memory log backfill` idempotently synthesizes historical creation, retirement,
+and supersession receipts, with `--dry-run` available before writing.
 
 `memory groom --split [--dry-run]` automatically partitions qualifying bricks at
 deterministic byte-offset story seams into exact-substring children. List items,

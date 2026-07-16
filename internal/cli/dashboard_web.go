@@ -88,6 +88,7 @@ func newDashboardWebHandler(ds *webDataSource) http.Handler {
 	// status change busts the cache.
 	mux.HandleFunc("GET /api/workflows", ds.handleWorkflows)
 	mux.HandleFunc("GET /api/learning/knowledge", ds.handleLearningKnowledge)
+	mux.HandleFunc("GET /api/brain/events", ds.handleBrainEvents)
 	// #958 single-label detail widening (no module cache policy for this route).
 	mux.HandleFunc("GET /api/workflow/{label}", ds.handleWorkflowAPI)
 	mux.Handle("/", dashboard.Serve(ds))

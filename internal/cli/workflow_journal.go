@@ -551,10 +551,14 @@ func autoConfirmWorkflowObservationIfEnabled(ctx context.Context, store *db.Stor
 	if !enabled || !autoConfirmEligibleProvenance(obs.Provenance) {
 		return false, false, nil
 	}
+	actor := strings.TrimSpace(obs.SourceJob)
+	if actor == "" {
+		actor = "cli:workflow-note"
+	}
 	id, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
 		Owner: obs.Owner, AuthorRef: obs.AuthorRef, Repo: obs.Repo, Scope: obs.Scope,
 		Key: obs.Key, Content: obs.Content, Provenance: obs.Provenance,
-	}, db.PreserveSupersededEdition())
+	}, db.PreserveSupersededEdition(), db.WithConfirmedMemoryEvent(db.MemoryEventIngested, actor))
 	if err != nil {
 		if errors.Is(err, db.ErrConfirmedMemoryRetired) {
 			return false, true, nil

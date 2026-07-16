@@ -11437,6 +11437,9 @@ gitmoot memory vault export [--out DIR] [--agent NAME] [--force] [--json]
 gitmoot memory vault import <DIR> [--dry-run|--yes] [--json]
 gitmoot memory links backfill [--dry-run] [--json]
 gitmoot memory links list <id> [--json]
+gitmoot memory log [--key K] [--agent A] [--repo R] [--kind k1,k2] [--since 168h] [--limit N] [--json]
+gitmoot memory log --id <memory-id> [--json]
+gitmoot memory log backfill [--dry-run] [--json]
 ```
 
 `memory list` shows confirmed memories and/or pending observations. `memory
@@ -11672,6 +11675,15 @@ active confirmed pool in id order; `--dry-run` reports the links it would create
 without writing, and repeat runs are idempotent. `memory links list <id>` shows one fact's
 persisted outgoing links. Vault export merges these persisted links with the
 content-derived links in each note's `## Links` section and dedupes by target.
+
+`memory log` reads the append-only SQLite brain changelog. The default feed is
+newest-first and bounded to 50 events; key, agent, repository, kind, and duration
+filters answer operational questions such as “what changed this week.”
+`memory log --id <memory-id>` returns that fact's complete biography oldest-first.
+`memory log backfill` synthesizes historical `created`, `retired`, and
+`superseded` receipts from existing tombstones; `--dry-run` previews the work and
+repeat runs do not duplicate events. Edit details retain the previous content
+inline up to 2 KiB, then use a SHA-256 hash and 300-character preview.
 
 > **Trust boundary.** Ingested Markdown is untrusted input — an
 > **indirect-prompt-injection vector**. Ingest records `trust_mark = low` on every

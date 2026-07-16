@@ -293,6 +293,10 @@ func autoConfirmObservationIfEnabled(ctx context.Context, store *db.Store, obs d
 		return false, false, fmt.Errorf("authoring agent is required")
 	}
 	owner := db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: author}
+	actor := strings.TrimSpace(obs.SourceJob)
+	if actor == "" {
+		actor = "cli:memory-ingest"
+	}
 	// Auto-confirm is an AUTOMATED writer, so a key-matched in-place update
 	// archives the prior edition as a superseded row first (#804): a bad or
 	// poisoned note edit can never silently destroy the last edition. Manual
@@ -305,7 +309,7 @@ func autoConfirmObservationIfEnabled(ctx context.Context, store *db.Store, obs d
 		Content:    obs.Content,
 		Provenance: obs.Provenance,
 		SourceJob:  obs.SourceJob,
-	}, db.PreserveSupersededEdition())
+	}, db.PreserveSupersededEdition(), db.WithConfirmedMemoryEvent(db.MemoryEventIngested, actor))
 	if err != nil {
 		if errors.Is(err, db.ErrConfirmedMemoryRetired) {
 			return false, true, nil
@@ -656,6 +660,10 @@ func runMemoryConfirm(args []string, stdout, stderr io.Writer) int {
 			if *toShared {
 				owner = db.MemoryOwner{Kind: memory.OwnerKindShared, Ref: memory.SharedOwnerRef}
 			}
+			actor := strings.TrimSpace(obs.SourceJob)
+			if actor == "" {
+				actor = "cli:memory-confirm"
+			}
 			// Manual `memory confirm --yes` is an explicit human intervention, so it
 			// preserves the pre-existing behavior that can revive a retired keyed row.
 			// Automated collectors and ingest auto-confirm do not pass this option.
@@ -668,7 +676,7 @@ func runMemoryConfirm(args []string, stdout, stderr io.Writer) int {
 				Content:    obs.Content,
 				Provenance: obs.Provenance,
 				SourceJob:  obs.SourceJob,
-			}, db.AllowResurrectConfirmedMemory())
+			}, db.AllowResurrectConfirmedMemory(), db.WithConfirmedMemoryEvent(db.MemoryEventConfirmed, actor))
 			if err != nil {
 				return fmt.Errorf("confirm observation %d: %w", obs.ID, err)
 			}

@@ -305,6 +305,9 @@ gitmoot memory retire --provenance-prefix P [--agent NAME] [--dry-run] [--yes] [
 gitmoot memory promote --to-shared <id>... [--json]
 gitmoot memory links backfill [--dry-run] [--json]
 gitmoot memory links list <id> [--json]
+gitmoot memory log [--key K] [--agent A] [--repo R] [--kind k1,k2] [--since 168h] [--limit N] [--json]
+gitmoot memory log --id <memory-id> [--json]
+gitmoot memory log backfill [--dry-run] [--json]
 ```
 
 `memory ingest` walks `*.md`, strips a leading YAML frontmatter block when
@@ -415,6 +418,19 @@ would be created, and repeat runs create nothing new. `memory links list <id>`
 inspects a fact's persisted outgoing links. Vault export merges persisted links
 with content-derived links in each note's `## Links` section and removes
 duplicates by target.
+
+### Brain changelog
+
+Every confirmed-memory mutation writes an append-only event in the same SQLite
+transaction as the fact change. `gitmoot memory log` shows the newest events and
+filters by key, agent, repository, kind, or age. Use `memory log --id ID` for one
+fact's oldest-first biography. Updates retain the previous content inline up to
+2 KiB, then switch to a SHA-256 hash and 300-character preview; retirements retain
+their reason, and split, promotion, and cluster operations retain compact JSON
+details. `memory log backfill` synthesizes historical creation, retirement, and
+supersession receipts from existing tombstones; it is idempotent and supports
+`--dry-run`. The dashboard server exposes the same chronology at
+`GET /api/brain/events?cursor=ID&limit=N`.
 
 :::warning Ingested Markdown is untrusted
 Ingested Markdown is an **indirect-prompt-injection vector**. Ingest stamps

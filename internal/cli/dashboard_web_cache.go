@@ -274,9 +274,11 @@ func (d *webDataSource) taskEventCursor(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, remainder, _ := strings.Cut(cursor, ".")
-	_, taskEventID, _ := strings.Cut(remainder, ".")
-	return taskEventID, nil
+	parts := strings.Split(cursor, ".")
+	if len(parts) < 3 {
+		return "0", nil
+	}
+	return parts[2], nil
 }
 
 func (d *webDataSource) workflowEventCursor(ctx context.Context) (string, error) {
@@ -284,9 +286,11 @@ func (d *webDataSource) workflowEventCursor(ctx context.Context) (string, error)
 	if err != nil {
 		return "", err
 	}
-	jobEventID, remainder, _ := strings.Cut(cursor, ".")
-	workflowNoteID, _, _ := strings.Cut(remainder, ".")
-	return jobEventID + "." + workflowNoteID, nil
+	parts := strings.Split(cursor, ".")
+	if len(parts) < 2 {
+		return "0.0", nil
+	}
+	return parts[0] + "." + parts[1], nil
 }
 
 func (d *webDataSource) fullDashboardCursor(ctx context.Context) (string, error) {

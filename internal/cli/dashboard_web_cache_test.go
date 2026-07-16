@@ -66,7 +66,7 @@ func TestDashboardCacheCursorSelection(t *testing.T) {
 			}
 		}
 	}
-	assertCursors("0", "0", "0.0", "0.0.0")
+	assertCursors("0", "0", "0.0", "0.0.0.0")
 
 	store, err := db.Open(config.PathsForHome(home).Database)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestDashboardCacheCursorSelection(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertCursors("1", "1", "1.1", "1.1.1")
+	assertCursors("1", "1", "1.1", "1.1.1.0")
 }
 
 func TestDashboardCacheCursorFloorAndHardMax(t *testing.T) {
