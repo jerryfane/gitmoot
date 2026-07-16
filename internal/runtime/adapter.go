@@ -91,6 +91,11 @@ type Agent struct {
 	// pipeline stage. Codex enforces them itself; Claude/Kimi receive matching
 	// --add-dir hints while Gitmoot's Landlock wrapper provides hard enforcement.
 	WritablePaths []string
+	// ReadablePaths are produce-only external inputs. Claude/Kimi receive
+	// cooperative --add-dir visibility while Landlock keeps these roots read-only;
+	// Codex's native workspace sandbox already permits filesystem reads and has no
+	// read-only --add-dir equivalent.
+	ReadablePaths []string
 	// ProduceNetwork opts that produce delivery into workspace-write network access.
 	ProduceNetwork bool
 }
@@ -1638,6 +1643,13 @@ func claudePermissionArgs(agent Agent) []string {
 	}
 	for _, path := range agent.WritablePaths {
 		if path = strings.TrimSpace(path); path != "" {
+			args = append(args, "--add-dir", path)
+		}
+	}
+	for _, path := range agent.ReadablePaths {
+		if path = strings.TrimSpace(path); path != "" {
+			// Claude's --add-dir is the Read-tool visibility gate. Landlock is
+			// the enforcement boundary that keeps this subset read-only.
 			args = append(args, "--add-dir", path)
 		}
 	}

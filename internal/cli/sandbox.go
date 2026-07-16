@@ -42,11 +42,11 @@ func runSandbox(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-type sandboxWriteFlags []string
+type sandboxPathFlags []string
 
-func (v *sandboxWriteFlags) String() string { return strings.Join(*v, ",") }
+func (v *sandboxPathFlags) String() string { return strings.Join(*v, ",") }
 
-func (v *sandboxWriteFlags) Set(value string) error {
+func (v *sandboxPathFlags) Set(value string) error {
 	if strings.TrimSpace(value) == "" {
 		return errors.New("value must not be empty")
 	}
@@ -59,7 +59,8 @@ func (v *sandboxWriteFlags) Set(value string) error {
 func runSandboxExec(args []string, _ io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sandbox-exec", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var writes sandboxWriteFlags
+	var reads, writes sandboxPathFlags
+	fs.Var(&reads, "read", "absolute directory readable by the sandbox (repeatable)")
 	fs.Var(&writes, "write", "absolute directory writable by the sandbox (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -72,7 +73,7 @@ func runSandboxExec(args []string, _ io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "sandbox-exec requires -- <command> [args...]")
 		return 2
 	}
-	if err := sandbox.Exec([]string(writes), argv); err != nil {
+	if err := sandbox.Exec([]string(reads), []string(writes), argv); err != nil {
 		fmt.Fprintf(stderr, "sandbox-exec: %v\n", err)
 		return 1
 	}

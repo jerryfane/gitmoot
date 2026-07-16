@@ -177,6 +177,16 @@ in a stage command or inline `env`. Use an operator-owned `0600` pipeline
 grant it to the pipeline, then select it with the shell stage's `env_keys`
 allowlist.
 
+Produce agent stages have a separate filesystem allowlist. `writes:` grants
+read/write output directories. Optional `reads:` grants external input directories
+read-only: Claude/Kimi receive a cooperative runtime visibility hint, but Landlock
+is the enforcement boundary and installs those paths with read rights only. Gitmoot
+refuses read roots that expose its home, the configured keychain, or the pipeline
+`env_file`, and refuses a read root that contains a write root. Unsupported
+Claude/Kimi hosts fail closed instead of falling back to advisory confinement;
+Codex uses its native sandbox, and read paths are never passed as writable
+`--add-dir` grants.
+
 Pipeline key access is deny-by-default. An `injected` selection gives the shell
 the real value, which it can print or transmit. A configured `proxied` shared
 selection instead gives it a per-job placeholder and loopback URL; Gitmoot

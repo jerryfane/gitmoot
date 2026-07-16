@@ -253,6 +253,7 @@ type JobRequest struct {
 	// Additive/omitempty: false leaves the enqueued payload byte-identical.
 	OrchestrateStage bool
 	WritablePaths    []string
+	ReadablePaths    []string
 	Network          bool
 	Check            string
 	CheckRetries     int
@@ -341,6 +342,7 @@ type JobPayload struct {
 	// pipeline-sender payload — shell + #757 agent leaf — serializes byte-identically.
 	OrchestrateStage bool         `json:"orchestrate_stage,omitempty"`
 	WritablePaths    []string     `json:"writable_paths,omitempty"`
+	ReadablePaths    []string     `json:"readable_paths,omitempty"`
 	Network          bool         `json:"network,omitempty"`
 	Check            string       `json:"check,omitempty"`
 	CheckRetries     int          `json:"check_retries,omitempty"`
@@ -480,6 +482,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		MootSeat:               request.MootSeat,
 		OrchestrateStage:       request.OrchestrateStage,
 		WritablePaths:          compactStrings(request.WritablePaths),
+		ReadablePaths:          compactStrings(request.ReadablePaths),
 		Network:                request.Network,
 		Check:                  strings.TrimSpace(request.Check),
 		CheckRetries:           request.CheckRetries,
@@ -1368,6 +1371,8 @@ func validateJobRequest(request JobRequest) error {
 		return errors.New("job action produce requires at least one writable path")
 	case action != "produce" && len(compactStrings(request.WritablePaths)) > 0:
 		return errors.New("job writable_paths are only valid for action produce")
+	case action != "produce" && len(compactStrings(request.ReadablePaths)) > 0:
+		return errors.New("job readable_paths are only valid for action produce")
 	case action != "produce" && request.Network:
 		return errors.New("job network access is only valid for action produce")
 	case action != "produce" && strings.TrimSpace(request.Check) != "":

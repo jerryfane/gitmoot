@@ -318,6 +318,13 @@ func kimiPermissionArgs(agent Agent) []string {
 			args = append(args, "--add-dir", path)
 		}
 	}
+	for _, path := range agent.ReadablePaths {
+		if path = strings.TrimSpace(path); path != "" {
+			// Kimi's workspace guard needs the same visibility hint; the
+			// surrounding Landlock policy prevents writes to readable roots.
+			args = append(args, "--add-dir", path)
+		}
+	}
 	return args
 }
 
