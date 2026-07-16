@@ -52,6 +52,8 @@ func runMemory(args []string, stdout, stderr io.Writer) int {
 		return runMemoryPromote(args[1:], stdout, stderr)
 	case "links":
 		return runMemoryLinks(args[1:], stdout, stderr)
+	case "log":
+		return runMemoryLog(args[1:], stdout, stderr)
 	case "groom":
 		return runMemoryGroom(args[1:], stdout, stderr)
 	case "clusters":
@@ -86,6 +88,9 @@ func printMemoryUsage(w io.Writer) {
 	fmt.Fprintln(w, "  gitmoot memory promote --to-shared <id>... [--json]")
 	fmt.Fprintln(w, "  gitmoot memory links backfill [--dry-run] [--json]")
 	fmt.Fprintln(w, "  gitmoot memory links list <id> [--json]")
+	fmt.Fprintln(w, "  gitmoot memory log [--key K] [--agent A] [--repo R] [--kind k1,k2] [--since 168h] [--limit N] [--json]")
+	fmt.Fprintln(w, "  gitmoot memory log --id <memory-id> [--json]")
+	fmt.Fprintln(w, "  gitmoot memory log backfill [--dry-run] [--json]")
 	fmt.Fprintln(w, "  gitmoot memory groom --propose | --yes --plan PLAN.json | --split | --split-revert [options]")
 	fmt.Fprintln(w, "  gitmoot memory clusters [--json]")
 	fmt.Fprintln(w, "  gitmoot memory clusters recompute --propose [--out PLAN.json] [--json] | --apply [--plan PLAN.json] [--json]")
@@ -103,6 +108,7 @@ func printMemoryUsage(w io.Writer) {
 	fmt.Fprintln(w, "  retire        bulk-retire active confirmed memory by provenance prefix")
 	fmt.Fprintln(w, "  promote       explicitly move active confirmed facts into the shared pool")
 	fmt.Fprintln(w, "  links         inspect persisted memory links; backfill links for existing facts")
+	fmt.Fprintln(w, "  log           inspect or backfill the append-only confirmed-memory changelog")
 	fmt.Fprintln(w, "  groom         deterministically propose stale-memory retirements, apply on confirmation")
 	fmt.Fprintln(w, "  clusters      list emergent memory clusters; recompute them via a propose/apply plan")
 	fmt.Fprintln(w, "  cluster       rename a cluster (owner label override)")

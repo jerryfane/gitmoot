@@ -121,6 +121,8 @@ var ErrConfirmedMemoryRetired = errors.New("confirmed memory is retired")
 type upsertConfirmedMemoryOptions struct {
 	allowResurrect   bool
 	preserveEditions bool
+	eventKind        string
+	actor            string
 }
 
 // UpsertConfirmedMemoryOption tunes confirmed-memory upsert behavior.
@@ -145,6 +147,16 @@ func AllowResurrectConfirmedMemory() UpsertConfirmedMemoryOption {
 func PreserveSupersededEdition() UpsertConfirmedMemoryOption {
 	return func(o *upsertConfirmedMemoryOptions) {
 		o.preserveEditions = true
+	}
+}
+
+// WithConfirmedMemoryEvent identifies the producer of an upsert for the
+// append-only brain changelog. Existing callers may omit it; inserts then use
+// created and updates use updated.
+func WithConfirmedMemoryEvent(kind, actor string) UpsertConfirmedMemoryOption {
+	return func(o *upsertConfirmedMemoryOptions) {
+		o.eventKind = strings.TrimSpace(kind)
+		o.actor = strings.TrimSpace(actor)
 	}
 }
 
@@ -431,18 +443,21 @@ func (s *Store) UpsertConfirmedMemory(ctx context.Context, cm ConfirmedMemory, o
 	// the active row, then the newest retired one, so the match (and an explicit
 	// resurrection) stays deterministic.
 	var id int64
-	var retiredAt string
+	var retiredAt, previousContent string
 	err = tx.QueryRowContext(ctx, `
-SELECT id, retired_at FROM confirmed_memories
+SELECT id, retired_at, content FROM confirmed_memories
 WHERE owner_kind = ? AND owner_ref = ? AND owner_version = ?
 	AND ((? IS NULL AND repo IS NULL) OR repo = ?)
 	AND key = ?
 	AND superseded_by IS NULL
 ORDER BY CASE WHEN retired_at = '' THEN 0 ELSE 1 END, id DESC
 LIMIT 1`,
-		cm.Owner.Kind, cm.Owner.Ref, cm.Owner.Version, nullableRepo(cm.Repo), nullableRepo(cm.Repo), cm.Key).Scan(&id, &retiredAt)
+		cm.Owner.Kind, cm.Owner.Ref, cm.Owner.Version, nullableRepo(cm.Repo), nullableRepo(cm.Repo), cm.Key).Scan(&id, &retiredAt, &previousContent)
+	inserted := false
+	resurrected := false
 	switch {
 	case err == sql.ErrNoRows:
+		inserted = true
 		res, insErr := tx.ExecContext(ctx, `
 INSERT INTO confirmed_memories
 	(owner_kind, owner_ref, owner_version, author_ref, repo, scope, key, content, context, provenance, source_job, first_confirmed_at, updated_at)
@@ -462,8 +477,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			return 0, fmt.Errorf("%w: confirmed memory %d key %q", ErrConfirmedMemoryRetired, id, cm.Key)
 		}
 		if options.preserveEditions {
-			if err := archiveSupersededEditionTx(ctx, tx, id, cm.Content); err != nil {
+			archivedID, err := archiveSupersededEditionTx(ctx, tx, id, cm.Content)
+			if err != nil {
 				return 0, err
+			}
+			if archivedID > 0 {
+				detail, _ := compactMemoryEventDetail(map[string]any{"superseded_by": id})
+				if err := recordMemoryEventTx(ctx, tx, archivedID, MemoryEventSuperseded,
+					memoryEventActor(options.actor, cm.SourceJob), detail); err != nil {
+					return 0, err
+				}
 			}
 		}
 		// Only explicit human-controlled paths pass AllowResurrectConfirmedMemory.
@@ -477,6 +500,7 @@ WHERE id = ?`,
 			strings.TrimSpace(cm.AuthorRef), cm.Content, strings.TrimSpace(cm.Context), cm.Provenance, cm.SourceJob, now, id); upErr != nil {
 			return 0, fmt.Errorf("update confirmed memory: %w", upErr)
 		}
+		resurrected = retiredAt != ""
 	}
 
 	// Keep the plain FTS5 index in sync inside the same transaction.
@@ -488,6 +512,41 @@ WHERE id = ?`,
 	}
 	if _, err := enrichConfirmedMemoryLinksTx(ctx, tx, id, false); err != nil {
 		return 0, fmt.Errorf("auto-link confirmed memory: %w", err)
+	}
+	kind := options.eventKind
+	if kind == "" {
+		kind = MemoryEventCreated
+	}
+	detail := ""
+	recordEvent := true
+	switch {
+	case resurrected:
+		kind = MemoryEventUnretired
+		// A resurrection may overwrite content in the same UPDATE; without a
+		// before-content receipt that edition would be unrecoverable (no
+		// superseded archive row exists on this path).
+		if previousContent != cm.Content {
+			detail, err = memoryEventBeforeDetail(previousContent)
+			if err != nil {
+				return 0, err
+			}
+		}
+	case !inserted && previousContent == cm.Content:
+		// Byte-identical re-confirmation (steady-state harvest/ingest
+		// re-observing an unchanged fact): no history to record — mirrors
+		// archiveSupersededEditionTx, which skips identical editions.
+		recordEvent = false
+	case !inserted:
+		kind = MemoryEventUpdated
+		detail, err = memoryEventBeforeDetail(previousContent)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if recordEvent {
+		if err := recordMemoryEventTx(ctx, tx, id, kind, memoryEventActor(options.actor, cm.SourceJob), detail); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -502,7 +561,7 @@ WHERE id = ?`,
 // added to FTS, and carries no memory_links — links stay keyed on the live row
 // id, which does not change. A byte-identical update archives nothing: there is
 // no history to preserve.
-func archiveSupersededEditionTx(ctx context.Context, tx *sql.Tx, id int64, newContent string) error {
+func archiveSupersededEditionTx(ctx context.Context, tx *sql.Tx, id int64, newContent string) (int64, error) {
 	var prev ConfirmedMemory
 	var repoNull sql.NullString
 	err := tx.QueryRowContext(ctx, `
@@ -513,21 +572,23 @@ FROM confirmed_memories WHERE id = ?`, id).Scan(
 		&prev.Scope, &prev.Key, &prev.Content, &prev.Context, &prev.Provenance, &prev.SourceJob,
 		&prev.FirstConfirmedAt, &prev.UpdatedAt)
 	if err != nil {
-		return fmt.Errorf("read confirmed memory %d for supersede archive: %w", id, err)
+		return 0, fmt.Errorf("read confirmed memory %d for supersede archive: %w", id, err)
 	}
 	if prev.Content == newContent {
-		return nil
+		return 0, nil
 	}
 	prev.Repo = repoNull.String
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO confirmed_memories
 	(owner_kind, owner_ref, owner_version, author_ref, repo, scope, key, content, context, provenance, source_job, first_confirmed_at, updated_at, superseded_by)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		prev.Owner.Kind, prev.Owner.Ref, prev.Owner.Version, prev.AuthorRef, nullableRepo(prev.Repo), prev.Scope,
-		prev.Key, prev.Content, prev.Context, prev.Provenance, prev.SourceJob, prev.FirstConfirmedAt, prev.UpdatedAt, id); err != nil {
-		return fmt.Errorf("archive superseded edition of confirmed memory %d: %w", id, err)
+		prev.Key, prev.Content, prev.Context, prev.Provenance, prev.SourceJob, prev.FirstConfirmedAt, prev.UpdatedAt, id)
+	if err != nil {
+		return 0, fmt.Errorf("archive superseded edition of confirmed memory %d: %w", id, err)
 	}
-	return nil
+	archiveID, err := res.LastInsertId()
+	return archiveID, err
 }
 
 // PromoteConfirmedMemoriesToShared moves active confirmed rows into the reserved
@@ -536,7 +597,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 // a row has no author_ref, the previous owner_ref is recorded as its author
 // before owner_kind/owner_ref change to shared/shared. Retired or superseded rows
 // are refused so stale facts cannot be widened to every agent.
-func (s *Store) PromoteConfirmedMemoriesToShared(ctx context.Context, ids []int64) ([]ConfirmedMemory, error) {
+func (s *Store) PromoteConfirmedMemoriesToShared(ctx context.Context, ids []int64, actors ...string) ([]ConfirmedMemory, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("at least one confirmed memory id is required")
 	}
@@ -547,6 +608,10 @@ func (s *Store) PromoteConfirmedMemoriesToShared(ctx context.Context, ids []int6
 	defer func() { _ = tx.Rollback() }()
 
 	now := nowRFC3339()
+	actor := "cli:memory-promote"
+	if len(actors) > 0 {
+		actor = memoryEventActor(actors[0], actor)
+	}
 	out := make([]ConfirmedMemory, 0, len(ids))
 	seen := map[int64]struct{}{}
 	for _, id := range ids {
@@ -557,7 +622,7 @@ func (s *Store) PromoteConfirmedMemoriesToShared(ctx context.Context, ids []int6
 			continue
 		}
 		seen[id] = struct{}{}
-		c, err := promoteConfirmedMemoryToSharedTx(ctx, tx, id, now)
+		c, err := promoteConfirmedMemoryToSharedTx(ctx, tx, id, now, actor)
 		if err != nil {
 			return nil, err
 		}
@@ -574,7 +639,7 @@ func (s *Store) PromoteConfirmedMemoriesToShared(ctx context.Context, ids []int6
 // active confirmed row into the reserved shared pool (a no-op returning the row
 // unchanged when it is already shared), preserving the author. Retired or
 // superseded rows are refused so stale facts cannot be widened to every agent.
-func promoteConfirmedMemoryToSharedTx(ctx context.Context, tx *sql.Tx, id int64, now string) (ConfirmedMemory, error) {
+func promoteConfirmedMemoryToSharedTx(ctx context.Context, tx *sql.Tx, id int64, now, actor string) (ConfirmedMemory, error) {
 	var c ConfirmedMemory
 	var repoNull sql.NullString
 	var retiredAt string
@@ -607,6 +672,10 @@ WHERE id = ?`, id).Scan(
 	if author == "" {
 		author = c.Owner.Ref
 	}
+	// Capture the source pool before the owner rewrite: the promoted event's
+	// most useful datum is where the fact came from, and recordMemoryEventTx
+	// snapshots the row post-UPDATE (owner already shared).
+	fromOwner := c.Owner
 	if _, err := tx.ExecContext(ctx, `
 UPDATE confirmed_memories
 SET owner_kind = ?, owner_ref = ?, owner_version = '', author_ref = ?, updated_at = ?
@@ -617,6 +686,14 @@ WHERE id = ?`,
 	c.Owner = MemoryOwner{Kind: memoryOwnerKindShared, Ref: memorySharedOwnerRef}
 	c.AuthorRef = author
 	c.UpdatedAt = now
+	promotedDetail, err := compactMemoryEventDetail(map[string]any{
+		"from_owner_kind": fromOwner.Kind, "from_owner_ref": fromOwner.Ref})
+	if err != nil {
+		return ConfirmedMemory{}, err
+	}
+	if err := recordMemoryEventTx(ctx, tx, id, MemoryEventPromoted, actor, promotedDetail); err != nil {
+		return ConfirmedMemory{}, err
+	}
 	return c, nil
 }
 
@@ -995,13 +1072,17 @@ func memoryLinkMatchQuery(content string) string {
 // row changed since (or was retired), the CAS matches nothing and the update is
 // refused with an id-naming error so the caller can abort and re-export. Writes are
 // serialized by the store (MaxOpenConns=1), so this optimistic CAS is sufficient.
-func (s *Store) UpdateConfirmedMemoryByID(ctx context.Context, id int64, expectedUpdatedAt, content, provenance string) error {
+func (s *Store) UpdateConfirmedMemoryByID(ctx context.Context, id int64, expectedUpdatedAt, content, provenance string, actors ...string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := updateConfirmedMemoryByIDTx(ctx, tx, id, expectedUpdatedAt, content, provenance); err != nil {
+	actor := "cli:memory-vault-import"
+	if len(actors) > 0 {
+		actor = memoryEventActor(actors[0], actor)
+	}
+	if err := updateConfirmedMemoryByIDTx(ctx, tx, id, expectedUpdatedAt, content, provenance, actor); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1009,9 +1090,15 @@ func (s *Store) UpdateConfirmedMemoryByID(ctx context.Context, id int64, expecte
 
 // updateConfirmedMemoryByIDTx is the transaction body shared by the single-op
 // public method and the atomic ApplyVaultImport batch.
-func updateConfirmedMemoryByIDTx(ctx context.Context, tx *sql.Tx, id int64, expectedUpdatedAt, content, provenance string) error {
+func updateConfirmedMemoryByIDTx(ctx context.Context, tx *sql.Tx, id int64, expectedUpdatedAt, content, provenance, actor string) error {
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("confirmed memory %d requires content", id)
+	}
+	var previousContent string
+	if err := tx.QueryRowContext(ctx, `SELECT content FROM confirmed_memories WHERE id = ?`, id).Scan(&previousContent); err == sql.ErrNoRows {
+		return fmt.Errorf("confirmed memory %d not found", id)
+	} else if err != nil {
+		return fmt.Errorf("read confirmed memory %d before update: %w", id, err)
 	}
 	now := nowRFC3339()
 	res, err := tx.ExecContext(ctx, `
@@ -1050,6 +1137,16 @@ WHERE id = ? AND updated_at = ? AND retired_at = ''`,
 	if _, err := tx.ExecContext(ctx, `INSERT INTO confirmed_memories_fts(rowid, content, key) VALUES (?, ?, ?)`, id, content, key); err != nil {
 		return fmt.Errorf("sync confirmed memory fts (insert): %w", err)
 	}
+	// Byte-identical rewrite = no history to record (mirrors the upsert path).
+	if previousContent != content {
+		detail, err := memoryEventBeforeDetail(previousContent)
+		if err != nil {
+			return err
+		}
+		if err := recordMemoryEventTx(ctx, tx, id, MemoryEventUpdated, actor, detail); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1061,13 +1158,17 @@ WHERE id = ? AND updated_at = ? AND retired_at = ''`,
 // distinct replacement semantics and has no writers today — see #737 P2). Backs
 // `memory vault import` deletions ⇒ retirements. A row that does not exist (or is
 // already retired) yields an id-naming error rather than a silent no-op.
-func (s *Store) RetireConfirmedMemory(ctx context.Context, id int64, reason string) error {
+func (s *Store) RetireConfirmedMemory(ctx context.Context, id int64, reason string, actors ...string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := retireConfirmedMemoryTx(ctx, tx, id, "", reason); err != nil {
+	actor := "cli:memory-retire"
+	if len(actors) > 0 {
+		actor = memoryEventActor(actors[0], actor)
+	}
+	if err := retireConfirmedMemoryTx(ctx, tx, id, "", reason, actor); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1089,7 +1190,7 @@ func (s *Store) ListActiveConfirmedMemoriesForRetire(ctx context.Context, prefix
 // whose provenance starts with prefix, removing each row from FTS in the same
 // transaction. It returns the rows selected before retirement so callers can
 // report the blast radius.
-func (s *Store) RetireConfirmedMemoriesByProvenancePrefix(ctx context.Context, prefix, agentRef, reason string) ([]ConfirmedMemory, error) {
+func (s *Store) RetireConfirmedMemoriesByProvenancePrefix(ctx context.Context, prefix, agentRef, reason string, actors ...string) ([]ConfirmedMemory, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -1099,8 +1200,12 @@ func (s *Store) RetireConfirmedMemoriesByProvenancePrefix(ctx context.Context, p
 	if err != nil {
 		return nil, err
 	}
+	actor := "cli:memory-retire"
+	if len(actors) > 0 {
+		actor = memoryEventActor(actors[0], actor)
+	}
 	for _, row := range rows {
-		if err := retireConfirmedMemoryTx(ctx, tx, row.ID, "", reason); err != nil {
+		if err := retireConfirmedMemoryTx(ctx, tx, row.ID, "", reason, actor); err != nil {
 			return nil, err
 		}
 	}
@@ -1142,7 +1247,7 @@ ORDER BY updated_at DESC, id DESC`
 // newer fact on the same row) makes the retirement match nothing and roll the whole
 // import batch back rather than burying the newer fact. An empty string means "no
 // version guard" (the single-op public path), preserving its prior behavior.
-func retireConfirmedMemoryTx(ctx context.Context, tx *sql.Tx, id int64, expectedUpdatedAt, reason string) error {
+func retireConfirmedMemoryTx(ctx context.Context, tx *sql.Tx, id int64, expectedUpdatedAt, reason, actor string) error {
 	now := nowRFC3339()
 	query := `
 UPDATE confirmed_memories
@@ -1184,6 +1289,13 @@ WHERE id = ? AND retired_at = ''`
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM confirmed_memories_fts WHERE rowid = ?`, id); err != nil {
 		return fmt.Errorf("sync confirmed memory fts (delete): %w", err)
+	}
+	detail, err := compactMemoryEventDetail(map[string]any{"reason": reason})
+	if err != nil {
+		return err
+	}
+	if err := recordMemoryEventTx(ctx, tx, id, MemoryEventRetired, actor, detail); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1518,6 +1630,10 @@ ON CONFLICT(memory_id) DO UPDATE SET cluster_id = excluded.cluster_id`, childID,
 				return GroomSplitApplied{}, false, fmt.Errorf("attach groom split child %d to cluster %d: %w", childID, clusterID, err)
 			}
 		}
+		if err := recordMemoryEventTx(ctx, tx, childID, MemoryEventCreated,
+			fmt.Sprintf("groom-split:%d", parent.ID), ""); err != nil {
+			return GroomSplitApplied{}, false, err
+		}
 		applied.ChildIDs = append(applied.ChildIDs, childID)
 	}
 
@@ -1542,6 +1658,11 @@ WHERE id = ? AND updated_at = ? AND superseded_by IS NULL AND retired_at = ''`,
 		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_cluster_members WHERE memory_id = ?`, parent.ID); err != nil {
 			return GroomSplitApplied{}, false, fmt.Errorf("detach groom split parent %d from cluster: %w", parent.ID, err)
 		}
+	}
+	detail, _ := compactMemoryEventDetail(map[string]any{"superseded_by": applied.ChildIDs[0]})
+	if err := recordMemoryEventTx(ctx, tx, parent.ID, MemoryEventSuperseded,
+		fmt.Sprintf("groom-split:%d", parent.ID), detail); err != nil {
+		return GroomSplitApplied{}, false, err
 	}
 	return applied, true, nil
 }
@@ -1723,7 +1844,8 @@ ORDER BY c.id`, fmt.Sprintf("groom-split:%d", parentID))
 		return reverted, true, "", nil
 	}
 	for _, child := range children {
-		if err := retireConfirmedMemoryTx(ctx, tx, child.id, "", fmt.Sprintf("groom-split-revert:%d", parentID)); err != nil {
+		reason := fmt.Sprintf("groom-split-revert:%d", parentID)
+		if err := retireConfirmedMemoryTx(ctx, tx, child.id, "", reason, reason); err != nil {
 			return GroomSplitReverted{}, false, "", fmt.Errorf("retire groom split child %d: %w", child.id, err)
 		}
 	}
@@ -1764,6 +1886,11 @@ WHERE id = ? AND superseded_by = ? AND retired_at = ''`, now, parentID, expected
 			return GroomSplitReverted{}, false, "", fmt.Errorf("restore parent %d cluster: %w", parentID, err)
 		}
 	}
+	detail, _ := compactMemoryEventDetail(map[string]any{"restored_from": childIDs})
+	if err := recordMemoryEventTx(ctx, tx, parentID, MemoryEventUnretired,
+		fmt.Sprintf("groom-split-revert:%d", parentID), detail); err != nil {
+		return GroomSplitReverted{}, false, "", err
+	}
 	return reverted, true, "", nil
 }
 
@@ -1778,12 +1905,12 @@ func (s *Store) ApplyVaultImport(ctx context.Context, plan VaultImportPlan) erro
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, u := range plan.Updates {
-		if err := updateConfirmedMemoryByIDTx(ctx, tx, u.ID, u.ExpectedUpdatedAt, u.Content, u.Provenance); err != nil {
+		if err := updateConfirmedMemoryByIDTx(ctx, tx, u.ID, u.ExpectedUpdatedAt, u.Content, u.Provenance, "cli:memory-vault-import"); err != nil {
 			return err
 		}
 	}
 	for _, r := range plan.Retirements {
-		if err := retireConfirmedMemoryTx(ctx, tx, r.ID, r.ExpectedUpdatedAt, r.Reason); err != nil {
+		if err := retireConfirmedMemoryTx(ctx, tx, r.ID, r.ExpectedUpdatedAt, r.Reason, "cli:memory-vault-import"); err != nil {
 			return err
 		}
 	}
@@ -1867,6 +1994,15 @@ WHERE id = ? AND retired_at = ''`, now, reason, id)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM confirmed_memories_fts WHERE rowid = ?`, id); err != nil {
 		return false, fmt.Errorf("groom retire fts %d: %w", id, err)
+	}
+	detail, err := compactMemoryEventDetail(map[string]any{"reason": reason})
+	if err != nil {
+		return false, err
+	}
+	// actor = stable producer identity; the free-text plan reason lives in
+	// detail only, so journal filtering/grouping by actor stays meaningful.
+	if err := recordMemoryEventTx(ctx, tx, id, MemoryEventRetired, "groom-retire", detail); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -2023,6 +2159,18 @@ UPDATE confirmed_memories SET key = ?, updated_at = ? WHERE id = ?`,
 			item.KeepID, keep.Content, item.NewKey); err != nil {
 			return false, fmt.Errorf("groom rekey fts insert %d: %w", item.KeepID, err)
 		}
+		// The rekey mutates the KEY, not the content: record the old key (the
+		// datum the journal would otherwise lose — recordMemoryEventTx re-reads
+		// the row post-UPDATE so the event's key column holds the new key).
+		detail, err := compactMemoryEventDetail(map[string]any{
+			"before_key": keep.Key, "reason": item.Reason})
+		if err != nil {
+			return false, err
+		}
+		if err := recordMemoryEventTx(ctx, tx, item.KeepID, MemoryEventUpdated,
+			"groom-rekey", detail); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
 }
@@ -2065,7 +2213,8 @@ WHERE owner_kind = ? AND owner_ref = ? AND owner_version = ''
 		return false, nil
 	}
 
-	if _, err := promoteConfirmedMemoryToSharedTx(ctx, tx, item.PrivateID, now); err != nil {
+	if _, err := promoteConfirmedMemoryToSharedTx(ctx, tx, item.PrivateID, now,
+		"groom-cross-pool"); err != nil {
 		return false, err
 	}
 	return true, nil

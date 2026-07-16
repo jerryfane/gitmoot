@@ -9233,5 +9233,25 @@ ALTER TABLE keychain_keys ADD COLUMN proxy_upstream TEXT;
 ALTER TABLE keychain_keys ADD COLUMN proxy_auth_kind TEXT
 	CHECK(proxy_auth_kind IS NULL OR proxy_auth_kind IN ('bearer', 'header'));
 ALTER TABLE keychain_keys ADD COLUMN proxy_header TEXT;
+`,
+	// #988 append-only brain changelog. Events observe confirmed-memory and
+	// cluster mutations in the same transaction; kind remains an open string so
+	// future lifecycle actions do not require another schema change.
+	`
+CREATE TABLE memory_events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	at TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	memory_id INTEGER,
+	key TEXT NOT NULL DEFAULT '',
+	owner_kind TEXT NOT NULL DEFAULT '',
+	owner_ref TEXT NOT NULL DEFAULT '',
+	repo TEXT,
+	scope TEXT NOT NULL DEFAULT '',
+	actor TEXT NOT NULL DEFAULT '',
+	detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_memory_events_at ON memory_events(at);
+CREATE INDEX idx_memory_events_memory_id ON memory_events(memory_id);
 	`,
 }

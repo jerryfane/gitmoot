@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // ErrClusterPlanStale is returned by RecomputeMemoryClustersFresh when the
@@ -117,14 +119,18 @@ func (s *Store) CountMemoryClusters(ctx context.Context) (int, error) {
 // medoid identity. Child overrides are carried forward by their hierarchy-derived
 // cluster id and disappear when a split dissolves. The whole swap is atomic: a
 // reader never sees a half-written clustering.
-func (s *Store) RecomputeMemoryClusters(ctx context.Context, a MemoryClusterAssignment) error {
+func (s *Store) RecomputeMemoryClusters(ctx context.Context, a MemoryClusterAssignment, actors ...string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := recomputeMemoryClustersTx(ctx, tx, a); err != nil {
+	actor := "cli:memory-clusters-recompute"
+	if len(actors) > 0 {
+		actor = memoryEventActor(actors[0], actor)
+	}
+	if err := recomputeMemoryClustersTx(ctx, tx, a, actor); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -141,7 +147,7 @@ func (s *Store) RecomputeMemoryClusters(ctx context.Context, a MemoryClusterAssi
 // or invalidates the write snapshot (→ SQLITE_BUSY_SNAPSHOT); the stale row can no
 // longer be dropped unnoticed. Returns ErrClusterPlanStale (wrapped) if the anchor
 // moved; the whole swap is atomic.
-func (s *Store) RecomputeMemoryClustersFresh(ctx context.Context, a MemoryClusterAssignment, expected string, anchorFn func([]ConfirmedMemory) string) error {
+func (s *Store) RecomputeMemoryClustersFresh(ctx context.Context, a MemoryClusterAssignment, expected string, anchorFn func([]ConfirmedMemory) string, actors ...string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -155,7 +161,11 @@ func (s *Store) RecomputeMemoryClustersFresh(ctx context.Context, a MemoryCluste
 	if got := anchorFn(rows); got != expected {
 		return fmt.Errorf("%w (plan anchor %s, current %s)", ErrClusterPlanStale, expected, got)
 	}
-	if err := recomputeMemoryClustersTx(ctx, tx, a); err != nil {
+	actor := "cli:memory-clusters-recompute"
+	if len(actors) > 0 {
+		actor = memoryEventActor(actors[0], actor)
+	}
+	if err := recomputeMemoryClustersTx(ctx, tx, a, actor); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -166,9 +176,32 @@ func (s *Store) RecomputeMemoryClustersFresh(ctx context.Context, a MemoryCluste
 // a same-tx anchor re-read (RecomputeMemoryClustersFresh) or run standalone
 // (RecomputeMemoryClusters). Top-level owner label overrides are carried forward
 // by medoid identity; child overrides are carried by stable child cluster id.
-func recomputeMemoryClustersTx(ctx context.Context, tx *sql.Tx, a MemoryClusterAssignment) error {
+func recomputeMemoryClustersTx(ctx context.Context, tx *sql.Tx, a MemoryClusterAssignment, actor string) error {
 	rootOverrideByMedoid, childOverrideByID, err := clusterOverridesTx(ctx, tx)
 	if err != nil {
+		return err
+	}
+	previousCounts := map[int64]int{}
+	previousLabels := map[int64]string{}
+	countRows, err := tx.QueryContext(ctx, `
+SELECT c.cluster_id, CASE WHEN c.label_override <> '' THEN c.label_override ELSE c.label END, COUNT(m.memory_id)
+FROM memory_clusters c LEFT JOIN memory_cluster_members m ON m.cluster_id = c.cluster_id
+GROUP BY c.cluster_id`)
+	if err != nil {
+		return fmt.Errorf("read prior cluster counts: %w", err)
+	}
+	for countRows.Next() {
+		var id int64
+		var count int
+		var label string
+		if err := countRows.Scan(&id, &label, &count); err != nil {
+			countRows.Close()
+			return err
+		}
+		previousCounts[id] = count
+		previousLabels[id] = label
+	}
+	if err := countRows.Close(); err != nil {
 		return err
 	}
 
@@ -202,6 +235,44 @@ INSERT INTO memory_cluster_members (memory_id, cluster_id) VALUES (?, ?)`,
 			m.MemoryID, m.ClusterID); err != nil {
 			return fmt.Errorf("insert cluster member %d: %w", m.MemoryID, err)
 		}
+	}
+	newCounts := map[int64]int{}
+	for _, member := range a.Members {
+		newCounts[member.ClusterID]++
+	}
+	type clusterDelta struct {
+		ClusterID        int64  `json:"cluster_id"`
+		Label            string `json:"label"`
+		MemberCountDelta int    `json:"member_count_delta"`
+	}
+	deltas := make([]clusterDelta, 0, len(a.Clusters))
+	seenClusters := make(map[int64]struct{}, len(a.Clusters))
+	for _, cluster := range a.Clusters {
+		seenClusters[cluster.ClusterID] = struct{}{}
+		label := cluster.LabelOverride
+		if label == "" {
+			label = cluster.Label
+		}
+		deltas = append(deltas, clusterDelta{ClusterID: cluster.ClusterID, Label: label,
+			MemberCountDelta: newCounts[cluster.ClusterID] - previousCounts[cluster.ClusterID]})
+	}
+	var removed []int64
+	for id := range previousCounts {
+		if _, ok := seenClusters[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	sort.Slice(removed, func(i, j int) bool { return removed[i] < removed[j] })
+	for _, id := range removed {
+		deltas = append(deltas, clusterDelta{ClusterID: id, Label: previousLabels[id], MemberCountDelta: -previousCounts[id]})
+	}
+	detail, err := compactMemoryEventDetail(map[string]any{"clusters": deltas})
+	if err != nil {
+		return err
+	}
+	if _, err := insertMemoryEventTx(ctx, tx, MemoryEvent{At: nowRFC3339(), Kind: MemoryEventClusterRecompute,
+		Actor: actor, Detail: detail}); err != nil {
+		return err
 	}
 	return nil
 }
@@ -259,12 +330,27 @@ ON CONFLICT(memory_id) DO UPDATE SET cluster_id = excluded.cluster_id`,
 // then wins over the computed label). A blank label clears the override, falling
 // back to the computed label. Renaming the reserved unclustered bucket (id 0) is
 // rejected — its grouping is structural, not a named community.
-func (s *Store) RenameMemoryCluster(ctx context.Context, clusterID int64, label string) error {
+func (s *Store) RenameMemoryCluster(ctx context.Context, clusterID int64, label string, actors ...string) error {
 	if clusterID == 0 {
 		return fmt.Errorf("cannot rename the reserved unclustered bucket")
 	}
-	res, err := s.db.ExecContext(ctx, `
-UPDATE memory_clusters SET label_override = ? WHERE cluster_id = ?`, label, clusterID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var computed, previous string
+	var memberCount int
+	if err := tx.QueryRowContext(ctx, `
+SELECT c.label, c.label_override, COUNT(m.memory_id)
+FROM memory_clusters c LEFT JOIN memory_cluster_members m ON m.cluster_id = c.cluster_id
+WHERE c.cluster_id = ? GROUP BY c.cluster_id`, clusterID).Scan(&computed, &previous, &memberCount); err == sql.ErrNoRows {
+		return fmt.Errorf("no cluster with id %d", clusterID)
+	} else if err != nil {
+		return fmt.Errorf("read cluster %d: %w", clusterID, err)
+	}
+	res, err := tx.ExecContext(ctx, `
+UPDATE memory_clusters SET label_override = ? WHERE cluster_id = ?`, strings.TrimSpace(label), clusterID)
 	if err != nil {
 		return fmt.Errorf("rename cluster %d: %w", clusterID, err)
 	}
@@ -275,7 +361,29 @@ UPDATE memory_clusters SET label_override = ? WHERE cluster_id = ?`, label, clus
 	if n == 0 {
 		return fmt.Errorf("no cluster with id %d", clusterID)
 	}
-	return nil
+	actor := "cli:memory-cluster-rename"
+	if len(actors) > 0 {
+		actor = memoryEventActor(actors[0], actor)
+	}
+	detail, err := compactMemoryEventDetail(map[string]any{"cluster_id": clusterID,
+		"label": strings.TrimSpace(label), "previous_label": firstNonEmptyString(previous, computed), "member_count_delta": 0})
+	if err != nil {
+		return err
+	}
+	if _, err := insertMemoryEventTx(ctx, tx, MemoryEvent{At: nowRFC3339(), Kind: MemoryEventClusterRename,
+		Key: fmt.Sprintf("cluster:%d", clusterID), Actor: actor, Detail: detail}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // ClusterOfMemory returns the cluster id a fact currently belongs to, and whether
