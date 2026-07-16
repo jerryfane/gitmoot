@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -37,9 +38,10 @@ func writePipelineEnvFile(t *testing.T, dir, body string, mode os.FileMode) stri
 
 func TestPipelineAddEnvFileValidation(t *testing.T) {
 	tests := []struct {
-		name  string
-		setup func(t *testing.T, home string) (envFile, envBody, stage string)
-		want  string
+		name   string
+		setup  func(t *testing.T, home string) (envFile, envBody, stage string)
+		want   string
+		enable bool
 	}{
 		{
 			name: "missing file",
@@ -91,7 +93,8 @@ func TestPipelineAddEnvFileValidation(t *testing.T) {
 			setup: func(t *testing.T, _ string) (string, string, string) {
 				return writePipelineEnvFile(t, t.TempDir(), "PRESENT="+pipelineEnvSecretA+"\n", 0o600), "", "{id: run, cmd: echo, env_keys: [MISSING]}"
 			},
-			want: `env_keys entry "MISSING" does not resolve`,
+			want:   `env_keys entry "MISSING" is unresolved`,
+			enable: true,
 		},
 		{
 			name: "agent stage denied",
@@ -109,7 +112,11 @@ func TestPipelineAddEnvFileValidation(t *testing.T) {
 			raw := fmt.Sprintf("name: env-validation\nenv_file: %q\n%s\nstages:\n  - %s\n", envFile, extra, stage)
 			specFile := writeSpec(t, raw)
 			var stdout, stderr bytes.Buffer
-			code := Run([]string{"pipeline", "add", specFile, "--home", home}, &stdout, &stderr)
+			args := []string{"pipeline", "add", specFile, "--home", home}
+			if tt.enable {
+				args = append(args, "--enable")
+			}
+			code := Run(args, &stdout, &stderr)
 			if code == 0 || !strings.Contains(stderr.String(), tt.want) {
 				t.Fatalf("code=%d stderr=%q, want %q", code, stderr.String(), tt.want)
 			}
@@ -209,6 +216,172 @@ func TestPipelineEnvDeliveryScopePrecedenceAndRotation(t *testing.T) {
 	}
 	if got := reservedCapture.jobs[0].ShellEnv; !reflect.DeepEqual(got, []string{"GITMOOT_PIPELINE_NAME=untrusted", "GITMOOT_PIPELINE_NAME=real"}) {
 		t.Fatalf("Gitmoot internal value did not win at delivery: %#v", got)
+	}
+}
+
+func TestPipelineKeyAccessResolutionPrecedenceAndGrantBoundary(t *testing.T) {
+	ctx := context.Background()
+	home, _, store := heartbeatLoopE2EHome(t)
+	writeDefaultKeychain(t, home, "OVERLAP=shared-overlap\nSHARED_ONLY="+pipelineEnvSecretA+"\nUNGRANTED="+pipelineEnvSecretB+"\n")
+	if err := store.CreateOrUpdatePipeline(ctx, db.Pipeline{Name: "sources", SpecYAML: "name: sources\nstages: [{id: run, cmd: echo}]\n"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"OVERLAP", "SHARED_ONLY", "UNGRANTED"} {
+		if _, err := store.AddKeychainKey(ctx, name, db.KeychainModeInjected); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"OVERLAP", "SHARED_ONLY"} {
+		if _, err := store.GrantKeychainKey(ctx, db.KeychainConsumerPipeline, "sources", name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ownFile := writePipelineEnvFile(t, t.TempDir(), "OVERLAP=own-overlap\nOWN_ONLY=own\n", 0o600)
+	spec := pipeline.Spec{
+		Name:    "sources",
+		EnvFile: ownFile,
+		Env: map[string]string{
+			"OVERLAP":      "default-overlap",
+			"SHARED_ONLY":  "default-shared",
+			"DEFAULT_ONLY": "default-only",
+		},
+		Stages: []pipeline.Stage{{ID: "run", Cmd: "echo", EnvKeys: []string{"OVERLAP", "SHARED_ONLY", "DEFAULT_ONLY"}}},
+	}
+	resolution, err := resolvePipelineEnvironment(ctx, store, home, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []workflow.PipelineKeyAccess{
+		{Stage: "run", Name: "OVERLAP", Source: pipelineKeySourceOwn, Mode: db.KeychainModeInjected},
+		{Stage: "run", Name: "SHARED_ONLY", Source: pipelineKeySourceShared, Mode: db.KeychainModeInjected},
+		{Stage: "run", Name: "DEFAULT_ONLY", Source: pipelineKeySourceDefault, Mode: db.KeychainModeInjected},
+	}
+	if !reflect.DeepEqual(resolution.Access, want) || len(resolution.Unresolved) != 0 {
+		t.Fatalf("resolution=%#v unresolved=%#v, want %#v", resolution.Access, resolution.Unresolved, want)
+	}
+
+	for _, selector := range []string{"UNGRANTED", "UNGRANTED*"} {
+		probe := spec
+		probe.Stages = []pipeline.Stage{{ID: "run", Cmd: "echo", EnvKeys: []string{selector}}}
+		got, err := resolvePipelineEnvironment(ctx, store, home, probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Access) != 0 || !reflect.DeepEqual(got.Unresolved, []pipelineEnvUnresolved{{Stage: "run", Selector: selector}}) {
+			t.Fatalf("selector %q resolved without a grant: access=%#v unresolved=%#v", selector, got.Access, got.Unresolved)
+		}
+	}
+
+	raw := fmt.Sprintf("name: sources\nenv_file: %q\nenv:\n  OVERLAP: default-overlap\n  SHARED_ONLY: default-shared\n  DEFAULT_ONLY: default-only\nstages:\n  - id: run\n    cmd: echo\n    env_keys: [OVERLAP, SHARED_ONLY, DEFAULT_ONLY]\n", ownFile)
+	if err := store.CreateOrUpdatePipeline(ctx, db.Pipeline{Name: "sources", SpecYAML: raw, SpecHash: pipeline.Hash([]byte(raw))}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"pipeline", "show", "sources", "--home", home, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("pipeline show code=%d stderr=%q", code, stderr.String())
+	}
+	var shown pipelineJSON
+	if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
+		t.Fatal(err)
+	}
+	if shown.EnvFile != ownFile || !reflect.DeepEqual(shown.KeyAccess, want) || !reflect.DeepEqual(shown.Stages[0].EnvKeys, spec.Stages[0].EnvKeys) {
+		t.Fatalf("pipeline show projection=%+v", shown)
+	}
+	if err := os.WriteFile(ownFile, []byte("OWN_ONLY=own\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := &pipelineEnvCaptureAdapter{}
+	pinnedOwn := wrapPipelineEnvDeliveryAdapter(store, home, workflow.JobPayload{
+		PipelineName: "sources", PipelineEnvFile: ownFile, PipelineKeyAccess: []workflow.PipelineKeyAccess{want[0]},
+	}, capture)
+	if _, err := pinnedOwn.Deliver(ctx, runtime.Agent{}, runtime.Job{}); err == nil || !strings.Contains(err.Error(), "source own") {
+		t.Fatalf("disappeared own source silently switched to shared: err=%v", err)
+	}
+	if len(capture.jobs) != 0 {
+		t.Fatalf("disappeared own source reached delivery: %#v", capture.jobs)
+	}
+}
+
+func TestPipelineSharedKeyDeliveryRotationAndRevocation(t *testing.T) {
+	ctx := context.Background()
+	home, _, store := heartbeatLoopE2EHome(t)
+	path := writeDefaultKeychain(t, home, "SHARED="+pipelineEnvSecretA+"\n")
+	if err := store.CreateOrUpdatePipeline(ctx, db.Pipeline{Name: "shared-delivery", SpecYAML: "name: shared-delivery\nstages: [{id: run, cmd: echo}]\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddKeychainKey(ctx, "SHARED", db.KeychainModeInjected); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GrantKeychainKey(ctx, db.KeychainConsumerPipeline, "shared-delivery", "SHARED"); err != nil {
+		t.Fatal(err)
+	}
+	spec := pipeline.Spec{Name: "shared-delivery", Stages: []pipeline.Stage{{ID: "run", Cmd: "echo", EnvKeys: []string{"SHARED"}}}}
+	access, err := resolvePipelineStageEnvAccess(ctx, store, home, spec, spec.Stages[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture := &pipelineEnvCaptureAdapter{}
+	wrapped := wrapPipelineEnvDeliveryAdapter(store, home, workflow.JobPayload{
+		PipelineName: "shared-delivery", PipelineKeyAccess: access.Access,
+	}, capture)
+	if _, err := wrapped.Deliver(ctx, runtime.Agent{}, runtime.Job{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := capture.jobs[0].ShellEnv; !reflect.DeepEqual(got, []string{"SHARED=" + pipelineEnvSecretA}) {
+		t.Fatalf("first shared delivery=%#v", got)
+	}
+	if err := os.WriteFile(path, []byte("SHARED=rotated-shared-874\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrapped.Deliver(ctx, runtime.Agent{}, runtime.Job{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := capture.jobs[1].ShellEnv; !reflect.DeepEqual(got, []string{"SHARED=rotated-shared-874"}) {
+		t.Fatalf("rotated shared delivery=%#v", got)
+	}
+	if _, err := store.RevokeKeychainKey(ctx, db.KeychainConsumerPipeline, "shared-delivery", "SHARED"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrapped.Deliver(ctx, runtime.Agent{}, runtime.Job{}); err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("revoked grant delivery error=%v", err)
+	}
+	if len(capture.jobs) != 2 {
+		t.Fatalf("revoked grant reached inner adapter: jobs=%d", len(capture.jobs))
+	}
+}
+
+func TestPipelineEnvironmentValidationTiming(t *testing.T) {
+	home := t.TempDir()
+	specFile := writeSpec(t, "name: unresolved-env\nrepo: owner/repo\nstages: [{id: run, cmd: echo, env_keys: [MISSING]}]\n")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"pipeline", "add", specFile, "--home", home}, &stdout, &stderr); code != 0 || !strings.Contains(stderr.String(), "warning:") || !strings.Contains(stderr.String(), "gitmoot key grant MISSING --pipeline unresolved-env") {
+		t.Fatalf("disabled add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, args := range [][]string{
+		{"pipeline", "enable", "unresolved-env", "--home", home},
+		{"pipeline", "run", "unresolved-env", "--home", home},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run(args, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "gitmoot key grant MISSING --pipeline unresolved-env") {
+			t.Fatalf("%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+
+	enabledSpec := writeSpec(t, "name: unresolved-enabled\nrepo: owner/repo\nstages: [{id: run, cmd: echo, env_keys: [MISSING]}]\n")
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"pipeline", "add", enabledSpec, "--enable", "--home", home}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "gitmoot key grant MISSING --pipeline unresolved-enabled") {
+		t.Fatalf("enabled add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if err := withStore(home, func(store *db.Store) error {
+		_, found, err := store.GetPipeline(context.Background(), "unresolved-enabled")
+		if err == nil && found {
+			return fmt.Errorf("unresolved enabled pipeline was persisted")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -327,6 +500,232 @@ func TestPipelineInjectedEnvShellE2E(t *testing.T) {
 		}
 		if bytes.Contains(data, []byte(pipelineEnvSecretA)) || bytes.Contains(data, []byte(pipelineEnvSecretB)) {
 			return fmt.Errorf("secret value persisted in log %s", path)
+		}
+		return nil
+	}); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestPipelineKeychainRegistryGrantsShellE2E(t *testing.T) {
+	ctx := context.Background()
+	home, paths, store := heartbeatLoopE2EHome(t)
+	checkout := createDaemonWorkerGitCheckout(t, "main")
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	const (
+		sharedA  = "KEYCARD_SHARED_A"
+		sharedB  = "KEYCARD_SHARED_B"
+		override = "KEYCARD_OVERRIDE"
+		revoked  = "KEYCARD_REVOKED"
+		unused   = "KEYCARD_UNGRANTED"
+		oldA     = "registry-old-a-874"
+		oldB     = "registry-old-b-874"
+		rotatedB = "registry-rotated-b-874"
+		sharedO  = "registry-shared-override-874"
+		ownO     = "pipeline-own-override-874"
+		revokedV = "registry-revoked-874"
+		unusedV  = "registry-ungranted-874"
+	)
+	keychainPath := writeDefaultKeychain(t, home, fmt.Sprintf("%s=%s\n%s=%s\n%s=%s\n%s=%s\n%s=%s\n", sharedA, oldA, sharedB, oldB, override, sharedO, revoked, revokedV, unused, unusedV))
+	ownFile := writePipelineEnvFile(t, t.TempDir(), override+"="+ownO+"\n", 0o600)
+	outA := filepath.Join(t.TempDir(), "shared-a.txt")
+	outB := filepath.Join(t.TempDir(), "shared-b.txt")
+	outRevoked := filepath.Join(t.TempDir(), "revoked.txt")
+	specYAML := fmt.Sprintf(`name: keycard-e2e
+repo: owner/repo
+env_file: %q
+stages:
+  - id: a
+    cmd: |
+      test -n "$%s"; test -n "$%s"; test -z "${%s+x}"; printf '%%s|%%s' "$%s" "$%s" > %q; %s
+    env_keys: [%s, %s]
+  - id: b
+    cmd: |
+      test -n "$%s"; test -z "${%s+x}"; printf '%%s' "$%s" > %q; %s
+    env_keys: [%s]
+    needs: [a]
+  - id: revoked
+    cmd: |
+      printf '%%s' "$%s" > %q; %s
+    env_keys: [%s]
+    needs: [b]
+`, ownFile, sharedA, override, sharedB, sharedA, override, outA, pipelineShellResultCommand(t, "approved", "a"), sharedA, override, sharedB, sharedA, sharedB, outB, pipelineShellResultCommand(t, "approved", "b"), sharedB, revoked, outRevoked, pipelineShellResultCommand(t, "approved", "revoked"), revoked)
+	specFile := writeSpec(t, specYAML)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"pipeline", "add", specFile, "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("pipeline add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, name := range []string{sharedA, sharedB, override, revoked, unused} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run([]string{"key", "add", name, "--mode", "injected", "--home", home}, &stdout, &stderr); code != 0 {
+			t.Fatalf("key add %s code=%d stdout=%q stderr=%q", name, code, stdout.String(), stderr.String())
+		}
+	}
+	for _, name := range []string{sharedA, sharedB, override, revoked} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run([]string{"key", "grant", name, "--pipeline", "keycard-e2e", "--home", home}, &stdout, &stderr); code != 0 {
+			t.Fatalf("key grant %s code=%d stdout=%q stderr=%q", name, code, stdout.String(), stderr.String())
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"pipeline", "run", "keycard-e2e", "--home", home}, &stdout, &stderr); code != 0 {
+		t.Fatalf("pipeline run code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	runID := strings.TrimSpace(stdout.String())
+	enqueue := newPipelineStageEnqueuer(store, home)
+	worker := defaultJobWorker(store, io.Discard, home)
+	now := time.Date(2026, 7, 16, 15, 0, 0, 0, time.UTC)
+	rotated := false
+	revokedAfterEnqueue := false
+	for i := 0; i < 12; i++ {
+		if err := runEnabledRepoWorkerTicks(ctx, store, worker, 1, io.Discard, now); err != nil {
+			t.Fatalf("worker tick %d: %v", i, err)
+		}
+		if !rotated {
+			row := stageRow(t, store, runID, "a")
+			if row.JobID != "" {
+				job, err := store.GetJob(ctx, row.JobID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if job.State == string(workflow.JobSucceeded) {
+					rotatedBody := fmt.Sprintf("%s=%s\n%s=%s\n%s=%s\n%s=%s\n%s=%s\n", sharedA, oldA, sharedB, rotatedB, override, sharedO, revoked, revokedV, unused, unusedV)
+					if err := os.WriteFile(keychainPath, []byte(rotatedBody), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					rotated = true
+				}
+			}
+		}
+		if err := runPipelineScanOnce(ctx, store, enqueue, now); err != nil {
+			t.Fatalf("pipeline scan %d: %v", i, err)
+		}
+		if !revokedAfterEnqueue {
+			row := stageRow(t, store, runID, "revoked")
+			if row.JobID != "" {
+				if _, err := store.RevokeKeychainKey(ctx, db.KeychainConsumerPipeline, "keycard-e2e", revoked); err != nil {
+					t.Fatal(err)
+				}
+				revokedAfterEnqueue = true
+			}
+		}
+		run, _, err := store.GetPipelineRun(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.State != pipeline.RunRunning {
+			if run.State != pipeline.RunFailed {
+				t.Fatalf("run state=%s halt=%s reason=%s", run.State, run.HaltStage, run.HaltReason)
+			}
+			break
+		}
+	}
+	if !rotated || !revokedAfterEnqueue {
+		t.Fatalf("rotation=%v revoke-after-enqueue=%v", rotated, revokedAfterEnqueue)
+	}
+	if data, err := os.ReadFile(outA); err != nil || string(data) != oldA+"|"+ownO {
+		t.Fatalf("stage a output=%q err=%v", data, err)
+	}
+	if data, err := os.ReadFile(outB); err != nil || string(data) != rotatedB {
+		t.Fatalf("stage b output=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(outRevoked); !os.IsNotExist(err) {
+		t.Fatalf("revoked stage executed: err=%v", err)
+	}
+
+	wantSources := map[string]map[string]string{
+		"a":       {sharedA: pipelineKeySourceShared, override: pipelineKeySourceOwn},
+		"b":       {sharedB: pipelineKeySourceShared},
+		"revoked": {revoked: pipelineKeySourceShared},
+	}
+	for stageID, names := range wantSources {
+		row := stageRow(t, store, runID, stageID)
+		job, err := store.GetJob(ctx, row.JobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := workflow.ParseJobPayload(job.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if payload.PipelineName != "keycard-e2e" || len(payload.PipelineKeyAccess) != len(names) {
+			t.Fatalf("stage %s payload=%+v", stageID, payload)
+		}
+		for _, access := range payload.PipelineKeyAccess {
+			if names[access.Name] != access.Source || access.Stage != stageID || access.Mode != db.KeychainModeInjected {
+				t.Fatalf("stage %s access=%+v want=%+v", stageID, payload.PipelineKeyAccess, names)
+			}
+		}
+	}
+
+	ungrantedSpec := writeSpec(t, "name: keycard-ungranted\nrepo: owner/repo\nstages: [{id: run, cmd: echo, env_keys: [KEYCARD_UNGRANTED]}]\n")
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"pipeline", "add", ungrantedSpec, "--home", home}, &stdout, &stderr); code != 0 || !strings.Contains(stderr.String(), "warning:") {
+		t.Fatalf("ungranted add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"pipeline", "run", "keycard-ungranted", "--home", home}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "gitmoot key grant KEYCARD_UNGRANTED --pipeline keycard-ungranted") {
+		t.Fatalf("ungranted run code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if runs, err := store.ListPipelineRuns(ctx, "keycard-ungranted"); err != nil || len(runs) != 0 {
+		t.Fatalf("ungranted runs=%+v err=%v", runs, err)
+	}
+
+	sentinels := []string{oldA, oldB, rotatedB, sharedO, ownO, revokedV, unusedV}
+	for _, stageID := range []string{"a", "b", "revoked"} {
+		row := stageRow(t, store, runID, stageID)
+		job, err := store.GetJob(ctx, row.JobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sentinel := range sentinels {
+			if strings.Contains(job.Payload, sentinel) {
+				t.Fatalf("stage %s payload persisted sentinel %q", stageID, sentinel)
+			}
+		}
+		events, err := store.ListJobEvents(ctx, row.JobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			for _, sentinel := range sentinels {
+				if strings.Contains(event.Message, sentinel) {
+					t.Fatalf("stage %s event persisted sentinel %q", stageID, sentinel)
+				}
+			}
+		}
+	}
+	for _, persistedPath := range []string{paths.Database, paths.Database + "-wal"} {
+		data, err := os.ReadFile(persistedPath)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		for _, sentinel := range sentinels {
+			if bytes.Contains(data, []byte(sentinel)) {
+				t.Fatalf("sentinel %q persisted in %s", sentinel, persistedPath)
+			}
+		}
+	}
+	if err := filepath.WalkDir(paths.Logs, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, sentinel := range sentinels {
+			if bytes.Contains(data, []byte(sentinel)) {
+				return fmt.Errorf("sentinel %q persisted in log %s", sentinel, path)
+			}
 		}
 		return nil
 	}); err != nil && !os.IsNotExist(err) {

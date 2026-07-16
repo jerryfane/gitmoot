@@ -72,7 +72,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `name`                      | pipeline     | yes      | Stable identifier and DB primary key; a name-safe token (letters, digits, `-`, `_`). |
 | `repo`                      | pipeline     | no\*     | `owner/name` the stages run against. Optional to **register**, but **required to run** — stage jobs need a managed repo for the worker to claim them. |
 | `env_file`                  | pipeline     | no       | Absolute operator-owned secret file. It must exist, be a regular file owned by the current uid with mode exactly `0600`, and live outside the Gitmoot home and every managed checkout. |
-| `env`                       | pipeline     | no       | Inline **non-secret** `KEY: value` defaults. A file value with the same key wins. Values are delivered only when a shell stage selects the key. |
+| `env`                       | pipeline     | no       | Inline **non-secret** `KEY: value` defaults. Pipeline-owned and granted shared values take precedence. Values are delivered only when a shell stage selects the key. |
 | `schedule.interval`         | pipeline     | cond.    | Required when a `schedule:` block is present. A positive Go duration (`24h`, `1h30m`). |
 | `schedule.jitter`           | pipeline     | no       | Random `[0, jitter]` added to each `next_due` to de-thunder (`>= 0`). |
 | `trigger.kind`              | pipeline     | cond.    | Required with `trigger:`. Only `email` is supported; it generates an owned Activepieces IMAP flow. |
@@ -100,7 +100,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `stages[].needs`            | stage        | no       | Ids of sibling stages that must **succeed** before this stage is enqueued. Must reference known stages, never the stage itself, and form no cycle. |
 | `stages[].timeout`          | stage        | no       | Per-stage job timeout (positive Go duration). |
 | `stages[].retry`            | stage        | no       | How many times a **failed** stage may be re-attempted (`>= 0`, default `0`). |
-| `stages[].env_keys`         | stage        | no       | Exact names or globs (for example `REDDIT_*`) selected from `env_file`/`env`. Shell stages only; no entry means no injected values. |
+| `stages[].env_keys`         | stage        | no       | Exact names or globs (for example `REDDIT_*`) selected from the pipeline's `env_file`, granted shared registry keys, or inline `env`. Shell stages only; no entry means no injected values. |
 | `stages[].success_decisions`| stage        | no       | Per-stage override of the pipeline default. |
 
 `gitmoot pipeline add` validates the whole spec **at add time** — unknown keys, a
@@ -119,7 +119,14 @@ rather than a stuck run later.
 
 Pipeline secrets are deny-by-default. A shell stage receives only the concrete
 names selected by its `env_keys`; a sibling with different or empty `env_keys`
-does not receive them. Agent and gate stages cannot declare `env_keys`.
+does not receive them. Agent and gate stages cannot declare `env_keys`. Shared
+keys must be registered and granted separately:
+
+```sh
+gitmoot key path # edit this 0600 file; the CLI never accepts values
+gitmoot key add REDDIT_CLIENT_SECRET --mode injected
+gitmoot key grant REDDIT_CLIENT_SECRET --pipeline trend-scout
+```
 
 ```yaml
 env_file: /root/.config/trend-scout/env
@@ -134,21 +141,27 @@ stages:
     env_keys: [TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]
 ```
 
-`pipeline add` parses the file and refuses missing files/keys, insecure mode,
-wrong ownership, protected locations, malformed selectors, and any inline,
-file, or selector collision with reserved `GITMOOT_*` names. Values are loaded
-again immediately before each stage process starts, so an atomic rewrite of the
-same `0600` file rotates credentials without a daemon restart. The file value
-wins an inline default; selected values win inherited daemon environment;
-Gitmoot's own later `GITMOOT_*` entries always win.
+`pipeline add` parses the pipeline-owned file and refuses insecure mode, wrong
+ownership, protected locations, malformed selectors, and any inline, file, or
+selector collision with reserved `GITMOOT_*` names. An unresolved selector is a
+names-only warning only while the pipeline remains disabled, which allows the
+pipeline to exist before `key grant`; add-with-enable, enable, manual run, and
+scheduled/triggered preflight fail closed until it resolves. Values are loaded
+again immediately before each stage process starts, so an atomic rewrite of a
+`0600` source rotates credentials without a daemon restart. Resolution is own
+`env_file`, then granted shared key, then inline default; Gitmoot's reserved
+`GITMOOT_*` entries always win. Registered but ungranted names are not glob or
+exact-match candidates.
 
-The persisted stage job payload is the audit record: it contains the env-file
-path and expanded key **names**, never secret values. Inline `env` is stored in
-the pipeline spec and is therefore for non-secrets only. An injected/opaque key
-is necessarily visible to its shell process, which can print or transmit it;
-this is scoping and audit, not a vault. The Claude model gateway is independent:
-it continues to proxy the model credential without exposing the real value to
-the child.
+The persisted stage job payload is the audit record: `PipelineKeyAccess` carries
+only `{stage,name,source,mode}` rows (plus legacy env-file/name fields for
+already-enqueued jobs), never secret values. `pipeline show --json` exposes the
+same rows. Delivery rechecks every shared grant and its registry mode; revoking
+after enqueue fails the stage rather than switching to another source. Inline
+`env` is stored in the pipeline spec and is therefore for non-secrets only. An
+injected key is visible to its shell process; this is scoping and audit, not a
+vault. `proxied` registry mode is stored for future gateway composition but is
+refused for pipeline grants. The Claude model gateway remains independent.
 
 On `pipeline add --enable`, Gitmoot publishes the owned flow. An unavailable
 Activepieces instance leaves a pending binding; run

@@ -141,6 +141,26 @@ fallback. The first adapter build imports legacy `daemon-runtime.env` when the
 new file is absent, otherwise it seeds from ambient managed variables once;
 existing authoritative files are never overwritten.
 
+Shared injected pipeline keys use a separate operator-owned keychain file,
+defaulting to `<base-home>/.config/gitmoot/keychain.env` (override with
+`[credentials] keychain_path`). The CLI manages names and grants only; edit the
+`0600` file at the path it prints to set or rotate values:
+
+```sh
+gitmoot key path [--json]
+gitmoot key add <NAME> --mode injected|proxied [--json]
+gitmoot key list [--json]
+gitmoot key show <NAME> [--json]
+gitmoot key grant <NAME> --pipeline <pipeline> [--json]
+gitmoot key revoke <NAME> --pipeline <pipeline> [--json]
+gitmoot key rm <NAME> [--force] [--json]
+```
+
+There is deliberately no value flag, stdin value, or value-derived hash.
+`proxied` metadata is reserved for future gateway composition and cannot be
+granted to a pipeline. `rm --force` removes metadata and grants but leaves the
+file entry untouched.
+
 Runtime-child environment curation is off by default. Enable it in
 `config.toml`:
 
@@ -151,6 +171,7 @@ env_passthrough = ["GOCACHE", "NPM_*"]
 github = "deny"
 model_gateway = false
 model_gateway_allow_hosts = ["api.anthropic.com"]
+# keychain_path = "/absolute/operator/path/keychain.env"
 ```
 
 Set `model_gateway = true` to opt Claude into the daemon-owned loopback model
@@ -2773,19 +2794,24 @@ its `needs` stages' result summaries are prepended to the prompt, and a repo-bou
 agent stage runs in its own detached read-only worktree so same-repo agent stages
 parallelize without touching the live checkout.
 
-Shell stages can opt into pipeline-owned environment values with `env_keys`.
-`env_file` must be an absolute, operator-owned regular file with mode exactly
-`0600`, outside the Gitmoot home and every managed checkout; inline `env` is for
-non-secret defaults. Exact names and globs such as `REDDIT_*` are expanded at
-enqueue, and every selector must resolve. Agent/gate stages cannot set
-`env_keys`; a shell stage with no list gets nothing. The file is read again at
-delivery, so rotation applies without a daemon restart. File values beat inline
-defaults, selected values beat inherited daemon environment, and reserved
-`GITMOOT_*` names are rejected while Gitmoot's internal entries remain final.
-The job payload audits only the env-file path and expanded key names, never file
-values. This injected mode exposes an opaque key to that shell process; it is
-separate from the Claude model gateway, whose proxied credential remains hidden
-from the child.
+Shell stages can opt into pipeline-owned or granted shared environment values
+with `env_keys`. Source files must be absolute, operator-owned regular files
+with mode exactly `0600`, outside the Gitmoot home and every managed checkout;
+inline `env` is for non-secret defaults. Agent/gate stages cannot set
+`env_keys`; a shell stage with no list gets nothing. Resolution is own
+`env_file`, then a shared `injected` key granted with `gitmoot key grant`, then
+inline default. Registered but ungranted names do not match exact or glob
+selectors. Structural errors always fail add; unresolved names warn only while
+the pipeline remains disabled, then hard-fail add-with-enable, enable, manual
+run, and scheduled/triggered preflight.
+
+Sources are revalidated and reread at delivery, so rotation applies without a
+daemon restart. Each payload audits `PipelineName` and names-only
+`PipelineKeyAccess` rows `{stage,name,source,mode}`; `pipeline show --json`
+exposes the same projection. A shared grant is rechecked immediately before
+delivery: revocation fails closed and never switches to another source. Gitmoot
+internal `GITMOOT_*` entries remain final. This injected mode exposes the value
+to that shell process and stays separate from the Claude model gateway.
 
 For a non-empty run payload, every agent stage (including roots) receives a
 dynamically fenced, 6000-byte-bounded `UNTRUSTED external data` block before

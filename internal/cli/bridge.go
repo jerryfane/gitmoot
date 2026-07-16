@@ -370,6 +370,13 @@ func runBridgePipeline(ctx context.Context, store *db.Store, rawHome, name, payl
 	if err != nil {
 		return "", fmt.Errorf("stored spec is invalid: %w", err)
 	}
+	environment, err := resolvePipelineEnvironment(ctx, store, rawHome, spec)
+	if err != nil {
+		return "", err
+	}
+	if err := pipelineEnvironmentResolutionError(spec, environment.Unresolved); err != nil {
+		return "", err
+	}
 	now := time.Now().UTC()
 	run, err := createPipelineRun(ctx, store, rec, spec, "bridge", payloadJSON, now)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/gitmoot/gitmoot/internal/db"
 	"github.com/gitmoot/gitmoot/internal/pipeline"
 	"github.com/gitmoot/gitmoot/internal/runtime"
+	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
 // runPipeline is the CLI for the #681 pipeline registry: define, inspect, and
@@ -259,8 +260,27 @@ func addPipelineCore(ctx context.Context, store *db.Store, spec pipeline.Spec, r
 	if err := validatePipelineProducePaths(ctx, store, opts.Home, spec); err != nil {
 		return false, err
 	}
-	if err := validatePipelineEnvironment(ctx, store, opts.Home, spec); err != nil {
+	previous, previousFound, err := store.GetPipeline(ctx, spec.Name)
+	if err != nil {
 		return false, err
+	}
+	finalEnabled := previousFound && previous.Enabled
+	if opts.ForceEnabled {
+		finalEnabled = opts.Enable
+	} else if opts.Enable {
+		finalEnabled = true
+	}
+	environment, err := resolvePipelineEnvironment(ctx, store, opts.Home, spec)
+	if err != nil {
+		return false, err
+	}
+	if err := pipelineEnvironmentResolutionError(spec, environment.Unresolved); err != nil {
+		if finalEnabled {
+			return false, err
+		}
+		for _, unresolved := range environment.Unresolved {
+			fmt.Fprintf(stderr, "warning: pipeline %s is disabled: %v\n", spec.Name, pipelineEnvironmentResolutionError(spec, []pipelineEnvUnresolved{unresolved}))
+		}
 	}
 	registered, err := store.ListPipelines(ctx)
 	if err != nil {
@@ -294,10 +314,6 @@ func addPipelineCore(ctx context.Context, store *db.Store, spec pipeline.Spec, r
 			fmt.Fprintf(stderr, "warning: stage %q references agent %q which does not exist yet; create it before the pipeline runs (gitmoot agent ...)\n", stage.ID, stage.Agent)
 		}
 	}
-	previous, previousFound, err := store.GetPipeline(ctx, spec.Name)
-	if err != nil {
-		return false, err
-	}
 	if err := store.CreateOrUpdatePipeline(ctx, record); err != nil {
 		return false, err
 	}
@@ -320,7 +336,7 @@ func addPipelineCore(ctx context.Context, store *db.Store, spec pipeline.Spec, r
 	if err != nil {
 		return false, err
 	}
-	finalEnabled := saved.Enabled
+	finalEnabled = saved.Enabled
 	if finalEnabled && spec.Trigger != nil && spec.Trigger.Kind == "email" {
 		if _, bindErr := bindPipelineTrigger(ctx, store, saved, activepiecesAuthOptions{Home: opts.Home}, triggerBindingPending); bindErr != nil {
 			fmt.Fprintf(stderr, "warning: pipeline %s was registered but its trigger is pending: %v; retry with `gitmoot pipeline bind-trigger %s`\n", spec.Name, bindErr, spec.Name)
@@ -534,23 +550,26 @@ type pipelineStageJSON struct {
 	Network          bool     `json:"network,omitempty"`
 	Check            string   `json:"check,omitempty"`
 	CheckRetries     *int     `json:"check_retries,omitempty"`
+	EnvKeys          []string `json:"env_keys,omitempty"`
 }
 
 type pipelineJSON struct {
-	Name                string              `json:"name"`
-	Repo                string              `json:"repo,omitempty"`
-	Group               string              `json:"group"`
-	Enabled             bool                `json:"enabled"`
-	Mode                string              `json:"mode"`
-	Interval            string              `json:"interval,omitempty"`
-	Jitter              string              `json:"jitter,omitempty"`
-	SpecHash            string              `json:"spec_hash"`
-	Stages              []pipelineStageJSON `json:"stages,omitempty"`
-	LastRunAt           string              `json:"last_run_at,omitempty"`
-	NextDueAt           string              `json:"next_due_at,omitempty"`
-	LastRunID           string              `json:"last_run_id,omitempty"`
-	LastStatus          string              `json:"last_status,omitempty"`
-	TriggerBindingState string              `json:"trigger_binding_state,omitempty"`
+	Name                string                       `json:"name"`
+	Repo                string                       `json:"repo,omitempty"`
+	Group               string                       `json:"group"`
+	Enabled             bool                         `json:"enabled"`
+	Mode                string                       `json:"mode"`
+	Interval            string                       `json:"interval,omitempty"`
+	Jitter              string                       `json:"jitter,omitempty"`
+	SpecHash            string                       `json:"spec_hash"`
+	EnvFile             string                       `json:"env_file,omitempty"`
+	KeyAccess           []workflow.PipelineKeyAccess `json:"key_access,omitempty"`
+	Stages              []pipelineStageJSON          `json:"stages,omitempty"`
+	LastRunAt           string                       `json:"last_run_at,omitempty"`
+	NextDueAt           string                       `json:"next_due_at,omitempty"`
+	LastRunID           string                       `json:"last_run_id,omitempty"`
+	LastStatus          string                       `json:"last_status,omitempty"`
+	TriggerBindingState string                       `json:"trigger_binding_state,omitempty"`
 }
 
 func runPipelineList(args []string, stdout, stderr io.Writer) int {
@@ -581,7 +600,7 @@ func runPipelineList(args []string, stdout, stderr io.Writer) int {
 	if *jsonOut {
 		out := make([]pipelineJSON, 0, len(pipelines))
 		for _, p := range pipelines {
-			out = append(out, pipelineToJSON(p, false, nil, pipelineUpstreamMissing(p, knownPipelines)))
+			out = append(out, pipelineToJSON(p, false, nil, pipelineEnvironmentResolution{}, pipelineUpstreamMissing(p, knownPipelines)))
 		}
 		return encodePipelineJSON(stdout, stderr, out)
 	}
@@ -623,6 +642,7 @@ func runPipelineShow(args []string, stdout, stderr io.Writer) int {
 		runView         pipelineRunView
 		runFound        bool
 		upstreamMissing bool
+		environment     pipelineEnvironmentResolution
 	)
 	if err := withStore(*home, func(store *db.Store) error {
 		ctx := context.Background()
@@ -635,6 +655,15 @@ func runPipelineShow(args []string, stdout, stderr io.Writer) int {
 			return err
 		}
 		if found {
+			if *jsonOut {
+				spec, loadErr := pipeline.Load([]byte(record.SpecYAML))
+				if loadErr == nil {
+					environment, err = resolvePipelineEnvironment(ctx, store, *home, spec)
+					if err != nil {
+						return err
+					}
+				}
+			}
 			agents = pipelineStageAgents(ctx, store, record)
 			rows, listErr := store.ListPipelines(ctx)
 			if listErr != nil {
@@ -651,7 +680,7 @@ func runPipelineShow(args []string, stdout, stderr io.Writer) int {
 	}
 	if found {
 		if *jsonOut {
-			return encodePipelineJSON(stdout, stderr, pipelineToJSON(record, true, agents, upstreamMissing))
+			return encodePipelineJSON(stdout, stderr, pipelineToJSON(record, true, agents, environment, upstreamMissing))
 		}
 		printPipeline(stdout, record, agents, upstreamMissing)
 		return 0
@@ -736,6 +765,13 @@ func runPipelineSetEnabled(args []string, enabled bool, stdout, stderr io.Writer
 				return store.SetPipelineEnabled(ctx, name, true)
 			}
 			return loadErr
+		}
+		environment, envErr := resolvePipelineEnvironment(ctx, store, *home, spec)
+		if envErr != nil {
+			return envErr
+		}
+		if envErr := pipelineEnvironmentResolutionError(spec, environment.Unresolved); envErr != nil {
+			return envErr
 		}
 		if spec.Trigger != nil && spec.Trigger.Kind == "pipeline" {
 			if err := store.ArmPipelineTrigger(ctx, name, spec.Trigger.Pipeline, time.Now().UTC()); err != nil {
@@ -834,7 +870,7 @@ func runPipelineRemove(args []string, stdout, stderr io.Writer) int {
 // shape. When withStages is set it parses the stored (already-validated) spec to
 // enumerate the stage DAG; a parse failure degrades to no stages rather than
 // failing the command.
-func pipelineToJSON(record db.Pipeline, withStages bool, agents map[string]db.Agent, upstreamMissing ...bool) pipelineJSON {
+func pipelineToJSON(record db.Pipeline, withStages bool, agents map[string]db.Agent, environment pipelineEnvironmentResolution, upstreamMissing ...bool) pipelineJSON {
 	group, _ := resolvedPipelineGroup(record)
 	out := pipelineJSON{
 		Name:                record.Name,
@@ -845,6 +881,7 @@ func pipelineToJSON(record db.Pipeline, withStages bool, agents map[string]db.Ag
 		Interval:            record.Interval,
 		Jitter:              record.Jitter,
 		SpecHash:            record.SpecHash,
+		KeyAccess:           append([]workflow.PipelineKeyAccess(nil), environment.Access...),
 		LastRunAt:           heartbeatTimeForStatus(record.LastRunAt),
 		NextDueAt:           heartbeatTimeForStatus(record.NextDueAt),
 		LastRunID:           record.LastRunID,
@@ -859,6 +896,7 @@ func pipelineToJSON(record db.Pipeline, withStages bool, agents map[string]db.Ag
 	}
 	if withStages {
 		if spec, err := pipeline.Load([]byte(record.SpecYAML)); err == nil {
+			out.EnvFile = spec.EnvFile
 			for _, stage := range spec.Stages {
 				agentRuntime := ""
 				if agent, ok := agents[stage.Agent]; ok {
@@ -883,6 +921,7 @@ func pipelineToJSON(record db.Pipeline, withStages bool, agents map[string]db.Ag
 					Network:          stage.Network,
 					Check:            stage.Check,
 					CheckRetries:     stage.CheckRetries,
+					EnvKeys:          append([]string(nil), stage.EnvKeys...),
 				})
 			}
 		}
@@ -1200,6 +1239,13 @@ func runPipelineRunCmd(args []string, stdout, stderr io.Writer) int {
 		spec, err := pipeline.Load([]byte(rec.SpecYAML))
 		if err != nil {
 			return fmt.Errorf("stored spec is invalid: %w", err)
+		}
+		environment, err := resolvePipelineEnvironment(ctx, store, *home, spec)
+		if err != nil {
+			return err
+		}
+		if err := pipelineEnvironmentResolutionError(spec, environment.Unresolved); err != nil {
+			return err
 		}
 		now := time.Now().UTC()
 		run, err := createPipelineRun(ctx, store, rec, spec, "manual", "{}", now)

@@ -39,12 +39,13 @@ env_passthrough = ["GOCACHE", "NPM_*"]
 github = "inherit"
 model_gateway = true
 model_gateway_allow_hosts = ["api.anthropic.com", "localhost"]
+keychain_path = "/tmp/gitmoot-keychain.env"
 `)
 	got, err := LoadCredentialsConfig(paths)
 	if err != nil {
 		t.Fatalf("LoadCredentialsConfig: %v", err)
 	}
-	if !got.EnvCuration || got.GitHub != CredentialsGitHubInherit || !got.ModelGateway || !reflect.DeepEqual(got.EnvPassthrough, []string{"GOCACHE", "NPM_*"}) || !reflect.DeepEqual(got.ModelGatewayAllowHosts, []string{"api.anthropic.com", "localhost"}) {
+	if !got.EnvCuration || got.GitHub != CredentialsGitHubInherit || !got.ModelGateway || !reflect.DeepEqual(got.EnvPassthrough, []string{"GOCACHE", "NPM_*"}) || !reflect.DeepEqual(got.ModelGatewayAllowHosts, []string{"api.anthropic.com", "localhost"}) || got.KeychainPath != "/tmp/gitmoot-keychain.env" {
 		t.Fatalf("unexpected config: %#v", got)
 	}
 }
@@ -65,6 +66,7 @@ func TestLoadCredentialsConfigRejectsInvalidValues(t *testing.T) {
 		{name: "gateway port", body: "model_gateway_allow_hosts = [\"api.anthropic.com:443\"]", want: "without a port"},
 		{name: "gateway wildcard", body: "model_gateway_allow_hosts = [\"*.anthropic.com\"]", want: "unsupported character"},
 		{name: "gateway space", body: "model_gateway_allow_hosts = [\"api anthropic.com\"]", want: "unsupported character"},
+		{name: "relative keychain", body: "keychain_path = \"relative.env\"", want: "must be absolute"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -83,7 +85,7 @@ func TestDefaultConfigCredentialsExampleRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	for _, line := range []string{"# [credentials]", "# env_curation = false", "# env_passthrough = []", "# github = \"deny\"", "# model_gateway = false", "# model_gateway_allow_hosts = [\"api.anthropic.com\"]"} {
+	for _, line := range []string{"# [credentials]", "# env_curation = false", "# env_passthrough = []", "# github = \"deny\"", "# model_gateway = false", "# model_gateway_allow_hosts = [\"api.anthropic.com\"]", "# keychain_path = \"\""} {
 		if !strings.Contains(string(content), line) {
 			t.Fatalf("DefaultConfig missing %q", line)
 		}

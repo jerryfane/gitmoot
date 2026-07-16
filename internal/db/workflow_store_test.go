@@ -477,7 +477,17 @@ func TestWorkflowDescriptionMigrationSeedsLegacySummary(t *testing.T) {
 	}
 	defer raw.Close()
 	store := &Store{db: raw}
-	for version, migration := range migrations[:len(migrations)-2] {
+	descriptionMigration := -1
+	for i, migration := range migrations {
+		if strings.Contains(migration, "ADD COLUMN description") {
+			descriptionMigration = i
+			break
+		}
+	}
+	if descriptionMigration < 0 {
+		t.Fatal("workflow description migration not found")
+	}
+	for version, migration := range migrations[:descriptionMigration] {
 		if err := store.applyMigration(ctx, version+1, migration); err != nil {
 			t.Fatalf("applyMigration(%d): %v", version+1, err)
 		}
@@ -485,8 +495,8 @@ func TestWorkflowDescriptionMigrationSeedsLegacySummary(t *testing.T) {
 	if _, err := raw.ExecContext(ctx, `INSERT INTO workflow_meta(workflow_id, summary) VALUES ('release/legacy', 'Legacy human intent')`); err != nil {
 		t.Fatalf("insert legacy meta: %v", err)
 	}
-	for offset, migration := range migrations[len(migrations)-2:] {
-		if err := store.applyMigration(ctx, len(migrations)-1+offset, migration); err != nil {
+	for offset, migration := range migrations[descriptionMigration:] {
+		if err := store.applyMigration(ctx, descriptionMigration+1+offset, migration); err != nil {
 			t.Fatalf("apply new workflow migration %d: %v", offset, err)
 		}
 	}

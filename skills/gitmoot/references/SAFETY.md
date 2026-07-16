@@ -171,16 +171,22 @@ treat `pipeline add` from an untrusted source as arbitrary code execution.
 The spec is stored **verbatim** (the raw YAML bytes plus a content hash), so a spec
 that embeds private hostnames, filesystem paths, tokens-by-reference, or repo names
 is retained in the local store as-is — the same private-repo caveat as a captured
-agent template or a published template. Do not register a spec carrying a secret in
-a stage command or inline `env`. Use an operator-owned `0600` `env_file` plus the
-shell stage's `env_keys` allowlist instead.
+agent template or a published template. Do not register a spec carrying a secret
+in a stage command or inline `env`. Use an operator-owned `0600` pipeline
+`env_file`, or register a name from the separate `gitmoot key path` keychain and
+grant it to the pipeline, then select it with the shell stage's `env_keys`
+allowlist.
 
-Pipeline `env_file` injection (#968) is deny-by-default but deliberately
-**opaque**: only a shell stage's selected `env_keys` are injected, yet that
-process receives the real values and can print or transmit them. Gitmoot stores
-only the file path and expanded names in the job audit. This is distinct from
-the Claude keycard/model gateway, where the child receives a placeholder and the
-real model credential stays daemon-side.
+Pipeline injection is deny-by-default but deliberately **opaque**: only a shell
+stage's selected own or granted shared `env_keys` are injected, yet that process
+receives the real values and can print or transmit them. Gitmoot stores only
+`{stage,name,source,mode}` audit rows, never values or hashes. Keychain and
+pipeline files are revalidated as owner-only `0600` files outside Gitmoot state
+and managed checkouts. A shared grant is rechecked at delivery, so revocation
+fails closed without source fallback. `proxied` registry entries cannot be
+granted to pipelines in this phase. This is distinct from the Claude model
+gateway, where the child receives a placeholder and the real model credential
+stays daemon-side.
 
 ## External Contracts
 

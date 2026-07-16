@@ -9171,4 +9171,25 @@ CREATE UNIQUE INDEX idx_workflow_notes_daemon_auto
 	ON workflow_notes(workflow_id, substr(body, 1, instr(body, ']')))
 	WHERE author = 'daemon' AND substr(body, 1, 9) = '[auto:pr:';
 	`,
+	// #874 named keycard registry metadata. Credential values remain exclusively
+	// in the operator-owned keychain.env file; these tables record only delivery
+	// mode and deny-by-default consumer grants. Foreign-key enforcement is not
+	// enabled globally, so key and pipeline deletion clean grants explicitly in
+	// the same transaction instead of relying on cascading constraints.
+	`
+CREATE TABLE keychain_keys (
+	name TEXT PRIMARY KEY,
+	mode TEXT NOT NULL CHECK(mode IN ('injected', 'proxied')),
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE keychain_grants (
+	consumer_kind TEXT NOT NULL,
+	consumer_id TEXT NOT NULL,
+	key_name TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (consumer_kind, consumer_id, key_name)
+);
+CREATE INDEX idx_keychain_grants_key_name ON keychain_grants(key_name);
+	`,
 }
