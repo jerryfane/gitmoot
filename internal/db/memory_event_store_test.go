@@ -212,6 +212,25 @@ func TestMemoryEventBackfillMixedLiveHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A post-journal preserved edition is an archival copy made by the update
+	// transaction. Its sole receipt is superseded, not a birth event, so a
+	// historical backfill must not fabricate created for it.
+	postArchiveLive, err := store.UpsertConfirmedMemory(ctx,
+		ConfirmedMemory{Owner: agentOwner("builder"), Key: "post-archive", Content: "old"},
+		WithConfirmedMemoryEvent(MemoryEventConfirmed, "cli-test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertConfirmedMemory(ctx,
+		ConfirmedMemory{Owner: agentOwner("builder"), Key: "post-archive", Content: "new"},
+		PreserveSupersededEdition(), WithConfirmedMemoryEvent(MemoryEventUpdated, "cli-test")); err != nil {
+		t.Fatal(err)
+	}
+	var postArchive int64
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT id FROM confirmed_memories WHERE superseded_by = ? AND key = 'post-archive'`, postArchiveLive).Scan(&postArchive); err != nil {
+		t.Fatal(err)
+	}
 
 	first, err := store.BackfillMemoryEvents(ctx, false)
 	if err != nil {
@@ -219,7 +238,7 @@ func TestMemoryEventBackfillMixedLiveHistory(t *testing.T) {
 	}
 	// Synthesized: created for preActive, created for preRetiredLive (birth
 	// predates journal) — but NOT a second retired for preRetiredLive, and
-	// NOTHING for postLive.
+	// NOTHING for postLive or the post-journal archived edition.
 	if first.Created != 2 {
 		t.Fatalf("first mixed backfill created=%d, want 2 (%+v)", first.Created, first)
 	}
@@ -239,6 +258,8 @@ func TestMemoryEventBackfillMixedLiveHistory(t *testing.T) {
 	assertEventCount(preRetiredLive, MemoryEventRetired, 1) // the LIVE one only
 	assertEventCount(postLive, MemoryEventCreated, 0)       // birth receipt is 'confirmed'
 	assertEventCount(postLive, MemoryEventConfirmed, 1)
+	assertEventCount(postArchive, MemoryEventCreated, 0) // archive only has superseded
+	assertEventCount(postArchive, MemoryEventSuperseded, 1)
 
 	second, err := store.BackfillMemoryEvents(ctx, false)
 	if err != nil || second.Created != 0 {

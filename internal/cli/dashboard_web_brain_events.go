@@ -77,8 +77,10 @@ func (d *webDataSource) handleBrainEvents(w http.ResponseWriter, r *http.Request
 	}
 	// singleflight-only (#948 conventions): never a stale page, but concurrent
 	// identical polls coalesce into one store read per (cursor, limit) variant.
-	variant := fmt.Sprintf("%d.%d", cursor, limit)
-	body, outcome, err := d.cacheForDashboard().get(r.Context(), "brain-events", variant, dashboardBrainEventsCachePolicy, func(ctx context.Context) ([]byte, error) {
+	// Retention is disabled for this endpoint, so the variant must be part of
+	// the cache key itself rather than only the entry cursor.
+	pageKey := dashboardBrainEventsCacheKey(cursor, limit)
+	body, outcome, err := d.cacheForDashboard().get(r.Context(), pageKey, "", dashboardBrainEventsCachePolicy, func(ctx context.Context) ([]byte, error) {
 		response, err := d.BrainEvents(ctx, cursor, int(limit))
 		if err != nil {
 			return nil, err
@@ -93,6 +95,10 @@ func (d *webDataSource) handleBrainEvents(w http.ResponseWriter, r *http.Request
 		return
 	}
 	d.writeCachedDashboardJSON(w, outcome, body, err)
+}
+
+func dashboardBrainEventsCacheKey(cursor, limit int64) string {
+	return fmt.Sprintf("brain-events:%d.%d", cursor, limit)
 }
 
 func dashboardBrainEventIntQuery(r *http.Request, name string, fallback int64) (int64, error) {

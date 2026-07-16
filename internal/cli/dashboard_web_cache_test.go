@@ -291,6 +291,51 @@ func TestDashboardHealthSingleflightWithoutRetention(t *testing.T) {
 	}
 }
 
+func TestDashboardBrainEventsCacheSeparatesPageFlights(t *testing.T) {
+	cache := newDashboardJSONCache(nil)
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	results := make(chan string, 2)
+	var wg sync.WaitGroup
+	run := func(cursor, limit int64, body string) {
+		defer wg.Done()
+		got, outcome, err := cache.get(context.Background(), dashboardBrainEventsCacheKey(cursor, limit), "", dashboardBrainEventsCachePolicy, func(context.Context) ([]byte, error) {
+			started <- body
+			<-release
+			return []byte(body), nil
+		})
+		if err != nil || outcome != "miss" {
+			t.Errorf("page %d.%d outcome=%q err=%v", cursor, limit, outcome, err)
+			return
+		}
+		results <- string(got)
+	}
+
+	wg.Add(1)
+	go run(0, 2, "newest-page")
+	if got := <-started; got != "newest-page" {
+		t.Fatalf("first flight = %q", got)
+	}
+	wg.Add(1)
+	go run(42, 2, "older-page")
+	select {
+	case got := <-started:
+		if got != "older-page" {
+			t.Fatalf("second flight = %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		close(release)
+		wg.Wait()
+		t.Fatal("different brain-event pages coalesced into one flight")
+	}
+	close(release)
+	wg.Wait()
+	seen := map[string]bool{<-results: true, <-results: true}
+	if !seen["newest-page"] || !seen["older-page"] {
+		t.Fatalf("page results = %#v", seen)
+	}
+}
+
 func waitForDashboardCacheWaiters(t *testing.T, cache *dashboardJSONCache, key string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

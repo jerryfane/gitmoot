@@ -251,8 +251,9 @@ func (s *Store) MaxMemoryEventID(ctx context.Context) (int64, error) {
 	return id, err
 }
 
-// BackfillMemoryEvents synthesizes tombstone history only for memories without
-// a created receipt. That created receipt is the durable idempotency marker.
+// BackfillMemoryEvents synthesizes history for pre-journal rows. It leaves
+// already-journaled archive editions alone even though an archive's only event
+// is superseded rather than a birth receipt.
 func (s *Store) BackfillMemoryEvents(ctx context.Context, dryRun bool) (MemoryEventBackfillResult, error) {
 	var result MemoryEventBackfillResult
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -262,7 +263,17 @@ func (s *Store) BackfillMemoryEvents(ctx context.Context, dryRun bool) (MemoryEv
 	defer func() { _ = tx.Rollback() }()
 	rows, err := tx.QueryContext(ctx, `
 SELECT m.id, m.first_confirmed_at, m.retired_at, m.retired_reason, COALESCE(m.superseded_by, 0),
-	m.key, m.owner_kind, m.owner_ref, m.repo, m.scope
+	m.key, m.owner_kind, m.owner_ref, m.repo, m.scope,
+	EXISTS(
+		SELECT 1 FROM confirmed_memories successor
+		WHERE successor.id = m.superseded_by
+			AND successor.owner_kind = m.owner_kind
+			AND successor.owner_ref = m.owner_ref
+			AND successor.owner_version = m.owner_version
+			AND successor.repo IS m.repo
+			AND successor.scope = m.scope
+			AND successor.key = m.key
+	) AS superseded_archive
 FROM confirmed_memories m
 ORDER BY m.id`)
 	if err != nil {
@@ -271,13 +282,14 @@ ORDER BY m.id`)
 	type row struct {
 		id, supersededBy                                                int64
 		first, retiredAt, reason, key, ownerKind, ownerRef, repo, scope string
+		supersededArchive                                               int
 	}
 	var memories []row
 	for rows.Next() {
 		var item row
 		var repo sql.NullString
 		if err := rows.Scan(&item.id, &item.first, &item.retiredAt, &item.reason, &item.supersededBy,
-			&item.key, &item.ownerKind, &item.ownerRef, &repo, &item.scope); err != nil {
+			&item.key, &item.ownerKind, &item.ownerRef, &repo, &item.scope, &item.supersededArchive); err != nil {
 			rows.Close()
 			return result, err
 		}
@@ -306,7 +318,12 @@ ORDER BY m.id`)
 		base := MemoryEvent{MemoryID: item.id, Key: item.key, OwnerKind: item.ownerKind, OwnerRef: item.ownerRef,
 			Repo: item.repo, Scope: item.scope, Actor: "cli:memory-log-backfill"}
 		synthesized := false
-		if birthCount == 0 {
+		// A post-journal PreserveSupersededEdition archive is a new row which
+		// deliberately records only its supersession. Its target has the same
+		// identity and key, distinguishing it from an older fact superseded by a
+		// groom split. Do not invent a created receipt for that archive.
+		postJournalArchive := item.supersededArchive != 0 && liveSuperseded > 0
+		if birthCount == 0 && !postJournalArchive {
 			createdDetail, _ := compactMemoryEventDetail(map[string]any{"backfilled": true})
 			event := base
 			event.At, event.Kind, event.Detail = item.first, MemoryEventCreated, createdDetail
@@ -356,4 +373,3 @@ ORDER BY m.id`)
 	}
 	return result, nil
 }
-
