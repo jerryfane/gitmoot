@@ -89,8 +89,9 @@ FROM workflow_notes INDEXED BY idx_workflow_notes_wid
 WHERE workflow_id = ? ORDER BY created_at, id LIMIT ?`
 
 // SQLite LIKE is ASCII-case-insensitive but harmless here: the sole writer path
-// (InsertWorkflowAutoNoteWithMeta) validates the lowercase "[auto:pr:" prefix,
-// and the anchored ":merged]" excludes opened/ready/closed receipts.
+// (InsertWorkflowAutoNoteWithMeta) validates the lowercase "[auto:pr:" prefix.
+// Matching only the first bracketed key keeps the anchored ":merged]" from
+// matching opened/ready/closed receipt prose.
 const workflowSummarySelectSQL = `WITH job_summary AS (
 	SELECT j.workflow_id,
 		COUNT(*) AS job_count,
@@ -123,7 +124,7 @@ const workflowSummarySelectSQL = `WITH job_summary AS (
 			WHERE latest.workflow_id = n.workflow_id AND latest.author != 'daemon'
 			ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1), '') AS last_human_author,
 		MAX(CASE WHEN n.author != 'daemon' THEN n.created_at END) AS last_human_at,
-		MAX(CASE WHEN n.author = 'daemon' AND n.body LIKE '[auto:pr:%:merged]%' THEN n.created_at END) AS last_merged_at
+		MAX(CASE WHEN n.author = 'daemon' AND substr(n.body, 1, instr(n.body, ']')) LIKE '[auto:pr:%:merged]' THEN n.created_at END) AS last_merged_at
 	FROM workflow_notes n INDEXED BY idx_workflow_notes_wid
 	GROUP BY n.workflow_id
 ), labels AS (

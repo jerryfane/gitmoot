@@ -31,6 +31,16 @@ type dashboardWorkflowActivity struct {
 	LastMergedReceipt time.Time
 }
 
+func dashboardActivityFromSummary(summary db.WorkflowSummary, lastAt int64) dashboardWorkflowActivity {
+	return dashboardWorkflowActivity{
+		Queued: summary.Queued, Running: summary.Running, Failed: summary.Failed,
+		Blocked: summary.Blocked, LastActivity: workflowMillisTime(lastAt),
+		LastFailure:       workflowMillisTime(parseJobTimeMillis(summary.LastFailureAt)),
+		LastHumanNote:     workflowMillisTime(parseJobTimeMillis(summary.LastHumanNoteAt)),
+		LastMergedReceipt: workflowMillisTime(parseJobTimeMillis(summary.LastMergedReceiptAt)),
+	}
+}
+
 // deriveDashboardWorkflowState is the single lifecycle definition shared by
 // workflow index and detail responses.
 func deriveDashboardWorkflowState(now time.Time, activity dashboardWorkflowActivity) (state string, stalledForS int64) {
@@ -43,9 +53,11 @@ func deriveDashboardWorkflowState(now time.Time, activity dashboardWorkflowActiv
 	// that receipt is therefore acknowledged; the bias is bounded by the poll
 	// interval, the same as a human note. A failure newer than the receipt
 	// re-stalls the workflow.
-	humanAcknowledges := !activity.LastHumanNote.IsZero() && !activity.LastHumanNote.Before(activity.LastFailure)
-	mergedReceiptAcknowledges := !activity.LastMergedReceipt.IsZero() && !activity.LastMergedReceipt.Before(activity.LastFailure)
-	failureUnacknowledged := !activity.LastFailure.IsZero() && !humanAcknowledges && !mergedReceiptAcknowledges
+	ackAt := activity.LastHumanNote
+	if activity.LastMergedReceipt.After(ackAt) {
+		ackAt = activity.LastMergedReceipt
+	}
+	failureUnacknowledged := !activity.LastFailure.IsZero() && (ackAt.IsZero() || ackAt.Before(activity.LastFailure))
 	if (activity.Failed > 0 || activity.Blocked > 0) && failureUnacknowledged &&
 		age > dashboardWorkflowActiveWindow && age < dashboardWorkflowStalledHorizon {
 		return "stalled", max(0, int64(age/time.Second))
@@ -126,13 +138,7 @@ func dashboardWorkflowEntries(ctx context.Context, store *db.Store, now time.Tim
 
 func dashboardWorkflowEntry(now time.Time, summary db.WorkflowSummary, meta db.WorkflowMeta, repos []string) dashboardWorkflowAPIEntry {
 	lastAt := parseJobTimeMillis(summary.LastAt)
-	state, stalledFor := deriveDashboardWorkflowState(now, dashboardWorkflowActivity{
-		Queued: summary.Queued, Running: summary.Running, Failed: summary.Failed,
-		Blocked: summary.Blocked, LastActivity: workflowMillisTime(lastAt),
-		LastFailure:       workflowMillisTime(parseJobTimeMillis(summary.LastFailureAt)),
-		LastHumanNote:     workflowMillisTime(parseJobTimeMillis(summary.LastHumanNoteAt)),
-		LastMergedReceipt: workflowMillisTime(parseJobTimeMillis(summary.LastMergedReceiptAt)),
-	})
+	state, stalledFor := deriveDashboardWorkflowState(now, dashboardActivityFromSummary(summary, lastAt))
 	author := strings.TrimSpace(meta.Author)
 	if author == "" {
 		author = strings.TrimSpace(summary.LastHumanAuthor)

@@ -376,13 +376,7 @@ func (d *webDataSource) Workflow(ctx context.Context, label string, q dashboard.
 			TokensIn: summary.InputTokens, TokensOut: summary.OutputTokens,
 			FirstAt: parseJobTimeMillis(summary.FirstAt), LastAt: parseJobTimeMillis(summary.LastAt),
 		}
-		out.State, out.StalledForS = deriveDashboardWorkflowState(now, dashboardWorkflowActivity{
-			Queued: summary.Queued, Running: summary.Running, Failed: summary.Failed,
-			Blocked: summary.Blocked, LastActivity: workflowMillisTime(out.Summary.LastAt),
-			LastFailure:       workflowMillisTime(parseJobTimeMillis(summary.LastFailureAt)),
-			LastHumanNote:     workflowMillisTime(parseJobTimeMillis(summary.LastHumanNoteAt)),
-			LastMergedReceipt: workflowMillisTime(parseJobTimeMillis(summary.LastMergedReceiptAt)),
-		})
+		out.State, out.StalledForS = deriveDashboardWorkflowState(now, dashboardActivityFromSummary(summary, out.Summary.LastAt))
 		meta, metaErr := store.GetWorkflowMeta(ctx, label)
 		if metaErr != nil && !errors.Is(metaErr, sql.ErrNoRows) {
 			return metaErr

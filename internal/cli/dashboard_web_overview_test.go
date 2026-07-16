@@ -189,15 +189,29 @@ func TestDashboardOverviewTasksAndWorkflows(t *testing.T) {
 	if len(overview.Activity.Workflows) != 1 || overview.Activity.Workflows[0].Label != "fable/redesign" || overview.Activity.Workflows[0].Running != 1 || !reflect.DeepEqual(overview.Activity.Workflows[0].Agents, []string{"alpha", "beta"}) || overview.Activity.Queued != 1 || overview.Activity.UnattendedNote != "1 active job without a workflow label" {
 		t.Fatalf("activity = %+v", overview.Activity)
 	}
-	if overview.Today.Completed != 2 || overview.Today.Failed != 1 || overview.Today.Cancelled != 1 || overview.Today.TokensIn != 68 || overview.Today.TokensOut != 82 || len(overview.Today.Notable) != 4 {
+	if overview.Today.Completed != 2 || overview.Today.Failed != 2 || overview.Today.Cancelled != 1 || overview.Today.TokensIn != 68 || overview.Today.TokensOut != 82 || len(overview.Today.Notable) != 5 {
 		t.Fatalf("today = %+v", overview.Today)
+	}
+	wantNotable := []dashboard.OverviewNotable{
+		{Agent: "alpha", Title: "Deploy failed", Outcome: "failed", ElapsedS: 30 * 60, AgeS: 60 * 60},
+		{Agent: "alpha", Title: "Merge resolved failure", Outcome: "failed", ElapsedS: 30 * 60, AgeS: 60 * 60},
+		{Agent: "alpha", Title: "Nightly ingest", Outcome: "succeeded", ElapsedS: 30 * 60, AgeS: 90 * 60},
+		{Agent: "alpha", Title: "Release complete", Outcome: "succeeded", ElapsedS: 60 * 60, AgeS: 2 * 60 * 60},
+		{Agent: "beta", Title: "Cancelled experiment", Outcome: "cancelled", ElapsedS: 60 * 60, AgeS: 3 * 60 * 60},
+	}
+	if !reflect.DeepEqual(overview.Today.Notable, wantNotable) {
+		t.Fatalf("notable = %+v, want %+v", overview.Today.Notable, wantNotable)
+	}
+	failedHourIndex := len(overview.Today.PerHour) - 1 - int(time.Hour/time.Hour)
+	if overview.Today.PerHour[failedHourIndex] != 3 {
+		t.Fatalf("per_hour[%d]=%d, want 3: %v", failedHourIndex, overview.Today.PerHour[failedHourIndex], overview.Today.PerHour)
 	}
 	hourTotal := 0
 	for _, count := range overview.Today.PerHour {
 		hourTotal += count
 	}
-	if hourTotal != 4 {
-		t.Fatalf("per_hour total=%d want 4: %v", hourTotal, overview.Today.PerHour)
+	if hourTotal != 5 {
+		t.Fatalf("per_hour total=%d want 5: %v", hourTotal, overview.Today.PerHour)
 	}
 	if len(overview.Scheduled) != 1 || overview.Scheduled[0].Name != "nightly" || overview.Scheduled[0].Schedule != "every 6h +30m" || overview.Scheduled[0].LastStatus != pipeline.RunSucceeded || overview.Scheduled[0].NextInS != 5*60*60 {
 		t.Fatalf("scheduled = %+v", overview.Scheduled)

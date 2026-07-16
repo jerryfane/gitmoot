@@ -403,6 +403,7 @@ func TestWorkflowSummaryTracksMergedDaemonReceipt(t *testing.T) {
 	}{
 		{workflowID: "release/merged", author: WorkflowAutoNoteAuthor, body: "[auto:pr:958:merged] PR #958 merged", merged: true},
 		{workflowID: "release/closed", author: WorkflowAutoNoteAuthor, body: "[auto:pr:959:closed] PR #959 closed without merging"},
+		{workflowID: "release/closed-tail", author: WorkflowAutoNoteAuthor, body: "[auto:pr:961:closed] reverted; see note re :merged] state"},
 		{workflowID: "release/opened", author: WorkflowAutoNoteAuthor, body: "[auto:pr:960:opened] PR #960 opened"},
 		{workflowID: "release/human", author: "coordinator", body: "human handoff"},
 	}
