@@ -5141,24 +5141,28 @@ func (w jobWorker) run(ctx context.Context, job db.Job) error {
 	}
 	checkout, err := w.CheckoutValidator(ctx, job, payload, agent)
 	if err != nil {
-		// Checkout-contention deferral (#532 slice C): a NON-delegation job whose
-		// daemon pre-flight checkout failed on a classified contention string (a
-		// branch-lock conflict that self-heals, or a dirty/wrong-head checkout that
-		// needs a human) is HELD with a backoff instead of terminally failing —
-		// pre-terminal, so no job.failed precedes the additive job.deferred. Every
-		// other checkout error (and every delegation child) falls through to the
-		// existing terminal path byte-identically.
-		if deferred, deferErr := w.deferCheckoutContention(ctx, job, payload, err); deferErr != nil {
-			writeLine(w.Stdout, "job %s checkout-contention deferral failed: %v", job.ID, deferErr)
-		} else if deferred {
-			writeLine(w.Stdout, "job %s deferred on checkout contention: %v", job.ID, err)
+		if resumedCheckout, resumedPayload, ok := w.resumeSelfDirtyWorktree(ctx, job, payload, agent, err); ok {
+			checkout, payload, err = resumedCheckout, resumedPayload, nil
+		} else {
+			// Checkout-contention deferral (#532 slice C): a NON-delegation job whose
+			// daemon pre-flight checkout failed on a classified contention string (a
+			// branch-lock conflict that self-heals, or a dirty/wrong-head checkout that
+			// needs a human) is HELD with a backoff instead of terminally failing —
+			// pre-terminal, so no job.failed precedes the additive job.deferred. Every
+			// other checkout error (and every delegation child) falls through to the
+			// existing terminal path byte-identically.
+			if deferred, deferErr := w.deferCheckoutContention(ctx, job, payload, err); deferErr != nil {
+				writeLine(w.Stdout, "job %s checkout-contention deferral failed: %v", job.ID, deferErr)
+			} else if deferred {
+				writeLine(w.Stdout, "job %s deferred on checkout contention: %v", job.ID, err)
+				return nil
+			}
+			if finishErr := w.finishQueuedJob(ctx, job.ID, workflow.JobFailed, err); finishErr != nil {
+				return finishErr
+			}
+			_ = w.postJobResultComment(ctx, job.ID, agent, "", err)
 			return nil
 		}
-		if finishErr := w.finishQueuedJob(ctx, job.ID, workflow.JobFailed, err); finishErr != nil {
-			return finishErr
-		}
-		_ = w.postJobResultComment(ctx, job.ID, agent, "", err)
-		return nil
 	}
 	// #732 moot-seat relay injection: a `gitmoot moot` SEAT (payload.MootSeat) must
 	// converse via `gitmoot chat send/wait` mid-run, but its runtime sandbox makes

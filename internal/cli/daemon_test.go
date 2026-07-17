@@ -2792,6 +2792,124 @@ func TestRunQueuedJobsUsesTaskWorktreeForImplement(t *testing.T) {
 	}
 }
 
+func TestRunQueuedJobsResumesSelfDirtyTaskWorktree(t *testing.T) {
+	ctx := context.Background()
+	store := daemonWorkerStore(t)
+	checkout := createDaemonWorkerGitCheckout(t, "main")
+	worktree := filepath.Join(t.TempDir(), "task-resume")
+	runDaemonWorkerGit(t, checkout, "worktree", "add", "-b", "task-resume", worktree, "main")
+	head, err := (gitutil.Client{Dir: worktree}).HeadSHA(ctx)
+	if err != nil {
+		t.Fatalf("HeadSHA returned error: %v", err)
+	}
+	completedWork := filepath.Join(worktree, "completed-work.txt")
+	if err := os.WriteFile(completedWork, []byte("completed before runtime death\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile completed work returned error: %v", err)
+	}
+
+	seedDaemonWorkerRepo(t, store, "owner/repo", checkout)
+	seedDaemonWorkerAgent(t, store, "lead", runtime.ShellRuntime, "unused", []string{"implement"}, "owner/repo")
+	if err := store.UpsertTask(ctx, db.Task{
+		ID:           "task-resume",
+		RepoFullName: "owner/repo",
+		GoalID:       "goal-1",
+		Title:        "Resume completed work",
+		State:        string(workflow.TaskImplementing),
+		Branch:       "task-resume",
+		WorktreePath: worktree,
+	}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+	if acquired, err := store.AcquireLock(ctx, db.BranchLock{RepoFullName: "owner/repo", Branch: "task-resume", Owner: "lead"}); err != nil || !acquired {
+		t.Fatalf("AcquireLock returned acquired=%v err=%v", acquired, err)
+	}
+	enqueueDaemonWorkerJob(t, store, workflow.JobRequest{
+		ID:           "job-resume-dirty",
+		Agent:        "lead",
+		Action:       "implement",
+		Repo:         "owner/repo",
+		Branch:       "task-resume",
+		HeadSHA:      head,
+		GoalID:       "goal-1",
+		TaskID:       "task-resume",
+		TaskTitle:    "Resume completed work",
+		Instructions: "Finish the implementation.",
+	})
+
+	adapter := &cliWorkerFakeAdapter{output: `{"gitmoot_result":{"decision":"implemented","summary":"prior work is complete","findings":[],"changes_made":[],"tests_run":[],"needs":[],"delegations":[]}}`}
+	worker := defaultJobWorker(store, io.Discard)
+	adapterCheckout := ""
+	worker.AdapterFactory = func(_ runtime.Agent, checkout string) (workflow.DeliveryAdapter, error) {
+		adapterCheckout = checkout
+		return adapter, nil
+	}
+	worker.WorkflowFactory = func(string) workflow.Engine {
+		return workflow.Engine{Store: store}
+	}
+
+	if err := runQueuedJobs(ctx, worker, 1); err != nil {
+		t.Fatalf("runQueuedJobs returned error: %v", err)
+	}
+
+	if adapter.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1 resumed delivery", adapter.calls)
+	}
+	wantCheckout, err := normalizeTaskWorktreePath(worktree)
+	if err != nil {
+		t.Fatalf("normalizeTaskWorktreePath returned error: %v", err)
+	}
+	if adapterCheckout != wantCheckout {
+		t.Fatalf("adapter checkout = %q, want task worktree %q", adapterCheckout, wantCheckout)
+	}
+	if len(adapter.prompts) != 1 || !strings.Contains(adapter.prompts[0], "COMPLETED work that is present but UNCOMMITTED") {
+		t.Fatalf("delivered prompt missing self-dirty resume notice: %q", adapter.prompts)
+	}
+	if strings.Contains(adapter.prompts[0], "NOTE (operational retry") || strings.Contains(adapter.prompts[0], "pushed branches") {
+		t.Fatalf("delivered prompt carried generic operational-blocker reconciliation notice: %q", adapter.prompts[0])
+	}
+
+	job, err := store.GetJob(ctx, "job-resume-dirty")
+	if err != nil {
+		t.Fatalf("GetJob returned error: %v", err)
+	}
+	payload, err := daemonJobPayload(job)
+	if err != nil {
+		t.Fatalf("daemonJobPayload returned error: %v", err)
+	}
+	if !payload.ResumedSelfDirtyWorktree {
+		t.Fatalf("payload does not mark resumed self-dirty worktree: %+v", payload)
+	}
+	if payload.BlockerAttempts != 1 || payload.BlockerRetryAt != "" || !payload.BlockerPreDelivery {
+		t.Fatalf("resume blocker fields = attempts=%d retry_at=%q pre_delivery=%v", payload.BlockerAttempts, payload.BlockerRetryAt, payload.BlockerPreDelivery)
+	}
+	if payload.HeadSHA != head {
+		t.Fatalf("payload head = %q, want original base %q", payload.HeadSHA, head)
+	}
+	events, err := store.ListJobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("ListJobEvents returned error: %v", err)
+	}
+	resumedEvent := false
+	failedEvent := false
+	for _, event := range events {
+		resumedEvent = resumedEvent || event.Kind == "worktree_resumed"
+		failedEvent = failedEvent || event.Kind == string(workflow.JobFailed) || event.Kind == "job.failed"
+	}
+	if !resumedEvent {
+		t.Fatalf("job events missing worktree_resumed: %+v", events)
+	}
+	if failedEvent {
+		t.Fatalf("resumed job recorded a failure event: %+v", events)
+	}
+	contents, err := os.ReadFile(completedWork)
+	if err != nil {
+		t.Fatalf("prior completed work did not survive re-delivery: %v", err)
+	}
+	if string(contents) != "completed before runtime death\n" {
+		t.Fatalf("prior completed work changed during resume: %q", contents)
+	}
+}
+
 func TestValidateTargetCheckoutSkipsHeadShaForDelegationWorktreeChild(t *testing.T) {
 	// A delegated implement child runs in its own freshly-allocated worktree whose
 	// HEAD is the base-branch tip at allocation time; the dispatcher clears the
@@ -6169,6 +6287,7 @@ type cliWorkerFakeAdapter struct {
 	startCheckouts       []string
 	calls                int
 	delivered            []string
+	prompts              []string
 	onStart              func()
 	onDeliver            func()
 	waitForContextCancel bool
@@ -6205,6 +6324,7 @@ func (f *cliWorkerFakeAdapter) Deliver(ctx context.Context, _ runtime.Agent, job
 	f.mu.Lock()
 	f.calls++
 	f.delivered = append(f.delivered, job.ID)
+	f.prompts = append(f.prompts, job.Prompt)
 	onDeliver := f.onDeliver
 	waitForContextCancel := f.waitForContextCancel
 	f.mu.Unlock()

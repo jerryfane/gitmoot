@@ -83,12 +83,21 @@ func (e Engine) worktreeHasLiveProcess(path string) bool {
 	return defaultWorktreeHasLiveProcess(path)
 }
 
+// WorktreeLiveness reports whether a live process on this host has its cwd in
+// path and whether the /proc scan was conclusive. A false, false result means
+// the process table could not be read, so safety-sensitive recovery callers must
+// treat the worktree as potentially live.
+func WorktreeLiveness(path string) (live bool, known bool) {
+	return worktreeLiveness(path, "/proc")
+}
+
 // WorktreeHasLiveProcess exposes the same conservative /proc cwd liveness probe
 // used by destructive worktree cleanup to CLI recovery/dispatch paths. It is
 // intentionally best-effort: false means "no same-host cwd owner observed", not a
 // proof that no external process can write.
 func WorktreeHasLiveProcess(path string) bool {
-	return defaultWorktreeHasLiveProcess(path)
+	live, _ := WorktreeLiveness(path)
+	return live
 }
 
 // defaultWorktreeHasLiveProcess is a best-effort Linux /proc scan: it returns true
@@ -100,17 +109,22 @@ func WorktreeHasLiveProcess(path string) bool {
 // applies while the lease is unexpired). A worktree mid-removal can report a cwd of
 // "<path> (deleted)"; that suffix is stripped before comparison.
 func defaultWorktreeHasLiveProcess(path string) bool {
+	live, _ := WorktreeLiveness(path)
+	return live
+}
+
+func worktreeLiveness(path string, procRoot string) (live bool, known bool) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return false
+		return false, true
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = path
 	}
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return false
+		return false, false
 	}
 	self := os.Getpid()
 	for _, entry := range entries {
@@ -124,16 +138,16 @@ func defaultWorktreeHasLiveProcess(path string) bool {
 		if pid, perr := strconv.Atoi(name); perr == nil && pid == self {
 			continue
 		}
-		cwd, err := os.Readlink(filepath.Join("/proc", name, "cwd"))
+		cwd, err := os.Readlink(filepath.Join(procRoot, name, "cwd"))
 		if err != nil {
 			continue
 		}
 		cwd = strings.TrimSuffix(strings.TrimSpace(cwd), " (deleted)")
 		if cwd == abs || strings.HasPrefix(cwd, abs+string(os.PathSeparator)) {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, true
 }
 
 // defaultOwnerPIDLive probes same-host process liveness via signal 0, mirroring

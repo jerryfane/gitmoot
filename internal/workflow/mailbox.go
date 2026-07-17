@@ -395,6 +395,11 @@ type JobPayload struct {
 	// later runtime_auth/quota/network deferral still carries the at-least-once
 	// side-effect warning. Additive/omitempty (byte-identical when unset).
 	BlockerPreDelivery bool `json:"blocker_pre_delivery,omitempty"`
+	// ResumedSelfDirtyWorktree marks a dead implement job re-delivered into its own
+	// task worktree with the prior attempt's completed work still uncommitted. It
+	// selects the accurate recovery notice below instead of the generic operational
+	// retry reconciliation warning. Additive/omitempty when unset.
+	ResumedSelfDirtyWorktree bool `json:"resumed_self_dirty_worktree,omitempty"`
 }
 
 type DeliveryAdapter interface {
@@ -668,6 +673,12 @@ func blockerRetryReconciliationNotice(class string, attempt int) string {
 		"artifacts and reuse/reconcile them instead of redoing or duplicating the work.", attempt, class)
 }
 
+func resumedSelfDirtyWorktreeNotice() string {
+	return "A previous attempt of this job COMPLETED work that is present but UNCOMMITTED in your worktree. " +
+		"It was NOT pushed and NO PR was opened. Review the uncommitted changes, finish/correct as needed, and leave them in place — " +
+		"the finalizer will commit and open the PR. Do not discard prior work."
+}
+
 func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, adapter DeliveryAdapter) (AgentResult, error) {
 	if m.Store == nil {
 		return AgentResult{}, errors.New("mailbox store is required")
@@ -733,7 +744,9 @@ func (m Mailbox) Run(ctx context.Context, jobID string, agent runtime.Agent, ada
 			prompt = prompt + "\n\n" + block
 		}
 	}
-	if payload.BlockerAttempts > 0 && strings.TrimSpace(payload.BlockerClass) != "" && !payload.BlockerPreDelivery {
+	if payload.ResumedSelfDirtyWorktree {
+		prompt = resumedSelfDirtyWorktreeNotice() + "\n\n" + prompt
+	} else if payload.BlockerAttempts > 0 && strings.TrimSpace(payload.BlockerClass) != "" && !payload.BlockerPreDelivery {
 		// This run is an automatic operational-blocker retry (#532): the previous
 		// attempt died on an environment condition, not on its own output, and may
 		// have executed side effects before the blocker hit — so warn the agent its

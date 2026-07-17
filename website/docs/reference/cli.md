@@ -1075,8 +1075,16 @@ including daemon `task_dismissed_auto` and explicit recovery events.
 
 If an implementer dies mid-work — its process exits after editing the task
 worktree but before it commits, pushes, and opens a PR — the changes are left
-uncommitted in the worktree. `task run` (and `agent implement`) refuse to
-restart over that state rather than silently discard the work, and point you at
+uncommitted in the worktree. A retry of that same implement job re-delivers into
+its recorded task worktree when both the worktree process probe and runtime-owner
+lease prove the prior attempt is dead and the bounded retry budget remains. The
+retry prompt tells the agent to review and preserve the uncommitted work; the
+normal finalizer still owns commit, push, and PR creation. A live worktree, a
+dirty registered/other checkout, wrong-head state, or an exhausted retry budget
+keeps the existing block/failure path.
+
+A new `task run` (or `agent implement`) still refuses a dirty worktree with no
+active job rather than silently discarding the work, and points you at
 `task recover`:
 
 ```sh
