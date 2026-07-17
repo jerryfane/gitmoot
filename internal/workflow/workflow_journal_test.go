@@ -71,6 +71,34 @@ func TestHandleReviewPullRequestClosedJournalsWorkflowOnce(t *testing.T) {
 	}
 }
 
+func TestRecordPullRequestWorkflowTransitionSummaryTracksMergedReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		transition PullRequestJournalTransition
+		wantMerged bool
+	}{
+		{name: "merged", transition: PullRequestJournalMerged, wantMerged: true},
+		{name: "opened", transition: PullRequestJournalOpened},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openEngineStore(t)
+			ctx := context.Background()
+			event := seedWorkflowJournalLifecycle(t, store, TaskReviewing)
+			inserted, err := RecordPullRequestWorkflowTransition(ctx, store, event, tc.transition)
+			if err != nil || !inserted {
+				t.Fatalf("RecordPullRequestWorkflowTransition = (inserted=%v, err=%v)", inserted, err)
+			}
+			summary, err := store.WorkflowSummary(ctx, "release/lifecycle")
+			if err != nil {
+				t.Fatalf("WorkflowSummary: %v", err)
+			}
+			if got := summary.LastMergedReceiptAt != ""; got != tc.wantMerged {
+				t.Fatalf("LastMergedReceiptAt = %q, want merged=%v", summary.LastMergedReceiptAt, tc.wantMerged)
+			}
+		})
+	}
+}
+
 func assertWorkflowJournalTransition(t *testing.T, store *db.Store, wantBody, wantStatus string) {
 	t.Helper()
 	ctx := context.Background()

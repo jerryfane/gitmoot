@@ -72,13 +72,14 @@ type WorkflowSummary struct {
 	LastNote     string `json:"last_note,omitempty"`
 	LastAuthor   string `json:"last_author,omitempty"`
 	// LastNote and LastAuthor describe the literal latest journal entry, including
-	// daemon receipts. LastFailureAt/LastHumanNoteAt let the dashboard apply the
-	// acknowledgment rule: daemon lifecycle receipts remain activity, but only a
-	// non-daemon note acknowledges a failure.
-	LastFailureAt   string `json:"last_failure_at,omitempty"`
-	LastNoteAt      string `json:"last_note_at,omitempty"`
-	LastHumanAuthor string `json:"last_human_author,omitempty"`
-	LastHumanNoteAt string `json:"last_human_note_at,omitempty"`
+	// daemon receipts. LastFailureAt/LastHumanNoteAt/LastMergedReceiptAt let the
+	// dashboard apply the acknowledgment rule: daemon lifecycle receipts remain
+	// activity, but merged daemon receipts may acknowledge like human notes.
+	LastFailureAt       string `json:"last_failure_at,omitempty"`
+	LastNoteAt          string `json:"last_note_at,omitempty"`
+	LastHumanAuthor     string `json:"last_human_author,omitempty"`
+	LastHumanNoteAt     string `json:"last_human_note_at,omitempty"`
+	LastMergedReceiptAt string `json:"last_merged_receipt_at,omitempty"`
 }
 
 // Exported query constants keep production SQL and EXPLAIN regression tests on
@@ -87,6 +88,10 @@ const ListWorkflowNotesSQL = `SELECT id, workflow_id, author, body, repo, memory
 FROM workflow_notes INDEXED BY idx_workflow_notes_wid
 WHERE workflow_id = ? ORDER BY created_at, id LIMIT ?`
 
+// SQLite LIKE is ASCII-case-insensitive but harmless here: the sole writer path
+// (InsertWorkflowAutoNoteWithMeta) validates the lowercase "[auto:pr:" prefix.
+// Matching only the first bracketed key keeps the anchored ":merged]" from
+// matching opened/ready/closed receipt prose.
 const workflowSummarySelectSQL = `WITH job_summary AS (
 	SELECT j.workflow_id,
 		COUNT(*) AS job_count,
@@ -118,7 +123,8 @@ const workflowSummarySelectSQL = `WITH job_summary AS (
 		COALESCE((SELECT latest.author FROM workflow_notes latest
 			WHERE latest.workflow_id = n.workflow_id AND latest.author != 'daemon'
 			ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1), '') AS last_human_author,
-		MAX(CASE WHEN n.author != 'daemon' THEN n.created_at END) AS last_human_at
+		MAX(CASE WHEN n.author != 'daemon' THEN n.created_at END) AS last_human_at,
+		MAX(CASE WHEN n.author = 'daemon' AND substr(n.body, 1, instr(n.body, ']')) LIKE '[auto:pr:%:merged]' THEN n.created_at END) AS last_merged_at
 	FROM workflow_notes n INDEXED BY idx_workflow_notes_wid
 	GROUP BY n.workflow_id
 ), labels AS (
@@ -142,7 +148,7 @@ SELECT labels.workflow_id,
 		WHEN j.last_at >= n.last_at THEN j.last_at ELSE n.last_at
 	END AS last_at,
 	COALESCE(n.last_note, ''), COALESCE(n.last_author, ''), COALESCE(n.last_human_author, ''),
-	COALESCE(j.last_failure_at, ''), COALESCE(n.last_at, ''), COALESCE(n.last_human_at, '')
+	COALESCE(j.last_failure_at, ''), COALESCE(n.last_at, ''), COALESCE(n.last_human_at, ''), COALESCE(n.last_merged_at, '')
 FROM labels
 LEFT JOIN job_summary j ON j.workflow_id = labels.workflow_id
 LEFT JOIN note_summary n ON n.workflow_id = labels.workflow_id`
@@ -656,7 +662,7 @@ func (s *Store) ListWorkflowSummaries(ctx context.Context) ([]WorkflowSummary, e
 			&item.Succeeded, &item.Failed, &item.Blocked, &item.Cancelled,
 			&item.InputTokens, &item.OutputTokens, &item.NoteCount, &item.FirstAt, &item.LastAt,
 			&item.LastNote, &item.LastAuthor, &item.LastHumanAuthor, &item.LastFailureAt,
-			&item.LastNoteAt, &item.LastHumanNoteAt); err != nil {
+			&item.LastNoteAt, &item.LastHumanNoteAt, &item.LastMergedReceiptAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -752,7 +758,8 @@ func (s *Store) WorkflowSummary(ctx context.Context, workflowID string) (Workflo
 		&item.WorkflowID, &item.JobCount, &item.Queued, &item.Running, &item.Succeeded,
 		&item.Failed, &item.Blocked, &item.Cancelled, &item.InputTokens,
 		&item.OutputTokens, &item.NoteCount, &firstAt, &lastAt, &item.LastNote, &item.LastAuthor,
-		&item.LastHumanAuthor, &item.LastFailureAt, &item.LastNoteAt, &item.LastHumanNoteAt)
+		&item.LastHumanAuthor, &item.LastFailureAt, &item.LastNoteAt, &item.LastHumanNoteAt,
+		&item.LastMergedReceiptAt)
 	if err != nil {
 		return WorkflowSummary{}, err
 	}

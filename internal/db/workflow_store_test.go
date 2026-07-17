@@ -394,6 +394,59 @@ func TestWorkflowSummarySeparatesDaemonNotesFromHumanAcknowledgment(t *testing.T
 	}
 }
 
+func TestWorkflowSummaryTracksMergedDaemonReceipt(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	fixtures := []struct {
+		workflowID, author, body string
+		merged                   bool
+	}{
+		{workflowID: "release/merged", author: WorkflowAutoNoteAuthor, body: "[auto:pr:958:merged] PR #958 merged", merged: true},
+		{workflowID: "release/closed", author: WorkflowAutoNoteAuthor, body: "[auto:pr:959:closed] PR #959 closed without merging"},
+		{workflowID: "release/closed-tail", author: WorkflowAutoNoteAuthor, body: "[auto:pr:961:closed] reverted; see note re :merged] state"},
+		{workflowID: "release/opened", author: WorkflowAutoNoteAuthor, body: "[auto:pr:960:opened] PR #960 opened"},
+		{workflowID: "release/human", author: "coordinator", body: "human handoff"},
+	}
+	for _, fixture := range fixtures {
+		if fixture.author == WorkflowAutoNoteAuthor {
+			if _, inserted, err := store.InsertWorkflowAutoNoteWithMeta(ctx,
+				WorkflowNote{WorkflowID: fixture.workflowID, Author: fixture.author, Body: fixture.body},
+				WorkflowMeta{WorkflowID: fixture.workflowID, Status: fixture.body, StatusSet: true}); err != nil || !inserted {
+				t.Fatalf("InsertWorkflowAutoNoteWithMeta(%q) = (inserted=%v, err=%v)", fixture.workflowID, inserted, err)
+			}
+			continue
+		}
+		if _, err := store.InsertWorkflowNote(ctx, WorkflowNote{WorkflowID: fixture.workflowID, Author: fixture.author, Body: fixture.body}); err != nil {
+			t.Fatalf("InsertWorkflowNote(%q): %v", fixture.workflowID, err)
+		}
+	}
+
+	listed, err := store.ListWorkflowSummaries(ctx)
+	if err != nil {
+		t.Fatalf("ListWorkflowSummaries: %v", err)
+	}
+	listedByWorkflow := make(map[string]WorkflowSummary, len(listed))
+	for _, summary := range listed {
+		listedByWorkflow[summary.WorkflowID] = summary
+	}
+	for _, fixture := range fixtures {
+		listedSummary, ok := listedByWorkflow[fixture.workflowID]
+		if !ok {
+			t.Fatalf("ListWorkflowSummaries missing %q: %+v", fixture.workflowID, listed)
+		}
+		shownSummary, err := store.WorkflowSummary(ctx, fixture.workflowID)
+		if err != nil {
+			t.Fatalf("WorkflowSummary(%q): %v", fixture.workflowID, err)
+		}
+		if got, want := listedSummary.LastMergedReceiptAt != "", fixture.merged; got != want {
+			t.Fatalf("listed %q LastMergedReceiptAt = %q, want merged=%v", fixture.workflowID, listedSummary.LastMergedReceiptAt, want)
+		}
+		if got, want := shownSummary.LastMergedReceiptAt != "", fixture.merged; got != want {
+			t.Fatalf("shown %q LastMergedReceiptAt = %q, want merged=%v", fixture.workflowID, shownSummary.LastMergedReceiptAt, want)
+		}
+	}
+}
+
 func TestWorkflowMetaTextSetPreserveClearAndLimit(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	ctx := context.Background()
