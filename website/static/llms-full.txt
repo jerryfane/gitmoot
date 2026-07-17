@@ -9197,7 +9197,11 @@ version (#741), so accepted items are by construction champion weaknesses. It
 keeps only items a strong agent beats the weak agent on and a judge
 deems well-formed, stores them `pending_human_approval`, and requires
 `gitmoot skillopt synth approve <item-id>` before an item may be used — nothing
-runs it automatically.
+runs it automatically. Opt-in `--diversity-quota N` may spend up to N of the
+`--max-items` slots on human-gated, non-discriminating `too_easy` diversity
+items. Opt-in `--novelty-injection` may weave one shared, confirmed,
+repo-visible fact from outside the guidance anchor's memory cluster into each
+Challenger prompt; it safely no-ops when no eligible clustered fact exists.
 
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).
@@ -11021,7 +11025,7 @@ gitmoot skillopt gate history --candidate <version-id> [--json]
 gitmoot skillopt binary run --set <file> --run <run-id> --source <file> [--deterministic] [--reviewer runtime] [--home path] [--json]
 gitmoot skillopt binary show --run <run-id> [--home path] [--json]
 gitmoot skillopt binary lessons --template <id> [--set <file>] [--run <run-id> ...] [--no-passes] [--apply] [--home path] [--json]
-gitmoot skillopt synth --template <id> --repo owner/repo --strong <agent> [--weak <agent>] [--judge <agent>] [--challenger <agent>] [--max-items N] [--max-rounds-per-item M] [--gap F] [--out dir] [--json]
+gitmoot skillopt synth --template <id> --repo owner/repo --strong <agent> [--weak <agent>] [--judge <agent>] [--challenger <agent>] [--max-items N] [--max-rounds-per-item M] [--gap F] [--diversity-quota N] [--novelty-injection] [--out dir] [--json]
 gitmoot skillopt synth list [--status pending_human_approval|approved|rejected] [--json]
 gitmoot skillopt synth approve <item-id>
 gitmoot skillopt synth reject <item-id>
@@ -11234,8 +11238,9 @@ path uses: a **Challenger** (the `--challenger` agent, default the strong agent)
 writes a `{context, question, rubric}`; the weak (champion by default) and
 `--strong` agents each attempt it; a
 `--judge` (default the strong agent) scores both answers against the rubric and
-flags well-formedness. An item is **accepted** only when the strong agent
-meaningfully beats the weak agent (score gap ≥ `--gap`, default 0.20) AND the
+flags well-formedness. Without a diversity quota, an item is **accepted** only
+when the strong agent meaningfully beats the weak agent (score gap ≥ `--gap`,
+default 0.20) AND the
 judge confirms the item is well-formed; otherwise the round records a
 diagnostic (`too_easy`, `too_hard`, `strong_failed`, `bad_rubric`, or
 `context_leak`) and the Challenger regenerates with targeted feedback until
@@ -11244,7 +11249,22 @@ challenger/weak/strong/judge delivery is **sandboxed** into a fresh per-item tem
 scratch dir (never a registered repo checkout) and framed with an answer-only
 preamble, so an agentic-CLI attempt can never write files, start servers, or
 modify a live checkout while "answering" the exercise (`#725`); the scratch dir
-is deleted when the item finishes. Accepted items are
+is deleted when the item finishes.
+
+Two independent opt-ins broaden the candidate search without changing the
+default path. `--diversity-quota N` admits up to N otherwise-`too_easy` items as
+`kind=diversity`; those exceptions compete for the same `--max-items` slots,
+remain `pending_human_approval`, and are segmented from discriminating champion
+weaknesses for human review and PACE analysis. Other rejection diagnostics never
+consume the quota. `--novelty-injection` selects one active, confirmed memory
+from the shared pool that is visible to the target repo and outside the
+guidance anchor's top-level cluster, then offers it only to the Challenger as an
+optional, untrusted weave-in. If the guidance has no clustered anchor, selection
+falls back to uniform sampling across visible clusters; if no eligible clustered
+fact exists, the feature logs one note and safely no-ops. The injected fact never
+enters weak, strong, or judge prompts.
+
+Accepted items are
 written to `--out` (default `<home>/evals/synth`) and stored in the DB with
 status `pending_human_approval`. They are **structurally isolated**: nothing in
 the promotion/training path reads the synth table, so a pending item can never
@@ -11252,7 +11272,8 @@ affect a promotion. `skillopt synth list [--status ...]` shows them; `skillopt
 synth approve <item-id>` / `skillopt synth reject <item-id>` is the load-bearing
 human gate — only an approved item is cleared for later manual inclusion in a
 review pool. Skipped/rejected candidates are logged with their diagnostic and
-never persisted.
+never persisted. Item files and `skillopt synth list --json` include `kind` and
+`injected_memory_key` only when set; text list output marks non-empty kinds.
 
 At the manual promote/reject gate, Gitmoot records every judge↔human outcome
 into a local store — all four directions: `agree_accept`, `agree_reject`,
