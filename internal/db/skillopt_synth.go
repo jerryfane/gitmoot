@@ -22,31 +22,35 @@ const (
 // SynthReviewItem is one Autodata-style synthetic SkillOpt review item (#535):
 // a Challenger-generated {Context, Question, Rubric} triple that a weak agent
 // struggled on, a strong agent solved, and a judge confirmed is well-formed and
-// discriminating. Only ACCEPTED items become rows (skipped/rejected candidates
-// are logged with their Diagnostic, never persisted). Rows are created
+// discriminating. With an explicit diversity quota, a well-formed item the
+// strong agent solved but the weak agent also solved may instead be retained as
+// Kind="diversity" with Diagnostic="too_easy". Only admitted items become rows
+// (other skipped/rejected candidates are logged, never persisted). Rows are created
 // pending_human_approval and only ever moved to approved/rejected by the human
 // gate — they never enter any training/review pool automatically.
 type SynthReviewItem struct {
-	ID           string
-	TemplateID   string
-	Repo         string
-	Status       string
-	Context      string
-	Question     string
-	Rubric       string
-	WeakAgent    string
-	StrongAgent  string
-	JudgeAgent   string
-	WeakAnswer   string
-	StrongAnswer string
-	WeakScore    float64
-	StrongScore  float64
-	Gap          float64
-	Rounds       int
-	Diagnostic   string
-	OutPath      string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                string
+	TemplateID        string
+	Repo              string
+	Status            string
+	Kind              string
+	InjectedMemoryKey string
+	Context           string
+	Question          string
+	Rubric            string
+	WeakAgent         string
+	StrongAgent       string
+	JudgeAgent        string
+	WeakAnswer        string
+	StrongAnswer      string
+	WeakScore         float64
+	StrongScore       float64
+	Gap               float64
+	Rounds            int
+	Diagnostic        string
+	OutPath           string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // CreateSynthReviewItem inserts one accepted synth item. The caller supplies the
@@ -64,11 +68,12 @@ func (s *Store) CreateSynthReviewItem(ctx context.Context, item SynthReviewItem)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO skillopt_synth_items(
-		id, template_id, repo, status, context, question, rubric,
+		id, template_id, repo, status, kind, injected_memory_key, context, question, rubric,
 		weak_agent, strong_agent, judge_agent, weak_answer, strong_answer,
 		weak_score, strong_score, gap, rounds, diagnostic, out_path, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, strings.TrimSpace(item.TemplateID), strings.TrimSpace(item.Repo), strings.TrimSpace(item.Status),
+		strings.TrimSpace(item.Kind), strings.TrimSpace(item.InjectedMemoryKey),
 		item.Context, item.Question, item.Rubric,
 		strings.TrimSpace(item.WeakAgent), strings.TrimSpace(item.StrongAgent), strings.TrimSpace(item.JudgeAgent),
 		item.WeakAnswer, item.StrongAnswer, item.WeakScore, item.StrongScore, item.Gap, item.Rounds,
@@ -152,7 +157,7 @@ func (s *Store) SetSynthReviewItemStatus(ctx context.Context, id, status string)
 	return nil
 }
 
-const synthReviewItemSelect = `SELECT id, template_id, repo, status, context, question, rubric,
+const synthReviewItemSelect = `SELECT id, template_id, repo, status, kind, injected_memory_key, context, question, rubric,
 	weak_agent, strong_agent, judge_agent, weak_answer, strong_answer,
 	weak_score, strong_score, gap, rounds, diagnostic, out_path, created_at, updated_at
 	FROM skillopt_synth_items`
@@ -162,7 +167,8 @@ func scanSynthReviewItem(row interface{ Scan(...any) error }) (SynthReviewItem, 
 		item               SynthReviewItem
 		createdAt, updated string
 	)
-	if err := row.Scan(&item.ID, &item.TemplateID, &item.Repo, &item.Status, &item.Context, &item.Question, &item.Rubric,
+	if err := row.Scan(&item.ID, &item.TemplateID, &item.Repo, &item.Status, &item.Kind, &item.InjectedMemoryKey,
+		&item.Context, &item.Question, &item.Rubric,
 		&item.WeakAgent, &item.StrongAgent, &item.JudgeAgent, &item.WeakAnswer, &item.StrongAnswer,
 		&item.WeakScore, &item.StrongScore, &item.Gap, &item.Rounds, &item.Diagnostic, &item.OutPath,
 		&createdAt, &updated); err != nil {

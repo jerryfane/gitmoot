@@ -1056,6 +1056,8 @@ gitmoot skillopt synth \
   --max-items 3 \
   --max-rounds-per-item 3 \
   --gap 0.2 \
+  --diversity-quota 1 \
+  --novelty-injection \
   --out .gitmoot/skillopt/synth
 ```
 
@@ -1083,8 +1085,9 @@ uses:
 3. The `--judge` (default the strong agent) scores both answers against the
    rubric and reports whether the item is well-formed.
 
-An item is **accepted** only when the strong agent meaningfully beats the weak
-agent — the judged score gap is at least `--gap` (default 0.20) — **and** the
+Without a diversity quota, an item is **accepted** only when the strong agent
+meaningfully beats the weak agent — the judged score gap is at least `--gap`
+(default 0.20) — **and** the
 judge confirms the item is well-formed. Otherwise the round records a diagnostic
 and the Challenger regenerates with targeted feedback until an item is accepted
 or `--max-rounds-per-item` (default 3) is exhausted. The diagnostics are:
@@ -1098,6 +1101,28 @@ or `--max-rounds-per-item` (default 3) is exhausted. The diagnostics are:
 Every skipped or rejected candidate is logged with its diagnostic; only accepted
 items are persisted. Cost is hard-bounded by `--max-items` and
 `--max-rounds-per-item`.
+
+The two optional search controls are independent:
+
+- `--diversity-quota N` may salvage up to N `too_easy` candidates as
+  `kind=diversity`, but only when a slot exhausts every refinement round without
+  producing a discriminating item. It keeps the most recent well-formed
+  `too_easy` candidate, so a diversity item never displaces a discriminating
+  item. These remain behind human approval and stay segmented for review and
+  PACE analysis. Other diagnostics never consume the quota.
+- `--novelty-injection` offers the Challenger one active, confirmed memory from
+  the shared pool that is visible to the target repo and outside the template
+  guidance's top-level memory cluster. The fact is framed as untrusted optional
+  data and never reaches weak, strong, or judge prompts. If the guidance has no
+  clustered anchor, Gitmoot samples uniformly across visible clusters; if no
+  eligible clustered fact exists, it emits one note and continues without an
+  injection.
+
+Novelty is exploratory: an injected fact can pull the Challenger away from the
+template's domain. The human approval gate is the backstop for that drift. Item
+JSON and `skillopt synth list --json` expose `kind` and
+`injected_memory_key` only when present, and text list output marks non-empty
+kinds.
 
 ### The Human Approval Gate
 
