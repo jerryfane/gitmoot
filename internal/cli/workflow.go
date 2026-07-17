@@ -32,6 +32,7 @@ import (
 var taskHeadingPattern = regexp.MustCompile(`^### Task ([0-9]+):\s*(.+)$`)
 
 var taskWorktreeHasLiveProcess = workflow.WorktreeHasLiveProcess
+var taskWorktreeLiveness = workflow.WorktreeLiveness
 
 type importedGoal struct {
 	Goal  db.Goal

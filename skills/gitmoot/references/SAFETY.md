@@ -335,6 +335,15 @@ cannot recurse or fan out forever:
   an explicit audited recovery. Dismissal never deletes the task branch or
   worktree.
 
+- Dead implement worktree retries (#994): a queued top-level implement job may
+  bypass only the dirty-checkout pre-flight when the dirty path resolves to that
+  job's own recorded task worktree, its repo and branch still match, no worktree
+  process or runtime-owner lease is live, and the bounded retry budget remains.
+  Gitmoot re-delivers with an explicit uncommitted-work notice and leaves commit,
+  push, and PR creation to the normal finalizer. Delegation children, dirty
+  registered/other checkouts, wrong-head and lock failures, and any live or
+  uncertain owner keep their existing blocking/failure paths.
+
 When a bound trips, the offending delegations are not dispatched and the parent
 receives a typed lifecycle event explaining why (for example, a delegation batch
 of new jobs would exceed the per-root job budget of 64). Rather than stopping

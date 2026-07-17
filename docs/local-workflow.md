@@ -87,11 +87,16 @@ planned tasks. `task run` starts one task branch in a dedicated worktree,
 records its branch lock, and stores the worktree path on the task.
 
 If an implementer dies mid-work — after editing the task worktree but before it
-commits, pushes, and opens a PR — the edits are left uncommitted. `task run`
-(and `agent implement`) refuse to restart over a dirty worktree with no active
-job, rather than silently discard the work, and point at `task recover <id>
---owner <agent>`. `task recover` commits the full worktree state (`git add -A`,
-including untracked non-ignored files), pushes the branch, and opens or adopts
+commits, pushes, and opens a PR — the edits are left uncommitted. A retry of that
+same implement job re-delivers into its recorded task worktree when both the
+worktree process probe and runtime-owner lease prove the prior attempt is dead;
+the prompt tells the agent to review and preserve the uncommitted work, and the
+normal finalizer commits it. A live worktree, a dirty registered/other checkout,
+or an exhausted retry budget still blocks. A new `task run` (or `agent implement`)
+refuses a dirty worktree with no active job rather than silently discard the work,
+and points at `task recover <id> --owner <agent>`. `task recover` commits the
+full worktree state (`git add -A`, including untracked non-ignored files), pushes
+the branch, and opens or adopts
 the task's PR — the finalize steps the dead implementer never reached. `--repo`
 is optional (it falls back to the task's stored repo). `--owner` is required for
 this artifact-finalization path, while a dismissed task with no branch can be
