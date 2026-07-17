@@ -1104,11 +1104,12 @@ items are persisted. Cost is hard-bounded by `--max-items` and
 
 The two optional search controls are independent:
 
-- `--diversity-quota N` may admit up to N `too_easy` candidates as
-  `kind=diversity`. These are intentionally non-discriminating exceptions, not
-  champion weaknesses. They consume the same `--max-items` slots, remain behind
-  human approval, and stay segmented for review and PACE analysis. Other
-  diagnostics never consume the quota.
+- `--diversity-quota N` may salvage up to N `too_easy` candidates as
+  `kind=diversity`, but only when a slot exhausts every refinement round without
+  producing a discriminating item. It keeps the most recent well-formed
+  `too_easy` candidate, so a diversity item never displaces a discriminating
+  item. These remain behind human approval and stay segmented for review and
+  PACE analysis. Other diagnostics never consume the quota.
 - `--novelty-injection` offers the Challenger one active, confirmed memory from
   the shared pool that is visible to the target repo and outside the template
   guidance's top-level memory cluster. The fact is framed as untrusted optional

@@ -1860,11 +1860,14 @@ modify a live checkout while "answering" the exercise (`#725`); the scratch dir
 is deleted when the item finishes.
 
 Two independent opt-ins broaden the candidate search without changing the
-default path. `--diversity-quota N` admits up to N otherwise-`too_easy` items as
-`kind=diversity`; those exceptions compete for the same `--max-items` slots,
-remain `pending_human_approval`, and are segmented from discriminating champion
-weaknesses for human review and PACE analysis. Other rejection diagnostics never
-consume the quota. `--novelty-injection` selects one active, confirmed memory
+default path. `--diversity-quota N` salvages up to N otherwise-`too_easy` items
+as `kind=diversity`, but only after a slot exhausts every refinement round
+without a discriminating item. The most recent well-formed `too_easy` candidate
+is kept, so a diversity item never displaces a discriminating item. Those
+exceptions remain `pending_human_approval` and are segmented from discriminating
+champion weaknesses for human review and PACE analysis. Other rejection
+diagnostics never consume the quota. `--novelty-injection` selects one active,
+confirmed memory
 from the shared pool that is visible to the target repo and outside the
 guidance anchor's top-level cluster, then offers it only to the Challenger as an
 optional, untrusted weave-in. If the guidance has no clustered anchor, selection
