@@ -280,7 +280,11 @@ version (#741), so accepted items are by construction champion weaknesses. It
 keeps only items a strong agent beats the weak agent on and a judge
 deems well-formed, stores them `pending_human_approval`, and requires
 `gitmoot skillopt synth approve <item-id>` before an item may be used — nothing
-runs it automatically.
+runs it automatically. Opt-in `--diversity-quota N` may spend up to N of the
+`--max-items` slots on human-gated, non-discriminating `too_easy` diversity
+items. Opt-in `--novelty-injection` may weave one shared, confirmed,
+repo-visible fact from outside the guidance anchor's memory cluster into each
+Challenger prompt; it safely no-ops when no eligible clustered fact exists.
 
 For complete command examples, read [CLI.md](references/CLI.md).
 For end-to-end workflows, read [WORKFLOWS.md](references/WORKFLOWS.md).

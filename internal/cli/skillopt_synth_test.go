@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +16,7 @@ import (
 	"github.com/gitmoot/gitmoot/internal/agenttemplate"
 	"github.com/gitmoot/gitmoot/internal/config"
 	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/memory"
 	"github.com/gitmoot/gitmoot/internal/runtime"
 	"github.com/gitmoot/gitmoot/internal/subprocess"
 )
@@ -177,6 +181,32 @@ func withScriptedSynthDeliver(t *testing.T, challenger, weak, strong, judge stri
 			return "", nil
 		}
 	}
+}
+
+func withScriptedSynthRand(t *testing.T, indices ...int) {
+	t.Helper()
+	prev := skillOptSynthRandIndex
+	t.Cleanup(func() { skillOptSynthRandIndex = prev })
+	next := 0
+	skillOptSynthRandIndex = func(n int) (int, error) {
+		if next >= len(indices) {
+			return 0, fmt.Errorf("unexpected random selection with bound %d", n)
+		}
+		picked := indices[next]
+		next++
+		return picked, nil
+	}
+}
+
+func synthTestMemory(t *testing.T, store *db.Store, owner db.MemoryOwner, repo, scope, key, content string) int64 {
+	t.Helper()
+	id, err := store.UpsertConfirmedMemory(context.Background(), db.ConfirmedMemory{
+		Owner: owner, Repo: repo, Scope: scope, Key: key, Content: content,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConfirmedMemory %s: %v", key, err)
+	}
+	return id
 }
 
 // envelopeClaudeRunner is a subprocess.Runner that returns a fixed claude
@@ -522,6 +552,409 @@ func TestRunSkillOptSynthRejectsTooEasyAndExhaustsRounds(t *testing.T) {
 	}
 	if len(all) != 0 {
 		t.Fatalf("persisted items = %d, want 0 (rejected candidates are not stored)", len(all))
+	}
+}
+
+func TestRunSkillOptSynthDiversityQuotaAdmitsTooEasyOnce(t *testing.T) {
+	home, store := synthTestHome(t, "weak-bot", "strong-bot")
+	withScriptedSynthDeliver(t,
+		`{"context":"2+2","question":"What is 2+2?","rubric":"Rewards the answer 4."}`,
+		"4", "4",
+		`{"weak_score":0.9,"strong_score":0.95,"well_formed":true,"diagnostic":""}`,
+	)
+	outDir := filepath.Join(t.TempDir(), "synth-out")
+	var stdout, stderr bytes.Buffer
+	code := runSkillOptSynth([]string{
+		"--template", "planner", "--repo", "acme/widgets",
+		"--weak", "weak-bot", "--strong", "strong-bot",
+		"--max-items", "2", "--max-rounds-per-item", "2", "--diversity-quota", "1",
+		"--out", outDir, "--json", "--home", home,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("synth exit = %d, stderr: %s", code, stderr.String())
+	}
+	var summary synthRunSummary
+	if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary: %v\n%s", err, stdout.String())
+	}
+	if summary.Accepted != 1 || summary.Diversity != 1 || summary.Skipped != 1 {
+		t.Fatalf("summary counts = accepted %d diversity %d skipped %d", summary.Accepted, summary.Diversity, summary.Skipped)
+	}
+	if len(summary.Items) != 2 || !summary.Items[0].Accepted || summary.Items[0].Kind != "diversity" ||
+		summary.Items[0].Diagnostic != synthDiagTooEasy || summary.Items[0].Rounds != 1 ||
+		summary.Items[1].Accepted || summary.Items[1].Rounds != 2 {
+		t.Fatalf("summary items = %+v", summary.Items)
+	}
+	items, err := store.ListSynthReviewItems(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListSynthReviewItems: %v", err)
+	}
+	if len(items) != 1 || items[0].Kind != "diversity" || items[0].Diagnostic != synthDiagTooEasy || items[0].Rounds != 1 {
+		t.Fatalf("persisted diversity item = %+v", items)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, items[0].ID+".json"))
+	if err != nil {
+		t.Fatalf("read item file: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode item file: %v", err)
+	}
+	if payload["kind"] != "diversity" {
+		t.Fatalf("item file kind = %#v", payload["kind"])
+	}
+}
+
+func TestRunSkillOptSynthDiversityTextAndListOutput(t *testing.T) {
+	home, _ := synthTestHome(t, "weak-bot", "strong-bot")
+	withScriptedSynthDeliver(t,
+		`{"context":"simple","question":"question","rubric":"rubric"}`,
+		"same answer", "same answer",
+		`{"weak_score":0.8,"strong_score":0.9,"well_formed":true}`,
+	)
+	var stdout, stderr bytes.Buffer
+	code := runSkillOptSynth([]string{
+		"--template", "planner", "--repo", "acme/widgets", "--weak", "weak-bot", "--strong", "strong-bot",
+		"--max-items", "1", "--diversity-quota", "1", "--out", t.TempDir(), "--home", home,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("synth exit = %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "accepted 1 (1 diversity), skipped 0") ||
+		!strings.Contains(stdout.String(), " kind=diversity  weak=") {
+		t.Fatalf("text output = %q", stdout.String())
+	}
+
+	var listOut, listErr bytes.Buffer
+	if code := runSkillOptSynth([]string{"list", "--home", home}, &listOut, &listErr); code != 0 {
+		t.Fatalf("list exit=%d stderr=%s", code, listErr.String())
+	}
+	if !strings.Contains(listOut.String(), " kind=diversity  template=planner") {
+		t.Fatalf("list text = %q", listOut.String())
+	}
+	listOut.Reset()
+	listErr.Reset()
+	if code := runSkillOptSynth([]string{"list", "--json", "--home", home}, &listOut, &listErr); code != 0 {
+		t.Fatalf("list json exit=%d stderr=%s", code, listErr.String())
+	}
+	var items []synthItemSummary
+	if err := json.Unmarshal(listOut.Bytes(), &items); err != nil {
+		t.Fatalf("decode list json: %v", err)
+	}
+	if len(items) != 1 || items[0].Kind != "diversity" {
+		t.Fatalf("list json = %+v", items)
+	}
+}
+
+func TestGenerateSynthItemDiversityQuotaRejectsOtherDiagnostics(t *testing.T) {
+	cases := []struct {
+		name    string
+		verdict string
+		want    string
+	}{
+		{"too hard", `{"weak_score":0.1,"strong_score":0.3,"well_formed":true}`, synthDiagTooHard},
+		{"strong failed", `{"weak_score":0.8,"strong_score":0.4,"well_formed":true}`, synthDiagStrongFail},
+		{"bad rubric", `{"weak_score":0.1,"strong_score":0.9,"well_formed":false}`, synthDiagBadRubric},
+		{"context leak", `{"weak_score":0.1,"strong_score":0.9,"well_formed":true,"diagnostic":"context_leak"}`, synthDiagContextLeak},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, store := synthTestHome(t)
+			withScriptedSynthDeliver(t,
+				`{"context":"ctx","question":"question","rubric":"rubric"}`,
+				"weak", "strong", tc.verdict,
+			)
+			remaining := 1
+			result := generateSynthItem(context.Background(), store, synthOptions{
+				template: "planner", repo: "acme/widgets", out: t.TempDir(), maxRounds: 1,
+				weak: "weak-bot", strong: "strong-bot", judge: "judge-bot",
+				gapThreshold: synthDefaultGapThreshold, diversityQuota: 1,
+			}, "guidance",
+				runtime.Agent{Name: "challenger-bot"}, runtime.Agent{Name: "weak-bot"}, "", "weak-bot",
+				runtime.Agent{Name: "strong-bot"}, runtime.Agent{Name: "judge-bot"}, 0,
+				&remaining, nil, io.Discard)
+			if result.Accepted || result.Diagnostic != tc.want || remaining != 1 {
+				t.Fatalf("result=%+v remaining=%d", result, remaining)
+			}
+		})
+	}
+}
+
+func TestWriteSynthItemFileOptionalAuditFields(t *testing.T) {
+	readPayload := func(path string) map[string]any {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read payload: %v", err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		return payload
+	}
+	base := db.SynthReviewItem{ID: "item", TemplateID: "planner", Status: db.SynthItemStatusPending}
+	plainPath := filepath.Join(t.TempDir(), "plain.json")
+	if err := writeSynthItemFile(plainPath, base); err != nil {
+		t.Fatalf("write plain item: %v", err)
+	}
+	plain := readPayload(plainPath)
+	if _, ok := plain["kind"]; ok {
+		t.Fatalf("plain item unexpectedly contains kind: %+v", plain)
+	}
+	if _, ok := plain["injected_memory_key"]; ok {
+		t.Fatalf("plain item unexpectedly contains injected_memory_key: %+v", plain)
+	}
+
+	base.Kind = "diversity"
+	base.InjectedMemoryKey = "fact#7"
+	auditPath := filepath.Join(t.TempDir(), "audit.json")
+	if err := writeSynthItemFile(auditPath, base); err != nil {
+		t.Fatalf("write audit item: %v", err)
+	}
+	audit := readPayload(auditPath)
+	if audit["kind"] != "diversity" || audit["injected_memory_key"] != "fact#7" {
+		t.Fatalf("audit item fields = %+v", audit)
+	}
+}
+
+func TestSynthNoveltySelectionNormalizesAndFiltersClusters(t *testing.T) {
+	_, store := synthTestHome(t)
+	shared := db.MemoryOwner{Kind: memory.OwnerKindShared, Ref: memory.SharedOwnerRef}
+	anchorID := synthTestMemory(t, store, shared, "acme/widgets", memory.ScopeRepo,
+		"migration-anchor", "Plan software migrations well with incremental checkpoints.")
+	eligibleID := synthTestMemory(t, store, shared, "", memory.ScopeGeneral,
+		"blue-green", "Traffic changes use a blue-green switch with a rollback window.")
+	privateID := synthTestMemory(t, store, db.MemoryOwner{Kind: memory.OwnerKindAgent, Ref: "builder"},
+		"acme/widgets", memory.ScopeRepo, "private", "Private member must never be selected.")
+	wrongRepoID := synthTestMemory(t, store, shared, "acme/other", memory.ScopeRepo,
+		"wrong-repo", "Wrong-repo member must never be selected.")
+	unclusteredID := synthTestMemory(t, store, shared, "", memory.ScopeGeneral,
+		"unclustered", "Reserved cluster zero must never be selected.")
+	if err := store.RecomputeMemoryClusters(context.Background(), db.MemoryClusterAssignment{
+		Clusters: []db.MemoryCluster{
+			{ClusterID: 0, Label: "unclustered"},
+			{ClusterID: 1, Label: "migration", MedoidID: anchorID},
+			{ClusterID: 101, ParentID: 1, Label: "migration-child", MedoidID: anchorID},
+			{ClusterID: 2, Label: "delivery", MedoidID: eligibleID},
+			{ClusterID: 202, ParentID: 2, Label: "delivery-child", MedoidID: eligibleID},
+		},
+		Members: []db.MemoryClusterMember{
+			{MemoryID: anchorID, ClusterID: 101},
+			{MemoryID: eligibleID, ClusterID: 202},
+			{MemoryID: privateID, ClusterID: 202},
+			{MemoryID: wrongRepoID, ClusterID: 202},
+			{MemoryID: unclusteredID, ClusterID: 0},
+		},
+	}); err != nil {
+		t.Fatalf("RecomputeMemoryClusters: %v", err)
+	}
+	withScriptedSynthRand(t, 0, 0)
+	selector, note, err := prepareSynthNoveltySelector(context.Background(), store, "acme/widgets", "Plan software migrations well.")
+	if err != nil {
+		t.Fatalf("prepareSynthNoveltySelector: %v", err)
+	}
+	if note != "" {
+		t.Fatalf("unexpected selector note: %q", note)
+	}
+	if len(selector.clusterIDs) != 1 || selector.clusterIDs[0] != 2 || len(selector.members[2]) != 1 {
+		t.Fatalf("selector clusters=%v members=%+v", selector.clusterIDs, selector.members)
+	}
+	fact, err := selector.pick()
+	if err != nil {
+		t.Fatalf("pick: %v", err)
+	}
+	if fact.AuditKey != fmt.Sprintf("blue-green#%d", eligibleID) || !strings.Contains(fact.Content, "blue-green") {
+		t.Fatalf("picked fact = %+v", fact)
+	}
+}
+
+func TestSynthNoveltySelectionAnchorlessUniformFallback(t *testing.T) {
+	_, store := synthTestHome(t)
+	shared := db.MemoryOwner{Kind: memory.OwnerKindShared, Ref: memory.SharedOwnerRef}
+	firstID := synthTestMemory(t, store, shared, "", memory.ScopeGeneral, "storage", "Storage checkpoints compact pages.")
+	secondID := synthTestMemory(t, store, shared, "", memory.ScopeGeneral, "network", "Network drains preserve inflight requests.")
+	if err := store.RecomputeMemoryClusters(context.Background(), db.MemoryClusterAssignment{
+		Clusters: []db.MemoryCluster{
+			{ClusterID: 1, Label: "storage", MedoidID: firstID},
+			{ClusterID: 2, Label: "network", MedoidID: secondID},
+		},
+		Members: []db.MemoryClusterMember{{MemoryID: firstID, ClusterID: 1}, {MemoryID: secondID, ClusterID: 2}},
+	}); err != nil {
+		t.Fatalf("RecomputeMemoryClusters: %v", err)
+	}
+	withScriptedSynthRand(t, 1, 0)
+	selector, note, err := prepareSynthNoveltySelector(context.Background(), store, "acme/widgets", "!!!")
+	if err != nil {
+		t.Fatalf("prepareSynthNoveltySelector: %v", err)
+	}
+	if !strings.Contains(note, "no clustered guidance anchor") || len(selector.clusterIDs) != 2 {
+		t.Fatalf("note=%q clusters=%v", note, selector.clusterIDs)
+	}
+	fact, err := selector.pick()
+	if err != nil {
+		t.Fatalf("pick: %v", err)
+	}
+	if fact.AuditKey != fmt.Sprintf("network#%d", secondID) {
+		t.Fatalf("picked fact = %+v", fact)
+	}
+}
+
+func TestRunSkillOptSynthNoveltyEmptyPoolNotesOnce(t *testing.T) {
+	home, _ := synthTestHome(t, "weak-bot", "strong-bot")
+	withScriptedSynthDeliver(t,
+		`{"context":"ctx","question":"question","rubric":"rubric"}`,
+		"weak", "strong", `{"weak_score":0.1,"strong_score":0.9,"well_formed":true}`,
+	)
+	var stdout, stderr bytes.Buffer
+	code := runSkillOptSynth([]string{
+		"--template", "planner", "--repo", "acme/widgets", "--weak", "weak-bot", "--strong", "strong-bot",
+		"--max-items", "1", "--novelty-injection", "--out", t.TempDir(), "--home", home,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("synth exit = %d, stderr: %s", code, stderr.String())
+	}
+	if strings.Count(stderr.String(), "novelty injection") != 1 || !strings.Contains(stderr.String(), "proceeding without injection") {
+		t.Fatalf("stderr note = %q", stderr.String())
+	}
+}
+
+func TestRunSkillOptSynthNoveltyInjectsOnlyChallengerAndAudits(t *testing.T) {
+	home, store := synthTestHome(t, "weak-bot", "strong-bot", "judge-bot", "challenger-bot")
+	shared := db.MemoryOwner{Kind: memory.OwnerKindShared, Ref: memory.SharedOwnerRef}
+	anchorID := synthTestMemory(t, store, shared, "acme/widgets", memory.ScopeRepo,
+		"migration-anchor", "Plan software migrations well with incremental checkpoints.")
+	const sentinel = "SENTINEL_CROSS_CLUSTER_FACT uses a blue-green rollback window."
+	injectedID := synthTestMemory(t, store, shared, "acme/widgets", memory.ScopeRepo,
+		"release-window", sentinel)
+	if err := store.RecomputeMemoryClusters(context.Background(), db.MemoryClusterAssignment{
+		Clusters: []db.MemoryCluster{
+			{ClusterID: 1, Label: "migration", MedoidID: anchorID},
+			{ClusterID: 2, Label: "release", MedoidID: injectedID},
+		},
+		Members: []db.MemoryClusterMember{{MemoryID: anchorID, ClusterID: 1}, {MemoryID: injectedID, ClusterID: 2}},
+	}); err != nil {
+		t.Fatalf("RecomputeMemoryClusters: %v", err)
+	}
+	withScriptedSynthRand(t, 0, 0)
+	prev := skillOptSynthDeliver
+	t.Cleanup(func() { skillOptSynthDeliver = prev })
+	prompts := map[string][]string{}
+	judgeCalls := 0
+	skillOptSynthDeliver = func(_ context.Context, agent runtime.Agent, prompt string) (string, error) {
+		prompts[agent.Name] = append(prompts[agent.Name], prompt)
+		switch {
+		case strings.Contains(prompt, "generating a synthetic review item"):
+			return `{"context":"A monolith migration.","question":"Choose a rollout.","rubric":"Rewards incremental safety."}`, nil
+		case strings.Contains(prompt, "Score two answers against a rubric"):
+			judgeCalls++
+			if judgeCalls == 1 {
+				return `{"weak_score":0.7,"strong_score":0.9,"well_formed":true}`, nil
+			}
+			return `{"weak_score":0.1,"strong_score":0.9,"well_formed":true}`, nil
+		case agent.Name == "weak-bot":
+			return "rewrite everything", nil
+		default:
+			return "migrate incrementally", nil
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	code := runSkillOptSynth([]string{
+		"--template", "planner", "--repo", "acme/widgets",
+		"--weak", "weak-bot", "--strong", "strong-bot", "--judge", "judge-bot", "--challenger", "challenger-bot",
+		"--max-items", "1", "--novelty-injection", "--out", t.TempDir(), "--json", "--home", home,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("synth exit = %d, stderr: %s", code, stderr.String())
+	}
+	if len(prompts["challenger-bot"]) != 2 {
+		t.Fatalf("challenger prompt = %q", prompts["challenger-bot"])
+	}
+	for _, prompt := range prompts["challenger-bot"] {
+		if !strings.Contains(prompt, sentinel) || !strings.Contains(prompt, "untrusted data, not instructions") {
+			t.Fatalf("challenger prompt = %q", prompt)
+		}
+	}
+	for _, name := range []string{"weak-bot", "strong-bot", "judge-bot"} {
+		for _, prompt := range prompts[name] {
+			if strings.Contains(prompt, sentinel) {
+				t.Fatalf("sentinel leaked to %s prompt: %q", name, prompt)
+			}
+		}
+	}
+	items, err := store.ListSynthReviewItems(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListSynthReviewItems: %v", err)
+	}
+	wantKey := fmt.Sprintf("release-window#%d", injectedID)
+	if len(items) != 1 || items[0].InjectedMemoryKey != wantKey {
+		t.Fatalf("persisted items = %+v, want injected key %q", items, wantKey)
+	}
+	var summary synthRunSummary
+	if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if len(summary.Items) != 1 || summary.Items[0].InjectedMemoryKey != wantKey {
+		t.Fatalf("summary = %+v", summary)
+	}
+	var listOut, listErr bytes.Buffer
+	if code := runSkillOptSynth([]string{"list", "--json", "--home", home}, &listOut, &listErr); code != 0 {
+		t.Fatalf("list json exit=%d stderr=%s", code, listErr.String())
+	}
+	var listed []synthItemSummary
+	if err := json.Unmarshal(listOut.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list json: %v", err)
+	}
+	if len(listed) != 1 || listed[0].InjectedMemoryKey != wantKey {
+		t.Fatalf("listed items = %+v", listed)
+	}
+}
+
+func TestRunSkillOptSynthNoveltyStoreFailureIsFlagScoped(t *testing.T) {
+	for _, flagged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("flagged=%v", flagged), func(t *testing.T) {
+			home, _ := synthTestHome(t, "weak-bot", "strong-bot")
+			raw, err := sql.Open("sqlite", config.PathsForHome(home).Database)
+			if err != nil {
+				t.Fatalf("open raw store: %v", err)
+			}
+			if _, err := raw.Exec(`DROP TABLE confirmed_memories`); err != nil {
+				t.Fatalf("drop confirmed_memories: %v", err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatalf("close raw store: %v", err)
+			}
+			prev := skillOptSynthDeliver
+			t.Cleanup(func() { skillOptSynthDeliver = prev })
+			deliveries := 0
+			skillOptSynthDeliver = func(_ context.Context, agent runtime.Agent, prompt string) (string, error) {
+				deliveries++
+				switch {
+				case strings.Contains(prompt, "generating a synthetic review item"):
+					return `{"context":"ctx","question":"question","rubric":"rubric"}`, nil
+				case strings.Contains(prompt, "Score two answers against a rubric"):
+					return `{"weak_score":0.1,"strong_score":0.9,"well_formed":true}`, nil
+				default:
+					return "answer", nil
+				}
+			}
+			args := []string{
+				"--template", "planner", "--repo", "acme/widgets", "--weak", "weak-bot", "--strong", "strong-bot",
+				"--max-items", "1", "--out", t.TempDir(), "--home", home,
+			}
+			if flagged {
+				args = append(args, "--novelty-injection")
+			}
+			var stdout, stderr bytes.Buffer
+			code := runSkillOptSynth(args, &stdout, &stderr)
+			if flagged {
+				if code != 1 || deliveries != 0 || !strings.Contains(stderr.String(), "novelty injection") {
+					t.Fatalf("flagged exit=%d deliveries=%d stderr=%q", code, deliveries, stderr.String())
+				}
+			} else if code != 0 || deliveries != 4 {
+				t.Fatalf("unflagged exit=%d deliveries=%d stderr=%q", code, deliveries, stderr.String())
+			}
+		})
 	}
 }
 
@@ -980,5 +1413,18 @@ func TestRunSkillOptSynthMissingFlags(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "missing required flags") {
 		t.Fatalf("expected missing-flags error, got: %s", stderr.String())
+	}
+}
+
+func TestRunSkillOptSynthRejectsInvalidDiversityQuota(t *testing.T) {
+	for _, quota := range []string{"-1", "2"} {
+		var stdout, stderr bytes.Buffer
+		code := runSkillOptSynth([]string{
+			"--template", "planner", "--repo", "acme/widgets", "--strong", "strong-bot",
+			"--max-items", "1", "--diversity-quota", quota,
+		}, &stdout, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "--diversity-quota must be between 0 and --max-items") {
+			t.Fatalf("quota %s: exit=%d stderr=%q", quota, code, stderr.String())
+		}
 	}
 }

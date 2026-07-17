@@ -2680,6 +2680,27 @@ LIMIT ?`
 	return scanConfirmedMemories(rows)
 }
 
+// ListSharedActiveConfirmedMemories returns the complete shared-memory pool that
+// is visible to repo for SkillOpt synth novelty selection. It is deliberately a
+// local plain-read seam rather than a refactor of QueryConfirmedMemories: normal
+// recall keeps its FTS ranking and owner-floor behavior unchanged.
+func (s *Store) ListSharedActiveConfirmedMemories(ctx context.Context, repo string) ([]ConfirmedMemory, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, owner_kind, owner_ref, owner_version, author_ref, repo, scope, key, content, context,
+	provenance, source_job, first_confirmed_at, updated_at
+FROM confirmed_memories
+WHERE owner_kind = 'shared' AND owner_ref = 'shared'
+	AND superseded_by IS NULL
+	AND retired_at = ''
+	AND (scope = 'general' OR repo = ?)
+ORDER BY id`, strings.TrimSpace(repo))
+	if err != nil {
+		return nil, fmt.Errorf("list shared active confirmed memories: %w", err)
+	}
+	defer rows.Close()
+	return scanConfirmedMemories(rows)
+}
+
 // ListConfirmedMemoriesForVault returns every NON-superseded confirmed row for
 // the deterministic `memory vault export` (#737 P1), across all owner kinds,
 // repos, and scopes, ordered by id for a stable traversal. superseded_by is

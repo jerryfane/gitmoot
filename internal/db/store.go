@@ -9264,4 +9264,11 @@ CREATE INDEX idx_memory_events_memory_id ON memory_events(memory_id);
 	`
 ALTER TABLE jobs ADD COLUMN model TEXT NOT NULL DEFAULT '';
 	`,
+	// #923 opt-in SkillOpt synth diversity/novelty audit metadata. Empty defaults
+	// preserve every legacy discriminating item and keep unflagged reads identical.
+	// The synth table predates these columns; both ALTERs are append-only.
+	`
+ALTER TABLE skillopt_synth_items ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE skillopt_synth_items ADD COLUMN injected_memory_key TEXT NOT NULL DEFAULT '';
+	`,
 }
