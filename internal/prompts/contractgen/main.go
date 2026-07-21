@@ -105,7 +105,7 @@ var humanQuestionFieldAnnotations = map[string]fieldAnnotation{
 
 var learningFieldAnnotations = map[string]fieldAnnotation{
 	"key":     {help: `key (string, required, short stable handle)`},
-	"scope":   {help: `scope (string, optional: "repo" for a fact about this repository — the default — or "general" for a fact true everywhere)`},
+	"scope":   {help: `scope (string, optional, one of ` + enumList(workflow.LearningScopes) + `): "repo" for a fact about this repository — the default — or "general" for a fact true everywhere`},
 	"content": {help: `content (string, required, the fact itself)`},
 }
 

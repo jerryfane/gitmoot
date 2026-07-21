@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -296,7 +297,7 @@ func validateAgentResult(result AgentResult) error {
 			errs = append(errs, delegationFieldError(i, d, "action", "is required"))
 		} else if d.Action != action {
 			errs = append(errs, delegationFieldError(i, d, "action", "must not have leading or trailing whitespace"))
-		} else if _, ok := allowedSet(DelegationActions)[action]; !ok {
+		} else if !slices.Contains(DelegationActions, action) {
 			errs = append(errs, delegationFieldError(i, d, "action", "must be one of "+strings.Join(DelegationActions, ", ")))
 		}
 		if strings.TrimSpace(d.Prompt) == "" {

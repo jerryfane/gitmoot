@@ -14,6 +14,7 @@ package prompts_test
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -100,7 +101,6 @@ func TestEnumValuesCoveredInJobPrompt(t *testing.T) {
 	values = append(values, workflow.DelegationFailurePolicies...)
 	values = append(values, workflow.DelegationSynthesisRules...)
 	values = append(values, workflow.EphemeralRuntimes...)
-	values = append(values, workflow.LearningScopes...)
 	values = append(values, workflow.DelegationActions...)
 
 	for _, v := range values {
@@ -108,6 +108,28 @@ func TestEnumValuesCoveredInJobPrompt(t *testing.T) {
 			t.Fatalf("rendered job prompt omits allowed enum value %q\n--- prompt ---\n%s", v, prompt)
 		}
 	}
+
+	scopeLine := promptLineContaining(t, prompt, "scope (string")
+	for _, scope := range workflow.LearningScopes {
+		if !containsDelimitedToken(scopeLine, scope) {
+			t.Fatalf("rendered job prompt scope enum omits allowed value %q\n--- scope line ---\n%s", scope, scopeLine)
+		}
+	}
+}
+
+func promptLineContaining(t *testing.T, prompt, marker string) string {
+	t.Helper()
+	for _, line := range strings.Split(prompt, "\n") {
+		if strings.Contains(line, marker) {
+			return line
+		}
+	}
+	t.Fatalf("rendered job prompt has no line containing %q", marker)
+	return ""
+}
+
+func containsDelimitedToken(text, token string) bool {
+	return regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(token) + `\b`).MatchString(text)
 }
 
 // TestExampleShapeIsByteIdentical pins the {"gitmoot_result":{…}} example

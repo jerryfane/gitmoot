@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -46,7 +47,7 @@ func TestDefaultPipelineResultLiteralsMatchContract(t *testing.T) {
 		if err := json.Unmarshal(result["decision"], &decision); err != nil {
 			t.Fatalf("literal %d decision is not a string: %v", i, err)
 		}
-		if !stringInSlice(decision, workflow.ResultDecisions) {
+		if !slices.Contains(workflow.ResultDecisions, decision) {
 			t.Fatalf("literal %d decision %q is outside workflow.ResultDecisions", i, decision)
 		}
 	}
@@ -101,13 +102,4 @@ func normalizePipelineShellInterpolation(literal string) string {
 		end += start + 5
 		literal = literal[:start] + "pipeline-value" + literal[end:]
 	}
-}
-
-func stringInSlice(value string, values []string) bool {
-	for _, candidate := range values {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
 }
