@@ -2066,9 +2066,10 @@ A non-service shell stage can opt in with `isolate: true`; it then runs in a
 disposable detached read-only committed-tip worktree. Default `false` preserves the
 shared checkout. Allocation failure records `readonly_worktree_skipped` and falls
 back to that checkout; success adds `GITMOOT_CHECKOUT=<live-checkout>` to the shell
-environment. This removes checkout-lock serialization for stages with different
-commands. **Known v1 limitation (tracked follow-up):** identical commands retain the same
-shell runtime-session key and serialize. The field is rejected on agent/gate stages,
+environment. This removes checkout-lock serialization, and each isolated stage also
+takes a job-scoped shell runtime-session key (`runtime:shell:job:<hash(job)>`) rather
+than the command-hash key, so same-repo stages run concurrently even when they share
+the identical command (#1034). The field is rejected on agent/gate stages,
 while service shell stages retain unconditional fail-closed isolation.
 For shell-stage API credentials, set an absolute pipeline `env_file` and list
 exact names or globs in each stage's `env_keys`. The file must be a regular,

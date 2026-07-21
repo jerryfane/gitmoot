@@ -3007,10 +3007,10 @@ checkout, including its uncommitted/gitignored data and any intentional writes.
 Opt-in allocation is fail-open: failure emits `readonly_worktree_skipped` and runs
 on the shared checkout. On success the command receives
 `GITMOOT_CHECKOUT=<live-checkout>` for cwd-independent access to data omitted from
-the clean worktree. This removes checkout-lock serialization, so same-repo stages
-with different commands can run concurrently. **Known v1 limitation (tracked follow-up):**
-identical commands still share `runtime:shell:<hash(cmd)>` and serialize on the
-separate shell session lock. Service shell stages retain their unconditional,
+the clean worktree. This removes checkout-lock serialization, and each isolated stage
+also takes a job-scoped shell runtime-session key (`runtime:shell:job:<hash(job)>`)
+instead of the command-hash key, so same-repo stages run concurrently even when they
+share the identical command (#1034). Service shell stages retain their unconditional,
 fail-closed isolation; agent and gate stages reject this shell-only field.
 
 Shell and agent stages can opt into scoped key access with `env_keys`. Source

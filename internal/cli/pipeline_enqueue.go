@@ -152,7 +152,7 @@ func newPipelineStageEnqueuer(store *db.Store, home string) pipelineStageEnqueue
 			if serviceShell {
 				message = fmt.Sprintf("detached worktree %s allocated for service shell stage (#1011); registered checkout is never used", worktreePath)
 			} else if isolateShell {
-				message = fmt.Sprintf("read-only worktree %s allocated for opted-in shell stage (#1016); job keyed worktree:<path> to remove shared-checkout serialization (identical shell commands still share a runtime-session key)", worktreePath)
+				message = fmt.Sprintf("read-only worktree %s allocated for opted-in shell stage (#1016); job keyed worktree:<path> and a job-scoped shell runtime-session key so it runs concurrently with same-repo siblings, including identical-command forks (#1034)", worktreePath)
 			}
 			_ = store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "readonly_worktree_allocated", Message: message})
 		} else if worktreeErr != nil {
