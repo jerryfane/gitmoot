@@ -10,13 +10,23 @@ and expose as a typed service API with verifiable receipts. Feature docs:
 
 ## Codex sessions used for Gitmoot Pipelines (main ones first)
 
+The pipeline feature was built by Codex sessions dispatched and coordinated through gitmoot
+itself; sessions 2 to 6 are gitmoot-managed Codex agents named after the issue they
+implemented. The original pipeline primitive (#681) predates Build Week; everything below is
+work done inside the July 13 to 21 window.
+
 | # | Codex session ID | Date | Role |
 |---|---|---|---|
 | 1 | `019f6e86-fdf2-78f1-8f6a-7c5e0f948340` | Jul 17 | **Main implementation session.** Codex (gpt-5.6-sol) built the Pipelines-as-a-Service layer: `pipeline expose` / `serve`, the typed input firewall, and public receipts (PR #1012, ~+4,480 lines). Gitmoot minted proof receipts for these jobs; one is committed verbatim in this folder (`codex-proof-receipt.txt`, proof `sha256:78b3ab08...`). |
-| 2 | `019f8191-f721-79f1-9558-3c5f960da540` | Jul 20 | **Demo, graph side.** The single-prompt Codex session that ran the `appkit-pro` pipeline end to end (run `prun-appkit-pro-18c41ee476461c88`). Source of the graph column in the numbers table: 1 prompt, 4,231,476 tokens, 21:24 to Telegram delivery. |
-| 3 | `019f7b98-2f12-7e90-94ce-5248969c289e` | Jul 19–20 | **Demo, loop side (baseline).** The plain-conversation Codex session doing the same mission without a pipeline. Source of the loop column: 6 prompts, 18,814,978 tokens, 54:41 active across two sittings. |
-| 4 | `019f766e-3f8d-7b61-b0d9-74fadf3ce15f` | Jul 18 | Design brainstorm seat and reference marketing-loop footage. |
-| 5 | `019f8180-c48e-71a0-8b2e-30ad98db83ad` | Jul 20 | Outtake: first graph-side attempt without the repo playbook. Codex misread normal scheduler gaps as a stall and improvised; it taught us the AGENTS.md patience rule described on the Devpost page. |
+| 2 | `019f6115-90d7-7b13-8cfc-d3dc57926dc6` | Jul 14 | **Feature: chained pipeline triggers** (#922, `trigger: pipeline`), the mechanism behind the Telegram delivery chain in the demo. Gitmoot-managed Codex agent `impl922`. |
+| 3 | `019f6380-a7b1-7c82-bb64-1f8ff84fb30a` | Jul 15 | **Feature: pipeline descriptions** (#940). Gitmoot-managed Codex agent `impl940`. |
+| 4 | `019f638d-ee99-7cc3-8fd8-64c7591ce759` | Jul 15 | **Feature: pipeline export/import bundles** (#935). Gitmoot-managed Codex agent `impl935`. |
+| 5 | `019f63bd-097e-7422-85bf-a409d9e1e266` | Jul 15 | **Feature: pipeline publish/pull via GitHub** (#941), the sharing story on the Devpost page. Gitmoot-managed Codex agent `impl941`. |
+| 6 | `019f704a-c8c6-7331-a990-e3465329df1f` | Jul 17 | **The demo pipeline repo itself** ([gitmoot/appkit-demo](https://github.com/gitmoot/appkit-demo)): Gitmoot-managed Codex implementer `g2impld3` building the launch-kit pipeline stages. |
+| 7 | `019f8191-f721-79f1-9558-3c5f960da540` | Jul 20 | **Demo, graph side.** The single-prompt Codex session that ran the `appkit-pro` pipeline end to end (run `prun-appkit-pro-18c41ee476461c88`). Source of the graph column in the numbers table: 1 prompt, 4,231,476 tokens, 21:24 to Telegram delivery. |
+| 8 | `019f7b98-2f12-7e90-94ce-5248969c289e` | Jul 19–20 | **Demo, loop side (baseline).** The plain-conversation Codex session doing the same mission without a pipeline. Source of the loop column: 6 prompts, 18,814,978 tokens, 54:41 active across two sittings. |
+| 9 | `019f766e-3f8d-7b61-b0d9-74fadf3ce15f` | Jul 18 | Design brainstorm seat and reference marketing-loop footage. |
+| 10 | `019f8180-c48e-71a0-8b2e-30ad98db83ad` | Jul 20 | Outtake: first graph-side attempt without the repo playbook. Codex misread normal scheduler gaps as a stall and improvised; it taught us the AGENTS.md patience rule described on the Devpost page. |
 
 Beyond these interactive sessions, every `appkit-pro` run contains two **Codex (gpt-5.6-sol)
 agent stages** executed by gitmoot itself: `derive` (reads the target repo, derives the app
