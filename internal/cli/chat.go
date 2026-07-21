@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -865,7 +866,7 @@ const chatPromotionDedupeWindowMs = 60_000
 // chatTaskActions is the fixed set of promotable actions, mirroring the daemon /
 // session-job action vocabulary. A mention alone never executes — only these
 // explicit promotions do.
-var chatTaskActions = map[string]bool{"ask": true, "review": true, "implement": true}
+var chatTaskActions = workflow.DelegationActions
 
 // chatTaskDispatch is the seam `chat task` promotes through. It defaults to the
 // real local dispatch path (the SAME Validate → GetAgent → repo-scope →
@@ -909,8 +910,8 @@ func runChatTask(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	act := strings.ToLower(strings.TrimSpace(*action))
-	if !chatTaskActions[act] {
-		fmt.Fprintf(stderr, "chat task --action must be ask|review|implement, got %q\n", *action)
+	if !slices.Contains(chatTaskActions, act) {
+		fmt.Fprintf(stderr, "chat task --action must be %s, got %q\n", strings.Join(workflow.DelegationActions, "|"), *action)
 		return 2
 	}
 

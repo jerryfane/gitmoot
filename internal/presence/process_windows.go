@@ -2,6 +2,6 @@
 
 package presence
 
-func probeDaemonProcess(_ int, _ daemonProcessFiles) string {
-	return DaemonUnknown
+func ProbeDaemonProcess(_ int, _ string) (string, error) {
+	return DaemonUnknown, nil
 }

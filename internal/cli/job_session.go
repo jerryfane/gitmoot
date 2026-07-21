@@ -19,7 +19,7 @@ import (
 
 // sessionJobActions are the job types a session ("here"/prompt-import) job may be
 // opened as — the same action set an engine-run job uses.
-var sessionJobActions = []string{"ask", "review", "implement"}
+var sessionJobActions = workflow.DelegationActions
 
 // jobSessionOutput is the shared JSON/text shape printed by `job open`, `job
 // close`, and `job record` (#657). Decision/summary/PR fields are omitted when
@@ -42,7 +42,7 @@ func runJobOpen(args []string, stdout, stderr io.Writer) int {
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	agent := fs.String("agent", "", "agent that performs the session work (must exist)")
 	repo := fs.String("repo", "", "repo scope as owner/repo (must be tracked)")
-	typeName := fs.String("type", "", "job type: ask|review|implement")
+	typeName := fs.String("type", "", "job type: "+strings.Join(workflow.DelegationActions, "|"))
 	title := fs.String("title", "", "optional human title for the job")
 	task := fs.String("task", "", "optional task id to associate")
 	pr := fs.Int("pr", 0, "optional pull request number")
@@ -189,7 +189,7 @@ func runJobRecord(args []string, stdout, stderr io.Writer) int {
 	home := fs.String("home", "", "home directory to use instead of the current user's home")
 	agent := fs.String("agent", "", "agent that performed the session work (must exist)")
 	repo := fs.String("repo", "", "repo scope as owner/repo (must be tracked)")
-	typeName := fs.String("type", "", "job type: ask|review|implement")
+	typeName := fs.String("type", "", "job type: "+strings.Join(workflow.DelegationActions, "|"))
 	decision := fs.String("decision", "", "result decision: "+strings.Join(workflow.ResultDecisions, "|"))
 	title := fs.String("title", "", "optional human title for the job")
 	summary := fs.String("summary", "", "optional result summary")

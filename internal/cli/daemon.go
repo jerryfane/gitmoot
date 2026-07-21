@@ -32,6 +32,7 @@ import (
 	gitutil "github.com/gitmoot/gitmoot/internal/git"
 	"github.com/gitmoot/gitmoot/internal/github"
 	"github.com/gitmoot/gitmoot/internal/pipeline"
+	"github.com/gitmoot/gitmoot/internal/presence"
 	"github.com/gitmoot/gitmoot/internal/runtime"
 	"github.com/gitmoot/gitmoot/internal/sandbox"
 	"github.com/gitmoot/gitmoot/internal/subprocess"
@@ -1210,7 +1211,7 @@ func withDaemonBoolFlagArg(args []string, name string, enabled bool) []string {
 // guardDaemonRunSingleton refuses to start a second daemon against the same home
 // (#550). It reuses currentDaemonPID — the exact liveness check `daemon start`
 // uses and the #505 definition of "running": an owner-pid that is alive AND whose
-// /proc cmdline still matches the recorded daemon meta (processLooksLikeDaemon).
+// /proc cmdline still matches the recorded daemon meta (presence.ProbeDaemonProcess).
 // Reusing that check is what makes this correct at the right depth:
 //   - a STALE pidfile from a dead (or non-daemon) pid is treated as not-running,
 //     so it is silently cleared and never blocks a fresh start; and
@@ -1548,6 +1549,10 @@ func processHoldsFileOpen(pid int, path string) (holds bool, verifiable bool) {
 }
 
 func currentDaemonPID(state daemonState) (pid int, stale bool, err error) {
+	return currentDaemonPIDWithProbe(state, presence.ProbeDaemonProcess)
+}
+
+func currentDaemonPIDWithProbe(state daemonState, probe func(int, string) (string, error)) (pid int, stale bool, err error) {
 	contents, err := os.ReadFile(state.PIDFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, false, nil
@@ -1560,11 +1565,14 @@ func currentDaemonPID(state daemonState) (pid int, stale bool, err error) {
 		_ = os.Remove(state.PIDFile)
 		return 0, true, nil
 	}
-	running, err := processRunning(pid)
+	probeState, err := probe(pid, state.MetaFile)
 	if err != nil {
 		return 0, false, err
 	}
-	if !running || !processLooksLikeDaemon(pid, state) {
+	if probeState == presence.DaemonUnknown {
+		return 0, false, nil
+	}
+	if probeState != presence.DaemonRunning {
 		_ = os.Remove(state.PIDFile)
 		return 0, true, nil
 	}
@@ -1695,7 +1703,7 @@ func daemonRunStartupReconcile(ctx context.Context, home string, argv []string, 
 //
 // args MUST be the process's own argv (os.Args) so the recorded meta.Executable
 // (argv[0]) and meta.Args (argv[1:]) match /proc/<pid>/cmdline and pass
-// processLooksLikeDaemon. It refuses to clobber a DIFFERENT live daemon's state
+// presence.ProbeDaemonProcess. It refuses to clobber a DIFFERENT live daemon's state
 // (returns ok=false), so the existing "daemon start then child self-registers"
 // flow stays idempotent (the child owns the pid it finds) and an unrelated daemon
 // is never overwritten.
@@ -1777,79 +1785,6 @@ func processRunning(pid int) (bool, error) {
 		return true, nil
 	}
 	return false, err
-}
-
-func processLooksLikeDaemon(pid int, state daemonState) bool {
-	contents, err := os.ReadFile(state.MetaFile)
-	if err != nil {
-		return false
-	}
-	var meta daemonMeta
-	if err := json.Unmarshal(contents, &meta); err != nil {
-		return false
-	}
-	if meta.PID != pid {
-		return false
-	}
-	if processCmdlineLooksLikeDaemon(pid, meta) {
-		return true
-	}
-	return processPSLooksLikeDaemon(pid, meta)
-}
-
-func processCmdlineLooksLikeDaemon(pid int, meta daemonMeta) bool {
-	cmdline, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-	if err != nil {
-		return false
-	}
-	parts := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
-	return daemonProcessArgsMatch(parts, meta)
-}
-
-func processPSLooksLikeDaemon(pid int, meta daemonMeta) bool {
-	if hasWhitespace(meta.Executable) {
-		return false
-	}
-	for _, arg := range meta.Args {
-		if hasWhitespace(arg) {
-			return false
-		}
-	}
-	result, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-	if err != nil {
-		return false
-	}
-	command := strings.TrimSpace(string(result))
-	if command == "" {
-		return false
-	}
-	return daemonProcessArgsMatch(strings.Fields(command), meta)
-}
-
-func daemonProcessArgsMatch(argv []string, meta daemonMeta) bool {
-	if len(argv) != len(meta.Args)+1 {
-		return false
-	}
-	if meta.Executable != "" && argv[0] != meta.Executable {
-		return false
-	}
-	return equalStringSlices(argv[1:], meta.Args)
-}
-
-func equalStringSlices(left []string, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func hasWhitespace(value string) bool {
-	return strings.ContainsAny(value, " \t\r\n")
 }
 
 func runRegisteredRepoSupervisor(ctx context.Context, home string, live *daemonReloadableConfig, dryRun bool, watchSkillOptReviews bool, watchIssues bool, rootFilter string, stdout io.Writer) error {

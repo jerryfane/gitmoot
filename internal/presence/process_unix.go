@@ -13,26 +13,34 @@ import (
 	"syscall"
 )
 
-func probeDaemonProcess(pid int, files daemonProcessFiles) string {
-	state := probeProcess(pid)
+// ProbeDaemonProcess reports whether pid is the recorded daemon, using kill(0)
+// liveness plus exact-argv identity (/proc/<pid>/cmdline first, ps fallback).
+// It never mutates (never deletes the pidfile, never signals beyond 0). The
+// error is returned so mutating callers can stay conservative when liveness is
+// unknown due to a permission or system error.
+func ProbeDaemonProcess(pid int, metaFile string) (state string, err error) {
+	state, err = probeProcess(pid)
+	if err != nil {
+		return state, err
+	}
 	if state != DaemonRunning {
-		return state
+		return state, nil
 	}
-	if processLooksLikeDaemon(pid, files.MetaFile) {
-		return DaemonRunning
+	if processLooksLikeDaemon(pid, metaFile) {
+		return DaemonRunning, nil
 	}
-	return DaemonStopped
+	return DaemonStopped, nil
 }
 
-func probeProcess(pid int) string {
+func probeProcess(pid int) (string, error) {
 	err := syscall.Kill(pid, 0)
 	if err == nil || errors.Is(err, syscall.EPERM) {
-		return DaemonRunning
+		return DaemonRunning, nil
 	}
 	if errors.Is(err, syscall.ESRCH) {
-		return DaemonStopped
+		return DaemonStopped, nil
 	}
-	return DaemonUnknown
+	return DaemonUnknown, err
 }
 
 func processLooksLikeDaemon(pid int, metaFile string) bool {
