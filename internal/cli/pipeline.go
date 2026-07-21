@@ -1534,7 +1534,11 @@ func printPipelineRunFunnelAt(stdout io.Writer, view pipelineRunView, now time.T
 		if stage.State != pipeline.StageQueued && stage.State != pipeline.StageRunning {
 			continue
 		}
-		writeLine(stdout, "  %s: %s; enqueued %s ago", stage.StageID, strings.ToUpper(stage.State), pipelineElapsed(now, stage.StartedAt))
+		timingLabel := "enqueued"
+		if stage.State == pipeline.StageRunning {
+			timingLabel = "started"
+		}
+		writeLine(stdout, "  %s: %s; %s %s ago", stage.StageID, strings.ToUpper(stage.State), timingLabel, pipelineElapsed(now, stage.StartedAt))
 		event, hasProgress := view.progress[stage.JobID]
 		progress, validProgress := decodePipelineProgress(event.Message)
 		if stage.State == pipeline.StageRunning && hasProgress && validProgress {

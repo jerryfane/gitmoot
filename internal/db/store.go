@@ -3696,6 +3696,19 @@ func (s *Store) GetLatestJobEventByKind(ctx context.Context, jobID, kind string)
 	return event, err == nil, err
 }
 
+// GetEarliestJobEventByKind returns the oldest event of kind for jobID. The
+// idx_job_events_kind_job_id covering index serves the lookup.
+func (s *Store) GetEarliestJobEventByKind(ctx context.Context, jobID, kind string) (JobEvent, bool, error) {
+	var event JobEvent
+	err := s.db.QueryRowContext(ctx, `SELECT job_id, kind, message, created_at
+		FROM job_events WHERE kind = ? AND job_id = ? ORDER BY id ASC LIMIT 1`,
+		kind, jobID).Scan(&event.JobID, &event.Kind, &event.Message, &event.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return JobEvent{}, false, nil
+	}
+	return event, err == nil, err
+}
+
 // LatestAdvancementMarker returns the most recent post-delivery advancement
 // marker kind for jobID (or "" when the job has none). The kind set is exactly
 // the one jobNeedsAdvanceRetry (daemon.go) evaluates last-one-wins, so this is a
@@ -3759,6 +3772,42 @@ func (s *Store) GetLatestJobEventsByKind(ctx context.Context, jobIDs []string, k
 	query := `SELECT job_id, kind, message, created_at FROM job_events
 		WHERE kind = ? AND job_id IN (` + placeholders + `)
 		  AND id IN (SELECT MAX(id) FROM job_events
+			WHERE kind = ? AND job_id IN (` + placeholders + `) GROUP BY job_id)`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var event JobEvent
+		if err := rows.Scan(&event.JobID, &event.Kind, &event.Message, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		out[event.JobID] = event
+	}
+	return out, rows.Err()
+}
+
+// GetEarliestJobEventsByKind returns the oldest event of kind for each requested
+// job in one indexed query. Empty input returns an initialized empty map.
+func (s *Store) GetEarliestJobEventsByKind(ctx context.Context, jobIDs []string, kind string) (map[string]JobEvent, error) {
+	out := map[string]JobEvent{}
+	if len(jobIDs) == 0 {
+		return out, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(jobIDs)), ",")
+	args := make([]any, 0, 2*(len(jobIDs)+1))
+	args = append(args, kind)
+	for _, jobID := range jobIDs {
+		args = append(args, jobID)
+	}
+	args = append(args, kind)
+	for _, jobID := range jobIDs {
+		args = append(args, jobID)
+	}
+	query := `SELECT job_id, kind, message, created_at FROM job_events
+		WHERE kind = ? AND job_id IN (` + placeholders + `)
+		  AND id IN (SELECT MIN(id) FROM job_events
 			WHERE kind = ? AND job_id IN (` + placeholders + `) GROUP BY job_id)`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

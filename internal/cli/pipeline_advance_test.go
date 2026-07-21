@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -82,6 +84,50 @@ func settleStageJob(t *testing.T, store *db.Store, jobID, decision, summary stri
 		db.JobEvent{JobID: jobID, Kind: to, Message: "settled by test"})
 	if err != nil || !ok {
 		t.Fatalf("settle %s -> %s: ok=%v err=%v", jobID, to, ok, err)
+	}
+}
+
+func startStageJob(t *testing.T, store *db.Store, jobID string) {
+	t.Helper()
+	ok, err := store.TransitionJobStateWithEvent(context.Background(), jobID, string(workflow.JobQueued), string(workflow.JobRunning), db.JobEvent{
+		JobID: jobID, Kind: string(workflow.JobRunning), Message: "job started by test",
+	})
+	if err != nil || !ok {
+		t.Fatalf("start %s: ok=%v err=%v", jobID, ok, err)
+	}
+}
+
+func setPipelineJobEventTime(t *testing.T, store *db.Store, jobID, kind string, at time.Time) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", store.DatabasePath())
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer conn.Close()
+	result, err := conn.Exec(`UPDATE job_events SET created_at = ? WHERE job_id = ? AND kind = ?`, at.UTC().Format(time.RFC3339Nano), jobID, kind)
+	if err != nil {
+		t.Fatalf("UPDATE job event time: %v", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		t.Fatalf("updated job event rows = %d, err=%v, want 1", changed, err)
+	}
+}
+
+func setPipelineJobEventTimeAtIndex(t *testing.T, store *db.Store, jobID, kind string, index int, at time.Time) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", store.DatabasePath())
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer conn.Close()
+	result, err := conn.Exec(`UPDATE job_events SET created_at = ? WHERE id = (
+		SELECT id FROM job_events WHERE job_id = ? AND kind = ? ORDER BY id ASC LIMIT 1 OFFSET ?
+	)`, at.UTC().Format(time.RFC3339Nano), jobID, kind, index)
+	if err != nil {
+		t.Fatalf("UPDATE indexed job event time: %v", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		t.Fatalf("updated indexed job event rows = %d, err=%v, want 1", changed, err)
 	}
 }
 
@@ -278,6 +324,112 @@ func TestAdvancerDiamond(t *testing.T) {
 	}
 }
 
+func TestAdvancerFastStageUsesJobEventTimes(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	rec, spec := newTestPipeline(t, store, "chain", linearChainSpec)
+	enqueueAt := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+	startedAt := enqueueAt.Add(17 * time.Second)
+	finishedAt := startedAt.Add(23 * time.Second)
+	foldAt := enqueueAt.Add(2 * time.Minute)
+
+	run := startTestRun(t, store, rec, spec, enqueue, enqueueAt)
+	jobID := stageRow(t, store, run.ID, "a").JobID
+	startStageJob(t, store, jobID)
+	setPipelineJobEventTime(t, store, jobID, string(workflow.JobRunning), startedAt)
+	settleStageJob(t, store, jobID, "approved", "fast", nil)
+	setPipelineJobEventTime(t, store, jobID, string(workflow.JobSucceeded), finishedAt)
+
+	run = advance(t, store, rec, spec, enqueue, run, foldAt)
+	got := stageRow(t, store, run.ID, "a")
+	if !got.StartedAt.Equal(startedAt) || !got.FinishedAt.Equal(finishedAt) {
+		t.Fatalf("fast stage times = (%s, %s), want job events (%s, %s)", got.StartedAt, got.FinishedAt, startedAt, finishedAt)
+	}
+	if got.StartedAt.Equal(enqueueAt) || got.FinishedAt.Equal(foldAt) {
+		t.Fatalf("fast stage retained advancer ticks: %+v", got)
+	}
+}
+
+func TestAdvancerStageUsesEarliestRunningEventAcrossReclaim(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	rec, spec := newTestPipeline(t, store, "chain", linearChainSpec)
+	enqueueAt := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+	firstStartedAt := enqueueAt.Add(time.Minute)
+	reclaimedAt := enqueueAt.Add(16 * time.Minute)
+	finishedAt := enqueueAt.Add(21 * time.Minute)
+	run := startTestRun(t, store, rec, spec, enqueue, enqueueAt)
+	jobID := stageRow(t, store, run.ID, "a").JobID
+
+	startStageJob(t, store, jobID)
+	ok, err := store.TransitionJobStateWithEvent(context.Background(), jobID, string(workflow.JobRunning), string(workflow.JobQueued), db.JobEvent{
+		JobID: jobID, Kind: string(workflow.JobQueued), Message: "requeued after reboot by test",
+	})
+	if err != nil || !ok {
+		t.Fatalf("requeue %s: ok=%v err=%v", jobID, ok, err)
+	}
+	startStageJob(t, store, jobID)
+	setPipelineJobEventTimeAtIndex(t, store, jobID, string(workflow.JobRunning), 0, firstStartedAt)
+	setPipelineJobEventTimeAtIndex(t, store, jobID, string(workflow.JobRunning), 1, reclaimedAt)
+	settleStageJob(t, store, jobID, "approved", "survived reclaim", nil)
+	setPipelineJobEventTime(t, store, jobID, string(workflow.JobSucceeded), finishedAt)
+
+	run = advance(t, store, rec, spec, enqueue, run, finishedAt.Add(time.Minute))
+	got := stageRow(t, store, run.ID, "a")
+	if !got.StartedAt.Equal(firstStartedAt) || !got.FinishedAt.Equal(finishedAt) {
+		t.Fatalf("reclaimed stage times = (%s, %s), want earliest start %s and finish %s", got.StartedAt, got.FinishedAt, firstStartedAt, finishedAt)
+	}
+	if duration := got.FinishedAt.Sub(got.StartedAt); duration != 20*time.Minute {
+		t.Fatalf("reclaimed stage duration = %s, want 20m (not 5m from reclaim)", duration)
+	}
+}
+
+func TestAdvancerForkedStagesUseDistinctJobEventTimes(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	rec, spec := newTestPipeline(t, store, "fork", independentBranchSpec)
+	tick := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+	run := startTestRun(t, store, rec, spec, enqueue, tick)
+
+	want := map[string][2]time.Time{
+		"a": {tick.Add(10 * time.Second), tick.Add(20 * time.Second)},
+		"b": {tick.Add(30 * time.Second), tick.Add(50 * time.Second)},
+	}
+	for stageID, times := range want {
+		jobID := stageRow(t, store, run.ID, stageID).JobID
+		startStageJob(t, store, jobID)
+		setPipelineJobEventTime(t, store, jobID, string(workflow.JobRunning), times[0])
+		settleStageJob(t, store, jobID, "approved", stageID+" done", nil)
+		setPipelineJobEventTime(t, store, jobID, string(workflow.JobSucceeded), times[1])
+	}
+
+	run = advance(t, store, rec, spec, enqueue, run, tick.Add(5*time.Minute))
+	for stageID, times := range want {
+		got := stageRow(t, store, run.ID, stageID)
+		if !got.StartedAt.Equal(times[0]) || !got.FinishedAt.Equal(times[1]) {
+			t.Fatalf("stage %s times = (%s, %s), want (%s, %s)", stageID, got.StartedAt, got.FinishedAt, times[0], times[1])
+		}
+	}
+}
+
+func TestAdvancerPreClaimFailureHasNonNegativeDuration(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	rec, spec := newTestPipeline(t, store, "chain", linearChainSpec)
+	tick := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+	run := startTestRun(t, store, rec, spec, enqueue, tick)
+	jobID := stageRow(t, store, run.ID, "a").JobID
+	terminalAt := tick.Add(45 * time.Second)
+
+	settleStageJob(t, store, jobID, "failed", "failed before claim", nil)
+	setPipelineJobEventTime(t, store, jobID, string(workflow.JobFailed), terminalAt)
+	run = advance(t, store, rec, spec, enqueue, run, tick.Add(time.Minute))
+	got := stageRow(t, store, run.ID, "a")
+	if got.State != pipeline.StageFailed || !got.StartedAt.Equal(terminalAt) || !got.FinishedAt.Equal(terminalAt) {
+		t.Fatalf("pre-claim failure stage = %+v, want terminal with zero non-negative duration at %s", got, terminalAt)
+	}
+}
+
 // TestAdvancerBlockedPark proves a blocked stage parks the run: needs are
 // persisted at stage AND run level, and the downstream stage is never enqueued.
 func TestAdvancerBlockedPark(t *testing.T) {
@@ -437,6 +589,49 @@ func TestAdvancerFailedRetryBudget(t *testing.T) {
 	}
 	if got := stageRow(t, store, run.ID, "b"); got.State != pipeline.StageSkipped || got.JobID != "" {
 		t.Fatalf("stage b = %+v, want skipped never-enqueued", got)
+	}
+}
+
+func TestAdvancerRetryResetsAndRederivesAttemptTimes(t *testing.T) {
+	store := pipelineAdvanceStore(t)
+	enqueue := testStageEnqueuer(store)
+	rec, spec := newTestPipeline(t, store, "retry", retrySpec)
+	tick := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+	run := startTestRun(t, store, rec, spec, enqueue, tick)
+	firstJob := stageRow(t, store, run.ID, "a").JobID
+
+	startStageJob(t, store, firstJob)
+	settleStageJob(t, store, firstJob, "failed", "retry me", nil)
+	failingEnqueue := func(context.Context, workflow.JobRequest) (db.Job, error) {
+		return db.Job{}, errors.New("pause after retry reset")
+	}
+	if _, err := advancePipelineRun(context.Background(), store, failingEnqueue, rec, spec, run, tick.Add(time.Minute)); err == nil {
+		t.Fatal("advance with failing retry enqueue returned nil error")
+	}
+	reset := stageRow(t, store, run.ID, "a")
+	if reset.State != pipeline.StagePending || reset.JobID != "" || !reset.StartedAt.IsZero() || !reset.FinishedAt.IsZero() {
+		t.Fatalf("retry reset stage = %+v, want pending with both timestamps zero", reset)
+	}
+
+	run = advance(t, store, rec, spec, enqueue, run, tick.Add(2*time.Minute))
+	second := stageRow(t, store, run.ID, "a")
+	if second.JobID == "" || second.JobID == firstJob {
+		t.Fatalf("retry job id = %q, want new id after %q", second.JobID, firstJob)
+	}
+	startedAt := tick.Add(3 * time.Minute)
+	finishedAt := tick.Add(4 * time.Minute)
+	startStageJob(t, store, second.JobID)
+	setPipelineJobEventTime(t, store, second.JobID, string(workflow.JobRunning), startedAt)
+	run = advance(t, store, rec, spec, enqueue, run, startedAt.Add(10*time.Second))
+	if live := stageRow(t, store, run.ID, "a"); live.State != pipeline.StageRunning || !live.StartedAt.Equal(startedAt) {
+		t.Fatalf("live retry stage = %+v, want real running-event start %s", live, startedAt)
+	}
+	settleStageJob(t, store, second.JobID, "approved", "retry passed", nil)
+	setPipelineJobEventTime(t, store, second.JobID, string(workflow.JobSucceeded), finishedAt)
+	run = advance(t, store, rec, spec, enqueue, run, tick.Add(10*time.Minute))
+	got := stageRow(t, store, run.ID, "a")
+	if !got.StartedAt.Equal(startedAt) || !got.FinishedAt.Equal(finishedAt) {
+		t.Fatalf("retried stage times = (%s, %s), want new job events (%s, %s)", got.StartedAt, got.FinishedAt, startedAt, finishedAt)
 	}
 }
 

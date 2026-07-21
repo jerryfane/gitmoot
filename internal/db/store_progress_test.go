@@ -85,9 +85,12 @@ func TestGetLatestJobEventByKindAndBulk(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := store.AddJobEvent(ctx, JobEvent{JobID: "job-a", Kind: "progress", Message: "a-latest"}); err != nil {
+		t.Fatal(err)
+	}
 
 	event, ok, err := store.GetLatestJobEventByKind(ctx, "job-a", "progress")
-	if err != nil || !ok || event.Message != "a" || event.CreatedAt == "" {
+	if err != nil || !ok || event.Message != "a-latest" || event.CreatedAt == "" {
 		t.Fatalf("by-kind event: ok=%v event=%+v err=%v", ok, event, err)
 	}
 	if _, ok, err := store.GetLatestJobEventByKind(ctx, "job-a", "missing"); err != nil || ok {
@@ -98,11 +101,30 @@ func TestGetLatestJobEventByKindAndBulk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bulk) != 2 || bulk["job-a"].Message != "a" || bulk["job-b"].Message != "b" {
+	if len(bulk) != 2 || bulk["job-a"].Message != "a-latest" || bulk["job-b"].Message != "b" {
 		t.Fatalf("bulk = %+v", bulk)
 	}
 	empty, err := store.GetLatestJobEventsByKind(ctx, nil, "progress")
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("empty bulk = %+v err=%v", empty, err)
+	}
+
+	earliest, ok, err := store.GetEarliestJobEventByKind(ctx, "job-a", "progress")
+	if err != nil || !ok || earliest.Message != "a" || earliest.CreatedAt == "" {
+		t.Fatalf("earliest by-kind event: ok=%v event=%+v err=%v", ok, earliest, err)
+	}
+	if _, ok, err := store.GetEarliestJobEventByKind(ctx, "job-a", "missing"); err != nil || ok {
+		t.Fatalf("missing earliest by-kind: ok=%v err=%v", ok, err)
+	}
+	earliestBulk, err := store.GetEarliestJobEventsByKind(ctx, []string{"job-a", "job-b"}, "progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(earliestBulk) != 2 || earliestBulk["job-a"].Message != "a" || earliestBulk["job-b"].Message != "b" {
+		t.Fatalf("earliest bulk = %+v", earliestBulk)
+	}
+	earliestEmpty, err := store.GetEarliestJobEventsByKind(ctx, nil, "progress")
+	if err != nil || len(earliestEmpty) != 0 {
+		t.Fatalf("empty earliest bulk = %+v err=%v", earliestEmpty, err)
 	}
 }

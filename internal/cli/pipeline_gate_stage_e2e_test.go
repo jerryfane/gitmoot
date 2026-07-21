@@ -227,6 +227,9 @@ stages:
 	if gate.State != pipeline.StageBlocked {
 		t.Fatalf("gate stage = %s, want blocked after the timeout", gate.State)
 	}
+	if !gate.StartedAt.Equal(start.UTC()) {
+		t.Fatalf("jobless gate StartedAt = %s, want unchanged enqueue tick %s", gate.StartedAt, start.UTC())
+	}
 	if run.State != pipeline.RunBlocked {
 		t.Fatalf("run = %s, want blocked", run.State)
 	}
