@@ -197,6 +197,15 @@ workflows. Unlabeled jobs remain visible on the Jobs page, while pipeline runs
 live on the Pipelines page. An explicitly labeled workflow still appears here
 even when its label begins with `pipeline/` or `adhoc/`.
 
+The overview's advisory unlabeled-job item is shown only for repositories with
+`require_workflow` enabled; doctor keeps its drift diagnostic always-on and
+advisory so historical/session rows remain visible without changing dispatch
+enforcement.
+
+When auto labeling is enabled, generated labels use the
+`adhoc/<agent>-<yyyy-mm-dd>` convention. They remain ordinary workflow labels;
+a dedicated adhoc-bucket presentation is intentionally out of scope.
+
 The **index** groups every known explicit workflow by derived lifecycle: **stalled**
 pinned on top ("needs a look"), then **active**, **recent**, and **settled**.
 Active means work is currently running or queued. Recent means no work is live,

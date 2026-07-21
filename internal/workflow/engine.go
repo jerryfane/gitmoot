@@ -22,6 +22,9 @@ import (
 
 type Engine struct {
 	Store *db.Store
+	// RequireWorkflowPolicy is passed to every mailbox the engine creates so
+	// continuations and delegation enqueue share the same home-aware policy.
+	RequireWorkflowPolicy func(repo string) RequireWorkflowPolicy
 	// ProduceCheckDir is the resolved checkout cwd for trusted produce-stage
 	// deterministic checks when no disposable worktree path is present.
 	ProduceCheckDir         string
@@ -482,7 +485,7 @@ func (e Engine) now() time.Time {
 // path is byte-identical. The hook maps the terminal JobState to the event_type,
 // resolves root_id from the payload, and ships a redacted event fire-and-forget.
 func (e Engine) mailbox() Mailbox {
-	mb := Mailbox{Store: e.Store, CanaryEnabled: e.CanaryEnabled, deferBlocker: e.BlockerDeferrer, RuntimeDefaultModel: e.RuntimeDefaultModel, RuntimeDefaultEffort: e.RuntimeDefaultEffort, routerContextEnabled: e.RouterContextEnabled, resultCheckMode: normalizeResultCheckMode(e.ResultCheckMode), produceCheckDir: e.ProduceCheckDir}
+	mb := Mailbox{Store: e.Store, RequireWorkflowPolicy: e.RequireWorkflowPolicy, CanaryEnabled: e.CanaryEnabled, deferBlocker: e.BlockerDeferrer, RuntimeDefaultModel: e.RuntimeDefaultModel, RuntimeDefaultEffort: e.RuntimeDefaultEffort, routerContextEnabled: e.RouterContextEnabled, resultCheckMode: normalizeResultCheckMode(e.ResultCheckMode), produceCheckDir: e.ProduceCheckDir}
 	// Wire the off-by-default memory hooks (#626). When e.Memory is nil (every
 	// non-enrolled path) both hooks stay nil, so Run's prompt assembly and terminal
 	// path are byte-identical. The hooks themselves also no-op when the executor
@@ -991,19 +994,20 @@ func (e Engine) HandlePullRequestOpened(ctx context.Context, event PullRequestEv
 	requests := make([]JobRequest, 0, len(reviewers))
 	for _, reviewer := range reviewers {
 		request := JobRequest{
-			Agent:       reviewer,
-			Action:      "review",
-			Repo:        event.Repo,
-			Branch:      event.Branch,
-			PullRequest: event.PullRequest,
-			HeadSHA:     event.HeadSHA,
-			GoalID:      event.GoalID,
-			TaskID:      event.TaskID,
-			TaskTitle:   event.TaskTitle,
-			LeadAgent:   event.LeadAgent,
-			Reviewers:   reviewers,
-			ReviewRound: reviewRound,
-			Sender:      event.Sender,
+			PolicyExempt: "exempt",
+			Agent:        reviewer,
+			Action:       "review",
+			Repo:         event.Repo,
+			Branch:       event.Branch,
+			PullRequest:  event.PullRequest,
+			HeadSHA:      event.HeadSHA,
+			GoalID:       event.GoalID,
+			TaskID:       event.TaskID,
+			TaskTitle:    event.TaskTitle,
+			LeadAgent:    event.LeadAgent,
+			Reviewers:    reviewers,
+			ReviewRound:  reviewRound,
+			Sender:       event.Sender,
 			Instructions: fmt.Sprintf(
 				"Review pull request #%d for task %s.",
 				event.PullRequest,
@@ -5017,19 +5021,20 @@ func (e Engine) dispatchFix(ctx context.Context, reviewer string, payload JobPay
 		return err
 	}
 	request := JobRequest{
-		Agent:       leadAgent,
-		Action:      "implement",
-		Repo:        payload.Repo,
-		Branch:      payload.Branch,
-		PullRequest: payload.PullRequest,
-		HeadSHA:     payload.HeadSHA,
-		GoalID:      payload.GoalID,
-		TaskID:      payload.TaskID,
-		TaskTitle:   payload.TaskTitle,
-		LeadAgent:   leadAgent,
-		Reviewers:   e.requiredReviewers(payload),
-		ReviewRound: payload.ReviewRound,
-		Sender:      reviewer,
+		PolicyExempt: "exempt",
+		Agent:        leadAgent,
+		Action:       "implement",
+		Repo:         payload.Repo,
+		Branch:       payload.Branch,
+		PullRequest:  payload.PullRequest,
+		HeadSHA:      payload.HeadSHA,
+		GoalID:       payload.GoalID,
+		TaskID:       payload.TaskID,
+		TaskTitle:    payload.TaskTitle,
+		LeadAgent:    leadAgent,
+		Reviewers:    e.requiredReviewers(payload),
+		ReviewRound:  payload.ReviewRound,
+		Sender:       reviewer,
 		Instructions: fmt.Sprintf(
 			"Address requested changes from %s: %s",
 			reviewer,

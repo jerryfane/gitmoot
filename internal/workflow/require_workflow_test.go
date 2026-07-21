@@ -1,0 +1,84 @@
+package workflow
+
+import (
+	"context"
+	"strings"
+	"testing"
+)
+
+func TestMailboxRequireWorkflow(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mb := Mailbox{Store: store, RequireWorkflowPolicy: func(string) RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "auto"} }}
+	job, err := mb.Enqueue(ctx, JobRequest{ID: "auto", Agent: "A_bad name", Action: "ask", Repo: "owner/repo", Sender: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := ParseJobPayload(job.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateWorkflowID(p.WorkflowID); err != nil || !strings.HasPrefix(p.WorkflowID, "adhoc/") {
+		t.Fatalf("workflow=%q err=%v", p.WorkflowID, err)
+	}
+	if _, err := mb.Enqueue(ctx, JobRequest{ID: "explicit", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: "local", WorkflowID: "team/campaign"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mb.Enqueue(ctx, JobRequest{ID: "pipeline", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: PipelineJobSender}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMailboxRequireWorkflowStrictRejectsBeforeCreation(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mb := Mailbox{Store: store, RequireWorkflowPolicy: func(string) RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "strict"} }}
+	_, err := mb.Enqueue(ctx, JobRequest{ID: "strict", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: "local"})
+	if err == nil || !strings.Contains(err.Error(), "pass --workflow") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := store.GetJob(ctx, "strict"); err == nil {
+		t.Fatal("strict rejection created a job")
+	}
+}
+
+func TestMailboxRequireWorkflowExcludesInternalProducers(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mb := Mailbox{Store: store, RequireWorkflowPolicy: func(string) RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "strict"} }}
+	for _, request := range []JobRequest{
+		{ID: "pipeline", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: PipelineJobSender},
+		{ID: "heartbeat", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: "heartbeat"},
+		{ID: "child", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: "a", ParentJobID: "parent"},
+		{ID: "merge", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: "temp", DelegationReason: "temp_worker_merge_back"},
+	} {
+		if _, err := mb.Enqueue(ctx, request); err != nil {
+			t.Fatalf("%s: %v", request.ID, err)
+		}
+	}
+}
+
+func TestMailboxRequireWorkflowPolicyExemptions(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mb := Mailbox{Store: store, RequireWorkflowPolicy: func(string) RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "strict"} }}
+	for _, request := range []JobRequest{
+		{ID: "engine", Agent: "a", Action: "review", Repo: "owner/repo", Sender: "lead", PolicyExempt: "exempt"},
+		{ID: "comment", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: "operator", PolicyExempt: "auto-only"},
+	} {
+		job, err := mb.Enqueue(ctx, request)
+		if err != nil {
+			t.Fatalf("%s: Enqueue: %v", request.ID, err)
+		}
+		payload, err := ParseJobPayload(job.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.PolicyExempt == "exempt" && payload.WorkflowID != "" {
+			t.Fatalf("engine workflow=%q, want inherited empty label", payload.WorkflowID)
+		}
+		if request.PolicyExempt == "auto-only" && !strings.HasPrefix(payload.WorkflowID, "adhoc/") {
+			t.Fatalf("comment workflow=%q, want auto label", payload.WorkflowID)
+		}
+	}
+}

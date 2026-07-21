@@ -57,7 +57,9 @@ func TestPollOnceCreatesJobAndAcknowledgement(t *testing.T) {
 		},
 	}
 
-	err := (Daemon{Repo: repo, Store: store, GitHub: client}).PollOnce(ctx)
+	err := (Daemon{Repo: repo, Store: store, GitHub: client, Workflow: &workflow.Engine{Store: store, RequireWorkflowPolicy: func(string) workflow.RequireWorkflowPolicy {
+		return workflow.RequireWorkflowPolicy{Enabled: true, Mode: "strict"}
+	}}}).PollOnce(ctx)
 
 	if err != nil {
 		t.Fatalf("PollOnce returned error: %v", err)
@@ -84,6 +86,9 @@ func TestPollOnceCreatesJobAndAcknowledgement(t *testing.T) {
 	if payload.Repo != repo.FullName() || payload.Branch != "task-7" || payload.PullRequest != 7 || payload.Sender != "alice" || payload.Instructions != "focus on tests" {
 		t.Fatalf("payload = %+v", payload)
 	}
+	if !strings.HasPrefix(payload.WorkflowID, "adhoc/") {
+		t.Fatalf("strict comment dispatch workflow=%q, want auto label", payload.WorkflowID)
+	}
 	if payload.TemplateID != "thermo-nuclear-code-quality-review" || payload.TemplateResolvedCommit != "abc123" || payload.TemplateContent != "Review deeply." {
 		t.Fatalf("payload template snapshot = %+v", payload)
 	}
@@ -91,7 +96,7 @@ func TestPollOnceCreatesJobAndAcknowledgement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListJobEvents returned error: %v", err)
 	}
-	if len(events) != 2 || events[0].Kind != string(workflow.JobQueued) || events[1].Kind != "routed" {
+	if len(events) != 3 || events[0].Kind != string(workflow.JobQueued) || events[1].Kind != "workflow_autolabeled" || events[2].Kind != "routed" {
 		t.Fatalf("events = %+v", events)
 	}
 }

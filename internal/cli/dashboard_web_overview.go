@@ -136,7 +136,7 @@ func (d *webDataSource) Overview(ctx context.Context) (dashboard.Overview, error
 	out := emptyDashboardOverview()
 	err := withStore(d.home, func(store *db.Store) error {
 		var err error
-		out, err = dashboardOverview(ctx, store, now)
+		out, err = dashboardOverview(ctx, store, now, requireWorkflowPolicyResolver(d.home))
 		return err
 	})
 	return out, err
@@ -152,7 +152,7 @@ func emptyDashboardOverview() dashboard.Overview {
 	}
 }
 
-func dashboardOverview(ctx context.Context, store *db.Store, now time.Time) (dashboard.Overview, error) {
+func dashboardOverview(ctx context.Context, store *db.Store, now time.Time, requireWorkflowPolicy func(string) workflow.RequireWorkflowPolicy) (dashboard.Overview, error) {
 	out := emptyDashboardOverview()
 	cutoff := dashboardSQLiteTime(now.Add(-dashboardTodayWindow))
 
@@ -209,6 +209,26 @@ func dashboardOverview(ctx context.Context, store *db.Store, now time.Time) (das
 			Kind: "stalled_workflow", Ref: item.Label, Title: title, AgeS: item.StalledForS,
 			Link: "/workflows/" + url.PathEscape(item.Label), Label: item.Label,
 			Pane: item.Coordinator.Pane, SessionID: item.Coordinator.SessionID, LastNote: item.LastNote,
+		})
+	}
+
+	jobs, err := store.ListDashboardUnlabeledJobs(ctx, dashboardSQLiteTime(now.Add(-24*time.Hour)))
+	if err != nil {
+		return out, err
+	}
+	unlabeledCounts := unlabeledJobCounts(jobs, now, unlabeledJobsDoctorThreshold)
+	repos := make([]string, 0, len(unlabeledCounts))
+	for repo := range unlabeledCounts {
+		if requireWorkflowPolicy != nil && requireWorkflowPolicy(repo).Enabled {
+			repos = append(repos, repo)
+		}
+	}
+	sort.Strings(repos)
+	for _, repo := range repos {
+		count := unlabeledCounts[repo]
+		out.NeedsYou = append(out.NeedsYou, dashboard.OverviewNeedsYou{
+			Kind: "unlabeled_jobs", Repo: repo,
+			Title: fmt.Sprintf("%d unlabeled agent jobs in 24h (%s)", count, repo),
 		})
 	}
 
@@ -466,9 +486,11 @@ func dashboardNeedRank(kind string) int {
 		return 1
 	case "blocked_job":
 		return 2
-	case "groom_proposal":
+	case "unlabeled_jobs":
 		return 3
-	default:
+	case "groom_proposal":
 		return 4
+	default:
+		return 5
 	}
 }

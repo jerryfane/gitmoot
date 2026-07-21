@@ -47,9 +47,10 @@ func runRepo(args []string, stdout, stderr io.Writer) int {
 // before or after flags, parses them into fs, and returns the single
 // positional. The returned code is -1 when parsing succeeded (use repoArg) or a
 // process exit code the caller should return immediately (0 for --help, 2 for a
-// parse or arity error). stringFlags lists fs flags that consume a value.
-func parseRepoPositional(fs *flag.FlagSet, command string, args []string, stringFlags map[string]struct{}, stderr io.Writer) (string, int) {
-	parsedArgs, err := reorderFlagArgs(args, stringFlags, nil)
+// parse or arity error). stringFlags lists fs flags that consume a value;
+// boolFlags lists stand-alone flags.
+func parseRepoPositional(fs *flag.FlagSet, command string, args []string, stringFlags map[string]struct{}, boolFlags map[string]struct{}, stderr io.Writer) (string, int) {
+	parsedArgs, err := reorderFlagArgs(args, stringFlags, boolFlags)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return "", 2
@@ -69,7 +70,7 @@ func parseRepoPositional(fs *flag.FlagSet, command string, args []string, string
 
 func printRepoUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  gitmoot repo add owner/repo --path <path> [--poll <duration>] [--force]")
+	fmt.Fprintln(w, "  gitmoot repo add owner/repo --path <path> [--poll <duration>] [--force] [--agents-md]")
 	fmt.Fprintln(w, "  gitmoot repo list")
 	fmt.Fprintln(w, "  gitmoot repo set-interval owner/repo (<duration>|default)")
 	fmt.Fprintln(w, "  gitmoot repo set-interval --all (<duration>|default)")
@@ -86,6 +87,7 @@ func runRepoAdd(args []string, stdout, stderr io.Writer) int {
 	path := fs.String("path", ".", "local checkout path")
 	poll := fs.Duration("poll", 30*time.Second, "poll interval")
 	force := fs.Bool("force", false, "allow a linked worktree to replace the registered checkout")
+	agentsMD := fs.Bool("agents-md", false, "append the Gitmoot workflow-label discipline to AGENTS.md")
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fs.Usage()
 		if len(args) == 0 {
@@ -94,7 +96,7 @@ func runRepoAdd(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg, code := parseRepoPositional(fs, "repo add", args, map[string]struct{}{"home": {}, "path": {}, "poll": {}}, stderr)
+	repoArg, code := parseRepoPositional(fs, "repo add", args, map[string]struct{}{"home": {}, "path": {}, "poll": {}}, map[string]struct{}{"agents-md": {}}, stderr)
 	if code >= 0 {
 		return code
 	}
@@ -169,7 +171,48 @@ func runRepoAdd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	writeLine(stdout, "registered %s at %s", record.FullName(), record.CheckoutPath)
+	if *agentsMD {
+		if already, err := scaffoldAgentsMD(record.CheckoutPath); err != nil {
+			writeLine(stderr, "WARN: registered %s but could not write AGENTS.md: %v", record.FullName(), err)
+		} else if already {
+			writeLine(stdout, "AGENTS.md discipline already present")
+		} else {
+			writeLine(stdout, "added Gitmoot discipline to AGENTS.md")
+		}
+	}
 	return 0
+}
+
+const gitmootDisciplineMarker = "<!-- gitmoot:discipline -->"
+
+const gitmootDisciplineSection = `<!-- gitmoot:discipline -->
+## Gitmoot work discipline
+
+- Label every agent dispatch: pass ` + "`--workflow <namespace>/<campaign>`" + ` on every
+  ` + "`gitmoot agent ask/run/review/implement`" + ` and ` + "`gitmoot orchestrate`" + ` call.
+- Journal milestones: ` + "`gitmoot workflow note <label> \"...\" --author <you>`" + ` at
+  kickoff, hand-offs, PR-open, and done — the journal is the only cross-session
+  memory and the operator's supervision surface.
+- Check ` + "`gitmoot workflow list`" + ` / the dashboard Workflows page before dispatching:
+  someone may already be on it.
+`
+
+// scaffoldAgentsMD is intentionally best-effort: repo registration remains the
+// durable operation when a checkout is read-only.
+func scaffoldAgentsMD(checkout string) (already bool, err error) {
+	path := filepath.Join(checkout, "AGENTS.md")
+	content, readErr := os.ReadFile(path)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return false, readErr
+	}
+	if strings.Contains(string(content), gitmootDisciplineMarker) {
+		return true, nil
+	}
+	appendix := gitmootDisciplineSection
+	if len(content) > 0 {
+		appendix = "\n" + appendix
+	}
+	return false, os.WriteFile(path, append(content, []byte(appendix)...), 0644)
 }
 
 func runRepoList(args []string, stdout, stderr io.Writer) int {
@@ -309,7 +352,7 @@ func runRepoRemove(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg, code := parseRepoPositional(fs, "repo remove", args, map[string]struct{}{"home": {}}, stderr)
+	repoArg, code := parseRepoPositional(fs, "repo remove", args, map[string]struct{}{"home": {}}, nil, stderr)
 	if code >= 0 {
 		return code
 	}
@@ -347,7 +390,7 @@ func runRepoDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg, code := parseRepoPositional(fs, "repo doctor", args, map[string]struct{}{"home": {}}, stderr)
+	repoArg, code := parseRepoPositional(fs, "repo doctor", args, map[string]struct{}{"home": {}}, nil, stderr)
 	if code >= 0 {
 		return code
 	}

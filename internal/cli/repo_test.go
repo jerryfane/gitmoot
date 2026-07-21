@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gitmoot/gitmoot/internal/config"
 	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/doctor"
 )
 
 func TestRunRepoAddListDoctorRemove(t *testing.T) {
@@ -84,6 +86,18 @@ func TestRunRepoAddAcceptsFlagsBeforeOrAfterPositional(t *testing.T) {
 			name: "positional between flags",
 			args: func(home, repoDir string) []string {
 				return []string{"repo", "add", "--home", home, "gitmoot/gitmoot", "--path", repoDir}
+			},
+		},
+		{
+			name: "agents-md after positional",
+			args: func(home, repoDir string) []string {
+				return []string{"repo", "add", "gitmoot/gitmoot", "--home", home, "--path", repoDir, "--agents-md"}
+			},
+		},
+		{
+			name: "agents-md before positional",
+			args: func(home, repoDir string) []string {
+				return []string{"repo", "add", "--agents-md", "--home", home, "--path", repoDir, "gitmoot/gitmoot"}
 			},
 		},
 	}
@@ -299,6 +313,8 @@ func TestRunRepoAddForceSelfHealsDanglingRecordedCheckout(t *testing.T) {
 func TestRepoCheckoutDoctorChecksWarnAndLazyBackfill(t *testing.T) {
 	home := t.TempDir()
 	primary, linked := setupLinkedWorktreeRepo(t)
+	writeFile(t, filepath.Join(primary, "AGENTS.md"), gitmootDisciplineMarker+"\n")
+	writeFile(t, filepath.Join(linked, "AGENTS.md"), gitmootDisciplineMarker+"\n")
 	store := openCLIJobStore(t, home)
 	if err := store.UpsertRepoForce(context.Background(), db.Repo{Owner: "owner", Name: "repo", CheckoutPath: linked}); err != nil {
 		t.Fatalf("UpsertRepoForce returned error: %v", err)
@@ -351,5 +367,54 @@ func TestRepoCheckoutDoctorChecksSkipMissingDatabase(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.Database); !os.IsNotExist(err) {
 		t.Fatalf("doctor sweep created database: %v", err)
+	}
+}
+
+func TestRepoCheckoutDoctorWorkflowDisciplineIsAdvisoryAndCapped(t *testing.T) {
+	home := t.TempDir()
+	store := openCLIJobStore(t, home)
+	ctx := context.Background()
+	for i := 0; i < 6; i++ {
+		checkout := t.TempDir()
+		repo := db.Repo{Owner: "owner", Name: fmt.Sprintf("repo-%d", i), CheckoutPath: checkout, Enabled: true}
+		if err := store.UpsertRepo(ctx, repo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.Close()
+	checks := repoCheckoutDoctorChecks(config.PathsForHome(home))
+	var discipline *doctor.Check
+	for i := range checks {
+		if checks[i].Name == "workflow discipline" {
+			discipline = &checks[i]
+			break
+		}
+	}
+	if discipline == nil || discipline.OK || discipline.Required {
+		t.Fatalf("workflow discipline check = %+v", discipline)
+	}
+	for _, want := range []string{"advisory: 6 repo(s) missing the work-discipline section", "run: gitmoot repo add <owner/repo> --agents-md", "+1 more"} {
+		if !strings.Contains(discipline.Detail, want) {
+			t.Fatalf("detail missing %q: %s", want, discipline.Detail)
+		}
+	}
+	if err := doctor.FailedRequired([]doctor.Check{*discipline}); err != nil {
+		t.Fatalf("advisory failed check changed doctor exit result: %v", err)
+	}
+}
+
+func TestScaffoldAgentsMD(t *testing.T) {
+	checkout := t.TempDir()
+	already, err := scaffoldAgentsMD(checkout)
+	if err != nil || already {
+		t.Fatalf("first scaffold already=%v err=%v", already, err)
+	}
+	content, err := os.ReadFile(filepath.Join(checkout, "AGENTS.md"))
+	if err != nil || !strings.Contains(string(content), gitmootDisciplineMarker) {
+		t.Fatalf("AGENTS.md=%q err=%v", content, err)
+	}
+	already, err = scaffoldAgentsMD(checkout)
+	if err != nil || !already {
+		t.Fatalf("second scaffold already=%v err=%v", already, err)
 	}
 }

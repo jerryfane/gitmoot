@@ -6772,6 +6772,15 @@ workflows. Unlabeled jobs remain visible on the Jobs page, while pipeline runs
 live on the Pipelines page. An explicitly labeled workflow still appears here
 even when its label begins with `pipeline/` or `adhoc/`.
 
+The overview's advisory unlabeled-job item is shown only for repositories with
+`require_workflow` enabled; doctor keeps its drift diagnostic always-on and
+advisory so historical/session rows remain visible without changing dispatch
+enforcement.
+
+When auto labeling is enabled, generated labels use the
+`adhoc/<agent>-<yyyy-mm-dd>` convention. They remain ordinary workflow labels;
+a dedicated adhoc-bucket presentation is intentionally out of scope.
+
 The **index** groups every known explicit workflow by derived lifecycle: **stalled**
 pinned on top ("needs a look"), then **active**, **recent**, and **settled**.
 Active means work is currently running or queued. Recent means no work is live,
@@ -9162,6 +9171,11 @@ a note in persistent memory. Linked PR lifecycle transitions also add deduped
 `--workflow <label>` on agent
 ask/run/review/implement, orchestrate, or `job open`; orchestration descendants
 inherit the label automatically. Use
+`[workflow] require_workflow = true` to enforce this discipline. `auto` mode
+files fresh unlabeled dispatches under `adhoc/<agent>-<yyyy-mm-dd>` and records
+`workflow_autolabeled`; `strict` instead requires `--workflow`. Per-repo
+overrides live in `[repos."owner/repo"]`, and `repo add --agents-md` scaffolds
+the discipline into a checkout's AGENTS.md. Use
 `gitmoot report bug --job <job-id> --preview` to inspect a redacted GitHub issue
 draft for failed, blocked, or cancelled jobs; use
 `gitmoot report bug --job <job-id> --create --yes` only when the user
@@ -10586,6 +10600,24 @@ digits, and single hyphens with no leading or trailing hyphen. The label is
 accepted by `agent ask`, `agent run`, `agent review`, `agent implement`,
 `orchestrate`, and `job open`; delegation children and every coordinator
 continuation inherit it.
+
+### Require workflow labels
+
+Set `[workflow] require_workflow = true` to prevent fresh agent dispatches from
+silently becoming ungrouped. `require_workflow_mode = "auto"` (the default)
+auto-files them as `adhoc/<agent>-<yyyy-mm-dd>` and emits a
+`workflow_autolabeled` event. `strict` rejects unlabeled dispatches with the
+required `--workflow <namespace>/<campaign>` fix. GitHub comment dispatches
+always take the auto-label path in either mode so acknowledgement ordering stays
+unchanged; engine PR reactions inherit their initiating dispatch's label instead.
+Both keys can be overridden per repository in `[repos."owner/repo"]`. `gitmoot
+doctor` always reports unlabeled-job drift as advisory diagnostics (including
+session-open and task-recover rows that bypass enforcement), while the overview
+shows that item only for repositories where the policy is enabled. `gitmoot repo
+add --agents-md` writes the recommended AGENTS.md discipline section.
+
+With the feature off, dispatch and enqueue remain byte-identical; doctor drift
+diagnostics remain always-on advisory, and the overview item remains policy-gated.
 
 ```sh
 gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo --workflow fable/dashboard-redesign

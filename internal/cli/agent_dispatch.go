@@ -117,6 +117,13 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	if err != nil {
 		return localAgentJobOutput{}, err
 	}
+	// Strict workflow rejection must happen before repo/task/worktree/branch-lock
+	// mutation. Otherwise a retry without --workflow strands a fresh adhoc task.
+	if request.Action == "implement" {
+		if err := preflightStrictWorkflowPolicy(request.Home, repo.FullName(), request.WorkflowID, ""); err != nil {
+			return localAgentJobOutput{}, err
+		}
+	}
 	if request.Action == "implement" {
 		paths, err := pathsFromFlag(request.Home)
 		if err != nil {
@@ -249,7 +256,7 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 			request.Instructions += note
 		}
 	}
-	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home), RuntimeDefaultModel: runtimeDefaultModelResolver(request.Home)}).Enqueue(ctx, workflow.JobRequest{
+	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home), RuntimeDefaultModel: runtimeDefaultModelResolver(request.Home), RequireWorkflowPolicy: requireWorkflowPolicyResolver(request.Home)}).Enqueue(ctx, workflow.JobRequest{
 		ID:                     jobID,
 		Agent:                  agent.Name,
 		Action:                 request.Action,
@@ -535,7 +542,7 @@ func buildLocalAgentJobOutput(latest db.Job, request localAgentDispatchRequest) 
 }
 
 func enqueuePermissionBlockedLocalAgentJob(ctx context.Context, store *db.Store, request localAgentDispatchRequest, repo string, defaultBranch string, agentName string, overrideRuntime string, overrideRef string) (localAgentJobOutput, error) {
-	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home), RuntimeDefaultModel: runtimeDefaultModelResolver(request.Home)}).Enqueue(ctx, workflow.JobRequest{
+	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home), RuntimeDefaultModel: runtimeDefaultModelResolver(request.Home), RequireWorkflowPolicy: requireWorkflowPolicyResolver(request.Home)}).Enqueue(ctx, workflow.JobRequest{
 		ID:           localAgentJobID(request.Action, agentName),
 		Agent:        agentName,
 		Action:       request.Action,

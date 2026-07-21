@@ -1518,6 +1518,7 @@ func (d Daemon) handleIssueAsk(ctx context.Context, issue github.Issue, comment 
 	}
 
 	job, created, err := d.enqueueJob(ctx, workflow.JobRequest{
+		PolicyExempt: "auto-only",
 		ID:           issueJobID(d.Repo, issue.Number, comment.ID, sequence, command.Agent, command.Action),
 		Agent:        agent.Name,
 		Action:       command.Action,
@@ -1641,6 +1642,7 @@ func (d Daemon) handleCommand(ctx context.Context, pull github.PullRequest, comm
 		return err
 	}
 	job, created, err := d.enqueueJob(ctx, workflow.JobRequest{
+		PolicyExempt: "auto-only",
 		ID:           jobID(d.Repo, pull.Number, comment.ID, sequence, command.Agent, command.Action),
 		Agent:        agent.Name,
 		Action:       command.Action,
@@ -2013,7 +2015,11 @@ func (d Daemon) enqueueJob(ctx context.Context, request workflow.JobRequest) (db
 	if d.Workflow != nil {
 		runtimeDefaultModel = d.Workflow.RuntimeDefaultModel
 	}
-	job, err := (workflow.Mailbox{Store: d.Store, CanaryEnabled: canaryEnabled, RuntimeDefaultModel: runtimeDefaultModel}).Enqueue(ctx, request)
+	var requireWorkflowPolicy func(string) workflow.RequireWorkflowPolicy
+	if d.Workflow != nil {
+		requireWorkflowPolicy = d.Workflow.RequireWorkflowPolicy
+	}
+	job, err := (workflow.Mailbox{Store: d.Store, CanaryEnabled: canaryEnabled, RuntimeDefaultModel: runtimeDefaultModel, RequireWorkflowPolicy: requireWorkflowPolicy}).Enqueue(ctx, request)
 	return job, true, err
 }
 

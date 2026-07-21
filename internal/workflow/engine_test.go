@@ -437,6 +437,7 @@ func TestEngineHandlePullRequestOpenedDispatchesReviewers(t *testing.T) {
 	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
+	engine.RequireWorkflowPolicy = func(string) RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "strict"} }
 
 	err := engine.HandlePullRequestOpened(ctx, PullRequestEvent{
 		Repo:              "gitmoot/gitmoot",
@@ -1331,6 +1332,7 @@ func TestEngineAdvanceReviewChangesRequestedDispatchesFix(t *testing.T) {
 	seedAgent(t, store, "lead", []string{"implement"}, "gitmoot/gitmoot")
 	seedAgent(t, store, "audit", []string{"review"}, "gitmoot/gitmoot")
 	engine := testEngine(store)
+	engine.RequireWorkflowPolicy = func(string) RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "strict"} }
 	insertCompletedJob(t, store, db.Job{
 		ID:    "review-job",
 		Agent: "audit",
