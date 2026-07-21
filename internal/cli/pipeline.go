@@ -1476,8 +1476,14 @@ func printPipelinePayloadPreview(w io.Writer, payloadJSON string) {
 	if payloadJSON = strings.TrimSpace(payloadJSON); payloadJSON == "" || payloadJSON == "{}" {
 		return
 	}
-	var payload map[string]string
+	// Decode into map[string]any, not map[string]string: manual runs carry string
+	// values but SERVICE runs persist typed payloads (canonicalPipelineServicePayload
+	// emits integers/booleans), and a map[string]string decode would fail on those
+	// and silently drop the whole payload. Any non-object / undecodable payload
+	// falls back to the raw line so provenance is never silently hidden.
+	var payload map[string]any
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || len(payload) == 0 {
+		writeLine(w, "payload_json: %s", payloadJSON)
 		return
 	}
 	keys := make([]string, 0, len(payload))
@@ -1489,15 +1495,36 @@ func printPipelinePayloadPreview(w io.Writer, payloadJSON string) {
 	for _, key := range keys {
 		value := "[redacted]"
 		if !pipelinePayloadKeyLooksSecret(key) {
-			value = pipelinePreview(payload[key], " ", 40)
+			value = pipelinePreview(pipelinePayloadValueString(payload[key]), " ", 40)
 		}
 		writeLine(w, "  %s: %s", key, strconv.Quote(value))
 	}
 }
 
+// pipelinePayloadValueString renders a decoded JSON payload value for the text
+// funnel: strings verbatim, everything else (numbers, bools, null, nested) as
+// its compact JSON literal.
+func pipelinePayloadValueString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// pipelinePayloadKeyLooksSecret reports whether a payload key names something
+// sensitive enough to redact in the text funnel. The trigger payload is UNTRUSTED
+// run input, not a secrets channel (secrets flow through keycard grants), so this
+// is a light guard against a caller accidentally passing a credential as a run
+// input. Markers are matched as substrings but kept LONG and unambiguous so
+// benign keys are not caught — the earlier short markers "auth"/"cookie"
+// over-redacted "author", "oauth_provider", and "cookie_domain". The full value
+// remains available via `pipeline show --json`.
 func pipelinePayloadKeyLooksSecret(key string) bool {
 	key = strings.ToLower(key)
-	for _, marker := range []string{"secret", "token", "password", "passwd", "credential", "api_key", "private_key", "auth", "cookie"} {
+	for _, marker := range []string{"secret", "password", "passwd", "token", "credential", "api_key", "apikey", "private_key", "access_key"} {
 		if strings.Contains(key, marker) {
 			return true
 		}

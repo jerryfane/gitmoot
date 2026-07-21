@@ -163,3 +163,43 @@ func TestPrintPipelinePayloadPreviewRedactsAndTruncates(t *testing.T) {
 		t.Fatalf("payload preview=%q", got)
 	}
 }
+
+// A SERVICE run persists a typed payload with integer/boolean values
+// (canonicalPipelineServicePayload). The preview must render them, not silently
+// drop the whole payload the way a map[string]string decode would.
+func TestPrintPipelinePayloadPreviewRendersNonStringValues(t *testing.T) {
+	var out bytes.Buffer
+	printPipelinePayloadPreview(&out, `{"count":5,"enabled":true,"name":"foo"}`)
+	got := out.String()
+	for _, want := range []string{`count: "5"`, `enabled: "true"`, `name: "foo"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("preview %q missing %q", got, want)
+		}
+	}
+}
+
+// A non-object / undecodable payload falls back to the raw line so provenance is
+// never silently hidden.
+func TestPrintPipelinePayloadPreviewFallsBackToRaw(t *testing.T) {
+	var out bytes.Buffer
+	printPipelinePayloadPreview(&out, `[1,2,3]`)
+	if got := out.String(); !strings.Contains(got, "payload_json: [1,2,3]") {
+		t.Fatalf("expected raw fallback, got %q", got)
+	}
+}
+
+// Long unambiguous markers redact; short benign keys that merely contain a
+// fragment ("author" superset of "auth", "cookie_domain" superset of "cookie")
+// must NOT be redacted.
+func TestPipelinePayloadKeyRedactionBoundaries(t *testing.T) {
+	for _, key := range []string{"secret", "api_key", "access_token", "db_password", "my_credential", "private_key"} {
+		if !pipelinePayloadKeyLooksSecret(key) {
+			t.Errorf("expected %q to be redacted", key)
+		}
+	}
+	for _, key := range []string{"author", "oauth_provider", "cookie_domain", "person", "transcript_path", "count"} {
+		if pipelinePayloadKeyLooksSecret(key) {
+			t.Errorf("expected %q to NOT be redacted", key)
+		}
+	}
+}
