@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +34,9 @@ const PipelineJobSender = "pipeline"
 
 // ResultDecisions are the allowed values of AgentResult.Decision.
 var ResultDecisions = []string{"approved", "changes_requested", "blocked", "implemented", "failed", "skipped"}
+
+// DelegationActions is the canonical set of delegation/session job actions.
+var DelegationActions = []string{"ask", "review", "implement"}
 
 // DelegationFailurePolicies are the allowed values of Delegation.FailurePolicy
 // (the empty string falls back to the default and is accepted separately).
@@ -148,6 +153,38 @@ type AgentResult struct {
 	HumanQuestions []HumanQuestion `json:"human_questions,omitempty"`
 }
 
+var agentResultAllowedFields = jsonTagSet(reflect.TypeOf(AgentResult{}))
+
+// AllowedAgentResultFields returns a copy of the JSON fields accepted in a
+// gitmoot_result object. It is derived from AgentResult so contract consumers
+// can drift-check hand-authored result objects without duplicating the roster.
+func AllowedAgentResultFields() map[string]struct{} {
+	fields := make(map[string]struct{}, len(agentResultAllowedFields))
+	for field := range agentResultAllowedFields {
+		fields[field] = struct{}{}
+	}
+	return fields
+}
+
+// jsonTagSet returns the JSON field names declared directly by t. Embedded,
+// unexported, and json-ignored fields are deliberately omitted: AgentResult is
+// a flat wire object and only its exported tagged fields are accepted.
+func jsonTagSet(t reflect.Type) map[string]struct{} {
+	fields := make(map[string]struct{})
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.Anonymous || field.PkgPath != "" {
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		fields[name] = struct{}{}
+	}
+	return fields
+}
+
 func ExtractAgentResult(output string) (AgentResult, error) {
 	var validationErr error
 	for _, candidate := range jsonObjectCandidates(output) {
@@ -192,20 +229,8 @@ func validateAgentResultFields(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return err
 	}
-	allowed := map[string]struct{}{
-		"decision":        {},
-		"summary":         {},
-		"findings":        {},
-		"changes_made":    {},
-		"tests_run":       {},
-		"needs":           {},
-		"delegations":     {},
-		"artifact_body":   {},
-		"human_questions": {},
-		"learnings":       {},
-	}
 	for field := range fields {
-		if _, ok := allowed[field]; !ok {
+		if _, ok := agentResultAllowedFields[field]; !ok {
 			return fmt.Errorf("unsupported gitmoot_result field %q", field)
 		}
 	}
@@ -272,8 +297,8 @@ func validateAgentResult(result AgentResult) error {
 			errs = append(errs, delegationFieldError(i, d, "action", "is required"))
 		} else if d.Action != action {
 			errs = append(errs, delegationFieldError(i, d, "action", "must not have leading or trailing whitespace"))
-		} else if action != "ask" && action != "review" && action != "implement" {
-			errs = append(errs, delegationFieldError(i, d, "action", "must be one of ask, review, implement"))
+		} else if !slices.Contains(DelegationActions, action) {
+			errs = append(errs, delegationFieldError(i, d, "action", "must be one of "+strings.Join(DelegationActions, ", ")))
 		}
 		if strings.TrimSpace(d.Prompt) == "" {
 			errs = append(errs, delegationFieldError(i, d, "prompt", "is required"))

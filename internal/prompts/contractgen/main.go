@@ -17,7 +17,8 @@
 //
 // Drift guard: every struct field MUST have an annotation. An un-annotated NEW
 // field is a hard error here — that is the mechanism by which adding a field to
-// AgentResult/Delegation/EphemeralSpec forces the prompt to be regenerated. CI
+// AgentResult/Delegation/EphemeralSpec/HumanQuestion/Learning forces the prompt
+// to be regenerated. CI
 // re-runs `go generate ./... && git diff --exit-code` so a stale checked-in
 // artifact fails the build.
 package main
@@ -58,8 +59,8 @@ var resultFieldAnnotations = map[string]fieldAnnotation{
 	"needs":           {example: "[]"},
 	"delegations":     {example: "[]"},
 	"artifact_body":   {help: `top-level artifact_body (string) is required when any delegation requests artifacts.`},
-	"human_questions": {help: `top-level human_questions (object[], optional): use SPARINGLY to pause for a specific human decision instead of guessing; each entry is {id (string, required, unique), prompt (string, required), choices (string[], optional)}. Returning it pauses the tree awaiting a human answer (no leg fails, no continuation runs); a human replies with /gitmoot resume <job> answer "<id>: ...". Leave it absent when you can proceed.`},
-	"learnings":       {help: `top-level learnings (object[], optional): use RARELY to record a durable, keyed FACT worth remembering next time (e.g. "this repo's arm64 CI is flaky"), NOT a directive and NOT for this job only. Each entry is {key (string, required, short stable handle), scope (string, optional: "repo" for a fact about this repository — the default — or "general" for a fact true everywhere), content (string, required, the fact itself)}. Most jobs return none; leave it absent unless you learned something that will help a future job.`},
+	"human_questions": {help: `top-level human_questions (object[], optional): use SPARINGLY to pause for a specific human decision instead of guessing; each entry is {` + humanQuestionFieldsHelp() + `}. Returning it pauses the tree awaiting a human answer (no leg fails, no continuation runs); a human replies with /gitmoot resume <job> answer "<id>: ...". Leave it absent when you can proceed.`},
+	"learnings":       {help: `top-level learnings (object[], optional): use RARELY to record a durable, keyed FACT worth remembering next time (e.g. "this repo's arm64 CI is flaky"), NOT a directive and NOT for this job only. Each entry is {` + learningFieldsHelp() + `}. Most jobs return none; leave it absent unless you learned something that will help a future job.`},
 }
 
 // delegationFieldAnnotations covers every JSON field of workflow.Delegation.
@@ -69,7 +70,7 @@ var delegationFieldAnnotations = map[string]fieldAnnotation{
 	"id":             {help: `id (string, required): unique within this batch; deps reference it and validation names entries as delegations[<index>] (id "<id>").`},
 	"agent":          {help: `agent (string): the target Gitmoot agent's NAME — use "agent", not "to". Set exactly one of agent or ephemeral.`},
 	"ephemeral":      {help: `ephemeral (object): an inline one-off worker instead of a registered agent; exactly one of agent or ephemeral. Fields: ` + ephemeralFieldsHelp() + ".\n  Ephemeral workers are leaf-only and cannot themselves delegate."},
-	"action":         {help: `action (string, required): one of ask|review|implement.`},
+	"action":         {help: `action (string, required): one of ` + enumList(workflow.DelegationActions) + `.`},
 	"worktree":       {help: `worktree (string, optional): worktree path for the child job.`},
 	"prompt":         {help: `prompt (string, required): what the agent should do.`},
 	"artifacts":      {help: `artifacts (string[], optional): named artifact handles passed to the child; when any delegation sets this, the parent result must also set the top-level artifact_body.`},
@@ -96,6 +97,18 @@ var ephemeralFieldAnnotations = map[string]fieldAnnotation{
 	"autonomy_policy": {help: `autonomy_policy (optional)`},
 }
 
+var humanQuestionFieldAnnotations = map[string]fieldAnnotation{
+	"id":      {help: `id (string, required, unique)`},
+	"prompt":  {help: `prompt (string, required)`},
+	"choices": {help: `choices (string[], optional)`},
+}
+
+var learningFieldAnnotations = map[string]fieldAnnotation{
+	"key":     {help: `key (string, required, short stable handle)`},
+	"scope":   {help: `scope (string, optional, one of ` + enumList(workflow.LearningScopes) + `): "repo" for a fact about this repository — the default — or "general" for a fact true everywhere`},
+	"content": {help: `content (string, required, the fact itself)`},
+}
+
 const resultDecisionHelp = "\nDecision semantics:\n- Use decision skipped only when the task itself had no work to do. Do not use skipped in a PR review to mean nothing to flag; use approved. skipped must not be returned with delegations.\n- Outside pipelines, skipped is an abstention for quorum and verify. Vote still counts the skipped child's succeeded job state.\n"
 
 func main() {
@@ -115,6 +128,12 @@ func run() error {
 		return err
 	}
 	if err := requireAnnotations(reflect.TypeOf(workflow.EphemeralSpec{}), ephemeralFieldAnnotations, "EphemeralSpec"); err != nil {
+		return err
+	}
+	if err := requireAnnotations(reflect.TypeOf(workflow.HumanQuestion{}), humanQuestionFieldAnnotations, "HumanQuestion"); err != nil {
+		return err
+	}
+	if err := requireAnnotations(reflect.TypeOf(workflow.Learning{}), learningFieldAnnotations, "Learning"); err != nil {
 		return err
 	}
 
@@ -250,14 +269,25 @@ func enumList(values []string) string {
 // ephemeralFieldsHelp renders the EphemeralSpec sub-field roster inline, in
 // declaration order, for the ephemeral delegation field's help line.
 func ephemeralFieldsHelp() string {
-	t := reflect.TypeOf(workflow.EphemeralSpec{})
+	return structFieldsHelp(reflect.TypeOf(workflow.EphemeralSpec{}), ephemeralFieldAnnotations)
+}
+
+func humanQuestionFieldsHelp() string {
+	return structFieldsHelp(reflect.TypeOf(workflow.HumanQuestion{}), humanQuestionFieldAnnotations)
+}
+
+func learningFieldsHelp() string {
+	return structFieldsHelp(reflect.TypeOf(workflow.Learning{}), learningFieldAnnotations)
+}
+
+func structFieldsHelp(t reflect.Type, annotations map[string]fieldAnnotation) string {
 	var parts []string
 	for i := 0; i < t.NumField(); i++ {
 		name, _ := jsonField(t.Field(i))
 		if name == "" {
 			continue
 		}
-		parts = append(parts, ephemeralFieldAnnotations[name].help)
+		parts = append(parts, annotations[name].help)
 	}
 	return strings.Join(parts, ", ")
 }

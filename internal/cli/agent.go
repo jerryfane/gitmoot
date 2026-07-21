@@ -742,13 +742,14 @@ func setAgentRunOption(options *agentRunOptions, flagName string, value string, 
 	case "--type":
 		options.typeName = value
 	case "--action":
-		switch value {
-		case "ask", "review", "implement":
-			options.action = value
-		default:
-			fmt.Fprintf(stderr, "--action must be one of ask, review, or implement; got %q\n", value)
-			return false
+		for _, action := range workflow.DelegationActions {
+			if value == action {
+				options.action = value
+				return true
+			}
 		}
+		fmt.Fprintf(stderr, "--action must be one of %s; got %q\n", actionChoices(workflow.DelegationActions), value)
+		return false
 	case "--model":
 		options.model = value
 	case "--effort":
@@ -785,6 +786,16 @@ func setAgentRunOption(options *agentRunOptions, flagName string, value string, 
 		options.prNumber = parsed
 	}
 	return true
+}
+
+func actionChoices(actions []string) string {
+	if len(actions) == 0 {
+		return ""
+	}
+	if len(actions) == 1 {
+		return actions[0]
+	}
+	return strings.Join(actions[:len(actions)-1], ", ") + ", or " + actions[len(actions)-1]
 }
 
 func validateAgentRunActionOptions(command string, options agentRunOptions) error {

@@ -24,6 +24,7 @@ import (
 	"github.com/gitmoot/gitmoot/internal/db"
 	gitutil "github.com/gitmoot/gitmoot/internal/git"
 	"github.com/gitmoot/gitmoot/internal/github"
+	"github.com/gitmoot/gitmoot/internal/presence"
 	"github.com/gitmoot/gitmoot/internal/runtime"
 	"github.com/gitmoot/gitmoot/internal/subprocess"
 	"github.com/gitmoot/gitmoot/internal/workflow"
@@ -349,29 +350,34 @@ func daemonArgsContainFlag(args []string, name string, value string) bool {
 	return false
 }
 
-func TestDaemonProcessArgsMatchRequiresSavedArgs(t *testing.T) {
-	meta := daemonMeta{
-		Executable: "/usr/local/bin/gitmoot",
-		Args:       []string{"daemon", "run", "--poll", "30s", "--workers", "1", "--home", "/tmp/home-a"},
-	}
-	matching := append([]string{meta.Executable}, meta.Args...)
-	if !daemonProcessArgsMatch(matching, meta) {
-		t.Fatalf("matching daemon argv was rejected")
+func TestCurrentDaemonPIDOnlyDeletesConfidentlyStalePID(t *testing.T) {
+	state := daemonState{PIDFile: t.TempDir() + "/daemon.pid", MetaFile: t.TempDir() + "/daemon.json"}
+	if err := os.WriteFile(state.PIDFile, []byte("42\n"), 0o600); err != nil {
+		t.Fatalf("write stale pid: %v", err)
 	}
 
-	otherHome := []string{meta.Executable, "daemon", "run", "--poll", "30s", "--workers", "1", "--home", "/tmp/home-b"}
-	if daemonProcessArgsMatch(otherHome, meta) {
-		t.Fatalf("daemon argv for another home was accepted")
+	pid, stale, err := currentDaemonPIDWithProbe(state, func(int, string) (string, error) {
+		return presence.DaemonStopped, nil
+	})
+	if err != nil || pid != 0 || !stale {
+		t.Fatalf("stale pid result = pid=%d stale=%v err=%v", pid, stale, err)
+	}
+	if _, err := os.Stat(state.PIDFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confidently stale pidfile still exists: %v", err)
 	}
 
-	foregroundRepo := []string{meta.Executable, "daemon", "run", "--repo", "owner/repo", "--poll", "30s", "--workers", "1", "--home", "/tmp/home-a"}
-	if daemonProcessArgsMatch(foregroundRepo, meta) {
-		t.Fatalf("foreground single-repo daemon argv was accepted")
+	if err := os.WriteFile(state.PIDFile, []byte("42\n"), 0o600); err != nil {
+		t.Fatalf("rewrite pid: %v", err)
 	}
-
-	truncated := []string{meta.Executable, "daemon", "run"}
-	if daemonProcessArgsMatch(truncated, meta) {
-		t.Fatalf("truncated daemon argv was accepted")
+	probeErr := errors.New("kill permission denied")
+	pid, stale, err = currentDaemonPIDWithProbe(state, func(int, string) (string, error) {
+		return presence.DaemonUnknown, probeErr
+	})
+	if !errors.Is(err, probeErr) || pid != 0 || stale {
+		t.Fatalf("unknown pid result = pid=%d stale=%v err=%v", pid, stale, err)
+	}
+	if _, err := os.Stat(state.PIDFile); err != nil {
+		t.Fatalf("unknown probe removed pidfile: %v", err)
 	}
 }
 

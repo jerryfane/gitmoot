@@ -46,10 +46,6 @@ type LockSnapshot struct {
 	Owner  string
 }
 
-type daemonProcessFiles struct {
-	MetaFile string
-}
-
 type daemonMeta struct {
 	PID        int      `json:"pid"`
 	Args       []string `json:"args"`
@@ -235,9 +231,12 @@ func InspectDaemon(paths config.Paths) DaemonSnapshot {
 		return snapshot
 	}
 	snapshot.PID = pid
-	snapshot.State = probeDaemonProcess(pid, daemonProcessFiles{
-		MetaFile: filepath.Join(paths.Home, "daemon.json"),
-	})
+	state, err := ProbeDaemonProcess(pid, filepath.Join(paths.Home, "daemon.json"))
+	if err != nil {
+		snapshot.State = DaemonUnknown
+		return snapshot
+	}
+	snapshot.State = state
 	return snapshot
 }
 

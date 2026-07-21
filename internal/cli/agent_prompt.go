@@ -39,7 +39,7 @@ func runAgentPrompt(args []string, stdout, stderr io.Writer) int {
 	jsonOutput := fs.Bool("json", false, "print prompt metadata and content as JSON")
 	record := fs.Bool("record", false, "open a session job for this import so the here-method work is tracked (#657); print the job id in the header and close it with `gitmoot job close`")
 	repo := fs.String("repo", "", "repo scope as owner/repo for the recorded session job (default: the agent's repo_scope); only used with --record")
-	typeName := fs.String("type", "implement", "session job type when recording: ask|review|implement; only used with --record")
+	typeName := fs.String("type", "implement", "session job type when recording: "+strings.Join(workflow.DelegationActions, "|")+"; only used with --record")
 	id, flagArgs := leadingID(args)
 	if len(args) == 0 || containsHelpFlag(args) {
 		fs.Usage()
@@ -97,7 +97,7 @@ func runAgentPrompt(args []string, stdout, stderr io.Writer) int {
 // the importing agent knows the session job id it must close when the here-method
 // work is done (#657). The decision list mirrors workflow.ResultDecisions.
 func sessionCloseHint(jobID string) string {
-	return fmt.Sprintf("[gitmoot session job %s \u2014 when this work is complete, run: gitmoot job close %s --decision <approved|changes_requested|implemented|blocked|failed|skipped> --summary \"...\"]", jobID, jobID)
+	return fmt.Sprintf("[gitmoot session job %s \u2014 when this work is complete, run: gitmoot job close %s --decision <%s> --summary \"...\"]", jobID, jobID, strings.Join(workflow.ResultDecisions, "|"))
 }
 
 // runAgentPromptRecord implements `agent prompt <id> --record`: it opens a session
