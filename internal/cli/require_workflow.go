@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -8,12 +9,39 @@ import (
 	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
-// requireWorkflowPolicyResolver keeps config ownership in CLI while giving each
-// enqueue producer a home-aware, current policy. Invalid or unreadable config is
+// requireWorkflowPolicyResolver accepts the raw --home value. In particular, a
+// raw directory named .gitmoot is still a home directory, so its config lives
+// under .gitmoot/.gitmoot rather than being mistaken for an already-resolved root.
+func requireWorkflowPolicyResolver(home string) func(string) workflow.RequireWorkflowPolicy {
+	if strings.TrimSpace(home) == "" {
+		paths, err := pathsFromFlag("")
+		if err != nil {
+			return func(string) workflow.RequireWorkflowPolicy { return workflow.RequireWorkflowPolicy{} }
+		}
+		return requireWorkflowPolicyResolverPaths(paths)
+	}
+	return requireWorkflowPolicyResolverPaths(config.PathsForHome(home))
+}
+
+// requireWorkflowPolicyResolverRoot is for daemon and engine seams that already
+// carry the canonical <home>/.gitmoot root. Keeping this separate prevents the
+// #446/#459 double-resolution class while preserving raw --home semantics above.
+func requireWorkflowPolicyResolverRoot(root string) func(string) workflow.RequireWorkflowPolicy {
+	return requireWorkflowPolicyResolverPaths(config.Paths{ConfigFile: configFileAtRoot(root)})
+}
+
+func configFileAtRoot(root string) string {
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	return filepath.Join(strings.TrimSpace(root), config.ConfigName)
+}
+
+// requireWorkflowPolicyResolverPaths keeps config ownership in CLI while giving
+// each enqueue producer a current policy. Invalid or unreadable config is
 // fail-open here; config edit/init validation remains the operator-facing error
 // path and the legacy default is disabled.
-func requireWorkflowPolicyResolver(home string) func(string) workflow.RequireWorkflowPolicy {
-	paths := requireWorkflowPaths(home)
+func requireWorkflowPolicyResolverPaths(paths config.Paths) func(string) workflow.RequireWorkflowPolicy {
 	return func(repo string) workflow.RequireWorkflowPolicy {
 		cfg, err := config.LoadRequireWorkflow(paths)
 		if err != nil {
@@ -24,16 +52,10 @@ func requireWorkflowPolicyResolver(home string) func(string) workflow.RequireWor
 	}
 }
 
-// requireWorkflowPaths accepts both the raw --home directory and the resolved
-// <home>/.gitmoot root used by daemon workers; do not resolve the latter twice.
-func requireWorkflowPaths(home string) config.Paths {
-	if filepath.Base(strings.TrimSpace(home)) != config.DirName {
-		return config.PathsForHome(home)
+func preflightStrictWorkflowPolicy(home, repo, workflowID, policyExempt string) error {
+	policy := requireWorkflowPolicyResolver(home)(repo)
+	if policy.Enabled && policy.Mode == "strict" && strings.TrimSpace(workflowID) == "" && policyExempt != "exempt" && policyExempt != "auto-only" {
+		return fmt.Errorf("repo %s has require_workflow=strict: pass --workflow <namespace>/<campaign>", strings.TrimSpace(repo))
 	}
-	root := strings.TrimSpace(home)
-	return config.Paths{
-		Home: root, ConfigFile: filepath.Join(root, config.ConfigName), Database: filepath.Join(root, config.DBName),
-		Logs: filepath.Join(root, config.LogsDir), Workspaces: filepath.Join(root, config.WorkDir),
-		Evals: filepath.Join(root, config.EvalsDir), ArtifactBlobs: filepath.Join(root, config.EvalsDir, config.BlobsDir),
-	}
+	return nil
 }

@@ -409,7 +409,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 		applyMergeGatePolicy(&mergeGate, *home, repo.FullName())
 		engine := workflow.Engine{
 			Store:                 store,
-			RequireWorkflowPolicy: requireWorkflowPolicyResolver(config.PathsForHome(*home).Home),
+			RequireWorkflowPolicy: requireWorkflowPolicyResolverRoot(config.PathsForHome(*home).Home),
 			ProduceCheckDir:       checkout,
 			MergeGate:             mergeGate,
 			// Registry default model/effort fallbacks, home-aware and fail-open — see
@@ -7339,7 +7339,7 @@ var (
 func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, home string) workflow.Engine {
 	engine := workflow.Engine{
 		Store:                   store,
-		RequireWorkflowPolicy:   requireWorkflowPolicyResolver(home),
+		RequireWorkflowPolicy:   requireWorkflowPolicyResolverRoot(home),
 		ProduceCheckDir:         checkout,
 		MergeGate:               daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout, Home: home},
 		ImplementationFinalizer: daemonImplementationFinalizer{Store: store, GitHub: gh, FallbackCheckout: checkout},

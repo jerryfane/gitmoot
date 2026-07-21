@@ -15,6 +15,7 @@ func TestBuildUnlabeledJobsCheck(t *testing.T) {
 		{Payload: `{"repo":"a/b","sender":"pipeline"}`, CreatedAt: "2026-07-21 11:00:00"},
 		{Payload: `{"repo":"a/b","sender":"local","workflow_id":"team/x"}`, CreatedAt: "2026-07-21 11:00:00"},
 		{Payload: `{"repo":"old/repo","sender":"local"}`, CreatedAt: "2026-07-19 11:00:00"},
+		{Payload: `{"repo":"a/b","sender":"local","parent_job_id":"legacy-root"}`, CreatedAt: "2026-07-21 11:00:00"},
 	}
 	if got := buildUnlabeledJobsCheck(jobs, now, 3); !got.OK {
 		t.Fatalf("under threshold=%+v", got)

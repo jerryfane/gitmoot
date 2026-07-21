@@ -117,6 +117,13 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	if err != nil {
 		return localAgentJobOutput{}, err
 	}
+	// Strict workflow rejection must happen before repo/task/worktree/branch-lock
+	// mutation. Otherwise a retry without --workflow strands a fresh adhoc task.
+	if request.Action == "implement" {
+		if err := preflightStrictWorkflowPolicy(request.Home, repo.FullName(), request.WorkflowID, ""); err != nil {
+			return localAgentJobOutput{}, err
+		}
+	}
 	if request.Action == "implement" {
 		paths, err := pathsFromFlag(request.Home)
 		if err != nil {

@@ -1518,6 +1518,7 @@ func (d Daemon) handleIssueAsk(ctx context.Context, issue github.Issue, comment 
 	}
 
 	job, created, err := d.enqueueJob(ctx, workflow.JobRequest{
+		PolicyExempt: "auto-only",
 		ID:           issueJobID(d.Repo, issue.Number, comment.ID, sequence, command.Agent, command.Action),
 		Agent:        agent.Name,
 		Action:       command.Action,
@@ -1641,6 +1642,7 @@ func (d Daemon) handleCommand(ctx context.Context, pull github.PullRequest, comm
 		return err
 	}
 	job, created, err := d.enqueueJob(ctx, workflow.JobRequest{
+		PolicyExempt: "auto-only",
 		ID:           jobID(d.Repo, pull.Number, comment.ID, sequence, command.Agent, command.Action),
 		Agent:        agent.Name,
 		Action:       command.Action,

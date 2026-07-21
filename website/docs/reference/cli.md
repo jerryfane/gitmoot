@@ -1000,9 +1000,17 @@ Repositories may turn on `[workflow] require_workflow = true`. In
 `require_workflow_mode = "auto"`, an unlabeled fresh agent dispatch is bucketed
 as `adhoc/<agent>-<yyyy-mm-dd>` and receives a `workflow_autolabeled` event.
 `strict` instead rejects it and tells the caller to pass
-`--workflow <namespace>/<campaign>`. Either key can be overridden in
-`[repos."owner/repo"]`. `gitmoot doctor` reports unlabeled-job drift, and
-`gitmoot repo add --agents-md` scaffolds the team discipline into AGENTS.md.
+`--workflow <namespace>/<campaign>`. GitHub comment dispatches always take the
+auto-label path in either mode so acknowledgement ordering stays unchanged;
+engine PR reactions inherit their initiating dispatch's label instead. Either key
+can be overridden in `[repos."owner/repo"]`. `gitmoot doctor` always reports
+unlabeled-job drift as advisory diagnostics (including session-open and
+task-recover rows that bypass enforcement), while the overview shows that item
+only for repositories where the policy is enabled. `gitmoot repo add --agents-md`
+scaffolds the team discipline into AGENTS.md.
+
+With the feature off, dispatch and enqueue remain byte-identical; doctor drift
+diagnostics remain always-on advisory, and the overview item remains policy-gated.
 
 ```sh
 gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo --workflow fable/dashboard-redesign

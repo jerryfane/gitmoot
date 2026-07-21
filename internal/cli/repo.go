@@ -47,9 +47,10 @@ func runRepo(args []string, stdout, stderr io.Writer) int {
 // before or after flags, parses them into fs, and returns the single
 // positional. The returned code is -1 when parsing succeeded (use repoArg) or a
 // process exit code the caller should return immediately (0 for --help, 2 for a
-// parse or arity error). stringFlags lists fs flags that consume a value.
-func parseRepoPositional(fs *flag.FlagSet, command string, args []string, stringFlags map[string]struct{}, stderr io.Writer) (string, int) {
-	parsedArgs, err := reorderFlagArgs(args, stringFlags, nil)
+// parse or arity error). stringFlags lists fs flags that consume a value;
+// boolFlags lists stand-alone flags.
+func parseRepoPositional(fs *flag.FlagSet, command string, args []string, stringFlags map[string]struct{}, boolFlags map[string]struct{}, stderr io.Writer) (string, int) {
+	parsedArgs, err := reorderFlagArgs(args, stringFlags, boolFlags)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return "", 2
@@ -95,7 +96,7 @@ func runRepoAdd(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg, code := parseRepoPositional(fs, "repo add", args, map[string]struct{}{"home": {}, "path": {}, "poll": {}, "agents-md": {}}, stderr)
+	repoArg, code := parseRepoPositional(fs, "repo add", args, map[string]struct{}{"home": {}, "path": {}, "poll": {}}, map[string]struct{}{"agents-md": {}}, stderr)
 	if code >= 0 {
 		return code
 	}
@@ -351,7 +352,7 @@ func runRepoRemove(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg, code := parseRepoPositional(fs, "repo remove", args, map[string]struct{}{"home": {}}, stderr)
+	repoArg, code := parseRepoPositional(fs, "repo remove", args, map[string]struct{}{"home": {}}, nil, stderr)
 	if code >= 0 {
 		return code
 	}
@@ -389,7 +390,7 @@ func runRepoDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	repoArg, code := parseRepoPositional(fs, "repo doctor", args, map[string]struct{}{"home": {}}, stderr)
+	repoArg, code := parseRepoPositional(fs, "repo doctor", args, map[string]struct{}{"home": {}}, nil, stderr)
 	if code >= 0 {
 		return code
 	}

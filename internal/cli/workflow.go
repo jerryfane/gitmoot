@@ -412,7 +412,7 @@ func runTaskRun(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fmt.Errorf("invalid repo: %w", err)
 		}
-		policy := requireWorkflowPolicyResolver(paths.Home)(requestRepo)
+		policy := requireWorkflowPolicyResolverRoot(paths.Home)(requestRepo)
 		if policy.Enabled && policy.Mode == "strict" && strings.TrimSpace(*workflowID) == "" {
 			return fmt.Errorf("repo %s has require_workflow=strict: pass --workflow <namespace>/<campaign>", requestRepo)
 		}

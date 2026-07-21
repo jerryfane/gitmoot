@@ -85,6 +85,51 @@ func TestAgentImplementBaseOriginMainFetchesAndBasesWorktree(t *testing.T) {
 	}
 }
 
+func TestLocalImplementStrictWorkflowPreflightLeavesNoTaskWorktreeOrLock(t *testing.T) {
+	fixture := newImplementBaseFixture(t)
+	paths := config.PathsForHome(fixture.home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatal(err)
+	}
+	content := config.DefaultConfig(paths) + "\n[workflow]\nrequire_workflow = true\nrequire_workflow_mode = \"strict\"\n"
+	if err := os.WriteFile(paths.ConfigFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openCLIJobStore(t, fixture.home)
+	defer store.Close()
+	ctx := context.Background()
+	record := db.Repo{Owner: "owner", Name: "repo", DefaultBranch: "main", CheckoutPath: fixture.checkout}
+	if err := store.UpsertRepo(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	_, err := dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
+		RepoFlag: "owner/repo", Agent: "builder", Action: "implement", Home: fixture.home, Instructions: "Implement the requested change.",
+	})
+	if err == nil || !strings.Contains(err.Error(), "pass --workflow") {
+		t.Fatalf("strict dispatch err=%v", err)
+	}
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("strict rejection created tasks: %+v", tasks)
+	}
+	locks, err := store.ListBranchLocks(ctx, "owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 0 {
+		t.Fatalf("strict rejection created branch locks: %+v", locks)
+	}
+	worktreeRoot := filepath.Join(paths.Workspaces, "owner", "repo")
+	if entries, err := os.ReadDir(worktreeRoot); err == nil && len(entries) != 0 {
+		t.Fatalf("strict rejection created worktrees: %+v", entries)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentImplementBaseHEADUsesCheckoutHead(t *testing.T) {
 	fixture := newImplementBaseFixture(t)
 	task, _, err := prepareImplementBaseFixture(t, fixture, localAgentDispatchRequest{Branch: "test-head", ImplementBase: "HEAD"})

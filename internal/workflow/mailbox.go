@@ -135,7 +135,9 @@ type PipelineKeyAccess struct {
 }
 
 type JobRequest struct {
-	ID           string
+	ID string
+	// PolicyExempt is enqueue-only policy routing; it is never persisted.
+	PolicyExempt string
 	Agent        string
 	Action       string
 	Repo         string
@@ -567,8 +569,14 @@ func IsUnlabeledAgentDispatch(workflowID, sender, delegationReason string) bool 
 // resolveEnqueueWorkflowID applies require_workflow only to fresh external
 // dispatches. Engine children inherit their parent's WorkflowID, heartbeat and
 // temporary-worker merge-back are internal producers, and pipeline jobs have
-// their own grouping semantics, so none are auto-filed or strict-rejected.
+// their own grouping semantics, so none are auto-filed or strict-rejected. Job
+// open (Sender "session") and task recover intentionally bypass this chokepoint:
+// diagnostics count their unlabeled rows, but enforcement does not touch them.
 func (m Mailbox) resolveEnqueueWorkflowID(request *JobRequest) (bool, error) {
+	// Engine reactions belong to their PR tree; the initiating dispatch owns labeling.
+	if request.PolicyExempt == "exempt" {
+		return false, nil
+	}
 	// Engine re-enqueues and descendants retain their parent label (including a
 	// legacy empty label). Never retroactively regroup or kill those trees.
 	if strings.TrimSpace(request.ParentJobID) != "" || strings.TrimSpace(request.DelegationReason) == "temp_worker_merge_back" {
@@ -581,7 +589,7 @@ func (m Mailbox) resolveEnqueueWorkflowID(request *JobRequest) (bool, error) {
 	if !p.Enabled {
 		return false, nil
 	}
-	if p.Mode == "strict" {
+	if p.Mode == "strict" && request.PolicyExempt != "auto-only" {
 		return false, fmt.Errorf("repo %s has require_workflow=strict: pass --workflow <namespace>/<campaign>", strings.TrimSpace(request.Repo))
 	}
 	request.WorkflowID = adhocWorkflowID(request.Agent, time.Now().UTC())

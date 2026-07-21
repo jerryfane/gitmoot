@@ -57,3 +57,28 @@ func TestMailboxRequireWorkflowExcludesInternalProducers(t *testing.T) {
 		}
 	}
 }
+
+func TestMailboxRequireWorkflowPolicyExemptions(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mb := Mailbox{Store: store, RequireWorkflowPolicy: func(string) RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "strict"} }}
+	for _, request := range []JobRequest{
+		{ID: "engine", Agent: "a", Action: "review", Repo: "owner/repo", Sender: "lead", PolicyExempt: "exempt"},
+		{ID: "comment", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: "operator", PolicyExempt: "auto-only"},
+	} {
+		job, err := mb.Enqueue(ctx, request)
+		if err != nil {
+			t.Fatalf("%s: Enqueue: %v", request.ID, err)
+		}
+		payload, err := ParseJobPayload(job.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.PolicyExempt == "exempt" && payload.WorkflowID != "" {
+			t.Fatalf("engine workflow=%q, want inherited empty label", payload.WorkflowID)
+		}
+		if request.PolicyExempt == "auto-only" && !strings.HasPrefix(payload.WorkflowID, "adhoc/") {
+			t.Fatalf("comment workflow=%q, want auto label", payload.WorkflowID)
+		}
+	}
+}

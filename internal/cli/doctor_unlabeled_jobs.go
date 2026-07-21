@@ -32,7 +32,8 @@ func unlabeledJobsDoctorCheck(paths config.Paths) (doctor.Check, bool) {
 }
 
 // buildUnlabeledJobsCheck is shared by doctor and dashboard. It uses the stored
-// row approximation documented by workflow.IsUnlabeledAgentDispatch.
+// row approximation documented by workflow.IsUnlabeledAgentDispatch, narrowed to
+// top-level payloads because children of legacy unlabeled trees are not drift.
 func buildUnlabeledJobsCheck(jobs []db.Job, now time.Time, threshold int) doctor.Check {
 	if threshold <= 0 {
 		threshold = unlabeledJobsDoctorThreshold
@@ -45,7 +46,7 @@ func buildUnlabeledJobsCheck(jobs []db.Job, now time.Time, threshold int) doctor
 		if err != nil {
 			continue
 		}
-		if !workflow.IsUnlabeledAgentDispatch(payload.WorkflowID, payload.Sender, payload.DelegationReason) {
+		if strings.TrimSpace(payload.ParentJobID) != "" || !workflow.IsUnlabeledAgentDispatch(payload.WorkflowID, payload.Sender, payload.DelegationReason) {
 			continue
 		}
 		if created := parseJobTimeMillis(job.CreatedAt); created <= cutoff {
@@ -76,7 +77,7 @@ func unlabeledJobCounts(jobs []db.Job, now time.Time, threshold int) map[string]
 	cutoff := now.Add(-24 * time.Hour).UnixMilli()
 	for _, job := range jobs {
 		p, err := workflow.ParseJobPayload(job.Payload)
-		if err == nil && workflow.IsUnlabeledAgentDispatch(p.WorkflowID, p.Sender, p.DelegationReason) && parseJobTimeMillis(job.CreatedAt) > cutoff {
+		if err == nil && strings.TrimSpace(p.ParentJobID) == "" && workflow.IsUnlabeledAgentDispatch(p.WorkflowID, p.Sender, p.DelegationReason) && parseJobTimeMillis(job.CreatedAt) > cutoff {
 			counts[p.Repo]++
 		}
 	}

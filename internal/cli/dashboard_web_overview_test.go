@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func TestDashboardOverviewUnlabeledJobsNeedsYou(t *testing.T) {
 		}
 		setJobTimes(t, home, entry.id, dashboardSQLiteTime(now.Add(-time.Hour)), dashboardSQLiteTime(now.Add(-time.Hour)))
 	}
-	overview, err := dashboardOverview(ctx, store, now)
+	overview, err := dashboardOverview(ctx, store, now, func(string) workflow.RequireWorkflowPolicy { return workflow.RequireWorkflowPolicy{Enabled: true} })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +80,49 @@ func TestDashboardOverviewUnlabeledJobsNeedsYou(t *testing.T) {
 	}
 	if !(dashboardNeedRank("stalled_workflow") < dashboardNeedRank("unlabeled_jobs") && dashboardNeedRank("pr_awaiting_merge") < dashboardNeedRank("unlabeled_jobs") && dashboardNeedRank("blocked_job") < dashboardNeedRank("unlabeled_jobs") && dashboardNeedRank("unlabeled_jobs") < dashboardNeedRank("groom_proposal")) {
 		t.Fatal("unlabeled_jobs rank is not advisory")
+	}
+}
+
+func TestDashboardOverviewUnlabeledJobsNeedsPolicyAndSortsRepos(t *testing.T) {
+	home := dashboardTestHome(t)
+	paths := config.PathsForHome(home)
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	for _, repo := range []string{"zeta/drift", "alpha/drift"} {
+		for i := 0; i < unlabeledJobsDoctorThreshold; i++ {
+			id := fmt.Sprintf("%s-%02d", strings.ReplaceAll(repo, "/", "-"), i)
+			if err := store.CreateJob(ctx, db.Job{ID: id, Agent: "worker", Type: "ask", State: "queued", Payload: mustJSON(t, workflow.JobPayload{Repo: repo, Sender: "local"})}); err != nil {
+				t.Fatal(err)
+			}
+			setJobTimes(t, home, id, dashboardSQLiteTime(now.Add(-time.Hour)), dashboardSQLiteTime(now.Add(-time.Hour)))
+		}
+	}
+	off, err := dashboardOverview(ctx, store, now, func(string) workflow.RequireWorkflowPolicy { return workflow.RequireWorkflowPolicy{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range off.NeedsYou {
+		if item.Kind == "unlabeled_jobs" {
+			t.Fatalf("feature-off overview contains unlabeled jobs: %+v", off.NeedsYou)
+		}
+	}
+	on, err := dashboardOverview(ctx, store, now, func(string) workflow.RequireWorkflowPolicy { return workflow.RequireWorkflowPolicy{Enabled: true} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repos []string
+	for _, item := range on.NeedsYou {
+		if item.Kind == "unlabeled_jobs" {
+			repos = append(repos, item.Repo)
+		}
+	}
+	if !reflect.DeepEqual(repos, []string{"alpha/drift", "zeta/drift"}) {
+		t.Fatalf("unlabeled repos = %v, want sorted enabled repos", repos)
 	}
 }
 
@@ -217,7 +261,7 @@ func TestDashboardOverviewTasksAndWorkflows(t *testing.T) {
 		t.Fatalf("task projection/order = %+v", tasks)
 	}
 
-	overview, err := dashboardOverview(ctx, store, now)
+	overview, err := dashboardOverview(ctx, store, now, nil)
 	if err != nil {
 		t.Fatalf("dashboardOverview: %v", err)
 	}
@@ -288,7 +332,7 @@ func TestDashboardOverviewTasksAndWorkflows(t *testing.T) {
 		t.Fatalf("explicit pipeline label = %+v", explicitPipeline)
 	}
 
-	second, err := dashboardOverview(ctx, store, now)
+	second, err := dashboardOverview(ctx, store, now, nil)
 	if err != nil {
 		t.Fatalf("second dashboardOverview: %v", err)
 	}

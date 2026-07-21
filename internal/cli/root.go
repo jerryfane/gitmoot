@@ -286,7 +286,17 @@ func repoCheckoutDoctorChecks(paths config.Paths) []doctor.Check {
 	}
 	if len(missingDiscipline) > 0 {
 		sort.Strings(missingDiscipline)
-		checks = append(checks, doctor.Check{Name: "workflow discipline", Required: false, Detail: fmt.Sprintf("missing %s in: %s — run gitmoot repo add <owner/repo> --agents-md", gitmootDisciplineMarker, strings.Join(missingDiscipline, ", "))})
+		listed := missingDiscipline
+		more := 0
+		if len(listed) > 5 {
+			listed = listed[:5]
+			more = len(missingDiscipline) - len(listed)
+		}
+		detail := fmt.Sprintf("advisory: %d repo(s) missing the work-discipline section (run: gitmoot repo add <owner/repo> --agents-md): %s", len(missingDiscipline), strings.Join(listed, ", "))
+		if more > 0 {
+			detail += fmt.Sprintf(" +%d more", more)
+		}
+		checks = append(checks, doctor.Check{Name: "workflow discipline", Required: false, Detail: detail})
 	}
 	return checks
 }
