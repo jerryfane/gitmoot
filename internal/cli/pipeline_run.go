@@ -1149,8 +1149,16 @@ func advancePipelineRunWithAutoMerge(ctx context.Context, store *db.Store, enque
 		return run, err
 	}
 	byID := make(map[string]db.PipelineRunStage, len(rows))
+	jobIDs := make([]string, 0, len(rows))
 	for _, row := range rows {
 		byID[row.StageID] = row
+		if (row.State == pipeline.StageQueued || row.State == pipeline.StageRunning) && strings.TrimSpace(row.JobID) != "" {
+			jobIDs = append(jobIDs, row.JobID)
+		}
+	}
+	eventSnapshot, err := loadPipelineJobEventSnapshot(ctx, store, jobIDs)
+	if err != nil {
+		return run, err
 	}
 
 	// --- FOLD: settle stage jobs by decision ---------------------------------
@@ -1167,7 +1175,8 @@ func advancePipelineRunWithAutoMerge(ctx context.Context, store *db.Store, enque
 		// reflect. That is deliberate — a future JOBLESS kind (gate) is reachable here
 		// without moving a guard out of a shared loop, and an unsettled kind can hand
 		// back a row mutation (nextRow) to persist while it keeps waiting.
-		deps := pipelineStageSettleDeps{store: store, rec: rec, run: run, now: now, autoMerge: autoMerge}
+		terminalJobState := ""
+		deps := pipelineStageSettleDeps{store: store, rec: rec, run: run, now: now, autoMerge: autoMerge, events: eventSnapshot, terminalJobState: &terminalJobState}
 		settled, state, summary, needs, nextRow, err := stageSettleOutcome(ctx, deps, spec, stage, row)
 		if err != nil {
 			return run, err
@@ -1192,12 +1201,21 @@ func advancePipelineRunWithAutoMerge(ctx context.Context, store *db.Store, enque
 			row.JobID = ""
 			row.Summary = summary
 			row.NeedsJSON = ""
+			row.StartedAt = time.Time{}
 			row.FinishedAt = time.Time{}
 		} else {
+			preserveStartedAt := stage.Kind() == pipeline.StageKindOrchestrate && row.State == pipeline.StageRunning
 			row.State = state
 			row.Summary = summary
 			row.NeedsJSON = marshalPipelineNeeds(needs)
-			row.FinishedAt = now
+			if strings.TrimSpace(row.JobID) != "" {
+				row.StartedAt, row.FinishedAt, err = stampStageTimestampsFromJobEvents(ctx, eventSnapshot, row.JobID, terminalJobState, now, row.StartedAt, preserveStartedAt)
+				if err != nil {
+					return run, err
+				}
+			} else {
+				row.FinishedAt = now
+			}
 		}
 		if err := persistPipelineStage(ctx, store, byID[stage.ID], row); err != nil {
 			return run, err
@@ -1300,7 +1318,10 @@ func advancePipelineRunWithAutoMerge(ctx context.Context, store *db.Store, enque
 				row.JobID = job.ID
 				row.Summary = summary
 				row.NeedsJSON = marshalPipelineNeeds(needs)
-				row.FinishedAt = now
+				row.StartedAt, row.FinishedAt, err = stampStageTimestampsFromJobEvents(ctx, eventSnapshot, job.ID, job.State, now, row.StartedAt, false)
+				if err != nil {
+					return run, err
+				}
 			}
 			if err := persistPipelineStage(ctx, store, byID[stage.ID], row); err != nil {
 				return run, err
@@ -1423,12 +1444,139 @@ func applyPipelineRunSettlement(ctx context.Context, store *db.Store, rec db.Pip
 //     terminal tail. While the tail is still live it re-points the row's JobID at the
 //     current continuation and stays unsettled by returning that row as nextRow. ctx
 //     bounds those store reads.
+type pipelineJobEventSnapshot struct {
+	store          *db.Store
+	preloaded      map[string]bool
+	runningByJobID map[string]db.JobEvent
+	latest         map[pipelineJobEventKey]pipelineJobEventLookup
+}
+
+type pipelineJobEventKey struct {
+	jobID string
+	kind  string
+}
+
+type pipelineJobEventLookup struct {
+	event db.JobEvent
+	ok    bool
+}
+
+func loadPipelineJobEventSnapshot(ctx context.Context, store *db.Store, jobIDs []string) (*pipelineJobEventSnapshot, error) {
+	snapshot := &pipelineJobEventSnapshot{
+		store:     store,
+		preloaded: make(map[string]bool, len(jobIDs)),
+		latest:    make(map[pipelineJobEventKey]pipelineJobEventLookup),
+	}
+	for _, jobID := range jobIDs {
+		snapshot.preloaded[jobID] = true
+	}
+	running, err := store.GetEarliestJobEventsByKind(ctx, jobIDs, string(workflow.JobRunning))
+	if err != nil {
+		return nil, err
+	}
+	snapshot.runningByJobID = running
+	return snapshot, nil
+}
+
+func (s *pipelineJobEventSnapshot) getRunning(ctx context.Context, jobID string) (db.JobEvent, bool, error) {
+	if s.preloaded[jobID] {
+		if event, ok := s.runningByJobID[jobID]; ok {
+			return event, true, nil
+		}
+		// The worker can transition a job after the batch snapshot but before its
+		// row is folded in this pass. Recheck only the missing job.
+	}
+	event, ok, err := s.store.GetEarliestJobEventByKind(ctx, jobID, string(workflow.JobRunning))
+	if err == nil && ok {
+		s.runningByJobID[jobID] = event
+	}
+	return event, ok, err
+}
+
+func (s *pipelineJobEventSnapshot) getLatest(ctx context.Context, jobID, kind string) (db.JobEvent, bool, error) {
+	key := pipelineJobEventKey{jobID: jobID, kind: kind}
+	if lookup, ok := s.latest[key]; ok {
+		return lookup.event, lookup.ok, nil
+	}
+	event, ok, err := s.store.GetLatestJobEventByKind(ctx, jobID, kind)
+	if err == nil {
+		s.latest[key] = pipelineJobEventLookup{event: event, ok: ok}
+	}
+	return event, ok, err
+}
+
+// stampStageTimestampsFromJobEvents projects job lifecycle truth onto a terminal
+// job-minting stage. Running events come from the preloaded earliest-event batch;
+// the matching latest terminal event is fetched lazily only when a stage settles.
+func stampStageTimestampsFromJobEvents(ctx context.Context, events *pipelineJobEventSnapshot, jobID, terminalState string, tickNow, existingStartedAt time.Time, preserveStartedAt bool) (started, finished time.Time, err error) {
+	tickNow = tickNow.UTC()
+	terminalEvent, terminalFound, err := events.getLatest(ctx, jobID, terminalState)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	finished = tickNow
+	if terminalFound {
+		if eventTime := pipelineEventTime(terminalEvent.CreatedAt); !eventTime.IsZero() {
+			finished = eventTime
+		}
+	}
+
+	started = existingStartedAt.UTC()
+	if !preserveStartedAt || started.IsZero() {
+		runningEvent, runningFound, eventErr := events.getRunning(ctx, jobID)
+		if eventErr != nil {
+			return time.Time{}, time.Time{}, eventErr
+		}
+		if eventTime := pipelineEventTime(runningEvent.CreatedAt); runningFound && !eventTime.IsZero() {
+			started = eventTime
+		} else if terminalFound {
+			// A queued job can fail before claim. It never started, so represent the
+			// terminal transition as a zero-duration stage rather than queue wait.
+			started = finished
+		} else if started.IsZero() {
+			started = tickNow
+		}
+	}
+	if started.After(finished) {
+		started = finished
+	}
+	return started, finished, nil
+}
+
+func recordPipelineTerminalJobState(deps pipelineStageSettleDeps, state string) {
+	if deps.terminalJobState != nil {
+		*deps.terminalJobState = state
+	}
+}
+
+func reflectPipelineStageRunning(ctx context.Context, deps pipelineStageSettleDeps, stageRow db.PipelineRunStage) (*db.PipelineRunStage, error) {
+	next := stageRow
+	next.State = pipeline.StageRunning
+	var event db.JobEvent
+	var ok bool
+	var err error
+	if deps.events != nil {
+		event, ok, err = deps.events.getRunning(ctx, stageRow.JobID)
+	} else {
+		event, ok, err = deps.store.GetEarliestJobEventByKind(ctx, stageRow.JobID, string(workflow.JobRunning))
+	}
+	if err != nil {
+		return nil, err
+	}
+	if started := pipelineEventTime(event.CreatedAt); ok && !started.IsZero() {
+		next.StartedAt = started
+	}
+	return &next, nil
+}
+
 type pipelineStageSettleDeps struct {
-	store     *db.Store
-	rec       db.Pipeline
-	run       db.PipelineRun
-	now       time.Time
-	autoMerge pipelineAutoMergeExecutor
+	store            *db.Store
+	rec              db.Pipeline
+	run              db.PipelineRun
+	now              time.Time
+	autoMerge        pipelineAutoMergeExecutor
+	events           *pipelineJobEventSnapshot
+	terminalJobState *string
 }
 
 // stageSettleOutcome is the per-stage-kind SETTLE PREDICATE seam. Given an in-flight
@@ -1504,12 +1652,12 @@ func decisionStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDep
 	}
 	if !workflow.IsSettledJobState(job.State) {
 		if job.State == string(workflow.JobRunning) && stageRow.State == pipeline.StageQueued {
-			next := stageRow
-			next.State = pipeline.StageRunning
-			return false, "", "", nil, &next, nil
+			next, eventErr := reflectPipelineStageRunning(ctx, deps, stageRow)
+			return false, "", "", nil, next, eventErr
 		}
 		return false, "", "", nil, nil, nil
 	}
+	recordPipelineTerminalJobState(deps, job.State)
 	state, summary, needs = foldPipelineStageOutcome(spec.EffectiveSuccessDecisions(stage), job)
 	return true, state, summary, needs, nil, nil
 }
@@ -1581,7 +1729,10 @@ func orchestrateStageSettleOutcome(ctx context.Context, deps pipelineStageSettle
 		}
 	}
 
-	// Stage-timeout bound → sub-tree per-root wall-clock. On expiry trip the #341 kill
+	// Stage-timeout bound → sub-tree per-root wall-clock. StartedAt is the root
+	// job's first running-event time (not its enqueue or reclaim tick), so queue wait
+	// is excluded and host-reboot recovery cannot extend the bound.
+	// On expiry trip the #341 kill
 	// switch on the root ONCE; the killed frontier routes its next dispatch to the #305
 	// finalize continuation, so the walk below still terminates in a foldable tail. The
 	// kill is graceful (in-flight children finish); we do not fold here — we keep
@@ -1600,9 +1751,8 @@ func orchestrateStageSettleOutcome(ctx context.Context, deps pipelineStageSettle
 		// The current frontier job is still running: reflect a queued->running funnel
 		// transition so the stage tracks the live frontier, otherwise leave it in flight.
 		if job.State == string(workflow.JobRunning) && stageRow.State == pipeline.StageQueued {
-			next := stageRow
-			next.State = pipeline.StageRunning
-			return false, "", "", nil, &next, nil
+			next, eventErr := reflectPipelineStageRunning(ctx, deps, stageRow)
+			return false, "", "", nil, next, eventErr
 		}
 		return false, "", "", nil, nil, nil
 	}
@@ -1612,12 +1762,18 @@ func orchestrateStageSettleOutcome(ctx context.Context, deps pipelineStageSettle
 	// waiting. This is the walk's one hop per scan.
 	contID := workflow.DelegationContinuationID(job.ID)
 	if _, cerr := deps.store.GetJob(ctx, contID); cerr == nil {
-		next := stageRow
+		next := &stageRow
+		if stageRow.State == pipeline.StageQueued {
+			next, err = reflectPipelineStageRunning(ctx, deps, stageRow)
+			if err != nil {
+				return false, "", "", nil, nil, err
+			}
+		}
 		next.JobID = contID
 		// The continuation is the live frontier now; keep the stage RUNNING so a later
 		// scan re-enters this walk rather than treating the row as freshly queued.
 		next.State = pipeline.StageRunning
-		return false, "", "", nil, &next, nil
+		return false, "", "", nil, next, nil
 	} else if !errors.Is(cerr, sql.ErrNoRows) {
 		return false, "", "", nil, nil, cerr
 	}
@@ -1632,6 +1788,7 @@ func orchestrateStageSettleOutcome(ctx context.Context, deps pipelineStageSettle
 	if perr == nil && payload.Result != nil && len(payload.Result.Delegations) > 0 && !payload.DelegationFinalize {
 		return false, "", "", nil, nil, nil
 	}
+	recordPipelineTerminalJobState(deps, job.State)
 	state, summary, needs = foldPipelineStageOutcome(spec.EffectiveSuccessDecisions(stage), job)
 	return true, state, summary, needs, nil, nil
 }
@@ -1670,12 +1827,12 @@ func implementStageSettleOutcome(ctx context.Context, deps pipelineStageSettleDe
 	}
 	if !workflow.IsSettledJobState(job.State) {
 		if job.State == string(workflow.JobRunning) && stageRow.State == pipeline.StageQueued {
-			next := stageRow
-			next.State = pipeline.StageRunning
-			return false, "", "", nil, &next, nil
+			next, eventErr := reflectPipelineStageRunning(ctx, deps, stageRow)
+			return false, "", "", nil, next, eventErr
 		}
 		return false, "", "", nil, nil, nil
 	}
+	recordPipelineTerminalJobState(deps, job.State)
 	state, summary, needs = foldPipelineStageOutcome(spec.EffectiveSuccessDecisions(stage), job)
 	payload, payloadErr := workflow.ParseJobPayload(job.Payload)
 	if state == pipeline.StageSucceeded {

@@ -116,6 +116,13 @@ func TestOrchestrateStageFollowsContinuationChainAndFoldsTail(t *testing.T) {
 	if cj, _ := store.GetJob(context.Background(), coordJob); mustPayloadRoot(t, cj) != coordJob {
 		t.Fatalf("coordinator RootJobID = %q, want its own id %q", mustPayloadRoot(t, cj), coordJob)
 	}
+	rootStartedAt := now.Add(10 * time.Second)
+	startStageJob(t, store, coordJob)
+	setPipelineJobEventTime(t, store, coordJob, string(workflow.JobRunning), rootStartedAt)
+	run = advance(t, store, rec, spec, enqueue, run, rootStartedAt.Add(time.Second))
+	if got := stageRow(t, store, run.ID, "coord"); !got.StartedAt.Equal(rootStartedAt) {
+		t.Fatalf("orchestrate root start = %s, want running event %s", got.StartedAt, rootStartedAt)
+	}
 
 	contID := coordJob + "/continuation"
 	contID2 := contID + "/continuation"
@@ -125,6 +132,8 @@ func TestOrchestrateStageFollowsContinuationChainAndFoldsTail(t *testing.T) {
 	settleChainJob(t, store, contID, "approved", "gen-1 placeholder", nil, oneDelegation(), false)
 	seedContinuationJob(t, store, contID2, contID, coordJob)
 	settleChainJob(t, store, contID2, "approved", "final synthesis", nil, nil, false)
+	tailFinishedAt := now.Add(2 * time.Minute)
+	setPipelineJobEventTime(t, store, contID2, string(workflow.JobSucceeded), tailFinishedAt)
 
 	// Scan 1: coordinator settled + continuation exists → re-point to gen-1, stay running.
 	run = advance(t, store, rec, spec, enqueue, run, now)
@@ -152,6 +161,9 @@ func TestOrchestrateStageFollowsContinuationChainAndFoldsTail(t *testing.T) {
 	}
 	if got.Summary != "final synthesis" {
 		t.Fatalf("stage folded summary = %q, want the TAIL's %q (not the coordinator's)", got.Summary, "final synthesis")
+	}
+	if !got.StartedAt.Equal(rootStartedAt) || !got.FinishedAt.Equal(tailFinishedAt) {
+		t.Fatalf("orchestrate times = (%s, %s), want root start %s and tail finish %s", got.StartedAt, got.FinishedAt, rootStartedAt, tailFinishedAt)
 	}
 	if run.State != pipeline.RunSucceeded {
 		t.Fatalf("run = %s, want succeeded", run.State)
@@ -292,13 +304,37 @@ func TestOrchestrateStageTimeoutTripsKillAndFoldsFinalizeTail(t *testing.T) {
 	run := startTestRun(t, store, rec, spec, enqueue, start)
 	coordJob := stageRow(t, store, run.ID, "coord").JobID
 	contID := coordJob + "/continuation"
+	realStart := start.Add(30 * time.Minute)
+	reclaimedAt := realStart.Add(15 * time.Minute)
+	startStageJob(t, store, coordJob)
+	ok, err := store.TransitionJobStateWithEvent(ctx, coordJob, string(workflow.JobRunning), string(workflow.JobQueued), db.JobEvent{
+		JobID: coordJob, Kind: string(workflow.JobQueued), Message: "requeued after reboot by test",
+	})
+	if err != nil || !ok {
+		t.Fatalf("requeue coordinator: ok=%v err=%v", ok, err)
+	}
+	startStageJob(t, store, coordJob)
+	setPipelineJobEventTimeAtIndex(t, store, coordJob, string(workflow.JobRunning), 0, realStart)
+	setPipelineJobEventTimeAtIndex(t, store, coordJob, string(workflow.JobRunning), 1, reclaimedAt)
+	run = advance(t, store, rec, spec, enqueue, run, reclaimedAt.Add(time.Second))
+	if got := stageRow(t, store, run.ID, "coord"); !got.StartedAt.Equal(realStart) {
+		t.Fatalf("orchestrate timeout anchor after reclaim = %s, want earliest running-event start %s", got.StartedAt, realStart)
+	}
 
 	// Coordinator fanned out; its sub-tree is still live (no continuation yet).
 	settleChainJob(t, store, coordJob, "approved", "coordinator", nil, oneDelegation(), false)
 
-	// A scan PAST the 1h stage timeout trips the kill switch on the sub-tree root and
-	// keeps waiting (no fold — the finalize tail has not arrived).
-	past := start.Add(2 * time.Hour)
+	// Queue wait is excluded: only 45 minutes have elapsed from the first running
+	// event, so the timeout must not trip yet.
+	beforeRealTimeout := start.Add(75 * time.Minute)
+	run = advance(t, store, rec, spec, enqueue, run, beforeRealTimeout)
+	if killed, err := store.IsRootJobKilled(ctx, coordJob); err != nil || killed {
+		t.Fatalf("timeout measured from enqueue instead of real start: killed=%v err=%v", killed, err)
+	}
+
+	// A scan past one hour from the FIRST start trips the kill switch even though the
+	// reclaim was only 45 minutes ago. The timeout is reboot-stable.
+	past := realStart.Add(time.Hour + time.Second)
 	run = advance(t, store, rec, spec, enqueue, run, past)
 	if killed, err := store.IsRootJobKilled(ctx, coordJob); err != nil || !killed {
 		t.Fatalf("stage timeout must trip the #341 kill switch on the sub-tree root: killed=%v err=%v", killed, err)

@@ -134,10 +134,13 @@ func TestPipelineRunProgressRenderingAndJSON(t *testing.T) {
 	}
 	var out bytes.Buffer
 	printPipelineRunFunnelAt(&out, view, now)
-	for _, want := range []string{"tokens: 123 (best-effort)", "work: RUNNING; enqueued 2m0s ago", "last activity 5s ago: testing", "gate: QUEUED; enqueued 1m0s ago", "last activity 2m0s ago: delegating", "(sub-tree running; no per-stage progress)"} {
+	for _, want := range []string{"tokens: 123 (best-effort)", "work: RUNNING; started 2m0s ago", "last activity 5s ago: testing", "gate: QUEUED; enqueued 1m0s ago", "last activity 2m0s ago: delegating", "(sub-tree running; no per-stage progress)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output missing %q:\n%s", want, out.String())
 		}
+	}
+	if strings.Contains(out.String(), "gate: QUEUED; started") {
+		t.Fatalf("queued stage rendered as started:\n%s", out.String())
 	}
 	jsonView := pipelineRunToJSON(view)
 	if jsonView.Stages[0].StartedAt == "" || jsonView.Stages[0].Progress == nil || jsonView.Stages[0].Progress.Activity != "testing" {
