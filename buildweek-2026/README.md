@@ -1,5 +1,7 @@
 # OpenAI Build Week 2026 — submission assets (temporary)
 
+**Demo video: <https://www.youtube.com/watch?v=oiX8OiXAVrM>**
+
 This folder documents the **Gitmoot Pipelines** submission for OpenAI Build Week 2026
 (July 13–21). It is temporary and will be removed after judging. The submission is one
 feature of this repo: agent graphs saved as yaml files that you can rerun, inspect, share,
@@ -89,6 +91,21 @@ Week. Codex's role there was architecture, not implementation: two research-pane
 `019f3597-a8eb-7652-b432-c182cc832ae1`, 5,509,044 tokens, July 6) whose settled design the
 coordinator then implemented (PR #694 records the cross-runtime panel). Everything in the
 table above is July 13–21 work.
+
+## The measured numbers, with provenance
+
+The video's comparison table comes from these records (nothing estimated):
+
+| Metric | Loop (conversation) | Graph (pipeline) | Where each number comes from |
+|---|---|---|---|
+| Tokens spent | 18,814,978 | 4,231,476 | Codex cumulative session usage; graph side adds the two agent-stage jobs (821,110+1,352 derive; 1,018,564+2,965 content) to the driving session (2,387,485) |
+| Prompts used | 6 | 1 | `user_message` count in each session log; the graph session also had zero permission requests |
+| Time used | 54:41 active | 21:24 | Loop: event timestamps, idle gaps over 30 min excluded (two sittings; 12h16m wall). Graph: first prompt 22:08:22Z to Telegram delivery 22:29:46Z (kit ready at 22:23:29Z) |
+| Tasks completed | 3/3 | 3/3 | Loop needed corrective rounds; graph run `prun-appkit-pro-18c41ee476461c88`, all six stages succeeded |
+
+Sessions: loop `019f7b98-2f12-7e90-94ce-5248969c289e`, graph `019f8191-f721-79f1-9558-3c5f960da540`
+(both in the table above). Same app, same model (Codex, gpt-5.6-sol), cache-inclusive totals on
+both sides. Telegram delivery is the chained pipeline run `prun-appkit-notify-pro-18c41fdbfaea26cd`.
 
 ## Files
 
