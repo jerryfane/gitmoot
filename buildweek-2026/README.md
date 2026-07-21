@@ -8,6 +8,40 @@ and expose as a typed service API with verifiable receipts. Feature docs:
 <https://github.com/gitmoot/appkit-demo>. Live runs:
 <https://gitmoot.themartian.app/pipelines/appkit-pro>.
 
+## Install, platforms, and how to test it (dev tool)
+
+**Install** (one static binary, no runtime dependencies):
+
+    curl -fsSL https://gitmoot.io/install.sh | sh
+
+or download a binary from the [releases page](https://github.com/gitmoot/gitmoot/releases)
+(latest: v0.9.1.3). Building from source needs Go 1.26+: `go build ./cmd/gitmoot`.
+
+**Supported platforms**: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64.
+
+**Test the pipeline feature in two minutes, no API keys needed** (shell stages need no LLM):
+
+    mkdir -p /tmp/gm-demo && cd /tmp/gm-demo && git init -q
+    cat > hello.yaml <<'YAML'
+    name: hello-graph
+    stages:
+      - id: a
+        cmd: sh -c 'echo hi > a.txt; printf '"'"'{"gitmoot_result":{"decision":"implemented","summary":"a"}}'"'"''
+      - id: b
+        cmd: sh -c 'printf '"'"'{"gitmoot_result":{"decision":"implemented","summary":"b"}}'"'"''
+      - id: join
+        needs: [a, b]
+        cmd: sh -c 'printf '"'"'{"gitmoot_result":{"decision":"implemented","summary":"join"}}'"'"''
+    YAML
+    gitmoot pipeline add hello.yaml
+    gitmoot pipeline run hello-graph
+    gitmoot pipeline list        # watch a and b fork, join runs last
+
+To test the service side (`expose` / `serve` / receipts) and the full demo pipeline with
+Codex agent stages, follow the README of
+[gitmoot/appkit-demo](https://github.com/gitmoot/appkit-demo). Full feature docs:
+<https://gitmoot.io/docs/workflows/pipelines-workflow>.
+
 ## Codex sessions used for Gitmoot Pipelines (main ones first)
 
 The pipeline feature was built by Codex sessions dispatched and coordinated through gitmoot
@@ -54,6 +88,3 @@ table above is July 13–21 work.
 
 - `codex-proof-receipt.txt` — a gitmoot proof receipt for the main implementation session,
   verbatim (`gitmoot proof` reproduces and verifies the manifest offline).
-- `framed-shot-en.png` — a real framed App Store shot produced by the pipeline.
-- `landing-real.png` — the landing page embedding the real captured screens.
-- `og.png` — social art from the generated launch kit.
