@@ -240,6 +240,16 @@ func (c *Cockpit) Available(ctx context.Context) bool {
 	return ok
 }
 
+// AgentPrompt sends a delivery-verified prompt to an existing Herdr pane. It is
+// the narrow exported seam used by the organization event-rule evaluator; pane
+// lifecycle remains owned by Cockpit's regular Wrap path.
+func (c *Cockpit) AgentPrompt(ctx context.Context, pane, prompt, until string) (delivered bool, stalled bool, err error) {
+	if c == nil {
+		return false, false, fmt.Errorf("cockpit is nil")
+	}
+	return c.client.agentPrompt(ctx, pane, prompt, until)
+}
+
 // Wrap returns a DeliveryAdapter that opens a pane (best-effort), runs
 // inner.Deliver, and closes the pane on return. When the cockpit is unavailable
 // it returns inner untouched so no herdr calls are made and behavior is

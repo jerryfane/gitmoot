@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gitmoot/gitmoot/internal/db"
+	"github.com/gitmoot/gitmoot/internal/events"
 	"github.com/gitmoot/gitmoot/internal/runtime"
 )
 
@@ -511,14 +512,30 @@ func (e Engine) runMergeGate(ctx context.Context, reviewer string, payload JobPa
 		// durable) block.
 		err := e.block(ctx, ref, reason)
 		var blocked BlockedError
-		if errors.As(err, &blocked) && decision.BlockClass == MergeBlockQuality {
-			e.harvestOutcomeForMergeGate(ctx, payload, Outcome{
-				Kind:        OutcomeBlocked,
-				Repo:        payload.Repo,
-				PullRequest: payload.PullRequest,
-				HeadSHA:     payload.HeadSHA,
-				Reason:      reason,
-			})
+		if errors.As(err, &blocked) {
+			jobID := firstNonEmptyString(payload.RootJobID, payload.ParentJobID, ref.ID, payload.TaskID)
+			rootID := firstNonEmptyString(payload.RootJobID, jobID)
+			ev := events.NewEvent(
+				events.EventJobBlocked,
+				jobID,
+				rootID,
+				payload.Repo,
+				string(TaskBlocked),
+				reason,
+				e.now(),
+				RedactCommentText,
+			)
+			ev.Cause = "merge_guard"
+			events.EmitEvent(ctx, e.EventSink, ev)
+			if decision.BlockClass == MergeBlockQuality {
+				e.harvestOutcomeForMergeGate(ctx, payload, Outcome{
+					Kind:        OutcomeBlocked,
+					Repo:        payload.Repo,
+					PullRequest: payload.PullRequest,
+					HeadSHA:     payload.HeadSHA,
+					Reason:      reason,
+				})
+			}
 		}
 		return decision, err
 	}

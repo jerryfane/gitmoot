@@ -532,8 +532,8 @@ be combined with `--json`, `--answer`, or `--dismiss`.
 ## Event Stream (Webhooks)
 
 To notify an external system when jobs finish, configure the off-by-default
-`[events]` section in the Gitmoot config — it is **not** in the generated
-default config, so this documentation is its discovery surface:
+webhook transport in the `[events]` section of the Gitmoot config — it is **not**
+in the generated default config, so this documentation is its discovery surface:
 
 ```toml
 [events]
@@ -1164,7 +1164,8 @@ registry and prints its role count. `gitmoot org show [--home PATH]` prints the
 resolved role table.
 
 The registry uses `[org] enforce = "warn"|"block"` and
-`[org.roles."name"]` entries with `parent`, `scope`, and `merge_rule`. There is
+`[org.roles."name"]` entries with `parent`, `scope`, `merge_rule`, and an
+optional `pane` Herdr binding (used by org event-rule wakes). There is
 exactly one root named `owner`; accepted scopes are `*`, `owner/*`, `*/repo`,
 and `owner/repo`, and each child scope must be covered by its parent. Malformed
 org configuration fails closed and loudly. `brief` records passive last-seen
@@ -1192,6 +1193,22 @@ panes; there is no code-level marker to migrate. Phase 1a writes the typed
 note, which is visible with `workflow show`; structured escalation surfaces
 land with the org brief and active delivery/wake is phase 2. Pane/agent creation
 permissions and Herdr checks remain later work.
+Event-rule wakes are separately opt-in:
+
+```sh
+gitmoot org events rule add --on attention --match owner/repo --wake maintainer
+gitmoot org events rule list
+gitmoot org events rule rm --home /alternate/home <rule-id>
+```
+
+`--on` accepts `escalation`, `attention`, `guard`, `job-terminal`, or `blocked`.
+`--match` is a case-insensitive substring matched independently against the
+event repo and job id; omit it to match every event of that kind. `--wake` must
+name a declared role whose config has `pane = "<herdr-pane>"`. The daemon calls
+`herdr agent prompt <pane> <text> --wait --until idle` and distinguishes
+delivered (`result.type = "agent_prompted"`) from stalled
+(`error.code = "agent_prompt_stalled"`) outcomes. Rules, pane resolution, and
+wakes are best-effort; with no rule rows this path is off.
 
 ## External-coordinator workflow groups
 

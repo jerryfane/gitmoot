@@ -9,10 +9,10 @@ import (
 	"strings"
 )
 
-// runner executes a single herdr CLI invocation and returns its stdout. It is
+// runner executes a single herdr CLI invocation and returns its output. It is
 // injectable so tests can drive the client with a fake (no real herdr server).
 // The default runner (newExecRunner) execs the configured herdr binary.
-type runner func(ctx context.Context, args ...string) (stdout string, err error)
+type runner func(ctx context.Context, args ...string) (output string, err error)
 
 // newExecRunner returns a runner that execs the herdr binary at bin. When the
 // caller sets HERDR_SOCKET_PATH, it is passed through to the child process so
@@ -24,7 +24,10 @@ func newExecRunner(bin string) runner {
 		// Inherit the daemon environment (incl. HERDR_SOCKET_PATH when set) so
 		// herdr resolves the same socket the reachability check used.
 		cmd.Env = os.Environ()
-		out, err := cmd.Output()
+		// Herdr writes structured error envelopes to stderr and exits non-zero.
+		// CombinedOutput preserves those envelopes so delivery outcomes such as
+		// agent_prompt_stalled remain distinguishable from transport failures.
+		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
 }
@@ -70,6 +73,49 @@ func (c herdrClient) available(ctx context.Context) bool {
 		return false
 	}
 	return st.Server.Running
+}
+
+type agentPromptResult struct {
+	Result struct {
+		Type string `json:"type"`
+	} `json:"result"`
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// agentPrompt runs `herdr agent prompt <pane> <prompt> --wait`, optionally
+// followed by `--until <until>`. Herdr returns successful delivery on stdout as
+// result.type=agent_prompted. A delivery stall is a structured error on stderr
+// with error.code=agent_prompt_stalled and a non-zero exit; it is a normal
+// not-delivered result, not a transport error.
+func (c herdrClient) agentPrompt(ctx context.Context, pane, prompt, until string) (delivered bool, stalled bool, err error) {
+	args := []string{"agent", "prompt", pane, prompt, "--wait"}
+	if strings.TrimSpace(until) != "" {
+		args = append(args, "--until", strings.TrimSpace(until))
+	}
+	out, runErr := c.run(ctx, args...)
+	var response agentPromptResult
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		if runErr != nil {
+			return false, false, fmt.Errorf("agent prompt failed: %w (parse response: %v)", runErr, err)
+		}
+		return false, false, fmt.Errorf("parse agent prompt response: %w", err)
+	}
+	if response.Error.Code == "agent_prompt_stalled" {
+		return false, true, nil
+	}
+	if runErr != nil {
+		if response.Error.Code != "" {
+			return false, false, fmt.Errorf("agent prompt %s: %s: %w", response.Error.Code, response.Error.Message, runErr)
+		}
+		return false, false, fmt.Errorf("agent prompt failed: %w", runErr)
+	}
+	if response.Result.Type != "agent_prompted" {
+		return false, false, fmt.Errorf("agent prompt returned result type %q", response.Result.Type)
+	}
+	return true, false, nil
 }
 
 // workspaceResult mirrors `herdr workspace create`: it carries the new
