@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gitmoot/gitmoot/internal/config"
@@ -421,6 +422,92 @@ func TestMemoryRecallExpandAddsLinkedFromJSON(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "- [this repo] [linked] aurora quartz vector hidden neighbor") {
 		t.Fatalf("text --expand should mark linked bullet, got:\n%s", stdout.String())
+	}
+}
+
+func TestMemoryRecallBumpsDirectHitsOnly(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	owner := db.MemoryOwner{Kind: "agent", Ref: "lead"}
+	linkedID, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "linked-neighbor",
+		Content: "aurora quartz vector hidden neighbor", Provenance: "seed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directID, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "direct-source",
+		Content: "aurora quartz vector source instructions", Provenance: "seed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runMemory([]string{"recall", "instructions", "--home", home, "--repo", "acme/widget", "--agent", "lead", "--limit", "2", "--expand", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("memory recall exit %d: %s", code, stderr.String())
+	}
+	direct, err := store.GetConfirmedMemoryByID(ctx, directID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked, err := store.GetConfirmedMemoryByID(ctx, linkedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct.RecalledCount != 1 || direct.LastRecalledAt == "" || direct.InjectedCount != 0 {
+		t.Fatalf("direct usage = %+v", direct.ConfirmedMemory)
+	}
+	if linked.RecalledCount != 0 || linked.LastRecalledAt != "" || linked.InjectedCount != 0 {
+		t.Fatalf("linked usage = %+v", linked.ConfirmedMemory)
+	}
+}
+
+type sabotageMemoryWriter struct {
+	bytes.Buffer
+	once     sync.Once
+	sabotage func()
+}
+
+func (w *sabotageMemoryWriter) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	w.once.Do(w.sabotage)
+	return n, err
+}
+
+func TestMemoryRecallBumpBestEffort(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	if _, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: db.MemoryOwner{Kind: "agent", Ref: "lead"}, Repo: "acme/widget", Scope: "repo",
+		Key: "direct-source", Content: "best effort recall instructions", Provenance: "seed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	paths := config.PathsForHome(home)
+	saved := paths.Database + ".saved"
+	writer := &sabotageMemoryWriter{sabotage: func() {
+		if err := os.Rename(paths.Database, saved); err != nil {
+			t.Errorf("rename database: %v", err)
+			return
+		}
+		if err := os.Mkdir(paths.Database, 0o755); err != nil {
+			t.Errorf("replace database with directory: %v", err)
+		}
+	}}
+	var stderr bytes.Buffer
+	code := runMemory([]string{"recall", "instructions", "--home", home, "--agent", "lead", "--json"}, writer, &stderr)
+	if removeErr := os.Remove(paths.Database); removeErr != nil {
+		t.Fatalf("remove sabotage directory: %v", removeErr)
+	}
+	if renameErr := os.Rename(saved, paths.Database); renameErr != nil {
+		t.Fatalf("restore database: %v", renameErr)
+	}
+	if code != 0 || !strings.Contains(writer.String(), "direct-source") {
+		t.Fatalf("recall should succeed despite bump failure: code=%d stdout=%s stderr=%s", code, writer.String(), stderr.String())
 	}
 }
 

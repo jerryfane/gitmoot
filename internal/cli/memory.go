@@ -165,6 +165,7 @@ func runMemoryRecall(args []string, stdout, stderr io.Writer) int {
 	}
 
 	var rows []db.ConfirmedMemory
+	var directIDs []int64
 	linkedFrom := map[int64]int64{}
 	err = withReadOnlyStore(*home, func(store *db.Store) error {
 		var err error
@@ -180,6 +181,13 @@ func runMemoryRecall(args []string, stdout, stderr io.Writer) int {
 			}
 		} else {
 			rows, err = store.QueryConfirmedMemoriesForAllAgents(ctx, strings.TrimSpace(*repo), query, effectiveLimit)
+		}
+		if err == nil {
+			for _, r := range rows {
+				if linkedFrom[r.ID] == 0 {
+					directIDs = append(directIDs, r.ID)
+				}
+			}
 		}
 		if err != nil || !*expand || len(rows) == 0 || len(rows) >= effectiveLimit {
 			return err
@@ -205,23 +213,26 @@ func runMemoryRecall(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "memory recall: %v\n", err)
 			return 1
 		}
-		return 0
-	}
-	if len(rows) == 0 {
+	} else if len(rows) == 0 {
 		fmt.Fprintln(stdout, "no matches")
-		return 0
+	} else {
+		for _, r := range rows {
+			fmt.Fprintf(stdout, "%s repo=%s scope=%s owner=%s:%s\n",
+				r.Key, memoryRecallDisplayRepo(r), r.Scope, r.Owner.Kind, r.Owner.Ref)
+			fmt.Fprintln(stdout, memory.RenderBullet(memory.Entry{
+				Scope:     r.Scope,
+				Key:       r.Key,
+				Context:   r.Context,
+				Content:   r.Content,
+				UpdatedAt: r.UpdatedAt,
+				Linked:    linkedFrom[r.ID] != 0,
+			}))
+		}
 	}
-	for _, r := range rows {
-		fmt.Fprintf(stdout, "%s repo=%s scope=%s owner=%s:%s\n",
-			r.Key, memoryRecallDisplayRepo(r), r.Scope, r.Owner.Kind, r.Owner.Ref)
-		fmt.Fprintln(stdout, memory.RenderBullet(memory.Entry{
-			Scope:     r.Scope,
-			Key:       r.Key,
-			Context:   r.Context,
-			Content:   r.Content,
-			UpdatedAt: r.UpdatedAt,
-			Linked:    linkedFrom[r.ID] != 0,
-		}))
+	if len(directIDs) > 0 {
+		_ = withStore(*home, func(store *db.Store) error {
+			return store.UpdateRecalledCounters(context.Background(), directIDs)
+		})
 	}
 	return 0
 }

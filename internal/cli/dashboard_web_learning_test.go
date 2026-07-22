@@ -381,6 +381,44 @@ func TestWebDataSourceKnowledge(t *testing.T) {
 	}
 }
 
+func TestKnowledgeJSONIncludesUsageTelemetry(t *testing.T) {
+	home := dashboardTestHome(t)
+	_, newID := seedKnowledge(t, home)
+	paths := config.PathsForHome(home)
+	store, err := db.Open(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateInjectedCounters(context.Background(), []int64{newID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateRecalledCounters(context.Background(), []int64{newID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body, err := (&webDataSource{home: home}).knowledgeJSON(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload dashboardKnowledgeResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	wantID := fmt.Sprintf("fact:%d", newID)
+	for _, fact := range payload.Facts {
+		if fact.ID != wantID {
+			continue
+		}
+		if fact.InjectedCount != 1 || fact.LastInjectedAt == "" || fact.RecalledCount != 1 || fact.LastRecalledAt == "" {
+			t.Fatalf("knowledge usage = %+v", fact)
+		}
+		return
+	}
+	t.Fatalf("fact %s missing from payload", wantID)
+}
+
 func TestKnowledgeFactLinkEdges(t *testing.T) {
 	home := dashboardTestHome(t)
 	paths := config.PathsForHome(home)

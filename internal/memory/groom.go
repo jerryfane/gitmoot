@@ -53,6 +53,10 @@ const (
 // owner; the actual rewrite is deferred to the opt-in LLM pass (P4.3).
 const GroomRewriteThreshold = 1200
 
+// GroomNeverUsedMinAge is the review-only age threshold for facts that have
+// never been injected into a job prompt or returned as a direct recall hit.
+const GroomNeverUsedMinAge = 90 * 24 * time.Hour
+
 // GroomMinChildBytes is the minimum trimmed size of a split child. Smaller
 // segments are merged into a neighbor before labels and keys are derived.
 const GroomMinChildBytes = 200
@@ -85,6 +89,16 @@ type GroomCandidate struct {
 	// the minimum-age guard; UpdatedAt remains the optimistic concurrency token.
 	FirstConfirmedAt string
 	UpdatedAt        string // RFC3339; lexicographic order == chronological order
+	InjectedCount    int64
+	RecalledCount    int64
+}
+
+// GroomNeverUsedFlag marks an old, never-used fact for owner review only.
+type GroomNeverUsedFlag struct {
+	ID               int64  `json:"id"`
+	Key              string `json:"key"`
+	AgeDays          int    `json:"age_days"`
+	FirstConfirmedAt string `json:"first_confirmed_at"`
 }
 
 // GroomRetirement is one proposed retirement: the memory id, its key, the detector
@@ -158,9 +172,35 @@ type GroomStats struct {
 	TotalMemories       int            `json:"total_memories"`
 	ProposedRetirements int            `json:"proposed_retirements"`
 	RewriteFlags        int            `json:"rewrite_flags"`
+	NeverUsedFlags      int            `json:"never_used_flags"`
 	Rekeys              int            `json:"rekeys"`
 	CrossPool           int            `json:"cross_pool"`
 	ByReason            map[string]int `json:"by_reason"`
+}
+
+// DetectNeverUsedReviews flags old facts with no live injection or direct-recall
+// usage. Malformed timestamps fail safe and output is ordered by id.
+func DetectNeverUsedReviews(cands []GroomCandidate, now time.Time) []GroomNeverUsedFlag {
+	var out []GroomNeverUsedFlag
+	for _, candidate := range cands {
+		if candidate.InjectedCount != 0 || candidate.RecalledCount != 0 {
+			continue
+		}
+		firstConfirmedAt, err := time.Parse(time.RFC3339, candidate.FirstConfirmedAt)
+		if err != nil {
+			continue
+		}
+		age := now.Sub(firstConfirmedAt)
+		if age < GroomNeverUsedMinAge {
+			continue
+		}
+		out = append(out, GroomNeverUsedFlag{
+			ID: candidate.ID, Key: candidate.Key, AgeDays: int(age / (24 * time.Hour)),
+			FirstConfirmedAt: candidate.FirstConfirmedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // GroomProposal is the detectors' full output over a candidate set.

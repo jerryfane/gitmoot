@@ -434,20 +434,22 @@ func isGitmootVaultDir(dir string) bool {
 
 func toVaultMemory(c db.ConfirmedMemory) memory.VaultMemory {
 	return memory.VaultMemory{
-		ID:           c.ID,
-		OwnerKind:    c.Owner.Kind,
-		OwnerRef:     c.Owner.Ref,
-		OwnerVersion: c.Owner.Version,
-		AuthorRef:    c.AuthorRef,
-		Repo:         c.Repo,
-		Scope:        c.Scope,
-		Key:          c.Key,
-		Content:      c.Content,
-		Provenance:   c.Provenance,
-		SourceJob:    c.SourceJob,
-		CreatedAt:    c.FirstConfirmedAt,
-		UpdatedAt:    c.UpdatedAt,
-		SupersededBy: c.SupersededBy,
+		ID:            c.ID,
+		OwnerKind:     c.Owner.Kind,
+		OwnerRef:      c.Owner.Ref,
+		OwnerVersion:  c.Owner.Version,
+		AuthorRef:     c.AuthorRef,
+		Repo:          c.Repo,
+		Scope:         c.Scope,
+		Key:           c.Key,
+		Content:       c.Content,
+		Provenance:    c.Provenance,
+		SourceJob:     c.SourceJob,
+		CreatedAt:     c.FirstConfirmedAt,
+		UpdatedAt:     c.UpdatedAt,
+		SupersededBy:  c.SupersededBy,
+		InjectedCount: c.InjectedCount,
+		RecalledCount: c.RecalledCount,
 	}
 }
 

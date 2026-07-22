@@ -130,10 +130,15 @@ func (c *MemoryController) injectBlock(ctx context.Context, agent runtime.Agent,
 	if len(entries) == 0 {
 		return hint
 	}
-	block, _ := memory.RenderBlock(entries, c.TokenBudget)
+	block, n := memory.RenderBlock(entries, c.TokenBudget)
 	if block == "" {
 		return hint
 	}
+	ids := make([]int64, 0, n)
+	for _, entry := range entries[:n] {
+		ids = append(ids, entry.ID)
+	}
+	_ = c.Store.UpdateInjectedCounters(ctx, ids)
 	if !strings.HasSuffix(block, "\n") {
 		block += "\n"
 	}
@@ -155,6 +160,7 @@ func memoryRecallHint(agentName string) string {
 // measurement-harness preview methods deliberately run it regardless so the
 // mechanics can be measured even for agents not yet enrolled.
 func (c *MemoryController) retrieve(ctx context.Context, owner db.MemoryOwner, repo, instructions string, limit int) []memory.Entry {
+	// NEVER bump usage counters here — shared with preview/eval.
 	if c == nil || c.Store == nil {
 		return nil
 	}
@@ -228,6 +234,7 @@ func (c *MemoryController) PreviewBlock(ctx context.Context, agentName, repo, in
 
 func memoryEntryFromConfirmed(r db.ConfirmedMemory, linked bool) memory.Entry {
 	return memory.Entry{
+		ID:        r.ID,
 		Scope:     r.Scope,
 		Key:       r.Key,
 		Context:   r.Context,

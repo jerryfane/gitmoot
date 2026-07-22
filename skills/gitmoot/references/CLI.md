@@ -2341,6 +2341,12 @@ persisted memory links from the direct matches, appending visible linked facts
 after every direct match and marking their bullets with `[linked]`. `--json`
 returns raw rows for scripts, including `author_ref` when a shared fact preserves
 a different author and `linked_from` when a row came from link expansion.
+Successful live prompt delivery increments per-fact injection telemetry only for
+the entries that fit the token budget; preview/replay/eval reads never increment
+it. A successful `memory recall` increments recall telemetry for direct FTS hits
+only, not linked expansion rows. Both counters are best-effort and can never fail
+the job or recall command. Brain fact and Knowledge JSON expose
+`injectedCount`, `lastInjectedAt`, `recalledCount`, and `lastRecalledAt`.
 `memory replay` is an offline A/B:
 it re-renders recent real jobs' prompts with and
 without the learnings block and reports the injection delta (added tokens,
@@ -2628,8 +2634,11 @@ child's current cluster when available. The operation is idempotent, and
 `--propose` reads every **active** confirmed memory (retired rows excluded),
 computes the current vault `snapshot_hash` (the same anchor `vault export`/`import`
 use), runs deterministic detectors, and writes a reviewable plan artifact
-(`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags, rekeys,
-cross_pool, quality, stale, stats}`). It never changes confirmed memories;
+(`{schema_version, snapshot_hash, proposed_retirements, rewrite_flags,
+never_used_flags, rekeys, cross_pool, quality, stale, stats}`). Facts at least 90
+days old with zero injection and recall usage are listed in the separate
+`never_used_flags` review section; they are never added to automatic retirement
+actions. The proposal never changes confirmed memories;
 quality and enabled staleness passes may add immutable verdict-cache rows. The
 detectors are:
 

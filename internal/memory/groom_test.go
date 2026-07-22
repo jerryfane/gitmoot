@@ -189,6 +189,29 @@ func TestDetectTaskListOnly(t *testing.T) {
 	}
 }
 
+func TestDetectNeverUsedReviews(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-100 * 24 * time.Hour).Format(time.RFC3339)
+	fresh := now.Add(-10 * 24 * time.Hour).Format(time.RFC3339)
+	got := DetectNeverUsedReviews([]GroomCandidate{
+		{ID: 5, Key: "recalled", FirstConfirmedAt: old, RecalledCount: 1},
+		{ID: 4, Key: "malformed", FirstConfirmedAt: "not-a-time"},
+		{ID: 3, Key: "fresh", FirstConfirmedAt: fresh},
+		{ID: 2, Key: "injected", FirstConfirmedAt: old, InjectedCount: 1},
+		{ID: 1, Key: "never-used", FirstConfirmedAt: old},
+	}, now)
+	if len(got) != 1 || got[0].ID != 1 || got[0].Key != "never-used" || got[0].AgeDays != 100 || got[0].FirstConfirmedAt != old {
+		t.Fatalf("DetectNeverUsedReviews = %+v", got)
+	}
+	ordered := DetectNeverUsedReviews([]GroomCandidate{
+		{ID: 9, Key: "nine", FirstConfirmedAt: old},
+		{ID: 7, Key: "seven", FirstConfirmedAt: old},
+	}, now)
+	if len(ordered) != 2 || ordered[0].ID != 7 || ordered[1].ID != 9 {
+		t.Fatalf("flags not deterministic: %+v", ordered)
+	}
+}
+
 func TestDetectGroomActionsPrecedenceAndDuplicates(t *testing.T) {
 	brick := strings.Repeat("x", GroomRewriteThreshold+50)
 	cands := []GroomCandidate{

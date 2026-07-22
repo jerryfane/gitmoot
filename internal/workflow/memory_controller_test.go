@@ -33,6 +33,10 @@ func memController(store *db.Store, budget, maxEntries int, enrolled ...string) 
 // runMemJob enqueues and runs an implement job with the given instructions,
 // returning the exact prompt delivered to the runtime.
 func runMemJob(t *testing.T, store *db.Store, ctrl *MemoryController, output, instructions string) string {
+	return runMemJobWithID(t, store, ctrl, "job-1", output, instructions)
+}
+
+func runMemJobWithID(t *testing.T, store *db.Store, ctrl *MemoryController, jobID, output, instructions string) string {
 	t.Helper()
 	ctx := context.Background()
 	mb := Mailbox{Store: store}
@@ -41,18 +45,130 @@ func runMemJob(t *testing.T, store *db.Store, ctrl *MemoryController, output, in
 		mb.recordMemory = ctrl.record
 	}
 	if _, err := mb.Enqueue(ctx, JobRequest{
-		ID: "job-1", Agent: "audit", Action: "implement", Repo: "acme/widget", Instructions: instructions,
+		ID: jobID, Agent: "audit", Action: "implement", Repo: "acme/widget", Instructions: instructions,
 	}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	adapter := &fakeDelivery{outputs: []string{output}}
-	if _, err := mb.Run(ctx, "job-1", memAgent(), adapter); err != nil {
+	if _, err := mb.Run(ctx, jobID, memAgent(), adapter); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(adapter.prompts) == 0 {
 		t.Fatalf("no prompt captured")
 	}
 	return adapter.prompts[0]
+}
+
+func TestInjectBlockBumpsInjectedCounter(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	id, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: db.MemoryOwner{Kind: "agent", Ref: "audit"}, Repo: "acme/widget", Scope: "repo",
+		Key: "runner", Content: "arm64 runner is flaky",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl := memController(store, 1500, 15, "audit")
+	runMemJobWithID(t, store, ctrl, "usage-job-1", memTestOutput, "fix arm64 runner")
+	runMemJobWithID(t, store, ctrl, "usage-job-2", memTestOutput, "fix arm64 runner")
+	record, err := store.GetConfirmedMemoryByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.InjectedCount != 2 || record.LastInjectedAt == "" || record.RecalledCount != 0 {
+		t.Fatalf("usage = %+v", record.ConfirmedMemory)
+	}
+}
+
+func TestPreviewDoesNotBumpInjectedCounter(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	id, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: db.MemoryOwner{Kind: "agent", Ref: "audit"}, Repo: "acme/widget", Scope: "repo",
+		Key: "runner", Content: "arm64 runner is flaky",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl := memController(store, 1500, 15, "audit")
+	for range 3 {
+		_ = ctrl.PreviewEntries(ctx, "audit", "acme/widget", "arm64 runner", 0)
+		_, _, _ = ctrl.PreviewBlock(ctx, "audit", "acme/widget", "arm64 runner")
+	}
+	record, err := store.GetConfirmedMemoryByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.InjectedCount != 0 || record.LastInjectedAt != "" {
+		t.Fatalf("preview changed usage = %+v", record.ConfirmedMemory)
+	}
+}
+
+func TestInjectBlockBudgetTruncationBumpsOnlyRendered(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	owner := db.MemoryOwner{Kind: "agent", Ref: "audit"}
+	for _, key := range []string{"one", "two", "three"} {
+		if _, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+			Owner: owner, Repo: "acme/widget", Scope: "repo", Key: key,
+			Content: "budgetneedle runner detail " + strings.Repeat(key, 30),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctrl := memController(store, 40, 15, "audit")
+	entries := ctrl.PreviewEntries(ctx, "audit", "acme/widget", "budgetneedle runner", 0)
+	_, n := memory.RenderBlock(entries, ctrl.TokenBudget)
+	if n <= 0 || n >= len(entries) {
+		t.Fatalf("test needs a truncated non-empty cut, n=%d entries=%d", n, len(entries))
+	}
+	runMemJobWithID(t, store, ctrl, "budget-job", memTestOutput, "budgetneedle runner")
+	for i, entry := range entries {
+		record, err := store.GetConfirmedMemoryByID(ctx, entry.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := int64(0)
+		if i < n {
+			want = 1
+		}
+		if record.InjectedCount != want {
+			t.Fatalf("entry %d id=%d count=%d want=%d", i, entry.ID, record.InjectedCount, want)
+		}
+	}
+}
+
+func TestInjectBlockBumpsLinkedNeighborInRenderedCut(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	owner := db.MemoryOwner{Kind: "agent", Ref: "audit"}
+	targetID, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "linked-neighbor",
+		Content: "aurora quartz vector hidden neighbor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: owner, Repo: "acme/widget", Scope: "repo", Key: "direct-source",
+		Content: "aurora quartz vector source instructions",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl := memController(store, 1500, 2, "audit")
+	entries := ctrl.PreviewEntries(ctx, "audit", "acme/widget", "instructions", 2)
+	if len(entries) != 2 || !entries[1].Linked {
+		t.Fatalf("test needs direct plus linked entries: %+v", entries)
+	}
+	runMemJobWithID(t, store, ctrl, "linked-job", memTestOutput, "instructions")
+	for _, id := range []int64{sourceID, targetID} {
+		record, err := store.GetConfirmedMemoryByID(ctx, id)
+		if err != nil || record.InjectedCount != 1 {
+			t.Fatalf("id=%d usage=%+v err=%v", id, record.ConfirmedMemory, err)
+		}
+	}
 }
 
 // TestMemoryOffByDefaultByteIdentical proves that with memory off — either no

@@ -73,6 +73,8 @@ prompt as a read-only "Prior learnings" reference block (never instructions).
 The block can include `[linked]` facts reached from persisted memory links, and
 non-empty blocks end with a footer pointing the agent to
 `gitmoot memory recall "<query>" --agent <agent-name>` for on-demand recall.
+Live prompt injection and direct recall hits maintain best-effort per-fact usage
+counters; preview/eval reads and linked-only recall expansion do not count.
 Enrollment is per agent via `[agents.<name>].memory = true` plus an optional
 `[memory]` section; inspect the store read-only with `gitmoot memory list`. For
 owner-curated memory, `gitmoot memory ingest` stages Markdown as pending

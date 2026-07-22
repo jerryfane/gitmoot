@@ -225,11 +225,18 @@ type witnessKey struct {
 // supersede "ghosts". The per-agent count and the on-graph fact-node count for that
 // agent therefore differ by its superseded rows — this is intentional.
 func (d *webDataSource) Knowledge(ctx context.Context) (dashboard.Knowledge, error) {
-	out, _, _, err := d.knowledgeWithShared(ctx)
+	out, _, _, _, err := d.knowledgeWithShared(ctx)
 	return out, err
 }
 
-func (d *webDataSource) knowledgeWithShared(ctx context.Context) (dashboard.Knowledge, map[string]bool, map[string]string, error) {
+type dashboardFactUsage struct {
+	InjectedCount  int64
+	LastInjectedAt string
+	RecalledCount  int64
+	LastRecalledAt string
+}
+
+func (d *webDataSource) knowledgeWithShared(ctx context.Context) (dashboard.Knowledge, map[string]bool, map[string]string, map[string]dashboardFactUsage, error) {
 	out := dashboard.Knowledge{
 		Agents:   []dashboard.KnowledgeAgent{},
 		Facts:    []dashboard.KnowledgeFact{},
@@ -238,6 +245,7 @@ func (d *webDataSource) knowledgeWithShared(ctx context.Context) (dashboard.Know
 	}
 	sharedByFact := map[string]bool{}
 	parentByCluster := map[string]string{}
+	usageByFact := map[string]dashboardFactUsage{}
 	err := withStoreAndPaths(d.home, func(paths config.Paths, store *db.Store) error {
 		// Confirmed facts (INCLUDING superseded ghosts) owned by any agent, plus
 		// shared facts attributed to their preserved author.
@@ -304,6 +312,10 @@ func (d *webDataSource) knowledgeWithShared(ctx context.Context) (dashboard.Know
 			if r.Owner.Kind == memory.OwnerKindShared && r.Owner.Ref == memory.SharedOwnerRef {
 				sharedByFact[fact.ID] = true
 			}
+			usageByFact[fact.ID] = dashboardFactUsage{
+				InjectedCount: r.InjectedCount, LastInjectedAt: r.LastInjectedAt,
+				RecalledCount: r.RecalledCount, LastRecalledAt: r.LastRecalledAt,
+			}
 			// Cluster: only when the membership resolves to a known cluster row, so a
 			// fact's Cluster never dangles past the emitted Clusters slice.
 			if cid, ok := membByRow[r.ID]; ok {
@@ -344,9 +356,9 @@ func (d *webDataSource) knowledgeWithShared(ctx context.Context) (dashboard.Know
 		return nil
 	})
 	if err != nil {
-		return dashboard.Knowledge{}, nil, nil, err
+		return dashboard.Knowledge{}, nil, nil, nil, err
 	}
-	return out, sharedByFact, parentByCluster, nil
+	return out, sharedByFact, parentByCluster, usageByFact, nil
 }
 
 func knowledgeFactOwner(r db.ConfirmedMemory) string {
@@ -365,7 +377,11 @@ type dashboardKnowledgeResponse struct {
 
 type dashboardKnowledgeFact struct {
 	dashboard.KnowledgeFact
-	Shared bool `json:"shared,omitempty"`
+	Shared         bool   `json:"shared,omitempty"`
+	InjectedCount  int64  `json:"injectedCount"`
+	LastInjectedAt string `json:"lastInjectedAt,omitempty"`
+	RecalledCount  int64  `json:"recalledCount"`
+	LastRecalledAt string `json:"lastRecalledAt,omitempty"`
 }
 
 // dashboardKnowledgeCluster extends the currently pinned dashboard module's
@@ -389,7 +405,7 @@ func (d *webDataSource) handleLearningKnowledge(w http.ResponseWriter, r *http.R
 }
 
 func (d *webDataSource) knowledgeJSON(ctx context.Context) ([]byte, error) {
-	k, sharedByFact, parentByCluster, err := d.knowledgeWithShared(ctx)
+	k, sharedByFact, parentByCluster, usageByFact, err := d.knowledgeWithShared(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -400,9 +416,14 @@ func (d *webDataSource) knowledgeJSON(ctx context.Context) ([]byte, error) {
 		Edges:    k.Edges,
 	}
 	for _, f := range k.Facts {
+		usage := usageByFact[f.ID]
 		resp.Facts = append(resp.Facts, dashboardKnowledgeFact{
-			KnowledgeFact: f,
-			Shared:        sharedByFact[f.ID],
+			KnowledgeFact:  f,
+			Shared:         sharedByFact[f.ID],
+			InjectedCount:  usage.InjectedCount,
+			LastInjectedAt: usage.LastInjectedAt,
+			RecalledCount:  usage.RecalledCount,
+			LastRecalledAt: usage.LastRecalledAt,
 		})
 	}
 	for _, c := range k.Clusters {
