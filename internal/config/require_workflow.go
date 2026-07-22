@@ -15,7 +15,9 @@ type RequireWorkflowPolicy struct {
 	Mode    string
 }
 
-func defaultRequireWorkflowPolicy() RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "auto"} }
+func defaultRequireWorkflowPolicy() RequireWorkflowPolicy {
+	return RequireWorkflowPolicy{Enabled: true, Mode: "auto"}
+}
 
 // RequireWorkflowConfig holds global [workflow] defaults and flat
 // [repos."owner/repo"] overrides. Pointer fields preserve inheritance when a
@@ -31,17 +33,22 @@ type requireWorkflowOverride struct {
 }
 
 func (c RequireWorkflowConfig) For(repo string) RequireWorkflowPolicy {
+	repoOverride := c.repos[strings.TrimSpace(repo)]
+	enabledExplicit := c.global.enabled != nil || repoOverride.enabled != nil
 	p := defaultRequireWorkflowPolicy()
-	applyRequireWorkflowOverride(&p, c.global)
-	applyRequireWorkflowOverride(&p, c.repos[strings.TrimSpace(repo)])
+	applyRequireWorkflowOverride(&p, c.global, enabledExplicit)
+	applyRequireWorkflowOverride(&p, repoOverride, enabledExplicit)
 	return p
 }
 
-func applyRequireWorkflowOverride(p *RequireWorkflowPolicy, o requireWorkflowOverride) {
+func applyRequireWorkflowOverride(p *RequireWorkflowPolicy, o requireWorkflowOverride, applyMode bool) {
 	if o.enabled != nil {
 		p.Enabled = *o.enabled
 	}
-	if o.mode != nil {
+	// #1067: a mode-only override was inert before #1053 flipped the default
+	// enable to true. Honor mode only when the applicable global or repo policy
+	// explicitly sets require_workflow, preserving that compatibility boundary.
+	if applyMode && o.mode != nil {
 		p.Mode = *o.mode
 	}
 }
@@ -134,6 +141,9 @@ func applyRequireWorkflowField(o *requireWorkflowOverride, key, value string) er
 		v, err := strconv.Unquote(value)
 		if err != nil {
 			return err
+		}
+		if v != "auto" && v != "strict" {
+			return fmt.Errorf("require_workflow_mode must be \"auto\" or \"strict\"")
 		}
 		o.mode = &v
 	}

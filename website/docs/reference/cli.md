@@ -1002,10 +1002,12 @@ Orchestration children and continuations inherit the label.
 `require_workflow` defaults to `true`. In the default `auto` mode, an unlabeled
 fresh agent dispatch is bucketed as `adhoc/<agent>-<yyyy-mm-dd>` and receives a
 `workflow_autolabeled` event; it is never rejected. Set `[workflow]
-require_workflow = false` to opt a repository out, or set
-`require_workflow_mode = "strict"` to reject unlabeled dispatches and require
-`--workflow <namespace>/<campaign>`. Both settings can be overridden in
-`[repos."owner/repo"]`. GitHub comment dispatches always take the auto-label
+require_workflow = false` to opt a repository out. To reject unlabeled
+dispatches, ensure the applicable global or repository policy explicitly sets
+`require_workflow = true`, then set `require_workflow_mode = "strict"` and pass
+`--workflow <namespace>/<campaign>`. Mode-only legacy configurations remain in
+`auto`. Both settings can be overridden in `[repos."owner/repo"]`. GitHub
+comment dispatches always take the auto-label
 path in either mode so acknowledgement ordering stays unchanged; engine PR
 reactions inherit their initiating dispatch's label instead. `gitmoot doctor`
 always reports unlabeled-job drift as advisory diagnostics (including
