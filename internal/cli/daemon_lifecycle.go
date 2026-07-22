@@ -362,6 +362,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 		engine := workflow.Engine{
 			Store:                 store,
 			RequireWorkflowPolicy: requireWorkflowPolicyResolverRoot(config.PathsForHome(*home).Home),
+			OrgPolicy:             orgPolicyResolverRoot(config.PathsForHome(*home).Home),
 			ProduceCheckDir:       checkout,
 			MergeGate:             mergeGate,
 			// Registry default model/effort fallbacks, home-aware and fail-open — see

@@ -35,6 +35,9 @@ type Mailbox struct {
 	// enqueue chokepoint. Nil deliberately means feature disabled so existing
 	// direct Mailbox users remain byte-identical.
 	RequireWorkflowPolicy func(repo string) RequireWorkflowPolicy
+	// OrgPolicy resolves the optional organization registry at the enqueue
+	// chokepoint. Nil deliberately leaves direct Mailbox users byte-identical.
+	OrgPolicy func(repo string) OrgEnforcement
 	// emitTerminal, when set, is called best-effort AFTER a genuine running->
 	// terminal transition in BOTH finishWithPayload (success/advance + timeout-
 	// finalize) and finish (the m.fail delivery/parse-failure path) (#446). Wiring
@@ -138,21 +141,27 @@ type JobRequest struct {
 	ID string
 	// PolicyExempt is enqueue-only policy routing; it is never persisted.
 	PolicyExempt string
-	Agent        string
-	Action       string
-	Repo         string
-	Branch       string
-	PullRequest  int
-	HeadSHA      string
-	GoalID       string
-	TaskID       string
-	TaskTitle    string
-	LeadAgent    string
-	Reviewers    []string
-	ReviewRound  string
-	Sender       string
-	Instructions string
-	Constraints  []string
+	// OperatorOrigin marks a genuine human CLI dispatch. It is deliberately
+	// enqueue-only: shared local dispatch helpers also serve automated producers.
+	OperatorOrigin bool
+	Agent          string
+	Action         string
+	Repo           string
+	Branch         string
+	PullRequest    int
+	HeadSHA        string
+	GoalID         string
+	TaskID         string
+	TaskTitle      string
+	LeadAgent      string
+	Reviewers      []string
+	ReviewRound    string
+	Sender         string
+	// ActingOrgRole attributes a fresh local dispatch to an organization role.
+	// It is persisted for audit provenance, then inherited by engine children.
+	ActingOrgRole string
+	Instructions  string
+	Constraints   []string
 	// TemplateOverride, when non-nil, replaces the agent's own template snapshot
 	// for this job only (the agent's identity is unchanged). Used by the
 	// orchestrate/run --recipe flag to route a coordinator to a built-in recipe
@@ -288,6 +297,7 @@ type JobPayload struct {
 	Reviewers             []string `json:"reviewers,omitempty"`
 	ReviewRound           string   `json:"review_round,omitempty"`
 	Sender                string   `json:"sender"`
+	ActingOrgRole         string   `json:"acting_org_role,omitempty"`
 	Instructions          string   `json:"instructions"`
 	Constraints           []string `json:"constraints"`
 	ParentJobID           string   `json:"parent_job_id,omitempty"`
@@ -429,6 +439,10 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 	if err := validateJobRequest(request); err != nil {
 		return db.Job{}, err
 	}
+	orgWarning, err := m.resolveEnqueueOrgScope(&request)
+	if err != nil {
+		return db.Job{}, err
+	}
 	autolabeled, err := m.resolveEnqueueWorkflowID(&request)
 	if err != nil {
 		return db.Job{}, err
@@ -456,6 +470,7 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 		Reviewers:              compactStrings(request.Reviewers),
 		ReviewRound:            request.ReviewRound,
 		Sender:                 request.Sender,
+		ActingOrgRole:          strings.TrimSpace(request.ActingOrgRole),
 		Instructions:           request.Instructions,
 		Constraints:            compactStrings(request.Constraints),
 		ParentJobID:            request.ParentJobID,
@@ -546,6 +561,12 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 			fmt.Fprintf(os.Stderr, "gitmoot: add workflow_autolabeled event for %s: %v\n", job.ID, err)
 		}
 	}
+	if orgWarning != "" {
+		if err := m.Store.AddJobEvent(ctx, db.JobEvent{JobID: job.ID, Kind: "org_scope_violation", Message: orgWarning}); err != nil {
+			// The queued job is durable. An advisory warning event must never undo it.
+			fmt.Fprintf(os.Stderr, "gitmoot: add org_scope_violation event for %s: %v\n", job.ID, err)
+		}
+	}
 	return job, nil
 }
 
@@ -554,6 +575,82 @@ func (m Mailbox) Enqueue(ctx context.Context, request JobRequest) (db.Job, error
 type RequireWorkflowPolicy struct {
 	Enabled bool
 	Mode    string
+}
+
+// OrgRole and OrgEnforcement are workflow-local copies of the registry surface.
+// CLI owns config loading so workflow stays independent from config.
+type OrgRole struct {
+	Name, Parent string
+	Scope        []string
+	MergeRule    string
+}
+
+type OrgEnforcement struct {
+	Enabled      bool
+	Enforce      string
+	LoadErr      error
+	Role         func(string) (OrgRole, bool)
+	ScopeMatches func([]string, string) bool
+}
+
+// NormalizeActingOrgRole is the canonical persisted representation of an
+// operator-selected org role.
+func NormalizeActingOrgRole(role string) string {
+	return strings.ToLower(strings.TrimSpace(role))
+}
+
+// OrgScopeDecision is the single org permission decision ladder. Callers that
+// mutate state before enqueue use it as a preflight; Mailbox uses the same
+// result at its durable chokepoint to retain warn-mode audit events.
+func OrgScopeDecision(policy OrgEnforcement, actingRole, repo string) (string, error) {
+	repo = strings.TrimSpace(repo)
+	roleName := NormalizeActingOrgRole(actingRole)
+	violation := func(reason string) (string, error) {
+		message := fmt.Sprintf("org scope violation for repo %s: role %s; %s", repo, firstNonEmptyString(roleName, "(none)"), reason)
+		if policy.Enforce == "warn" {
+			return message, nil
+		}
+		return "", errors.New(reason)
+	}
+	if policy.LoadErr != nil {
+		return "", fmt.Errorf("org config could not be loaded: %w", policy.LoadErr)
+	}
+	if !policy.Enabled {
+		return "", nil
+	}
+	if roleName == "" {
+		return violation(fmt.Sprintf("org enforcement on for %s: pass --org-role <role>", repo))
+	}
+	if policy.Role == nil {
+		return violation("org policy is missing role lookup")
+	}
+	role, ok := policy.Role(roleName)
+	if !ok {
+		return violation(fmt.Sprintf("unknown org role %q", roleName))
+	}
+	if policy.ScopeMatches == nil || !policy.ScopeMatches(role.Scope, repo) {
+		return violation(fmt.Sprintf("org role %q out of scope for repo %q", roleName, repo))
+	}
+	return "", nil
+}
+
+// resolveEnqueueOrgScope is deliberately independent of require_workflow: a
+// repo that opted out of workflow labels remains protected by its org registry.
+// Only explicit human CLI dispatches carry OperatorOrigin; shared local helpers
+// also serve comment, chat, pipeline, heartbeat, and other automated producers.
+func (m Mailbox) resolveEnqueueOrgScope(request *JobRequest) (string, error) {
+	if request.PolicyExempt == "exempt" || strings.TrimSpace(request.ParentJobID) != "" || strings.TrimSpace(request.DelegationReason) == "temp_worker_merge_back" || !request.OperatorOrigin {
+		return "", nil
+	}
+	if m.OrgPolicy == nil {
+		return "", nil
+	}
+	p := m.OrgPolicy(strings.TrimSpace(request.Repo))
+	if p.LoadErr != nil {
+		fmt.Fprintf(os.Stderr, "gitmoot: org policy load for %s: %v\n", strings.TrimSpace(request.Repo), p.LoadErr)
+	}
+	request.ActingOrgRole = NormalizeActingOrgRole(request.ActingOrgRole)
+	return OrgScopeDecision(p, request.ActingOrgRole, request.Repo)
 }
 
 // IsUnlabeledAgentDispatch is the shared eligibility predicate for enforcement

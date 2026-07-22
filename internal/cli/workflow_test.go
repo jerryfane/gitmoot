@@ -45,7 +45,7 @@ func TestTaskRunRequireWorkflowPolicy(t *testing.T) {
 	if task.State != "planned" || task.WorktreePath != "" {
 		t.Fatalf("strict preflight mutated task=%+v", task)
 	}
-	if _, err := enqueueTaskRunImplementJob(context.Background(), store, db.Task{ID: "strict-task", RepoFullName: "owner/repo", Title: "Strict", Branch: "strict-task"}, "lead", "abc", home, "team/campaign"); err != nil {
+	if _, err := enqueueTaskRunImplementJob(context.Background(), store, db.Task{ID: "strict-task", RepoFullName: "owner/repo", Title: "Strict", Branch: "strict-task"}, "lead", "abc", home, "team/campaign", "", workflow.OrgEnforcement{}); err != nil {
 		t.Fatalf("strict explicit workflow enqueue: %v", err)
 	}
 	if _, err := store.GetJob(context.Background(), "task-strict-task-implement-lead"); err != nil {
@@ -63,7 +63,7 @@ func TestTaskRunRequireWorkflowPolicy(t *testing.T) {
 	}
 	autoStore := openCLIJobStore(t, autoHome)
 	defer autoStore.Close()
-	job, err := enqueueTaskRunImplementJob(context.Background(), autoStore, db.Task{ID: "auto-task", RepoFullName: "owner/repo", Branch: "auto-task"}, "lead", "abc", autoHome, "")
+	job, err := enqueueTaskRunImplementJob(context.Background(), autoStore, db.Task{ID: "auto-task", RepoFullName: "owner/repo", Branch: "auto-task"}, "lead", "abc", autoHome, "", "", workflow.OrgEnforcement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +74,69 @@ func TestTaskRunRequireWorkflowPolicy(t *testing.T) {
 	if !strings.HasPrefix(payload.WorkflowID, "adhoc/") {
 		t.Fatalf("auto workflow=%q", payload.WorkflowID)
 	}
+}
+
+func TestTaskRunOrgScopePreflightLeavesTaskUntouched(t *testing.T) {
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+"\n[org.roles.\"owner\"]\nscope=[\"other/*\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openCLIJobStore(t, home)
+	if err := store.UpsertTask(context.Background(), db.Task{ID: "org-task", RepoFullName: "owner/repo", Title: "Org", State: "planned", Branch: "org-task"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"task", "run", "org-task", "--home", home, "--repo", "owner/repo", "--owner", "lead", "--org-role", "OWNER"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "out of scope") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	store = openCLIJobStore(t, home)
+	defer store.Close()
+	task, err := store.GetTask(context.Background(), "org-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State != "planned" || task.WorktreePath != "" {
+		t.Fatalf("org preflight mutated task=%+v", task)
+	}
+	if _, err := store.GetBranchLock(context.Background(), "owner/repo", "org-task"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("org preflight created branch lock: %v", err)
+	}
+}
+
+func TestTaskRunOrgScopeWarnRecordsEnqueueEvent(t *testing.T) {
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+"\n[org]\nenforce = \"warn\"\n[org.roles.\"owner\"]\nscope=[\"other/*\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openCLIJobStore(t, home)
+	defer store.Close()
+	policy := orgPolicyResolverRoot(paths.Home)("owner/repo")
+	if err := preflightOrgScope(policy, "owner/repo", "OWNER", true); err != nil {
+		t.Fatalf("warn preflight: %v", err)
+	}
+	job, err := enqueueTaskRunImplementJob(context.Background(), store, db.Task{ID: "warn-task", RepoFullName: "owner/repo", Branch: "warn-task"}, "lead", "abc", paths.Home, "", "OWNER", policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ListJobEvents(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Kind == "org_scope_violation" {
+			return
+		}
+	}
+	t.Fatalf("task-run warning event missing: %+v", events)
 }
 
 func TestRunGoalImportAndStatus(t *testing.T) {

@@ -316,6 +316,7 @@ func (e Engine) handleDelegationLoop(ctx context.Context, job db.Job, payload Jo
 		DelegatedBy:        job.Agent,
 		RootJobID:          e.rootJobID(job, payload),
 		WorkflowID:         payload.WorkflowID,
+		ActingOrgRole:      payload.ActingOrgRole,
 		// Carry the window forward (now including this repeat) and mark that a
 		// corrective nudge has fired, so if the next generation repeats again the
 		// detector escalates to delegation_loop_detected.
@@ -408,6 +409,7 @@ func (e Engine) handleDelegationPreflightFailure(ctx context.Context, job db.Job
 		DelegatedBy:        job.Agent,
 		RootJobID:          e.rootJobID(job, payload),
 		WorkflowID:         payload.WorkflowID,
+		ActingOrgRole:      payload.ActingOrgRole,
 		// Carry the window forward and mark that a corrective nudge has fired, and
 		// thread the streak forward, so a coordinator that keeps naming bad agents
 		// escalates to a graceful finalize.
@@ -482,6 +484,7 @@ func (e Engine) enqueueFinalizeContinuation(ctx context.Context, job db.Job, pay
 		DelegatedBy:        job.Agent,
 		RootJobID:          e.rootJobID(job, payload),
 		WorkflowID:         payload.WorkflowID,
+		ActingOrgRole:      payload.ActingOrgRole,
 		DelegationFinalize: true,
 		ThreadID:           payload.ThreadID,
 		ChatMessageID:      payload.ChatMessageID,

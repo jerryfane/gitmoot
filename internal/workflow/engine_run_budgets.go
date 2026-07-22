@@ -758,6 +758,7 @@ func (e Engine) delegationRequest(job db.Job, payload JobPayload, d Delegation) 
 		DelegatedBy:     job.Agent,
 		RootJobID:       rootID,
 		WorkflowID:      payload.WorkflowID,
+		ActingOrgRole:   payload.ActingOrgRole,
 		Deps:            compactStrings(d.Deps),
 		JobTimeout:      effectiveDelegationTimeout(d, e.DelegationTimeoutDefaults),
 		Fingerprint:     strings.TrimSpace(d.Fingerprint),

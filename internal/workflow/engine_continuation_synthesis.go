@@ -169,6 +169,7 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 			DelegatedBy:     parentJob.Agent,
 			RootJobID:       e.rootJobID(parentJob, parentPayload),
 			WorkflowID:      parentPayload.WorkflowID,
+			ActingOrgRole:   parentPayload.ActingOrgRole,
 			ThreadID:        parentPayload.ThreadID,
 			ChatMessageID:   parentPayload.ChatMessageID,
 			// Carry the window forward and mark that a corrective nudge has fired so a
@@ -269,6 +270,7 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 			DelegatedBy:     parentJob.Agent,
 			RootJobID:       e.rootJobID(parentJob, parentPayload),
 			WorkflowID:      parentPayload.WorkflowID,
+			ActingOrgRole:   parentPayload.ActingOrgRole,
 			// Consume one verify attempt so a still-failing verdict next generation
 			// climbs toward the cap and eventually finalizes.
 			VerifyAttempt: attempt,
@@ -355,8 +357,9 @@ func (e Engine) maybeEnqueueContinuation(ctx context.Context, parentJob db.Job, 
 		DelegatedBy:     parentJob.Agent,
 		// Share the originating coordinator's root so the whole continuation
 		// chain counts against one per-root budget and is visible to loop detection.
-		RootJobID:  e.rootJobID(parentJob, parentPayload),
-		WorkflowID: parentPayload.WorkflowID,
+		RootJobID:     e.rootJobID(parentJob, parentPayload),
+		WorkflowID:    parentPayload.WorkflowID,
+		ActingOrgRole: parentPayload.ActingOrgRole,
 		// Record the delegation set that was actually dispatched in the sliding
 		// window so the next generation can detect a non-progress repeat. A real
 		// dispatch happened => progress, so reset the repeat counter; the

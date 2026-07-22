@@ -2068,10 +2068,12 @@ func (d Daemon) enqueueJob(ctx context.Context, request workflow.JobRequest) (db
 		runtimeDefaultModel = d.Workflow.RuntimeDefaultModel
 	}
 	var requireWorkflowPolicy func(string) workflow.RequireWorkflowPolicy
+	var orgPolicy func(string) workflow.OrgEnforcement
 	if d.Workflow != nil {
 		requireWorkflowPolicy = d.Workflow.RequireWorkflowPolicy
+		orgPolicy = d.Workflow.OrgPolicy
 	}
-	job, err := (workflow.Mailbox{Store: d.Store, CanaryEnabled: canaryEnabled, RuntimeDefaultModel: runtimeDefaultModel, RequireWorkflowPolicy: requireWorkflowPolicy}).Enqueue(ctx, request)
+	job, err := (workflow.Mailbox{Store: d.Store, CanaryEnabled: canaryEnabled, RuntimeDefaultModel: runtimeDefaultModel, RequireWorkflowPolicy: requireWorkflowPolicy, OrgPolicy: orgPolicy}).Enqueue(ctx, request)
 	return job, true, err
 }
 

@@ -19,6 +19,9 @@ type Engine struct {
 	// RequireWorkflowPolicy is passed to every mailbox the engine creates so
 	// continuations and delegation enqueue share the same home-aware policy.
 	RequireWorkflowPolicy func(repo string) RequireWorkflowPolicy
+	// OrgPolicy is passed to every mailbox the engine creates. Descendant jobs are
+	// exempt from the gate but preserve their initiating role as provenance.
+	OrgPolicy func(repo string) OrgEnforcement
 	// ProduceCheckDir is the resolved checkout cwd for trusted produce-stage
 	// deterministic checks when no disposable worktree path is present.
 	ProduceCheckDir         string

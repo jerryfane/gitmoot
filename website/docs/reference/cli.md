@@ -1017,6 +1017,22 @@ With `require_workflow = false`, dispatch and enqueue remain byte-identical;
 doctor drift diagnostics remain always-on advisory, and the overview item
 remains policy-gated.
 
+### Organization registry and scoped dispatch
+
+The optional `[org]` registry is enabled by any `[org.roles."name"]` section.
+Roles have `parent`, `scope`, and advisory `merge_rule` (`owner`, `self`, or
+`none`); exactly one parent-less role is required. Scope entries are `*`,
+`owner/*`, or exact `owner/name`, and child scope must be a subset of its parent.
+
+Use `gitmoot org validate` to validate the registry and `gitmoot org show` to
+view its roles. When enabled, fresh local `agent ask`, `agent run`, `agent
+review`, `agent implement`, `orchestrate`, and `task run` dispatches require
+`--org-role <role>` (or `GITMOOT_ORG_ROLE`) and reject out-of-scope repositories
+at enqueue.
+`enforce = "block"` is the default; `"warn"` allows the job and records an
+`org_scope_violation` event. Merge rules are advisory in this phase; pane/agent
+creation permissions, Herdr checks, and escalation are later work.
+
 ```sh
 gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo --workflow fable/dashboard-redesign
 gitmoot job list --workflow fable/dashboard-redesign
