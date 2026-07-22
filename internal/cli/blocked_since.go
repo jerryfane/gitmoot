@@ -120,12 +120,18 @@ func evaluateBlockedTaskEpisodes(ctx context.Context, store *db.Store, sink even
 		staleSubjects[subject] = candidate.ID
 	}
 
-	// Prefix-scoped so a per-repo tick reads only this repo's task episodes.
-	episodes, err := store.ListBlockedEpisodesByPrefix(ctx, "task:"+strings.TrimSpace(repo)+":")
+	// The episode table is tiny (off-by-default, few blocked subjects), so a full
+	// list + byte-exact Go prefix filter is negligible and — unlike a SQL LIKE —
+	// cannot case-fold a sibling repo whose name differs only in ASCII case.
+	episodes, err := store.ListBlockedEpisodes(ctx)
 	if err != nil {
 		return err
 	}
+	taskPrefix := "task:" + strings.TrimSpace(repo) + ":"
 	for _, episode := range episodes {
+		if !strings.HasPrefix(episode.Subject, taskPrefix) {
+			continue
+		}
 		// Tasks have an authoritative blocked set (gitmoot's own state), so an
 		// episode whose task is no longer blocked is cleared immediately — no
 		// staleness heuristic needed (unlike the ambiguous Herdr role source).
@@ -248,13 +254,15 @@ func evaluateBlockedRoleEpisodes(ctx context.Context, store *db.Store, sink even
 		}
 	}
 
-	// Prefix-scoped read of only the role episodes.
-	episodes, err := store.ListBlockedEpisodesByPrefix(ctx, "role:")
+	episodes, err := store.ListBlockedEpisodes(ctx)
 	if err != nil {
 		return err
 	}
 	staleBefore := now.Add(-blockedEpisodeStaleGap)
 	for _, episode := range episodes {
+		if !strings.HasPrefix(episode.Subject, "role:") {
+			continue
+		}
 		if role, blocked := blockedSubjects[episode.Subject]; blocked {
 			if _, ready := readySubjects[episode.Subject]; !ready {
 				continue
@@ -314,7 +322,10 @@ func emitBlockedSinceEpisode(ctx context.Context, store *db.Store, sink events.S
 	if err := store.MarkBlockedEpisodeEmitted(ctx, episode.Subject, now); err != nil {
 		return fmt.Errorf("mark blocked episode emitted: %w", err)
 	}
-	detail := fmt.Sprintf("%s blocked %s", detailSubject, blockedFor.Round(time.Second))
+	// Carry the stable first_since (blocked_since) so a consumer distinguishes a
+	// re-nudge (same job_id + same since) from a genuinely fresh episode after a
+	// re-block (same job_id, new since) — a repeat must not read as a fresh alert.
+	detail := fmt.Sprintf("%s blocked %s (since %s)", detailSubject, blockedFor.Round(time.Second), blockedSince.UTC().Format(time.RFC3339))
 	ev := events.NewEvent(events.EventJobBlocked, subjectID, rootID, repo, string(workflow.TaskBlocked), detail, now, workflow.RedactCommentText)
 	ev.Cause = "blocked_since"
 	events.EmitEvent(ctx, sink, ev)

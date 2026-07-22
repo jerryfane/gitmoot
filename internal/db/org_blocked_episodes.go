@@ -71,14 +71,6 @@ func (s *Store) ListBlockedEpisodes(ctx context.Context) ([]BlockedEpisode, erro
 		FROM org_blocked_episodes ORDER BY subject`)
 }
 
-// ListBlockedEpisodesByPrefix returns only episodes whose subject starts with
-// prefix (e.g. "task:owner/repo:" or "role:"), so a per-repo tick reads only the
-// rows it can act on instead of scanning the whole table every tick.
-func (s *Store) ListBlockedEpisodesByPrefix(ctx context.Context, prefix string) ([]BlockedEpisode, error) {
-	return s.queryBlockedEpisodes(ctx, `SELECT subject, blocked_since, COALESCE(emitted_at, ''), updated_at
-		FROM org_blocked_episodes WHERE subject LIKE ? ESCAPE '\' ORDER BY subject`, likeLiteralPrefix(prefix))
-}
-
 func (s *Store) queryBlockedEpisodes(ctx context.Context, query string, args ...any) ([]BlockedEpisode, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -94,11 +86,4 @@ func (s *Store) queryBlockedEpisodes(ctx context.Context, query string, args ...
 		result = append(result, episode)
 	}
 	return result, rows.Err()
-}
-
-// likeLiteralPrefix escapes the LIKE metacharacters in a literal prefix (a repo
-// name can contain '_') so it matches by prefix rather than as a wildcard.
-func likeLiteralPrefix(prefix string) string {
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
-	return escaped + "%"
 }

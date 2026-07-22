@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -206,6 +207,19 @@ func TestBlockedSinceReNudgesOncePerIntervalWhileStillBlocked(t *testing.T) {
 	nudgeAt(base, 1)                            // crosses threshold → emit #1
 	nudgeAt(base.Add(30*time.Minute), 1)        // within interval → no re-emit
 	nudgeAt(base.Add(wakeAfter+time.Minute), 2) // past interval, still blocked → re-nudge #2
+
+	// Repeats must be self-identifying: both re-nudges of the SAME episode carry the
+	// SAME first_since, so a consumer never reads a re-nudge as a fresh episode.
+	blocked := sink.byType(events.EventJobBlocked)
+	sinceOf := func(detail string) string {
+		if i := strings.Index(detail, "(since "); i >= 0 {
+			return detail[i:]
+		}
+		return ""
+	}
+	if s0, s1 := sinceOf(blocked[0].Detail), sinceOf(blocked[1].Detail); s0 == "" || s0 != s1 {
+		t.Fatalf("re-nudges not self-identifying by first_since: %q vs %q", blocked[0].Detail, blocked[1].Detail)
+	}
 }
 
 // TestBlockedRoleEpisodeSurvivesTransientUnknownSnapshot pins the fix that a

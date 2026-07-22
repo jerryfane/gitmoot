@@ -183,6 +183,8 @@ disables both evaluators. An episode is cleared on a definitive non-blocked
 observation, or once the subject stops being observed blocked for a short grace
 (so a role gone for good is not leaked); a brief `unknown`/absent snapshot blip
 within that grace never resets it, and a later re-block starts a fresh episode.
+Each synthesized event's `detail` carries the stable since-time, so a re-nudge
+(same `job_id` + same since) is distinguishable from a fresh episode.
 The wake role's config sets `pane = "<pane-id-or-label>"`: a value containing `:`
 is a `wX:pY` pane id used as-is, any other value is a pane label resolved to the
 current id at wake time (so a recycled pane is still reached). Wake delivery runs
