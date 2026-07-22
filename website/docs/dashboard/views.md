@@ -197,8 +197,9 @@ workflows. Unlabeled jobs remain visible on the Jobs page, while pipeline runs
 live on the Pipelines page. An explicitly labeled workflow still appears here
 even when its label begins with `pipeline/` or `adhoc/`.
 
-The overview's advisory unlabeled-job item is shown only for repositories with
-`require_workflow` enabled; doctor keeps its drift diagnostic always-on and
+The overview's advisory unlabeled-job item is shown for repositories under the
+default enabled auto policy; it is hidden only for repositories that opt out
+with `require_workflow = false`. Doctor keeps its drift diagnostic always-on and
 advisory so historical/session rows remain visible without changing dispatch
 enforcement.
 

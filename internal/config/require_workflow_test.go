@@ -38,7 +38,7 @@ func TestLoadRequireWorkflowDefaultsAndRejectsBadMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cfg.For("a/b"); got.Enabled || got.Mode != "auto" {
+	if got := cfg.For("a/b"); !got.Enabled || got.Mode != "auto" {
 		t.Fatalf("default=%+v", got)
 	}
 	if err := os.WriteFile(paths.ConfigFile, []byte("[workflow]\nrequire_workflow_mode = \"bad\"\n"), 0600); err != nil {

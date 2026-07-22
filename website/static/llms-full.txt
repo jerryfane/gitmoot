@@ -2873,7 +2873,7 @@ stages:                     # the DAG, keyed by unique id and wired by needs
 | `allow_auto_merge`          | pipeline     | no       | Pipeline-level half of the auto-merge double key. Required with a gate's `merge: auto`; default `false`. It does not replace `allow_scheduled_writes` on scheduled pipelines. |
 | `stages[].id`               | stage        | yes      | Unique, name-safe stage id. Appears verbatim in the stage job's fingerprint and deterministic id. |
 | `stages[].cmd`              | stage        | cond.    | Shell command run verbatim via `sh -c` (see the stage contract below). A stage is **exactly one** of `cmd`, `agent`, or `gate`. |
-| `stages[].isolate`          | stage        | no       | Shell-only opt-in to a detached read-only committed-tip worktree, removing checkout-lock serialization so same-repo siblings with different commands can run concurrently. Default `false` preserves the shared checkout; rejected on non-shell stages. See [Shell-stage isolation](#shell-stage-isolation). |
+| `stages[].isolate`          | stage        | no       | Shell-only opt-in to a detached read-only committed-tip worktree, removing checkout-lock serialization so same-repo siblings can run concurrently — including siblings that share the identical `cmd`, which also take a job-scoped shell runtime-session key (#1034). Default `false` preserves the shared checkout; rejected on non-shell stages. See [Shell-stage isolation](#shell-stage-isolation). |
 | `stages[].agent`            | stage        | cond.    | Name of a managed gitmoot agent to run this stage (instead of a shell `cmd`). Must be a name-safe token; `pipeline add` warns (does not block) if the agent does not exist yet, but it must exist before the stage runs. Mutually exclusive with `cmd`/`gate`. The stage kind depends on `action`/`write`/`orchestrate` — see [Agent stages](#agent-stages). |
 | `stages[].prompt`           | stage        | cond.    | Instruction handed to an agent stage's agent. **Required** for an agent stage; rejected for a shell/gate stage. Prepended with the upstream `needs` stages' result summaries at enqueue. |
 | `stages[].action`           | stage        | no       | `ask` (default), `review`, `implement`, or `produce`. Produce writes operator-owned data but never the repo or a PR. |
@@ -3068,13 +3068,11 @@ Non-service shell stages use the managed shared checkout by default, preserving
 access to uncommitted and gitignored files and commands that intentionally write
 there. Set `isolate: true` on a `cmd` stage to run it in a disposable detached
 read-only worktree at the checkout's committed tip. Isolated fork stages key on
-their own worktree paths, removing checkout-lock serialization so siblings with
-different commands can run concurrently. Agent stages already have their own
+their own worktree paths, removing checkout-lock serialization, and each also
+takes a **job-scoped** shell runtime-session key (`runtime:shell:job:<hash(job)>`)
+instead of the command-hash key, so same-repo siblings run concurrently even when
+they share the **identical** `cmd` (#1034). Agent stages already have their own
 isolation rules, so `isolate` is rejected on them.
-
-**Known v1 limitation (tracked follow-up):** two isolated forks with the identical `cmd`
-still share `runtime:shell:<hash(cmd)>` and serialize on that separate shell
-session lock. This field does not change runtime-session identity.
 
 This opt-in path is fail-open: if Gitmoot cannot allocate the worktree, it emits a
 `readonly_worktree_skipped` job event and runs the command in the shared checkout.
@@ -3473,7 +3471,8 @@ gitmoot pipeline show <name> [--json]        # registry view for a pipeline name
 gitmoot pipeline show <run-id> [--json]      # run funnel for a "prun-…" run id
 gitmoot pipeline bind-trigger <name>         # create/re-sync the owned AP flow
 
-gitmoot pipeline run <name>                  # start a manual run; prints the run id
+gitmoot pipeline run <name> [--payload key=value ...] [--payload-json '<obj>']
+gitmoot pipeline watch <run-id> [--timeout 10m] [--poll 5s] [--json]
 gitmoot pipeline resume <run-id> [--from <stage>]
 gitmoot pipeline cancel <run-id>
 
@@ -3516,9 +3515,17 @@ the available `agent_runtime`, `prompt_preview`, and `cmd_preview` fields withou
 removing the full `prompt` or `cmd`.
 
 `pipeline run` prints just the run id (script-stable), so `RUN=$(gitmoot pipeline
-run nightly-sync)` works. A manual run ignores the `enabled` flag — a disabled
+run nightly-sync)` works. Repeat `--payload key=value` to inject manual trigger
+data, or pass one `--payload-json` object of string values; the two forms are
+mutually exclusive and use the bridge's existing key/count/size limits. A manual run ignores the `enabled` flag — a disabled
 pipeline can still be run by hand — but still requires a `repo` and refuses to
 start while the pipeline already has an active run (one active run per pipeline).
+
+`pipeline watch <run-id>` blocks until the run succeeds, fails, blocks, or is
+cancelled. It prints each stage state change once and exits `0` only for success;
+terminal non-success states exit `1`. A still-active run at `--timeout` exits `2`
+with `still running`, so automation can re-invoke the same command. `--json`
+suppresses transition lines and emits the final `pipeline show --json` shape.
 
 `pipeline show <run-id>` renders the run as a **text funnel**:
 
@@ -3649,6 +3656,7 @@ of `gitmoot agent list`**; `pipeline remove` disposes them.
 - `gitmoot pipeline show <name>` shows the registry view (spec hash, schedule,
   last/next run bookkeeping, and the stage DAG).
 - `gitmoot pipeline show <run-id>` shows the run funnel.
+- `gitmoot pipeline watch <run-id>` waits for terminal state without an agent-side poll loop.
 - Stage jobs are ordinary jobs (sender `pipeline`), so they also appear in the usual
   job/status surfaces.
 
@@ -6826,8 +6834,9 @@ workflows. Unlabeled jobs remain visible on the Jobs page, while pipeline runs
 live on the Pipelines page. An explicitly labeled workflow still appears here
 even when its label begins with `pipeline/` or `adhoc/`.
 
-The overview's advisory unlabeled-job item is shown only for repositories with
-`require_workflow` enabled; doctor keeps its drift diagnostic always-on and
+The overview's advisory unlabeled-job item is shown for repositories under the
+default enabled auto policy; it is hidden only for repositories that opt out
+with `require_workflow = false`. Doctor keeps its drift diagnostic always-on and
 advisory so historical/session rows remain visible without changing dispatch
 enforcement.
 
@@ -10657,21 +10666,24 @@ continuation inherit it.
 
 ### Require workflow labels
 
-Set `[workflow] require_workflow = true` to prevent fresh agent dispatches from
-silently becoming ungrouped. `require_workflow_mode = "auto"` (the default)
-auto-files them as `adhoc/<agent>-<yyyy-mm-dd>` and emits a
-`workflow_autolabeled` event. `strict` rejects unlabeled dispatches with the
-required `--workflow <namespace>/<campaign>` fix. GitHub comment dispatches
+`require_workflow` defaults to `true`. In the default `auto` mode, fresh
+unlabeled agent dispatches are filed as `adhoc/<agent>-<yyyy-mm-dd>` and emit a
+`workflow_autolabeled` event; they are never rejected. Set `[workflow]
+require_workflow = false` to opt a repository out, or set
+`require_workflow_mode = "strict"` to reject unlabeled dispatches with the
+required `--workflow <namespace>/<campaign>` fix. Both settings can be
+overridden per repository in `[repos."owner/repo"]`. GitHub comment dispatches
 always take the auto-label path in either mode so acknowledgement ordering stays
 unchanged; engine PR reactions inherit their initiating dispatch's label instead.
-Both keys can be overridden per repository in `[repos."owner/repo"]`. `gitmoot
-doctor` always reports unlabeled-job drift as advisory diagnostics (including
-session-open and task-recover rows that bypass enforcement), while the overview
-shows that item only for repositories where the policy is enabled. `gitmoot repo
-add --agents-md` writes the recommended AGENTS.md discipline section.
+`gitmoot doctor` always reports unlabeled-job drift as advisory diagnostics
+(including session-open and task-recover rows that bypass enforcement), while
+the overview shows that item only for repositories where the policy is enabled.
+`gitmoot repo add --agents-md` writes the recommended AGENTS.md discipline
+section.
 
-With the feature off, dispatch and enqueue remain byte-identical; doctor drift
-diagnostics remain always-on advisory, and the overview item remains policy-gated.
+With `require_workflow = false`, dispatch and enqueue remain byte-identical;
+doctor drift diagnostics remain always-on advisory, and the overview item
+remains policy-gated.
 
 ```sh
 gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo --workflow fable/dashboard-redesign
@@ -12283,7 +12295,8 @@ gitmoot pipeline install-defaults                 # install built-in memory pipe
 gitmoot pipeline list [--json]
 gitmoot pipeline show nightly-sync [--json]        # registry view for a name
 gitmoot pipeline bind-trigger nightly-sync         # create/re-sync owned AP flow
-gitmoot pipeline run nightly-sync                  # start a manual run; prints the run id
+gitmoot pipeline run nightly-sync [--payload key=value ...] [--payload-json '<obj>']
+gitmoot pipeline watch <run-id> [--timeout 10m] [--poll 5s] [--json]
 gitmoot pipeline show <run-id> [--json]            # run funnel for a "prun-…" id
 gitmoot pipeline expose --schema schema.json <name> # issue one bearer token (shown once)
 gitmoot pipeline serve                              # loopback API on 127.0.0.1:8792
@@ -12505,10 +12518,10 @@ checkout, including its uncommitted/gitignored data and any intentional writes.
 Opt-in allocation is fail-open: failure emits `readonly_worktree_skipped` and runs
 on the shared checkout. On success the command receives
 `GITMOOT_CHECKOUT=<live-checkout>` for cwd-independent access to data omitted from
-the clean worktree. This removes checkout-lock serialization, so same-repo stages
-with different commands can run concurrently. **Known v1 limitation (tracked follow-up):**
-identical commands still share `runtime:shell:<hash(cmd)>` and serialize on the
-separate shell session lock. Service shell stages retain their unconditional,
+the clean worktree. This removes checkout-lock serialization, and each isolated stage
+also takes a job-scoped shell runtime-session key (`runtime:shell:job:<hash(job)>`)
+instead of the command-hash key, so same-repo stages run concurrently even when they
+share the identical command (#1034). Service shell stages retain their unconditional,
 fail-closed isolation; agent and gate stages reject this shell-only field.
 
 Shell and agent stages can opt into scoped key access with `env_keys`. Source
@@ -12551,8 +12564,9 @@ dynamically fenced, 6000-byte-bounded `UNTRUSTED external data` block before
 upstream context; each rendered value is capped at 1500 bytes. Shell stages receive
 exact `GITMOOT_TRIGGER_<UPPERCASE_KEY>` exec environment entries, never shell-source
 interpolation. The full canonical payload is retained in the SQLite run row and
-shown by `pipeline show <run-id>` as `payload_json`; job
-env/prompt projections follow normal job-data retention.
+shown as redacted/truncated key provenance by text `pipeline show <run-id>` and
+as `payload_json` in JSON; job env/prompt projections follow normal job-data
+retention.
 
 Every pipeline shell stage also receives `GITMOOT_PIPELINE_NAME`,
 `GITMOOT_PIPELINE_RUN_ID`, and `GITMOOT_PIPELINE_STAGE_ID`. A dependent shell
@@ -12652,11 +12666,18 @@ strict: omitting `skipped` makes it fail. A `pr_merged` gate whose source skippe
 parks blocked because no PR can exist for that run.
 
 `pipeline run` prints only the run id (script-stable: `RUN=$(gitmoot pipeline run
-nightly-sync)`); a manual run ignores `enabled` but still needs a `repo` and refuses
+nightly-sync)`); repeat `--payload key=value` or use one `--payload-json` string
+object to enter the existing trigger-input seam. The forms are mutually exclusive
+and share the bridge's key/count/size validation. A manual run ignores `enabled` but still needs a `repo` and refuses
 to start while a run is already active. `pipeline show <run-id>` renders the **text
 funnel** (`source OK -> score BLOCKED (needs: R2 token) -> deploy SKIPPED`) under a
 run header; a **failed** run also prints the exact `gitmoot report bug --job
 <stage-job>` command (gitmoot never auto-files it).
+
+`pipeline watch <run-id>` is the blocking completion primitive. It prints each
+stage state transition once, returns `0` for succeeded, `1` for terminal
+failed/blocked/cancelled, and `2` with `still running` when `--timeout` expires.
+Use `--json` for the same final summary shape as `pipeline show --json`.
 
 While a stage is queued or running, the run view adds an honest
 `STATE; enqueued <elapsed> ago` detail (the stage timestamp is enqueue time, not
@@ -14047,7 +14068,7 @@ stages:
 ```sh
 gitmoot pipeline add nightly-sync.yaml --enable   # validate + store; --enable turns on the schedule
 RUN=$(gitmoot pipeline run nightly-sync)          # or trigger a manual run now
-gitmoot pipeline show "$RUN"                       # watch the text funnel
+gitmoot pipeline watch "$RUN"                      # one blocking call; no agent poll loop
 ```
 
 ### Pipelines as a service
@@ -14325,10 +14346,11 @@ Its disposable worktree is the committed tip, while the default `false` continue
 to run in the shared checkout for commands that need dirty/gitignored data or write
 there. Allocation is fail-open (`readonly_worktree_skipped` records fallback), and
 successful isolation adds `GITMOOT_CHECKOUT=<live-checkout>` to the shell env. This
-removes checkout-lock serialization for siblings with different commands. **Known
-v1 limitation (tracked follow-up):** identical commands retain the same shell runtime-session
-key and serialize. Service shell stages remain unconditionally isolated and fail
-closed. The field is rejected on agent and gate stages.
+removes checkout-lock serialization for siblings, and each isolated stage also
+takes a job-scoped shell runtime-session key (`runtime:shell:job:<hash(job)>`)
+instead of the command-hash key, so siblings run concurrently even when they share
+the **identical** command (#1034). Service shell stages remain unconditionally
+isolated and fail closed. The field is rejected on agent and gate stages.
 
 A dependent `cmd` stage receives the same settled upstream results through a data
 channel, not shell interpolation. All pipeline shell stages get
@@ -14365,6 +14387,19 @@ Produce batches use the existing result decisions: `implemented` = complete,
 `changes_requested` = partial (only advances when opted into `success_decisions`),
 `blocked` = needs a human, and `skipped` = no work. `pipeline show` reports a
 best-effort run token total and per-stage input/output usage in JSON.
+
+Manual runs can carry the same trigger payload as bridge-started runs:
+
+```sh
+RUN=$(gitmoot pipeline run nightly-sync --payload batch=nightly --payload region=eu)
+gitmoot pipeline watch "$RUN" --timeout 10m
+```
+
+Use `--payload-json '{"batch":"nightly"}'` instead of repeatable `--payload`
+when the input already exists as JSON. The forms are mutually exclusive and use
+the bridge's shared payload limits. If watch exits `2` with `still running`,
+re-invoke it with another timeout window; do not teach agents to poll `pipeline
+show` in a loop.
 
 ### Park and resume
 
