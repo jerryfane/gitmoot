@@ -229,15 +229,17 @@ func eventRuleWakePrompt(kind string, event events.Event) string {
 }
 
 // truncateForWake caps s to at most max BYTES without splitting a multibyte UTF-8
-// rune (a byte slice at a rune boundary would emit invalid UTF-8), appending an
-// ellipsis when it actually truncates.
+// rune (a byte slice mid-rune would emit invalid UTF-8), appending an ellipsis
+// when it actually truncates. It backs the cut up over continuation bytes at the
+// cut point ONLY — validating the whole prefix instead would let a stray invalid
+// byte anywhere before max collapse the detail down to just the ellipsis.
 func truncateForWake(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	truncated := s[:max]
-	for len(truncated) > 0 && !utf8.ValidString(truncated) {
-		truncated = truncated[:len(truncated)-1]
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return truncated + "…"
+	return s[:cut] + "…"
 }

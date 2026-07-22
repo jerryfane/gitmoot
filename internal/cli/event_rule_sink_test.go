@@ -223,4 +223,10 @@ func TestTruncateForWakeRuneSafe(t *testing.T) {
 	if got := truncateForWake("ok", 320); got != "ok" {
 		t.Fatalf("short string altered: %q", got)
 	}
+	// An invalid byte EARLY in the string must not collapse the tail: we shave
+	// only the partial rune at the cut boundary, not react to bytes elsewhere.
+	bad := "\xff" + strings.Repeat("b", 400)
+	if got := truncateForWake(bad, 320); len(got) < 300 {
+		t.Fatalf("early invalid byte over-trimmed the detail to %d bytes: %q", len(got), got)
+	}
 }
