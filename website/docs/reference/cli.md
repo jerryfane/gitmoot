@@ -1846,8 +1846,8 @@ Agent persistent memory is **off by default** and enrolled per agent
 are hot-read with no restart; `default_enroll` is read by each manual
 `agent start`. See
 [Agent Persistent Memory](../concepts/agent-memory.md) for the full model. The
-inspection commands are read-only; `ingest` and `confirm` write behind a human
-gate:
+inspection commands are read-only except for `recall`'s best-effort usage
+counter bump; `ingest` and `confirm` write behind a human gate:
 
 ```sh
 gitmoot memory list [--pending|--confirmed] [--agent NAME] [--repo owner/repo] [--json]
@@ -1894,7 +1894,12 @@ including `author_ref` for shared facts that preserve a different author and
 same link expansion automatically for enrolled agents, within the entry limit
 and token budget, and non-empty memory blocks include a footer pointing the
 agent at `gitmoot memory recall "<query>" --agent <agent-name>` for on-demand
-search. Semantic or embedding search is future work; current retrieval stays
+search. Successful live delivery increments injection telemetry only for facts
+inside the rendered token-budget cut; preview/replay/eval reads never increment
+it. Successful recalls increment direct-hit telemetry only, excluding linked
+expansion. Both writes are best-effort. Brain fact and Knowledge JSON expose
+`injectedCount`, `lastInjectedAt`, `recalledCount`, and `lastRecalledAt`.
+Semantic or embedding search is future work; current retrieval stays
 SQLite FTS5 plus persisted links. `memory replay`
 re-renders recent real jobs' prompts with and without the injected
 learnings block and reports the token/entry delta. `memory eval` computes
@@ -2029,6 +2034,8 @@ vault `snapshot_hash`, runs deterministic detectors
 (status/changelog/ToC snapshots — short notes need a strong `STATUS:`/`… & deployed`
 marker; bare to-do lists; exact duplicates scoped to the same owner/repo/scope;
 over-long or strong-seam multi-story bricks are flagged when not already split;
+facts at least 90 days old with zero injection and recall usage are listed in a
+separate `never_used_flags` owner-review section and are never auto-retired;
 seam-poor long prose remains flag-only; **legacy-key rekeys**
 that migrate pre-stable-key rows ending in an 8-hex hash suffix, keeping the
 newest edition under the stable key and retiring older siblings with reason

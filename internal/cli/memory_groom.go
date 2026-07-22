@@ -138,15 +138,16 @@ type groomQualitySection struct {
 
 // groomPlan is the reviewable artifact `--propose` writes and `--yes --plan` reads.
 type groomPlan struct {
-	SchemaVersion       int                    `json:"schema_version"`
-	SnapshotHash        string                 `json:"snapshot_hash"`
-	ProposedRetirements []groomPlanRetirement  `json:"proposed_retirements"`
-	RewriteFlags        []groomPlanRewriteFlag `json:"rewrite_flags"`
-	Rekeys              []groomPlanRekey       `json:"rekeys"`
-	CrossPool           []groomPlanCrossPool   `json:"cross_pool"`
-	Quality             groomQualitySection    `json:"quality"`
-	Stale               []groomStaleEntry      `json:"stale"`
-	Stats               memory.GroomStats      `json:"stats"`
+	SchemaVersion       int                         `json:"schema_version"`
+	SnapshotHash        string                      `json:"snapshot_hash"`
+	ProposedRetirements []groomPlanRetirement       `json:"proposed_retirements"`
+	RewriteFlags        []groomPlanRewriteFlag      `json:"rewrite_flags"`
+	NeverUsedFlags      []memory.GroomNeverUsedFlag `json:"never_used_flags"`
+	Rekeys              []groomPlanRekey            `json:"rekeys"`
+	CrossPool           []groomPlanCrossPool        `json:"cross_pool"`
+	Quality             groomQualitySection         `json:"quality"`
+	Stale               []groomStaleEntry           `json:"stale"`
+	Stats               memory.GroomStats           `json:"stats"`
 }
 
 // groomApplyResult is the --json summary of an apply run.
@@ -374,6 +375,7 @@ func runMemoryGroomSplit(home string, dryRun, jsonOut bool, stdout, stderr io.Wr
 				ID: row.ID, Key: row.Key, Content: row.Content, Provenance: row.Provenance, OwnerKind: row.Owner.Kind,
 				OwnerRef: row.Owner.Ref, OwnerVersion: row.Owner.Version, Repo: row.Repo,
 				Scope: row.Scope, FirstConfirmedAt: row.FirstConfirmedAt, UpdatedAt: row.UpdatedAt,
+				InjectedCount: row.InjectedCount, RecalledCount: row.RecalledCount,
 			})
 		}
 		budget := newGroomLLMBudget(settings.GroomLLMTotalMaxPerRun)
@@ -1213,8 +1215,11 @@ func runMemoryGroomPropose(home, out string, jsonOut bool, stdout, stderr io.Wri
 				Scope:            n.memRecord.Scope,
 				FirstConfirmedAt: n.memRecord.CreatedAt,
 				UpdatedAt:        n.memRecord.UpdatedAt,
+				InjectedCount:    n.memRecord.InjectedCount,
+				RecalledCount:    n.memRecord.RecalledCount,
 			})
 		}
+		neverUsedFlags := memory.DetectNeverUsedReviews(cands, now)
 		proposal := memory.DetectGroomActions(cands)
 
 		// #804 rekey + cross-pool detectors run over the candidates that SURVIVE
@@ -1282,11 +1287,13 @@ func runMemoryGroomPropose(home, out string, jsonOut bool, stdout, stderr io.Wri
 
 		proposal.Stats.Rekeys = len(rekeys)
 		proposal.Stats.CrossPool = len(crossPool)
+		proposal.Stats.NeverUsedFlags = len(neverUsedFlags)
 		plan = groomPlan{
 			SchemaVersion:       groomSchemaVersion,
 			SnapshotHash:        snapshotHash,
 			ProposedRetirements: make([]groomPlanRetirement, 0, len(proposal.Retirements)),
 			RewriteFlags:        make([]groomPlanRewriteFlag, 0, len(proposal.RewriteFlags)),
+			NeverUsedFlags:      neverUsedFlags,
 			Rekeys:              make([]groomPlanRekey, 0, len(rekeys)),
 			CrossPool:           make([]groomPlanCrossPool, 0, len(crossPool)),
 			Quality:             quality,
@@ -1489,8 +1496,8 @@ func groomScopeLabel(r groomPlanRetirement) string {
 
 func printGroomProposal(w io.Writer, plan groomPlan, outPath string) {
 	fmt.Fprintf(w, "groom proposal (snapshot %s)\n", plan.SnapshotHash)
-	fmt.Fprintf(w, "  %d of %d memory(ies) proposed for retirement; %d flagged for rewrite; %d rekey group(s); %d cross-pool pair(s); %d quality candidate(s) (shadow=%t); %d stale status candidate(s)\n",
-		plan.Stats.ProposedRetirements, plan.Stats.TotalMemories, plan.Stats.RewriteFlags, plan.Stats.Rekeys, plan.Stats.CrossPool, len(plan.Quality.Candidates), plan.Quality.Shadow, len(plan.Stale))
+	fmt.Fprintf(w, "  %d of %d memory(ies) proposed for retirement; %d flagged for rewrite; %d never-used review flag(s); %d rekey group(s); %d cross-pool pair(s); %d quality candidate(s) (shadow=%t); %d stale status candidate(s)\n",
+		plan.Stats.ProposedRetirements, plan.Stats.TotalMemories, plan.Stats.RewriteFlags, plan.Stats.NeverUsedFlags, plan.Stats.Rekeys, plan.Stats.CrossPool, len(plan.Quality.Candidates), plan.Quality.Shadow, len(plan.Stale))
 	if len(plan.Stats.ByReason) > 0 {
 		reasons := make([]string, 0, len(plan.Stats.ByReason))
 		for r := range plan.Stats.ByReason {
@@ -1530,6 +1537,12 @@ func printGroomProposal(w io.Writer, plan groomPlan, outPath string) {
 		fmt.Fprintln(w, "\nFlagged for rewrite (NOT retired — owner review):")
 		for _, f := range plan.RewriteFlags {
 			fmt.Fprintf(w, "  - memory %d [%s] %d chars\n", f.ID, f.Key, f.Chars)
+		}
+	}
+	if len(plan.NeverUsedFlags) > 0 {
+		fmt.Fprintln(w, "\nFlagged never-injected & never-recalled >=90d (NOT retired — owner review):")
+		for _, f := range plan.NeverUsedFlags {
+			fmt.Fprintf(w, "  - memory %d [%s] age=%dd first_confirmed_at=%s\n", f.ID, f.Key, f.AgeDays, f.FirstConfirmedAt)
 		}
 	}
 	if len(plan.Quality.Candidates) > 0 {

@@ -173,3 +173,37 @@ func TestBrainFactHTTPAPIIncludesHistoricalRowsAndErrors(t *testing.T) {
 		t.Fatalf("missing error=%v body=%s", err, recorder.Body.String())
 	}
 }
+
+func TestBrainFactHTTPAPIIncludesUsageTelemetry(t *testing.T) {
+	home, store := memoryTestHome(t)
+	ctx := context.Background()
+	id, err := store.UpsertConfirmedMemory(ctx, db.ConfirmedMemory{
+		Owner: db.MemoryOwner{Kind: "agent", Ref: "builder"}, Repo: "acme/widget", Scope: "repo",
+		Key: "usage", Content: "usage telemetry fact",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateInjectedCounters(ctx, []int64{id}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateRecalledCounters(ctx, []int64{id}); err != nil {
+		t.Fatal(err)
+	}
+	fact, err := (&webDataSource{home: home}).BrainFact(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact.InjectedCount != 1 || fact.LastInjectedAt == "" || fact.RecalledCount != 1 || fact.LastRecalledAt == "" {
+		t.Fatalf("brain usage = %+v", fact)
+	}
+	body, err := json.Marshal(fact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"injectedCount":1`, `"lastInjectedAt":`, `"recalledCount":1`, `"lastRecalledAt":`} {
+		if !strings.Contains(string(body), field) {
+			t.Fatalf("brain payload missing %s: %s", field, body)
+		}
+	}
+}

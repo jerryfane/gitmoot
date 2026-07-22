@@ -50,6 +50,10 @@ type dashboardBrainFact struct {
 	SupersededBy     int64  `json:"supersededBy,omitempty"`
 	FirstConfirmedAt string `json:"firstConfirmedAt"`
 	UpdatedAt        string `json:"updatedAt"`
+	InjectedCount    int64  `json:"injectedCount"`
+	LastInjectedAt   string `json:"lastInjectedAt,omitempty"`
+	RecalledCount    int64  `json:"recalledCount"`
+	LastRecalledAt   string `json:"lastRecalledAt,omitempty"`
 }
 
 func (d *webDataSource) BrainEvents(ctx context.Context, cursor int64, limit int) (dashboardBrainEventsResponse, error) {
@@ -110,6 +114,8 @@ func (d *webDataSource) BrainFact(ctx context.Context, id int64) (dashboardBrain
 			Repo: record.Repo, Scope: record.Scope, OwnerKind: record.Owner.Kind, OwnerRef: record.Owner.Ref,
 			RetiredAt: record.RetiredAt, RetiredReason: record.RetiredReason, SupersededBy: record.SupersededBy,
 			FirstConfirmedAt: record.FirstConfirmedAt, UpdatedAt: record.UpdatedAt,
+			InjectedCount: record.InjectedCount, LastInjectedAt: record.LastInjectedAt,
+			RecalledCount: record.RecalledCount, LastRecalledAt: record.LastRecalledAt,
 		}
 		return nil
 	})

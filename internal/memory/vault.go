@@ -26,20 +26,22 @@ import (
 // renderer needs. It mirrors db.ConfirmedMemory but carries no store coupling so
 // the rendering logic is pure.
 type VaultMemory struct {
-	ID           int64
-	OwnerKind    string
-	OwnerRef     string
-	OwnerVersion string
-	AuthorRef    string
-	Repo         string // "" == general scope
-	Scope        string
-	Key          string
-	Content      string
-	Provenance   string
-	SourceJob    string
-	CreatedAt    string
-	UpdatedAt    string
-	SupersededBy int64 // 0 == not superseded
+	ID            int64
+	OwnerKind     string
+	OwnerRef      string
+	OwnerVersion  string
+	AuthorRef     string
+	Repo          string // "" == general scope
+	Scope         string
+	Key           string
+	Content       string
+	Provenance    string
+	SourceJob     string
+	CreatedAt     string
+	UpdatedAt     string
+	SupersededBy  int64 // 0 == not superseded
+	InjectedCount int64
+	RecalledCount int64
 }
 
 // VaultLink is one rendered [[wikilink]] from a note to a related memory. Stem

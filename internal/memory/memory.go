@@ -54,6 +54,7 @@ type Owner struct {
 
 // Entry is one injectable confirmed memory rendered into the prompt block.
 type Entry struct {
+	ID        int64
 	Scope     string // ScopeRepo | ScopeGeneral
 	Key       string
 	Context   string // optional subject inherited from a split parent

@@ -1694,4 +1694,13 @@ CREATE TABLE org_role_missed_wakes (
 	updated_at TEXT NOT NULL
 );
 	`,
+	// #1078 per-fact usage telemetry. ADD-COLUMN-only and appended at the tail
+	// AFTER #1086's org_role_missed_wakes entry: migration versions are positional,
+	// so never renumber this or prior entries.
+	`
+ALTER TABLE confirmed_memories ADD COLUMN injected_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE confirmed_memories ADD COLUMN last_injected_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE confirmed_memories ADD COLUMN recalled_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE confirmed_memories ADD COLUMN last_recalled_at TEXT NOT NULL DEFAULT '';
+	`,
 }

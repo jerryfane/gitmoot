@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitmoot/gitmoot/internal/config"
 	"github.com/gitmoot/gitmoot/internal/db"
@@ -299,6 +300,48 @@ func TestGroomProposeEmptyStore(t *testing.T) {
 	code, _, stderr = runGroom(t, "--home", home, "--yes", "--plan", planPath)
 	if code != 0 {
 		t.Fatalf("apply empty exit %d: %s", code, stderr)
+	}
+}
+
+func TestGroomProposeSurfacesNeverUsedFlags(t *testing.T) {
+	home, store := memoryTestHome(t)
+	owner := db.MemoryOwner{Kind: "agent", Ref: "lead"}
+	oldID := seedConfirmed(t, store, owner, "acme/widget", "repo", "old-never-used", "durable build topology reference")
+	usedID := seedConfirmed(t, store, owner, "acme/widget", "repo", "used-control", "recently used deployment reference")
+	old := time.Now().UTC().Add(-100 * 24 * time.Hour).Format(time.RFC3339)
+	raw, err := sql.Open("sqlite", config.PathsForHome(home).Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// BOTH facts are aged past the 90d gate; usedID must be excluded by its
+	// injection COUNTER, not by age — that is what proves the flag is usage-aware
+	// (guards the propose-path 0/0 hardcode regression).
+	if _, err := raw.Exec(`UPDATE confirmed_memories SET first_confirmed_at = ? WHERE id IN (?, ?)`, old, oldID, usedID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateInjectedCounters(context.Background(), []int64{usedID}); err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	code, stdout, stderr := runGroom(t, "--home", home, "--propose", "--out", planPath)
+	if code != 0 {
+		t.Fatalf("propose exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Flagged never-injected & never-recalled >=90d (NOT retired — owner review):") {
+		t.Fatalf("missing review-only section:\n%s", stdout)
+	}
+	plan, err := readGroomPlan(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.NeverUsedFlags) != 1 || plan.NeverUsedFlags[0].ID != oldID || plan.Stats.NeverUsedFlags != 1 {
+		t.Fatalf("never-used flags = %+v stats=%+v", plan.NeverUsedFlags, plan.Stats)
+	}
+	for _, retirement := range plan.ProposedRetirements {
+		if retirement.ID == oldID {
+			t.Fatalf("review-only id entered proposed retirements: %+v", retirement)
+		}
 	}
 }
 

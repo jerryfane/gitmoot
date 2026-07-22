@@ -62,6 +62,10 @@ type ConfirmedMemory struct {
 	FirstConfirmedAt string
 	UpdatedAt        string
 	SupersededBy     int64 // 0 == not superseded
+	InjectedCount    int64
+	LastInjectedAt   string
+	RecalledCount    int64
+	LastRecalledAt   string
 }
 
 // ConfirmedMemoryRecord is the complete read-only row shape used by audit
@@ -358,7 +362,8 @@ ORDER BY id`, ownerKind)
 func (s *Store) ListConfirmedMemoriesForKnowledge(ctx context.Context) ([]ConfirmedMemory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, owner_kind, owner_ref, owner_version, author_ref, repo, scope, key, content, context,
-	provenance, source_job, first_confirmed_at, updated_at, COALESCE(superseded_by, 0)
+	provenance, source_job, first_confirmed_at, updated_at, COALESCE(superseded_by, 0),
+	injected_count, last_injected_at, recalled_count, last_recalled_at
 FROM confirmed_memories
 WHERE (owner_kind = 'agent' OR (owner_kind = 'shared' AND owner_ref = 'shared'))
 	AND retired_at = ''
@@ -372,7 +377,8 @@ ORDER BY id`)
 		var c ConfirmedMemory
 		var repoNull sql.NullString
 		if err := rows.Scan(&c.ID, &c.Owner.Kind, &c.Owner.Ref, &c.Owner.Version, &c.AuthorRef, &repoNull,
-			&c.Scope, &c.Key, &c.Content, &c.Context, &c.Provenance, &c.SourceJob, &c.FirstConfirmedAt, &c.UpdatedAt, &c.SupersededBy); err != nil {
+			&c.Scope, &c.Key, &c.Content, &c.Context, &c.Provenance, &c.SourceJob, &c.FirstConfirmedAt, &c.UpdatedAt, &c.SupersededBy,
+			&c.InjectedCount, &c.LastInjectedAt, &c.RecalledCount, &c.LastRecalledAt); err != nil {
 			return nil, err
 		}
 		c.Repo = repoNull.String
@@ -390,13 +396,14 @@ func (s *Store) GetConfirmedMemoryByID(ctx context.Context, id int64) (Confirmed
 	err := s.db.QueryRowContext(ctx, `
 SELECT id, owner_kind, owner_ref, owner_version, author_ref, repo, scope, key, content, context,
 	provenance, source_job, first_confirmed_at, updated_at, COALESCE(superseded_by, 0),
-	retired_at, retired_reason
+	retired_at, retired_reason, injected_count, last_injected_at, recalled_count, last_recalled_at
 FROM confirmed_memories
 WHERE id = ?`, id).Scan(
 		&record.ID, &record.Owner.Kind, &record.Owner.Ref, &record.Owner.Version, &record.AuthorRef, &repo,
 		&record.Scope, &record.Key, &record.Content, &record.Context, &record.Provenance, &record.SourceJob,
 		&record.FirstConfirmedAt, &record.UpdatedAt, &record.SupersededBy,
-		&record.RetiredAt, &record.RetiredReason)
+		&record.RetiredAt, &record.RetiredReason, &record.InjectedCount, &record.LastInjectedAt,
+		&record.RecalledCount, &record.LastRecalledAt)
 	if err == sql.ErrNoRows {
 		return ConfirmedMemoryRecord{}, fmt.Errorf("%w: %d", ErrConfirmedMemoryNotFound, id)
 	}
@@ -2024,6 +2031,52 @@ func (s *Store) ApplyGroomRetirements(ctx context.Context, items []GroomRetire) 
 	return result, nil
 }
 
+// UpdateInjectedCounters records one live prompt injection for each distinct id.
+func (s *Store) UpdateInjectedCounters(ctx context.Context, ids []int64) error {
+	return s.bumpUsageCounters(ctx, ids, "injected_count", "last_injected_at")
+}
+
+// UpdateRecalledCounters records one direct CLI recall for each distinct id.
+func (s *Store) UpdateRecalledCounters(ctx context.Context, ids []int64) error {
+	return s.bumpUsageCounters(ctx, ids, "recalled_count", "last_recalled_at")
+}
+
+func (s *Store) bumpUsageCounters(ctx context.Context, ids []int64, countCol, tsCol string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	unique := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	now := nowRFC3339()
+	const chunkSize = 500
+	for start := 0; start < len(unique); start += chunkSize {
+		end := start + chunkSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, now)
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		query := `UPDATE confirmed_memories SET ` + countCol + ` = ` + countCol + ` + 1, ` + tsCol + ` = ? WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // groomRetireTx retires one row for a groom-style plan apply, removing it from
 // FTS in the same transaction. Unlike retireConfirmedMemoryTx it SKIPS gracefully
 // (returns false, nil) when the row is already retired or missing: a plan may
@@ -2725,7 +2778,8 @@ type rowsQuerier interface {
 func listConfirmedMemoriesForVault(ctx context.Context, q rowsQuerier, agentRef string) ([]ConfirmedMemory, error) {
 	query := `
 SELECT id, owner_kind, owner_ref, owner_version, author_ref, repo, scope, key, content, context,
-	provenance, source_job, first_confirmed_at, updated_at, COALESCE(superseded_by, 0)
+	provenance, source_job, first_confirmed_at, updated_at, COALESCE(superseded_by, 0),
+	injected_count, recalled_count
 FROM confirmed_memories
 WHERE superseded_by IS NULL AND retired_at = ''`
 	var args []any
@@ -2744,7 +2798,8 @@ WHERE superseded_by IS NULL AND retired_at = ''`
 		var c ConfirmedMemory
 		var repoNull sql.NullString
 		if err := rows.Scan(&c.ID, &c.Owner.Kind, &c.Owner.Ref, &c.Owner.Version, &c.AuthorRef, &repoNull,
-			&c.Scope, &c.Key, &c.Content, &c.Context, &c.Provenance, &c.SourceJob, &c.FirstConfirmedAt, &c.UpdatedAt, &c.SupersededBy); err != nil {
+			&c.Scope, &c.Key, &c.Content, &c.Context, &c.Provenance, &c.SourceJob, &c.FirstConfirmedAt, &c.UpdatedAt, &c.SupersededBy,
+			&c.InjectedCount, &c.RecalledCount); err != nil {
 			return nil, err
 		}
 		c.Repo = repoNull.String

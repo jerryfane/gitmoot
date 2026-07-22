@@ -32,6 +32,11 @@ it ships in phases. The current phase is **observation mode**:
   mid-job via `gitmoot memory recall "<query>" --agent <agent-name>`; the hint
   renders whether or not startup retrieval found anything, because on-demand
   recall matters most when the initial push missed.
+  Successful live injection increments usage only for facts inside the rendered
+  token-budget cut, including linked facts. Preview, replay, and eval reads never
+  increment it. On-demand recall separately counts direct FTS hits, excluding
+  linked expansion rows; both telemetry writes are best-effort and cannot fail a
+  job or recall.
 - **WRITE:** the confirmed (injectable) tier is populated only by Gitmoot's own
   deterministic **mechanical facts** (no model involved). A fact is written only
   when a terminal job carries a genuine, bounded signal — never one fact per job:
@@ -63,7 +68,11 @@ awareness) so template upgrades never inherit stale pools. The reserved shared
 pool uses `owner_kind = "shared"` and `owner_ref = "shared"`. When a fact moves
 there, `author_ref` preserves who wrote it; an empty `author_ref` means the author
 is the same as `owner_ref`. A standalone FTS5 index over confirmed content powers
-the BM25 retrieval.
+the BM25 retrieval. Each confirmed fact also carries injection and direct-recall
+counts plus its last-use timestamps. Brain fact and Knowledge JSON publish these
+fields for usage-aware review. The groomer separately flags facts at least 90
+days old with both counts still zero; this is review-only and never auto-retires
+the fact.
 
 ## Enrollment and configuration
 

@@ -253,6 +253,9 @@ read them.
 The changelog feed comes from `/api/brain/events`, whose `total` reports the
 exact append-only event count. Selecting an event loads `/api/brain/fact?id=ID`,
 which can return active, retired, or superseded facts for historical inspection.
+Fact-detail and Knowledge payloads also include injection and direct-recall
+counts plus their last-use timestamps; these distinguish unused facts without
+turning absence of usage into an automatic retirement decision.
 
 ## Agents
 
