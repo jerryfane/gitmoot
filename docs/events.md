@@ -113,7 +113,7 @@ Every event is a single JSON object:
 | `status`         | string | Terminal/lifecycle state (`succeeded`/`failed`/`blocked`/`awaiting_human`). |
 | `ts`             | string | RFC3339 emit time.                                                          |
 | `detail`         | string | Short redacted human-facing string (failure summary, the escalation question). |
-| `cause`          | string | Optional internal discriminator (`escalation`, `ask_gate`, `merge_guard`, or `permission_guard`). |
+| `cause`          | string | Optional internal discriminator (`escalation`, `ask_gate`, `merge_guard`, `permission_guard`, or `blocked_since`). |
 
 `cause` is an additive optional field, so `schema_version` remains `1` and
 existing events serialize unchanged. It is a trusted enum assigned at emit
@@ -175,7 +175,18 @@ gitmoot org events rule rm <rule-id>
 Kinds are `escalation`, `attention`, `guard`, `job-terminal`, and `blocked`.
 The v1 `--match` filter is a case-insensitive substring tested against the event
 repo and job id; empty matches all. A plain `job.blocked` event matches both
-`job-terminal` and `blocked`, while guard-caused blocks match `guard` first.
+`job-terminal` and `blocked`, while guard-caused blocks match `guard` first. A
+synthesized `blocked_since` event matches only `blocked`. Set
+`[orchestrate].blocked_role_wake_after` to a positive Go duration to emit such an
+event when a task or Herdr role stays blocked past the threshold, re-nudging at
+most once per that interval while it remains blocked (so a dropped wake
+self-heals on the next interval instead of being lost); `0s` (the default)
+disables both evaluators. An episode is cleared on a definitive non-blocked
+observation, or once the subject stops being observed blocked for a short grace
+(so a role gone for good is not leaked); a brief `unknown`/absent snapshot blip
+within that grace never resets it, and a later re-block starts a fresh episode.
+Each synthesized event's `detail` carries the stable since-time, so a re-nudge
+(same `job_id` + same since) is distinguishable from a fresh episode.
 The wake role's config sets `pane = "<pane-id-or-label>"`: a value containing `:`
 is a `wX:pY` pane id used as-is, any other value is a pane label resolved to the
 current id at wake time (so a recycled pane is still reached). Wake delivery runs
