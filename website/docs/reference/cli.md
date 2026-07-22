@@ -1040,10 +1040,12 @@ note. The acting role is `--org-role` when given, otherwise `GITMOOT_ORG_ROLE`;
 it must be configured. The target must be an ancestor of the acting role, not
 the same role or a sibling. Escalations use the typed note schema
 `[org:escalate to=<to> from=<from> wf=<workflow>] <question>` and set the
-from-role as author; `--json` prints the stored escalation fields. This retires
-new uses of the free-text `ESCALATE-` marker; readers should keep recognizing
-that legacy marker during the transition. Pane/agent creation permissions and
-Herdr checks remain later work.
+from-role as author; `--json` prints the stored escalation fields. It
+formalizes the earlier ad-hoc practice of typing escalations into notes or
+panes; there is no code-level marker to migrate. Phase 1a writes the typed
+note, which is visible with `workflow show`; structured escalation surfaces
+land with the org brief and active delivery/wake is phase 2. Pane/agent creation
+permissions and Herdr checks remain later work.
 
 ```sh
 gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo --workflow fable/dashboard-redesign

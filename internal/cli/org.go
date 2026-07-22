@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/gitmoot/gitmoot/internal/config"
@@ -125,17 +126,21 @@ func runOrgEscalate(args []string, stdout, stderr io.Writer) int {
 	fromFlag := fs.String("org-role", "", "acting organization role")
 	repo := fs.String("repo", "", "repository binding for the escalation note")
 	jsonOutput := fs.Bool("json", false, "print the escalation as JSON")
-	if err := fs.Parse(args); err != nil {
+	question, flagArgs, ok := orgEscalateQuestionAndFlags(args)
+	if !ok {
+		fmt.Fprintln(stderr, "org escalate requires exactly one question")
+		return 2
+	}
+	if err := fs.Parse(flagArgs); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
 	}
-	if fs.NArg() != 1 {
+	if fs.NArg() != 0 {
 		fmt.Fprintln(stderr, "org escalate requires exactly one question")
 		return 2
 	}
-	question := strings.TrimSpace(fs.Arg(0))
 	if question == "" {
 		fmt.Fprintln(stderr, "org escalate question must be non-empty")
 		return 2
@@ -171,7 +176,7 @@ func runOrgEscalate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "unknown org role %q\n", to)
 		return 2
 	}
-	if to == from || !orgContainsString(cfg.Ancestors(from), to) {
+	if !slices.Contains(cfg.Ancestors(from), to) {
 		fmt.Fprintf(stderr, "--to %q must be an ancestor of %q in the org hierarchy\n", to, from)
 		return 2
 	}
@@ -190,7 +195,14 @@ func runOrgEscalate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if err := withStore(*home, func(store *db.Store) error {
-		_, err := store.InsertWorkflowNote(context.Background(), db.WorkflowNote{
+		count, err := store.CountJobsByWorkflow(context.Background(), label)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return fmt.Errorf("workflow %q has no jobs; refusing note to guard against a typo", label)
+		}
+		_, err = store.InsertWorkflowNote(context.Background(), db.WorkflowNote{
 			WorkflowID: label, Author: from, Body: body, Repo: strings.TrimSpace(*repo),
 		})
 		return err
@@ -210,11 +222,24 @@ func runOrgEscalate(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func orgContainsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
+func orgEscalateQuestionAndFlags(args []string) (string, []string, bool) {
+	needsValue := map[string]bool{"--home": true, "--to": true, "--workflow": true, "--org-role": true, "--repo": true}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if needsValue[arg] {
+			i++
+			if i >= len(args) {
+				return "", nil, false
+			}
+			continue
 		}
+		if arg == "--json" || strings.HasPrefix(arg, "--home=") || strings.HasPrefix(arg, "--to=") || strings.HasPrefix(arg, "--workflow=") || strings.HasPrefix(arg, "--org-role=") || strings.HasPrefix(arg, "--repo=") {
+			continue
+		}
+		if i != len(args)-1 {
+			return "", nil, false
+		}
+		return strings.TrimSpace(arg), args[:i], strings.TrimSpace(arg) != ""
 	}
-	return false
+	return "", nil, false
 }

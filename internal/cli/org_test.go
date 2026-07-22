@@ -57,6 +57,11 @@ func TestOrgCommandAndAgentOrgRolePrecedence(t *testing.T) {
 
 func TestOrgEscalateWritesTypedWorkflowNote(t *testing.T) {
 	home := writeOrgEscalateConfig(t)
+	store := openCLIJobStore(t, home)
+	seedCLIJob(t, store, db.Job{ID: "escalate-job", Agent: "agent", Type: "ask", State: "queued", Payload: `{"workflow_id":"release/one"}`}, "queued")
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	var out, errOut bytes.Buffer
 	code := runOrg([]string{"escalate", "--home", home, "--org-role", "OPERATOR", "--to", "OWNER", "--workflow", "release/one", "--repo", "acme/widget", "--json", "Can we include ] and x=y?"}, &out, &errOut)
 	if code != 0 {
@@ -65,7 +70,7 @@ func TestOrgEscalateWritesTypedWorkflowNote(t *testing.T) {
 	if got := out.String(); !strings.Contains(got, `"from":"operator"`) || !strings.Contains(got, `"to":"owner"`) || !strings.Contains(got, `"workflow":"release/one"`) || !strings.Contains(got, `"question":"Can we include ] and x=y?"`) {
 		t.Fatalf("escalate JSON = %q", got)
 	}
-	store := openCLIJobStore(t, home)
+	store = openCLIJobStore(t, home)
 	defer store.Close()
 	notes, err := store.ListWorkflowNotes(context.Background(), "release/one", 0)
 	if err != nil {
@@ -93,12 +98,17 @@ func TestOrgEscalateValidation(t *testing.T) {
 		{name: "missing workflow", args: []string{"--org-role", "operator", "--to", "owner", "question"}, want: "requires --workflow"},
 		{name: "invalid workflow", args: []string{"--org-role", "operator", "--to", "owner", "--workflow", "Bad Label", "question"}, want: "invalid workflow id"},
 		{name: "missing question", args: []string{"--org-role", "operator", "--to", "owner", "--workflow", "release/one"}, want: "requires exactly one question"},
+		{name: "workflow has no jobs", args: []string{"--org-role", "operator", "--to", "owner", "--workflow", "release/one", "question"}, want: "has no jobs; refusing note to guard against a typo"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := writeOrgEscalateConfig(t)
 			args := append([]string{"escalate", "--home", home}, tt.args...)
 			var out, errOut bytes.Buffer
-			if code := runOrg(args, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), tt.want) {
+			wantCode := 2
+			if tt.name == "workflow has no jobs" {
+				wantCode = 1
+			}
+			if code := runOrg(args, &out, &errOut); code != wantCode || !strings.Contains(errOut.String(), tt.want) {
 				t.Fatalf("code=%d out=%q err=%q, want %q", code, out.String(), errOut.String(), tt.want)
 			}
 		})
@@ -114,12 +124,17 @@ func TestOrgEscalateRegistryAndRolePrecedence(t *testing.T) {
 	})
 	t.Run("flag wins over environment", func(t *testing.T) {
 		home := writeOrgEscalateConfig(t)
+		store := openCLIJobStore(t, home)
+		seedCLIJob(t, store, db.Job{ID: "precedence-job", Agent: "agent", Type: "ask", State: "queued", Payload: `{"workflow_id":"release/one"}`}, "queued")
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
 		t.Setenv("GITMOOT_ORG_ROLE", "auditor")
 		var out, errOut bytes.Buffer
 		if code := runOrg([]string{"escalate", "--home", home, "--org-role", "operator", "--to", "owner", "--workflow", "release/one", "question"}, &out, &errOut); code != 0 {
 			t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 		}
-		store := openCLIJobStore(t, home)
+		store = openCLIJobStore(t, home)
 		defer store.Close()
 		notes, err := store.ListWorkflowNotes(context.Background(), "release/one", 0)
 		if err != nil || len(notes) != 1 || notes[0].Author != "operator" {
@@ -128,9 +143,26 @@ func TestOrgEscalateRegistryAndRolePrecedence(t *testing.T) {
 	})
 	t.Run("environment fallback", func(t *testing.T) {
 		home := writeOrgEscalateConfig(t)
+		store := openCLIJobStore(t, home)
+		seedCLIJob(t, store, db.Job{ID: "fallback-job", Agent: "agent", Type: "ask", State: "queued", Payload: `{"workflow_id":"release/one"}`}, "queued")
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
 		t.Setenv("GITMOOT_ORG_ROLE", "operator")
 		var out, errOut bytes.Buffer
 		if code := runOrg([]string{"escalate", "--home", home, "--to", "owner", "--workflow", "release/one", "question"}, &out, &errOut); code != 0 {
+			t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+		}
+	})
+	t.Run("hyphen-leading question", func(t *testing.T) {
+		home := writeOrgEscalateConfig(t)
+		store := openCLIJobStore(t, home)
+		seedCLIJob(t, store, db.Job{ID: "hyphen-job", Agent: "agent", Type: "ask", State: "queued", Payload: `{"workflow_id":"release/one"}`}, "queued")
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		var out, errOut bytes.Buffer
+		if code := runOrg([]string{"escalate", "--home", home, "--org-role", "operator", "--to", "owner", "--workflow", "release/one", "-1 day left"}, &out, &errOut); code != 0 {
 			t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 		}
 	})
