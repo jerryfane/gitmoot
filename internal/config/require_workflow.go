@@ -15,7 +15,7 @@ type RequireWorkflowPolicy struct {
 	Mode    string
 }
 
-func defaultRequireWorkflowPolicy() RequireWorkflowPolicy { return RequireWorkflowPolicy{Mode: "auto"} }
+func defaultRequireWorkflowPolicy() RequireWorkflowPolicy { return RequireWorkflowPolicy{Enabled: true, Mode: "auto"} }
 
 // RequireWorkflowConfig holds global [workflow] defaults and flat
 // [repos."owner/repo"] overrides. Pointer fields preserve inheritance when a

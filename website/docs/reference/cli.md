@@ -999,21 +999,23 @@ Orchestration children and continuations inherit the label.
 
 ### Require workflow labels
 
-Repositories may turn on `[workflow] require_workflow = true`. In
-`require_workflow_mode = "auto"`, an unlabeled fresh agent dispatch is bucketed
-as `adhoc/<agent>-<yyyy-mm-dd>` and receives a `workflow_autolabeled` event.
-`strict` instead rejects it and tells the caller to pass
-`--workflow <namespace>/<campaign>`. GitHub comment dispatches always take the
-auto-label path in either mode so acknowledgement ordering stays unchanged;
-engine PR reactions inherit their initiating dispatch's label instead. Either key
-can be overridden in `[repos."owner/repo"]`. `gitmoot doctor` always reports
-unlabeled-job drift as advisory diagnostics (including session-open and
-task-recover rows that bypass enforcement), while the overview shows that item
-only for repositories where the policy is enabled. `gitmoot repo add --agents-md`
-scaffolds the team discipline into AGENTS.md.
+`require_workflow` defaults to `true`. In the default `auto` mode, an unlabeled
+fresh agent dispatch is bucketed as `adhoc/<agent>-<yyyy-mm-dd>` and receives a
+`workflow_autolabeled` event; it is never rejected. Set `[workflow]
+require_workflow = false` to opt a repository out, or set
+`require_workflow_mode = "strict"` to reject unlabeled dispatches and require
+`--workflow <namespace>/<campaign>`. Both settings can be overridden in
+`[repos."owner/repo"]`. GitHub comment dispatches always take the auto-label
+path in either mode so acknowledgement ordering stays unchanged; engine PR
+reactions inherit their initiating dispatch's label instead. `gitmoot doctor`
+always reports unlabeled-job drift as advisory diagnostics (including
+session-open and task-recover rows that bypass enforcement), while the overview
+shows that item only for repositories where the policy is enabled. `gitmoot repo
+add --agents-md` scaffolds the team discipline into AGENTS.md.
 
-With the feature off, dispatch and enqueue remain byte-identical; doctor drift
-diagnostics remain always-on advisory, and the overview item remains policy-gated.
+With `require_workflow = false`, dispatch and enqueue remain byte-identical;
+doctor drift diagnostics remain always-on advisory, and the overview item
+remains policy-gated.
 
 ```sh
 gitmoot orchestrate planner "Coordinate the dashboard wave." --repo owner/repo --workflow fable/dashboard-redesign
