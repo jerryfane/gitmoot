@@ -50,9 +50,10 @@ artifact_blobs = %q
 # planning context that a later goal-file import cannot reconstruct.
 # require_workflow is true by default. In the default auto mode, fresh unlabeled
 # agent dispatches are filed under adhoc/<agent>-<yyyy-mm-dd> and never
-# rejected. Set require_workflow = false to opt out, or require_workflow_mode =
-# "strict" to reject unlabeled dispatches. Both can be overridden in a flat
-# [repos."owner/repo"] section.
+# rejected. Set require_workflow = false to opt out. To reject unlabeled
+# dispatches, explicitly set require_workflow and set require_workflow_mode =
+# "strict"; a mode-only override remains inert for pre-#1053 compatibility.
+# Both can be overridden in a flat [repos."owner/repo"] section.
 # [workflow]
 # implement_base = "origin/main"
 # result_checks = "warn"

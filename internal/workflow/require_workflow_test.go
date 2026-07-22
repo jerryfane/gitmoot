@@ -2,8 +2,11 @@ package workflow
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/gitmoot/gitmoot/internal/config"
 )
 
 func TestMailboxRequireWorkflow(t *testing.T) {
@@ -39,6 +42,54 @@ func TestMailboxRequireWorkflowStrictRejectsBeforeCreation(t *testing.T) {
 	}
 	if _, err := store.GetJob(ctx, "strict"); err == nil {
 		t.Fatal("strict rejection created a job")
+	}
+}
+
+func TestMailboxRequireWorkflowConfigCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		body       string
+		wantStrict bool
+	}{
+		{name: "mode only auto files", body: "[workflow]\nrequire_workflow_mode = \"strict\"\n"},
+		{name: "explicit enable rejects", body: "[workflow]\nrequire_workflow = true\nrequire_workflow_mode = \"strict\"\n", wantStrict: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			paths := config.PathsForHome(t.TempDir())
+			if err := config.Initialize(paths); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(paths.ConfigFile, []byte(test.body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.LoadRequireWorkflow(paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			store := openTestStore(t)
+			mb := Mailbox{Store: store, RequireWorkflowPolicy: func(repo string) RequireWorkflowPolicy {
+				policy := cfg.For(repo)
+				return RequireWorkflowPolicy{Enabled: policy.Enabled, Mode: policy.Mode}
+			}}
+			job, err := mb.Enqueue(ctx, JobRequest{ID: "compat", Agent: "a", Action: "ask", Repo: "owner/repo", Sender: "local"})
+			if test.wantStrict {
+				if err == nil || !strings.Contains(err.Error(), "pass --workflow") {
+					t.Fatalf("Enqueue() job=%+v err=%v, want strict rejection", job, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Enqueue() error = %v, want auto-file", err)
+			}
+			payload, err := ParseJobPayload(job.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(payload.WorkflowID, "adhoc/") {
+				t.Fatalf("workflow_id = %q, want adhoc auto-file", payload.WorkflowID)
+			}
+		})
 	}
 }
 
