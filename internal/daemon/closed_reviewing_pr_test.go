@@ -19,7 +19,8 @@ func TestPollOnceReconcilesClosedReviewingPullRequest(t *testing.T) {
 	const headSHA = "d0b6891d074f7b5af39c2555c6fe4b6fd3284003"
 
 	cases := []struct {
-		name string
+		name       string
+		startState workflow.TaskState
 		// openPulls / closedPulls are what GitHub reports for each list state.
 		openPulls   []github.PullRequest
 		closedPulls []github.PullRequest
@@ -33,6 +34,20 @@ func TestPollOnceReconcilesClosedReviewingPullRequest(t *testing.T) {
 			// task is still reviewing. Reconcile to terminal blocked + closed PR.
 			name:        "closed unmerged duplicate is reconciled to blocked",
 			openPulls:   nil,
+			closedPulls: []github.PullRequest{{Number: 6, State: "closed", HeadRef: branch, BaseRef: "main", HeadSHA: headSHA}},
+			wantTask:    workflow.TaskBlocked,
+			wantPRState: "closed",
+		},
+		{
+			name:        "closed unmerged pr_open is reconciled to blocked",
+			startState:  workflow.TaskPullRequestOpen,
+			closedPulls: []github.PullRequest{{Number: 6, State: "closed", HeadRef: branch, BaseRef: "main", HeadSHA: headSHA}},
+			wantTask:    workflow.TaskBlocked,
+			wantPRState: "closed",
+		},
+		{
+			name:        "closed unmerged changes_requested is reconciled to blocked",
+			startState:  workflow.TaskChangesRequested,
 			closedPulls: []github.PullRequest{{Number: 6, State: "closed", HeadRef: branch, BaseRef: "main", HeadSHA: headSHA}},
 			wantTask:    workflow.TaskBlocked,
 			wantPRState: "closed",
@@ -71,12 +86,16 @@ func TestPollOnceReconcilesClosedReviewingPullRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			store := testStore(t)
+			startState := tc.startState
+			if startState == "" {
+				startState = workflow.TaskReviewing
+			}
 			if err := store.UpsertTask(ctx, db.Task{
 				ID:           "task-7304",
 				RepoFullName: repo.FullName(),
 				GoalID:       "goal-1",
 				Title:        "CSV Export",
-				State:        string(workflow.TaskReviewing),
+				State:        string(startState),
 				Branch:       branch,
 			}); err != nil {
 				t.Fatalf("UpsertTask returned error: %v", err)
@@ -131,6 +150,12 @@ func TestPollOnceReconcilesClosedReviewingPullRequest(t *testing.T) {
 			// The PR row identity must be preserved, never blanked, by reconciliation.
 			if pr.URL != "https://github.com/jerryfane/expensy/pull/6" || pr.HeadBranch != branch {
 				t.Fatalf("PR #6 row not preserved: url=%q head=%q", pr.URL, pr.HeadBranch)
+			}
+			if tc.wantTask == workflow.TaskBlocked {
+				events, err := store.ListTaskEvents(ctx, "task-7304")
+				if err != nil || len(events) != 1 || events[0].Kind != "pr_closed_unmerged" || events[0].FromState != string(startState) {
+					t.Fatalf("task events = %+v, err=%v", events, err)
+				}
 			}
 		})
 	}
