@@ -275,7 +275,7 @@ type heartbeatEnqueuer func(ctx context.Context, request workflow.JobRequest) (d
 // construction so a heartbeat job is indistinguishable from a normal background
 // job once enqueued.
 func newHeartbeatEnqueuer(store *db.Store, home string) heartbeatEnqueuer {
-	mailbox := workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(home), RuntimeDefaultModel: runtimeDefaultModelResolver(home), RequireWorkflowPolicy: requireWorkflowPolicyResolver(home)}
+	mailbox := workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(home), RuntimeDefaultModel: runtimeDefaultModelResolver(home), RequireWorkflowPolicy: requireWorkflowPolicyResolver(home), OrgPolicy: orgPolicyResolver(home)}
 	return func(ctx context.Context, request workflow.JobRequest) (db.Job, error) {
 		return mailbox.Enqueue(ctx, request)
 	}

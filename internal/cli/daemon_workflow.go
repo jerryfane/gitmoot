@@ -39,6 +39,7 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, ho
 	engine := workflow.Engine{
 		Store:                   store,
 		RequireWorkflowPolicy:   requireWorkflowPolicyResolverRoot(home),
+		OrgPolicy:               orgPolicyResolverRoot(home),
 		ProduceCheckDir:         checkout,
 		MergeGate:               daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout, Home: home},
 		ImplementationFinalizer: daemonImplementationFinalizer{Store: store, GitHub: gh, FallbackCheckout: checkout},

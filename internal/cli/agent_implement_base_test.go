@@ -133,6 +133,89 @@ func TestLocalImplementStrictWorkflowPreflightLeavesNoTaskWorktreeOrLock(t *test
 	}
 }
 
+func TestLocalImplementOrgScopePreflightLeavesNoTaskWorktreeOrLock(t *testing.T) {
+	fixture := newImplementBaseFixture(t)
+	paths := config.PathsForHome(fixture.home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatal(err)
+	}
+	content := config.DefaultConfig(paths) + "\n[org.roles.\"owner\"]\nscope = [\"other/*\"]\n"
+	if err := os.WriteFile(paths.ConfigFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openCLIJobStore(t, fixture.home)
+	defer store.Close()
+	ctx := context.Background()
+	runGit(t, fixture.checkout, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+	if err := store.UpsertRepo(ctx, db.Repo{Owner: "owner", Name: "repo", DefaultBranch: "main", CheckoutPath: fixture.checkout}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
+		RepoFlag: "owner/repo", Agent: "builder", Action: "implement", Home: fixture.home, Instructions: "Implement the requested change.", OperatorOrigin: true, ActingOrgRole: "owner",
+	})
+	if err == nil || !strings.Contains(err.Error(), "out of scope") {
+		t.Fatalf("org dispatch err=%v", err)
+	}
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("org rejection created tasks: %+v", tasks)
+	}
+	locks, err := store.ListBranchLocks(ctx, "owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 0 {
+		t.Fatalf("org rejection created branch locks: %+v", locks)
+	}
+	worktreeRoot := filepath.Join(paths.Workspaces, "owner", "repo")
+	if entries, err := os.ReadDir(worktreeRoot); err == nil && len(entries) != 0 {
+		t.Fatalf("org rejection created worktrees: %+v", entries)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestLocalReviewOrgScopePreflightLeavesNoTaskOrWorktree(t *testing.T) {
+	fixture := newImplementBaseFixture(t)
+	paths := config.PathsForHome(fixture.home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatal(err)
+	}
+	content := config.DefaultConfig(paths) + "\n[org.roles.\"owner\"]\nscope = [\"other/*\"]\n"
+	if err := os.WriteFile(paths.ConfigFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openCLIJobStore(t, fixture.home)
+	defer store.Close()
+	ctx := context.Background()
+	runGit(t, fixture.checkout, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+	if err := store.UpsertRepo(ctx, db.Repo{Owner: "owner", Name: "repo", DefaultBranch: "main", CheckoutPath: fixture.checkout}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := dispatchLocalAgentJob(ctx, store, localAgentDispatchRequest{
+		RepoFlag: "owner/repo", Agent: "reviewer", Action: "review", Home: fixture.home, Instructions: "Review the change.", OperatorOrigin: true, ActingOrgRole: "owner",
+	})
+	if err == nil || !strings.Contains(err.Error(), "out of scope") {
+		t.Fatalf("org review err=%v", err)
+	}
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("org review rejection created tasks: %+v", tasks)
+	}
+	worktreeRoot := filepath.Join(paths.Workspaces, "owner", "repo")
+	if entries, err := os.ReadDir(worktreeRoot); err == nil && len(entries) != 0 {
+		t.Fatalf("org review rejection created worktrees: %+v", entries)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentImplementBaseHEADUsesCheckoutHead(t *testing.T) {
 	fixture := newImplementBaseFixture(t)
 	task, _, err := prepareImplementBaseFixture(t, fixture, localAgentDispatchRequest{Branch: "test-head", ImplementBase: "HEAD"})

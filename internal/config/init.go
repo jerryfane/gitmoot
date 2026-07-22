@@ -570,5 +570,21 @@ path = ""
 # require_external_ci = false
 # min_ci_wait = "60s"
 # max_ci_wait = "10m"
+
+# [org] optionally registers organization roles for scoped local dispatch. Any
+# [org.roles.*] entry turns enforcement on. One parent-less role is the org
+# owner; child scopes must be subsets of their parent's scope. scope accepts
+# "*" (all repos), "owner/*", or exact "owner/name". enforce is "block"
+# (default) or "warn". Scope is checked at dispatch; merge_rule is advisory in
+# this phase (owner | self | none).
+# [org]
+# enforce = "block"
+# [org.roles."owner"]
+# scope = ["*"]
+# merge_rule = "owner"
+# [org.roles."maintainer"]
+# parent = "owner"
+# scope = ["owner/*"]
+# merge_rule = "self"
 `, paths.Database, paths.Logs, paths.Workspaces, paths.Evals, paths.ArtifactBlobs)
 }

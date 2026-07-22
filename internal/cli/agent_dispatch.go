@@ -25,15 +25,17 @@ var newAgentDispatchGitHubClient = func(checkout string) github.Client {
 }
 
 type localAgentDispatchRequest struct {
-	RepoFlag     string
-	Agent        string
-	Action       string
-	Instructions string
-	Background   bool
-	Type         string
-	Model        string
-	Effort       string
-	WorkflowID   string
+	RepoFlag       string
+	Agent          string
+	Action         string
+	Instructions   string
+	Background     bool
+	Type           string
+	Model          string
+	Effort         string
+	WorkflowID     string
+	ActingOrgRole  string
+	OperatorOrigin bool
 	// Runtime, when non-empty, is the per-job runtime override (#531): this one
 	// job runs through the named runtime while the agent's registered default
 	// runtime (and its session) stays untouched. RuntimeSession optionally names
@@ -117,10 +119,26 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	if err != nil {
 		return localAgentJobOutput{}, err
 	}
+	// Resolve once per human dispatch. The snapshot is shared by the mutation
+	// preflight and the enqueue chokepoint so both see precisely one registry.
+	orgPolicy := orgPolicyResolver(request.Home)
+	var resolvedOrgPolicy workflow.OrgEnforcement
+	if request.OperatorOrigin {
+		resolvedOrgPolicy = orgPolicy(repo.FullName())
+		orgPolicy = fixedOrgPolicy(resolvedOrgPolicy)
+		request.ActingOrgRole = workflow.NormalizeActingOrgRole(request.ActingOrgRole)
+	}
 	// Strict workflow rejection must happen before repo/task/worktree/branch-lock
 	// mutation. Otherwise a retry without --workflow strands a fresh adhoc task.
 	if request.Action == "implement" {
 		if err := preflightStrictWorkflowPolicy(request.Home, repo.FullName(), request.WorkflowID, ""); err != nil {
+			return localAgentJobOutput{}, err
+		}
+	}
+	// Implement and review both allocate durable state before enqueue. Check the
+	// shared decision first so a block never strands a task or worktree.
+	if request.Action == "implement" || request.Action == "review" {
+		if err := preflightOrgScope(resolvedOrgPolicy, repo.FullName(), request.ActingOrgRole, request.OperatorOrigin); err != nil {
 			return localAgentJobOutput{}, err
 		}
 	}
@@ -163,7 +181,7 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 	if agent, blocked, err := readOnlyManagedImplementationBlock(ctx, store, request, repo.FullName()); err != nil {
 		return localAgentJobOutput{}, err
 	} else if blocked {
-		return enqueuePermissionBlockedLocalAgentJob(ctx, store, request, repo.FullName(), record.DefaultBranch, agent.Name, overrideRuntime, overrideRef)
+		return enqueuePermissionBlockedLocalAgentJob(ctx, store, request, repo.FullName(), record.DefaultBranch, agent.Name, overrideRuntime, overrideRef, orgPolicy)
 	}
 	agent, releaseAgentReservation, err := resolveLocalDispatchAgent(ctx, store, request, repo.FullName(), record)
 	if err != nil {
@@ -198,7 +216,7 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		}
 	}
 	if readOnlyImplementationBlocked(request.Action, effectiveAgent) {
-		return enqueuePermissionBlockedLocalAgentJob(ctx, store, request, repo.FullName(), record.DefaultBranch, agent.Name, overrideRuntime, overrideRef)
+		return enqueuePermissionBlockedLocalAgentJob(ctx, store, request, repo.FullName(), record.DefaultBranch, agent.Name, overrideRuntime, overrideRef, orgPolicy)
 	}
 	switch request.Action {
 	case "review":
@@ -256,7 +274,7 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 			request.Instructions += note
 		}
 	}
-	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home), RuntimeDefaultModel: runtimeDefaultModelResolver(request.Home), RequireWorkflowPolicy: requireWorkflowPolicyResolver(request.Home)}).Enqueue(ctx, workflow.JobRequest{
+	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home), RuntimeDefaultModel: runtimeDefaultModelResolver(request.Home), RequireWorkflowPolicy: requireWorkflowPolicyResolver(request.Home), OrgPolicy: orgPolicy}).Enqueue(ctx, workflow.JobRequest{
 		ID:                     jobID,
 		Agent:                  agent.Name,
 		Action:                 request.Action,
@@ -270,6 +288,8 @@ func dispatchLocalAgentJob(ctx context.Context, store *db.Store, request localAg
 		LeadAgent:              firstNonEmpty(request.LeadAgent, agent.Name),
 		Reviewers:              request.Reviewers,
 		Sender:                 "local",
+		ActingOrgRole:          request.ActingOrgRole,
+		OperatorOrigin:         request.OperatorOrigin,
 		Instructions:           request.Instructions,
 		Model:                  request.Model,
 		Effort:                 request.Effort,
@@ -541,22 +561,24 @@ func buildLocalAgentJobOutput(latest db.Job, request localAgentDispatchRequest) 
 	}, nil
 }
 
-func enqueuePermissionBlockedLocalAgentJob(ctx context.Context, store *db.Store, request localAgentDispatchRequest, repo string, defaultBranch string, agentName string, overrideRuntime string, overrideRef string) (localAgentJobOutput, error) {
-	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home), RuntimeDefaultModel: runtimeDefaultModelResolver(request.Home), RequireWorkflowPolicy: requireWorkflowPolicyResolver(request.Home)}).Enqueue(ctx, workflow.JobRequest{
-		ID:           localAgentJobID(request.Action, agentName),
-		Agent:        agentName,
-		Action:       request.Action,
-		Repo:         repo,
-		Branch:       firstNonEmpty(request.Branch, defaultBranch),
-		PullRequest:  request.PullRequest,
-		HeadSHA:      request.HeadSHA,
-		GoalID:       request.GoalID,
-		TaskID:       request.TaskID,
-		TaskTitle:    request.TaskTitle,
-		LeadAgent:    request.LeadAgent,
-		Reviewers:    request.Reviewers,
-		Sender:       "local",
-		Instructions: request.Instructions,
+func enqueuePermissionBlockedLocalAgentJob(ctx context.Context, store *db.Store, request localAgentDispatchRequest, repo string, defaultBranch string, agentName string, overrideRuntime string, overrideRef string, orgPolicy func(string) workflow.OrgEnforcement) (localAgentJobOutput, error) {
+	job, err := (workflow.Mailbox{Store: store, CanaryEnabled: canaryRoutingEnabled(request.Home), RuntimeDefaultModel: runtimeDefaultModelResolver(request.Home), RequireWorkflowPolicy: requireWorkflowPolicyResolver(request.Home), OrgPolicy: orgPolicy}).Enqueue(ctx, workflow.JobRequest{
+		ID:             localAgentJobID(request.Action, agentName),
+		Agent:          agentName,
+		Action:         request.Action,
+		Repo:           repo,
+		Branch:         firstNonEmpty(request.Branch, defaultBranch),
+		PullRequest:    request.PullRequest,
+		HeadSHA:        request.HeadSHA,
+		GoalID:         request.GoalID,
+		TaskID:         request.TaskID,
+		TaskTitle:      request.TaskTitle,
+		LeadAgent:      request.LeadAgent,
+		Reviewers:      request.Reviewers,
+		Sender:         "local",
+		ActingOrgRole:  request.ActingOrgRole,
+		OperatorOrigin: request.OperatorOrigin,
+		Instructions:   request.Instructions,
 		// Persist the per-job --model and the resolved --runtime/--session override
 		// (#531) on the BLOCKED job too: `gitmoot job retry` re-runs the stored
 		// payload as-is, so dropping them here would silently retry the job on the

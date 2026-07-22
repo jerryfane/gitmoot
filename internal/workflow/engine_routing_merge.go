@@ -78,9 +78,10 @@ func (e Engine) dispatchFix(ctx context.Context, reviewer string, payload JobPay
 		TaskID:       payload.TaskID,
 		TaskTitle:    payload.TaskTitle,
 		LeadAgent:    leadAgent,
-		Reviewers:    e.requiredReviewers(payload),
-		ReviewRound:  payload.ReviewRound,
-		Sender:       reviewer,
+		Reviewers:     e.requiredReviewers(payload),
+		ReviewRound:   payload.ReviewRound,
+		Sender:        reviewer,
+		ActingOrgRole: payload.ActingOrgRole,
 		Instructions: fmt.Sprintf(
 			"Address requested changes from %s: %s",
 			reviewer,

@@ -125,6 +125,7 @@ type agentAskOptions struct {
 	effort      string
 	workflowID  string
 	workflowSet bool
+	orgRole     string
 	runtime     string
 	session     string
 	force       bool
@@ -158,6 +159,8 @@ func runAgentAsk(args []string, stdout, stderr io.Writer) int {
 			Model:                options.model,
 			Effort:               options.effort,
 			WorkflowID:           options.workflowID,
+			ActingOrgRole:        options.orgRole,
+			OperatorOrigin:       true,
 			Runtime:              options.runtime,
 			RuntimeSession:       options.session,
 			Home:                 options.home,
@@ -253,9 +256,18 @@ func parseAgentAskOptions(args []string, stderr io.Writer) (agentAskOptions, boo
 			index++
 			options.workflowSet = true
 			options.workflowID = strings.TrimSpace(args[index])
+		case arg == "--org-role":
+			if index+1 >= len(args) {
+				fmt.Fprintln(stderr, "agent ask requires a value for --org-role")
+				return agentAskOptions{}, false
+			}
+			index++
+			options.orgRole = strings.TrimSpace(args[index])
 		case strings.HasPrefix(arg, "--workflow="):
 			options.workflowSet = true
 			options.workflowID = strings.TrimSpace(strings.TrimPrefix(arg, "--workflow="))
+		case strings.HasPrefix(arg, "--org-role="):
+			options.orgRole = strings.TrimSpace(strings.TrimPrefix(arg, "--org-role="))
 		case arg == "--runtime" || arg == "--session":
 			if index+1 >= len(args) {
 				fmt.Fprintf(stderr, "agent ask requires a value for %s\n", arg)
@@ -305,6 +317,9 @@ func parseAgentAskOptions(args []string, stderr io.Writer) (agentAskOptions, boo
 	}
 	options.agent = strings.TrimSpace(positionals[0])
 	options.message = strings.TrimSpace(positionals[1])
+	if options.orgRole == "" {
+		options.orgRole = strings.TrimSpace(os.Getenv("GITMOOT_ORG_ROLE"))
+	}
 	if options.agent == "" || options.message == "" {
 		fmt.Fprintln(stderr, "agent ask requires exactly one agent and one message")
 		return agentAskOptions{}, false
@@ -335,7 +350,7 @@ func containsHelpFlag(args []string) bool {
 
 func printAgentAskUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  gitmoot agent ask <name> \"message\" [--repo owner/repo] [--background] [--type type] [--action ask] [--model model] [--effort effort] [--workflow id] [--runtime rt] [--session ref] [--home path] [--json] [--force]")
+	fmt.Fprintln(w, "  gitmoot agent ask <name> \"message\" [--repo owner/repo] [--background] [--type type] [--action ask] [--model model] [--effort effort] [--workflow id] [--org-role role] [--runtime rt] [--session ref] [--home path] [--json] [--force]")
 	printAgentRuntimeOverrideHelp(w)
 }
 
@@ -364,6 +379,7 @@ type agentRunOptions struct {
 	effort                 string
 	workflowID             string
 	workflowSet            bool
+	orgRole                string
 	runtime                string
 	session                string
 	taskID                 string
@@ -552,6 +568,8 @@ func dispatchAgentCommand(options agentRunOptions, action string, reason string,
 			Model:                  options.model,
 			Effort:                 options.effort,
 			WorkflowID:             options.workflowID,
+			ActingOrgRole:          options.orgRole,
+			OperatorOrigin:         true,
 			Runtime:                options.runtime,
 			RuntimeSession:         options.session,
 			Home:                   options.home,
@@ -631,7 +649,7 @@ func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agen
 			options.cockpit = true
 		case arg == "--skip-native-review-fanout":
 			options.skipNativeReviewFanout = true
-		case arg == "--type" || arg == "--action" || arg == "--model" || arg == "--effort" || arg == "--workflow" || arg == "--runtime" || arg == "--session" || arg == "--repo" || arg == "--home" || arg == "--task" || arg == "--pr" || arg == "--head-sha" || arg == "--base" || arg == "--branch" || arg == "--cockpit-session" || arg == "--recipe":
+		case arg == "--type" || arg == "--action" || arg == "--model" || arg == "--effort" || arg == "--workflow" || arg == "--org-role" || arg == "--runtime" || arg == "--session" || arg == "--repo" || arg == "--home" || arg == "--task" || arg == "--pr" || arg == "--head-sha" || arg == "--base" || arg == "--branch" || arg == "--cockpit-session" || arg == "--recipe":
 			if index+1 >= len(args) {
 				fmt.Fprintf(stderr, "%s requires a value for %s\n", label, arg)
 				return agentRunOptions{}, false
@@ -655,6 +673,8 @@ func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agen
 		case strings.HasPrefix(arg, "--workflow="):
 			options.workflowSet = true
 			options.workflowID = strings.TrimSpace(strings.TrimPrefix(arg, "--workflow="))
+		case strings.HasPrefix(arg, "--org-role="):
+			options.orgRole = strings.TrimSpace(strings.TrimPrefix(arg, "--org-role="))
 		case strings.HasPrefix(arg, "--runtime="):
 			options.runtime = strings.TrimSpace(strings.TrimPrefix(arg, "--runtime="))
 		case strings.HasPrefix(arg, "--session="):
@@ -690,6 +710,9 @@ func parseAgentRunOptions(command string, args []string, stderr io.Writer) (agen
 	}
 	options.agent = strings.TrimSpace(positionals[0])
 	options.message = strings.TrimSpace(positionals[1])
+	if options.orgRole == "" {
+		options.orgRole = strings.TrimSpace(os.Getenv("GITMOOT_ORG_ROLE"))
+	}
 	if options.agent == "" || options.message == "" {
 		fmt.Fprintf(stderr, "%s requires exactly one agent and one message\n", label)
 		return agentRunOptions{}, false
@@ -757,6 +780,8 @@ func setAgentRunOption(options *agentRunOptions, flagName string, value string, 
 	case "--workflow":
 		options.workflowSet = true
 		options.workflowID = value
+	case "--org-role":
+		options.orgRole = value
 	case "--runtime":
 		options.runtime = value
 	case "--session":
@@ -829,13 +854,13 @@ func printAgentRunUsage(w io.Writer, command string) {
 	fmt.Fprintln(w, "Usage:")
 	switch command {
 	case "orchestrate":
-		fmt.Fprintln(w, "  gitmoot orchestrate <agent> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--type type] [--action ask|review|implement] [--model model] [--effort effort] [--workflow id] [--runtime rt] [--session ref] [--recipe id] [--cockpit] [--cockpit-session name] [--skip-native-review-fanout] [--home path] [--json]")
+		fmt.Fprintln(w, "  gitmoot orchestrate <agent> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--branch branch] [--type type] [--action ask|review|implement] [--model model] [--effort effort] [--workflow id] [--org-role role] [--runtime rt] [--session ref] [--recipe id] [--cockpit] [--cockpit-session name] [--skip-native-review-fanout] [--home path] [--json]")
 	case "review":
-		fmt.Fprintln(w, "  gitmoot agent review <name> \"message\" --repo owner/repo --pr number [--head-sha sha] [--branch branch] [--background] [--type type] [--action review] [--model model] [--effort effort] [--workflow id] [--runtime rt] [--session ref] [--home path] [--json]")
+		fmt.Fprintln(w, "  gitmoot agent review <name> \"message\" --repo owner/repo --pr number [--head-sha sha] [--branch branch] [--background] [--type type] [--action review] [--model model] [--effort effort] [--workflow id] [--org-role role] [--runtime rt] [--session ref] [--home path] [--json]")
 	case "implement":
-		fmt.Fprintln(w, "  gitmoot agent implement <name> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--base ref] [--head-sha sha] [--branch branch] [--background] [--type type] [--action implement] [--model model] [--effort effort] [--workflow id] [--runtime rt] [--session ref] [--skip-native-review-fanout] [--home path] [--json]")
+		fmt.Fprintln(w, "  gitmoot agent implement <name> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--base ref] [--head-sha sha] [--branch branch] [--background] [--type type] [--action implement] [--model model] [--effort effort] [--workflow id] [--org-role role] [--runtime rt] [--session ref] [--skip-native-review-fanout] [--home path] [--json]")
 	default:
-		fmt.Fprintln(w, "  gitmoot agent run <name> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--base ref] [--branch branch] [--background] [--type type] [--action ask|review|implement] [--model model] [--effort effort] [--workflow id] [--runtime rt] [--session ref] [--recipe id] [--skip-native-review-fanout] [--home path] [--json]")
+		fmt.Fprintln(w, "  gitmoot agent run <name> \"message\" [--repo owner/repo] [--task task-id] [--pr number] [--head-sha sha] [--base ref] [--branch branch] [--background] [--type type] [--action ask|review|implement] [--model model] [--effort effort] [--workflow id] [--org-role role] [--runtime rt] [--session ref] [--recipe id] [--skip-native-review-fanout] [--home path] [--json]")
 	}
 	if command == "implement" || command == "run" {
 		fmt.Fprintln(w, "  --base <ref> selects the starting commit for implement worktrees; origin/* refs are fetched before resolution.")

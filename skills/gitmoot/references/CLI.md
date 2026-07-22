@@ -1147,6 +1147,22 @@ configured, those commands require an explicit `--repo`. **Caution: templates
 are stored and published VERBATIM (prompt body + metadata) — point the remote
 at a PRIVATE repo unless the prompts are meant to be public.**
 
+## Organization registry and scoped dispatch
+
+`gitmoot org validate [--home PATH]` validates the optional local `[org]`
+registry and prints its role count. `gitmoot org show [--home PATH]` prints the
+resolved role table. Any `[org.roles."name"]` section enables the registry.
+Roles have optional `parent`, `scope`, and advisory `merge_rule` (`owner`,
+`self`, or `none`); exactly one role has no parent. Scope is `*`, `owner/*`, or
+exact `owner/name`, and each child scope must be covered by its parent.
+
+Fresh local `agent ask`, `agent run`, `agent review`, `agent implement`,
+`orchestrate`, and `task run` dispatches pass `--org-role <role>` (or the narrow
+`GITMOOT_ORG_ROLE` fallback) when enabled. The role scope is enforced at
+enqueue. `[org] enforce = "block"` rejects violations; `"warn"` queues and
+records an `org_scope_violation` event. Pane/agent creation permissions, Herdr
+checks, and escalation are later work (escalation is #1058).
+
 ## External-coordinator workflow groups
 
 Attach a global workflow label to work started outside Gitmoot's own goal/task
