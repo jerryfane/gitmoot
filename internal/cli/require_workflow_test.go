@@ -43,3 +43,16 @@ func TestRequireWorkflowPolicyResolverUsesCanonicalHome(t *testing.T) {
 		t.Fatalf("raw .gitmoot home policy = %+v, want nested default strict policy", got)
 	}
 }
+
+// TestRequireWorkflowPolicyResolverFailOpenUsesDefault guards #1053: when config
+// cannot be read (absent/unreadable home), the resolver must fail open to the
+// built-in DEFAULT policy (require_workflow on / auto), not a disabled zero
+// value — otherwise a transient read error silently drops the labeling the
+// default promises. Auto never rejects, so fail-open still never enforces strict.
+func TestRequireWorkflowPolicyResolverFailOpenUsesDefault(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist", ".gitmoot")
+	got := requireWorkflowPolicyResolver(filepath.Dir(missing))("owner/repo")
+	if !got.Enabled || got.Mode != "auto" {
+		t.Fatalf("fail-open policy = %+v, want default enabled/auto", got)
+	}
+}

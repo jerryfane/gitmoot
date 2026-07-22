@@ -16,7 +16,7 @@ func requireWorkflowPolicyResolver(home string) func(string) workflow.RequireWor
 	if strings.TrimSpace(home) == "" {
 		paths, err := pathsFromFlag("")
 		if err != nil {
-			return func(string) workflow.RequireWorkflowPolicy { return workflow.RequireWorkflowPolicy{} }
+			return func(repo string) workflow.RequireWorkflowPolicy { return requireWorkflowFailOpenPolicy(repo) }
 		}
 		return requireWorkflowPolicyResolverPaths(paths)
 	}
@@ -37,15 +37,26 @@ func configFileAtRoot(root string) string {
 	return filepath.Join(strings.TrimSpace(root), config.ConfigName)
 }
 
+// requireWorkflowFailOpenPolicy is the policy applied when config cannot be read
+// (absent/unreadable/unresolvable home). It returns the built-in DEFAULT policy
+// — not a disabled zero value — so a transient read error can't silently drop
+// the labeling the default promises. The default is auto (never rejects), so
+// fail-open never enforces strict on an unreadable config. Reusing For() on an
+// empty config keeps this in lockstep with the single default source.
+func requireWorkflowFailOpenPolicy(repo string) workflow.RequireWorkflowPolicy {
+	def := config.RequireWorkflowConfig{}.For(repo)
+	return workflow.RequireWorkflowPolicy{Enabled: def.Enabled, Mode: def.Mode}
+}
+
 // requireWorkflowPolicyResolverPaths keeps config ownership in CLI while giving
 // each enqueue producer a current policy. Invalid or unreadable config is
-// fail-open here; config edit/init validation remains the operator-facing error
-// path and the legacy default is disabled.
+// fail-open here (to the built-in default via requireWorkflowFailOpenPolicy);
+// config edit/init validation remains the operator-facing error path.
 func requireWorkflowPolicyResolverPaths(paths config.Paths) func(string) workflow.RequireWorkflowPolicy {
 	return func(repo string) workflow.RequireWorkflowPolicy {
 		cfg, err := config.LoadRequireWorkflow(paths)
 		if err != nil {
-			return workflow.RequireWorkflowPolicy{}
+			return requireWorkflowFailOpenPolicy(repo)
 		}
 		p := cfg.For(repo)
 		return workflow.RequireWorkflowPolicy{Enabled: p.Enabled, Mode: p.Mode}
