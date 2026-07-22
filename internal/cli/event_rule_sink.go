@@ -112,14 +112,21 @@ func (s *eventRuleSink) evaluate(ctx context.Context, event events.Event) {
 		cancel()
 		switch {
 		case delivered:
-			if resetErr := s.store.ResetRoleMissedWake(ctx, rule.WakeRole); resetErr != nil {
+			// Bound the best-effort counter write like every other op on this path,
+			// so a SQLite-busy stall (shared-DB write contention) is cut at the probe
+			// timeout instead of blocking the next rule's wake for the 15s busy-timeout.
+			counterCtx, ccancel := context.WithTimeout(ctx, eventRuleProbeTimeout)
+			if resetErr := s.store.ResetRoleMissedWake(counterCtx, rule.WakeRole); resetErr != nil {
 				slog.Warn("org event wake counter reset failed", "rule_id", rule.ID, "role", rule.WakeRole, "job_id", event.JobID, "error", resetErr)
 			}
+			ccancel()
 			slog.Info("org event wake delivered", "rule_id", rule.ID, "role", rule.WakeRole, "job_id", event.JobID, "delivered", true)
 		case stalled:
-			if incrementErr := s.store.IncrementRoleMissedWake(ctx, rule.WakeRole, time.Now().UTC()); incrementErr != nil {
+			counterCtx, ccancel := context.WithTimeout(ctx, eventRuleProbeTimeout)
+			if incrementErr := s.store.IncrementRoleMissedWake(counterCtx, rule.WakeRole, time.Now().UTC()); incrementErr != nil {
 				slog.Warn("org event wake counter increment failed", "rule_id", rule.ID, "role", rule.WakeRole, "job_id", event.JobID, "error", incrementErr)
 			}
+			ccancel()
 			slog.Info("org event wake stalled", "rule_id", rule.ID, "role", rule.WakeRole, "job_id", event.JobID, "delivered", false)
 		case err != nil:
 			// A Herdr outage is infrastructure failure, not a role ignoring a wake;

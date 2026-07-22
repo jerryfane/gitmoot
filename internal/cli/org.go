@@ -373,19 +373,26 @@ func runOrgOverview(command string, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "org %s: %v\n", command, err)
 		return 1
 	}
-	policy, err := config.LoadOrchestratePolicy(paths)
-	if err != nil {
-		fmt.Fprintf(stderr, "org %s: load orchestrate policy: %v\n", command, err)
-		return 1
+	// The missed-wake flag is a best-effort add-on (#1060 slice 2b): an unreadable
+	// [orchestrate] policy or missed-wake table must NEVER break the org chart/status
+	// diagnostic view, so a load error degrades to "flagging off" rather than exit 1.
+	// Reading the counters only when K>0 also keeps them fully invisible when flagging
+	// is disabled (the off-by-default contract — no missed_wakes JSON leak at K=0).
+	maxMissedWakes := 0
+	if policy, err := config.LoadOrchestratePolicy(paths); err != nil {
+		fmt.Fprintf(stderr, "org %s: missed-wake flag disabled (orchestrate policy unreadable): %v\n", command, err)
+	} else {
+		maxMissedWakes = policy.MaxConsecutiveMissedWakes
 	}
-	missedWakeRows, err := store.ListRoleMissedWakes(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "org %s: list missed wakes: %v\n", command, err)
-		return 1
-	}
-	missedWakes := make(map[string]int, len(missedWakeRows))
-	for _, row := range missedWakeRows {
-		missedWakes[row.Role] = row.Consecutive
+	missedWakes := map[string]int{}
+	if maxMissedWakes > 0 {
+		if rows, err := store.ListRoleMissedWakes(ctx); err != nil {
+			fmt.Fprintf(stderr, "org %s: missed-wake counts unavailable: %v\n", command, err)
+		} else {
+			for _, row := range rows {
+				missedWakes[row.Role] = row.Consecutive
+			}
+		}
 	}
 	snapshot, err := orgProviderSnapshot(ctx, cfg)
 	if err != nil {
@@ -402,7 +409,7 @@ func runOrgOverview(command string, args []string, stdout, stderr io.Writer) int
 		}
 		seen := presence[role.Name]
 		consecutive := missedWakes[role.Name]
-		flagged := policy.MaxConsecutiveMissedWakes > 0 && consecutive >= policy.MaxConsecutiveMissedWakes
+		flagged := maxMissedWakes > 0 && consecutive >= maxMissedWakes
 		flagReason := ""
 		if flagged {
 			flagReason = fmt.Sprintf("%d consecutive missed wakes", consecutive)
