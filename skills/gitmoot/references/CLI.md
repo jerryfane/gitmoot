@@ -1160,8 +1160,18 @@ Fresh local `agent ask`, `agent run`, `agent review`, `agent implement`,
 `orchestrate`, and `task run` dispatches pass `--org-role <role>` (or the narrow
 `GITMOOT_ORG_ROLE` fallback) when enabled. The role scope is enforced at
 enqueue. `[org] enforce = "block"` rejects violations; `"warn"` queues and
-records an `org_scope_violation` event. Pane/agent creation permissions, Herdr
-checks, and escalation are later work (escalation is #1058).
+records an `org_scope_violation` event.
+
+`gitmoot org escalate --to <ancestor-role> --workflow <label> [--org-role
+<from-role>] [--repo <owner/repo>] "<question>"` records an escalation as a
+workflow journal note. The acting role comes from `--org-role` (which takes
+precedence) or `GITMOOT_ORG_ROLE`; it must be a configured role. `--to` must be
+an ancestor of that role, never the same role or a sibling. The note uses the
+typed schema `[org:escalate to=<to> from=<from> wf=<workflow>] <question>`, has
+the from-role as author, and can be rendered as JSON with `--json`. This
+replaces new uses of the free-text `ESCALATE-` marker; readers should continue
+to recognize that legacy marker during the transition. Pane/agent creation
+permissions and Herdr checks remain later work.
 
 ## External-coordinator workflow groups
 
