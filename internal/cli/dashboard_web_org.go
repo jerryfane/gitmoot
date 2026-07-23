@@ -26,6 +26,12 @@ func (d *webDataSource) Org(ctx context.Context) (dashboard.OrgView, error) {
 	if err != nil {
 		return dashboard.OrgView{}, err
 	}
+	// Org-less deployments (the default, plus non-org dashboard hosts) degrade to
+	// an empty view — the page shows the "Org not configured" empty state — rather
+	// than surfacing the "registry disabled" error as an HTTP 500.
+	if cfg, cfgErr := config.LoadOrg(paths); cfgErr == nil && !cfg.Enabled() {
+		return dashboard.OrgView{Roles: []dashboard.OrgNode{}, Escalations: []dashboard.OrgEscalation{}, Feed: []dashboard.OrgFeedRow{}}, nil
+	}
 	var out dashboard.OrgView
 	err = withReadOnlyStore(d.home, func(store *db.Store) error {
 		cursor, err := dashboardOrgCursor(ctx, store)
@@ -52,6 +58,11 @@ func (d *webDataSource) OrgRole(ctx context.Context, name string) (dashboard.Org
 	paths, err := pathsFromFlag(d.home)
 	if err != nil {
 		return dashboard.OrgRoleView{}, err
+	}
+	// Org-less deployments have no roles: return the module's not-found sentinel
+	// (404) rather than the "registry disabled" error as an HTTP 500.
+	if cfg, cfgErr := config.LoadOrg(paths); cfgErr == nil && !cfg.Enabled() {
+		return dashboard.OrgRoleView{}, dashboard.ErrOrgRoleNotFound
 	}
 	name = strings.ToLower(strings.TrimSpace(name))
 	var out dashboard.OrgRoleView
@@ -223,9 +234,14 @@ func buildDashboardOrg(ctx context.Context, paths config.Paths, store *db.Store,
 	})
 	out.Health.Roles = len(out.Roles)
 	out.Health.OpenEscalations = len(out.Escalations)
-	for _, missed := range inputs.missedWakes {
-		if missed.Consecutive > 0 {
-			out.Health.StalledWakes++
+	// Missed-wake signal is off-by-default: only surface the stalled-wakes count
+	// when max_consecutive_missed_wakes > 0, matching the per-node badge gating so
+	// the health tile can't leak (or contradict the chart) at K=0.
+	if inputs.shared.MaxMissedWakes > 0 {
+		for _, missed := range inputs.missedWakes {
+			if missed.Consecutive > 0 {
+				out.Health.StalledWakes++
+			}
 		}
 	}
 	return out, nil

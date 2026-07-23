@@ -442,7 +442,8 @@ func (s *Store) CountCurrentJobsByOrgRole(ctx context.Context) (map[string]map[s
 func (s *Store) CountJobsByOrgRoleSince(ctx context.Context, since time.Time) (map[string]map[string]int, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT json_extract(payload, '$.acting_org_role') AS role, state, COUNT(*)
 		FROM jobs
-		WHERE json_extract(payload, '$.acting_org_role') IS NOT NULL
+		WHERE json_valid(payload)
+		AND json_extract(payload, '$.acting_org_role') IS NOT NULL
 		AND json_extract(payload, '$.acting_org_role') <> ''
 		AND created_at >= ?
 		GROUP BY role, state`, since.UTC().Format("2006-01-02 15:04:05"))

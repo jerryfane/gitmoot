@@ -14,9 +14,34 @@ import (
 
 	dashboard "github.com/gitmoot/gitmoot-dashboard"
 
+	"github.com/gitmoot/gitmoot/internal/config"
 	"github.com/gitmoot/gitmoot/internal/db"
 	"github.com/gitmoot/gitmoot/internal/workflow"
 )
+
+// TestDashboardOrgRegistryDisabledDegradesGracefully guards the #1097 review fix:
+// an org-less deployment (config present, no [org] section) must return an empty
+// view / not-found rather than an HTTP 500, so the SPA shows the "Org not
+// configured" empty state and org-less hosts (e.g. the public dashboard) keep
+// working.
+func TestDashboardOrgRegistryDisabledDegradesGracefully(t *testing.T) {
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	ds := &webDataSource{home: home}
+	view, err := ds.Org(context.Background())
+	if err != nil {
+		t.Fatalf("Org() on org-less home should not error, got %v", err)
+	}
+	if len(view.Roles) != 0 || view.DetectionEnabled || view.DataAsOf != "" {
+		t.Fatalf("org-less view = roles:%d detection:%v dataAsOf:%q, want empty", len(view.Roles), view.DetectionEnabled, view.DataAsOf)
+	}
+	if _, err := ds.OrgRole(context.Background(), "owner"); !errors.Is(err, dashboard.ErrOrgRoleNotFound) {
+		t.Fatalf("OrgRole() on org-less home = %v, want ErrOrgRoleNotFound", err)
+	}
+}
 
 func TestDashboardOrgDataSourceStoreBackedProjection(t *testing.T) {
 	home, paths := setupOrgHome(t)
