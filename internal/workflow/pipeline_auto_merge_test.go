@@ -31,8 +31,9 @@ func TestPipelineAutoMergerEvaluateCheckStates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := openEngineStore(t)
 			gh := &fakeMergeGateGitHub{
-				pr:     github.PullRequest{Number: 813, State: "open", HeadSHA: "reviewed-head", Mergeable: &mergeable},
-				checks: tc.checks,
+				pr:       github.PullRequest{Number: 813, State: "open", HeadSHA: "reviewed-head", Mergeable: &mergeable},
+				checks:   tc.checks,
+				noChecks: tc.checks == nil,
 			}
 			merger := PipelineAutoMerger{Store: store, GitHub: gh, RequireExternalCI: tc.requireExternalCI}
 			got, err := merger.Evaluate(context.Background(), PipelineAutoMergeRequest{Repo: "owner/repo", PullRequest: 813, HeadSHA: "reviewed-head"})

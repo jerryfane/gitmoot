@@ -468,6 +468,15 @@ func (s *Store) CompareAndSwapTaskState(ctx context.Context, taskID, from, to st
 // appends its audit event. A failed comparison writes no event and returns the
 // current state so callers can distinguish idempotence from a conflicting move.
 func (s *Store) TransitionTaskStateWithEvent(ctx context.Context, taskID string, fromStates []string, to string, kind string, reason string) (changed bool, currentState string, err error) {
+	changed, _, currentState, err = s.transitionTaskStateWithEvent(ctx, taskID, fromStates, to, kind, reason, false)
+	return changed, currentState, err
+}
+
+// TransitionTaskStateWithEventObserved is the same atomic state/event CAS as
+// TransitionTaskStateWithEvent, but also returns the state the transaction
+// observed before it attempted the update. Callers that need follow-up cleanup
+// tied to the actual transition, rather than a stale pre-read, should use it.
+func (s *Store) TransitionTaskStateWithEventObserved(ctx context.Context, taskID string, fromStates []string, to string, kind string, reason string) (changed bool, observedState string, currentState string, err error) {
 	return s.transitionTaskStateWithEvent(ctx, taskID, fromStates, to, kind, reason, false)
 }
 
@@ -477,62 +486,63 @@ func (s *Store) TransitionTaskStateWithEvent(ctx context.Context, taskID string,
 // caller before entering this transaction, while this guard closes the window
 // in which a newly queued/running job could acquire the task.
 func (s *Store) TransitionTaskStateWithEventIfNoActiveJob(ctx context.Context, taskID string, fromStates []string, to string, kind string, reason string) (changed bool, currentState string, err error) {
-	return s.transitionTaskStateWithEvent(ctx, taskID, fromStates, to, kind, reason, true)
+	changed, _, currentState, err = s.transitionTaskStateWithEvent(ctx, taskID, fromStates, to, kind, reason, true)
+	return changed, currentState, err
 }
 
-func (s *Store) transitionTaskStateWithEvent(ctx context.Context, taskID string, fromStates []string, to string, kind string, reason string, rejectActiveJob bool) (changed bool, currentState string, err error) {
+func (s *Store) transitionTaskStateWithEvent(ctx context.Context, taskID string, fromStates []string, to string, kind string, reason string, rejectActiveJob bool) (changed bool, observedState string, currentState string, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, "", err
+		return false, "", "", err
 	}
 	defer tx.Rollback()
 
 	var repoFullName, branch string
-	if err := tx.QueryRowContext(ctx, `SELECT state, repo_full_name, branch FROM tasks WHERE id = ?`, strings.TrimSpace(taskID)).Scan(&currentState, &repoFullName, &branch); err != nil {
-		return false, "", err
+	if err := tx.QueryRowContext(ctx, `SELECT state, repo_full_name, branch FROM tasks WHERE id = ?`, strings.TrimSpace(taskID)).Scan(&observedState, &repoFullName, &branch); err != nil {
+		return false, "", "", err
 	}
 	allowed := false
 	for _, state := range fromStates {
-		if currentState == strings.TrimSpace(state) {
+		if observedState == strings.TrimSpace(state) {
 			allowed = true
 			break
 		}
 	}
 	if !allowed {
-		return false, currentState, tx.Commit()
+		return false, observedState, observedState, tx.Commit()
 	}
 	if rejectActiveJob {
 		jobID, active, err := activeJobMatchingTaskTx(ctx, tx, strings.TrimSpace(taskID), repoFullName, branch)
 		if err != nil {
-			return false, currentState, err
+			return false, observedState, observedState, err
 		}
 		if active {
-			return false, currentState, fmt.Errorf("%w: %s", ErrTaskHasActiveJob, jobID)
+			return false, observedState, observedState, fmt.Errorf("%w: %s", ErrTaskHasActiveJob, jobID)
 		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND state = ?`,
-		strings.TrimSpace(to), strings.TrimSpace(taskID), currentState)
+		strings.TrimSpace(to), strings.TrimSpace(taskID), observedState)
 	if err != nil {
-		return false, "", err
+		return false, observedState, "", err
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return false, "", err
+		return false, observedState, "", err
 	}
 	if affected == 0 {
 		if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id = ?`, strings.TrimSpace(taskID)).Scan(&currentState); err != nil {
-			return false, "", err
+			return false, observedState, "", err
 		}
-		return false, currentState, tx.Commit()
+		return false, observedState, currentState, tx.Commit()
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO task_events(task_id, kind, from_state, to_state, reason)
-		VALUES (?, ?, ?, ?, ?)`, strings.TrimSpace(taskID), strings.TrimSpace(kind), currentState, strings.TrimSpace(to), strings.TrimSpace(reason)); err != nil {
-		return false, "", err
+		VALUES (?, ?, ?, ?, ?)`, strings.TrimSpace(taskID), strings.TrimSpace(kind), observedState, strings.TrimSpace(to), strings.TrimSpace(reason)); err != nil {
+		return false, observedState, "", err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, "", err
+		return false, observedState, "", err
 	}
-	return true, strings.TrimSpace(to), nil
+	return true, observedState, strings.TrimSpace(to), nil
 }
 
 func activeJobMatchingTaskTx(ctx context.Context, tx *sql.Tx, taskID string, repoFullName string, branch string) (string, bool, error) {

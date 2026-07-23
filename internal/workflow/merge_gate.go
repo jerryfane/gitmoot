@@ -15,15 +15,20 @@ import (
 )
 
 const (
-	gitmootMergeGateContext         = "gitmoot/merge-gate"
-	gitmootNoCIContext              = "gitmoot/ci"
-	commitStatusDescriptionMaxRunes = 140
-	mergeQueueLockTTL               = 30 * time.Minute
+	gitmootMergeGateContext = "gitmoot/merge-gate"
+	gitmootNoCIContext      = "gitmoot/ci"
+	// MergeLeaveOpenAutoMergeKillSwitchReason is persisted with a parked task so
+	// a later explicit auto_merge=false -> true config flip can re-arm only this
+	// operator decision.
+	MergeLeaveOpenAutoMergeKillSwitchReason = "native auto-merge is disabled by the repository kill-switch; leave the pull request open for a human merge"
+	commitStatusDescriptionMaxRunes         = 140
+	mergeQueueLockTTL                       = 30 * time.Minute
 )
 
 type MergeGateGitHub interface {
 	GetPullRequest(ctx context.Context, repo github.Repository, number int64) (github.PullRequest, error)
 	GetCombinedStatus(ctx context.Context, repo github.Repository, ref string) (github.CombinedStatus, error)
+	ListCheckRunsForRef(ctx context.Context, repo github.Repository, ref string) ([]github.PullRequestCheck, error)
 	CompareCommits(ctx context.Context, repo github.Repository, base string, head string) (github.CompareResult, error)
 	ListPullRequestChecks(ctx context.Context, repo github.Repository, number int64) ([]github.PullRequestCheck, error)
 	CreateCommitStatus(ctx context.Context, input github.CommitStatusInput) (github.CommitStatus, error)
@@ -54,6 +59,11 @@ type PolicyMergeGate struct {
 	CheckoutPath string
 	DeleteBranch bool
 	MergeMethod  string
+	// AutoMerge permits this native task merge gate to perform a GitHub merge
+	// after the mandatory exact-head review and CI gate. False is a kill-switch.
+	// PipelineAutoMerger does not call Evaluate and remains governed only by its
+	// independent pipeline allow_auto_merge mechanism.
+	AutoMerge bool
 	// RequireExternalCI hard-blocks a merge whose head reports zero external CI
 	// instead of ever stamping the synthetic gitmoot/ci success (#596, layer 3 —
 	// the [merge_gate] require_external_ci knob). Default false.
@@ -116,6 +126,11 @@ type workflowAwareGitHub interface {
 }
 
 func (g PolicyMergeGate) Evaluate(ctx context.Context, request MergeRequest) (MergeDecision, error) {
+	// An explicit operator kill-switch must remain before validation and every
+	// GitHub/local-store operation.
+	if !g.AutoMerge && !request.HumanMergeRequested {
+		return MergeDecision{LeaveOpen: true, Reason: MergeLeaveOpenAutoMergeKillSwitchReason}, nil
+	}
 	if err := g.validate(); err != nil {
 		return MergeDecision{}, err
 	}
@@ -132,7 +147,23 @@ func (g PolicyMergeGate) Evaluate(ctx context.Context, request MergeRequest) (Me
 	}
 	headSHA := strings.TrimSpace(pr.HeadSHA)
 	if headSHA == "" {
-		return g.block(ctx, request, "", "pull request head SHA is missing", MergeBlockTransient)
+		return g.gateMiss("pull request head SHA is missing"), nil
+	}
+	if !request.HumanMergeRequested && !pullRequestMerged(pr) && strings.TrimSpace(pr.State) != "closed" {
+		pendingDecision, isPending, reason, err := g.reviewAndCIGateMiss(ctx, repo, request, headSHA)
+		if err != nil {
+			return MergeDecision{}, err
+		}
+		if isPending {
+			// CI is still resolving (a check is genuinely in flight, or we're
+			// within the #596 Actions-creation-lag grace window) - this is not a
+			// policy miss, so retry silently on the next poll instead of parking
+			// and escalating.
+			return pendingDecision, nil
+		}
+		if reason != "" {
+			return g.gateMiss(reason), nil
+		}
 	}
 	releaseCheckoutLock, err := g.acquireLocalCheckoutMutationLock(ctx, request)
 	if err != nil {
@@ -162,19 +193,6 @@ func (g PolicyMergeGate) Evaluate(ctx context.Context, request MergeRequest) (Me
 			return g.block(ctx, request, headSHA, "local worktree is not clean", MergeBlockTransient)
 		}
 	}
-	if !request.ReviewOptional {
-		if err := g.ensureFinalReviewCaptured(ctx, request, headSHA); err != nil {
-			// A captured blocking review (mergeBlocked) is a template-quality rejection;
-			// every other review error (approval missing / not yet captured / head
-			// mismatch) is a transient/process condition the harvester must not score.
-			class := MergeBlockTransient
-			var blocked mergeBlocked
-			if errors.As(err, &blocked) {
-				class = MergeBlockQuality
-			}
-			return g.block(ctx, request, headSHA, err.Error(), class)
-		}
-	}
 	releaseMergeQueueLock, err := g.acquireMergeQueueLock(ctx, request, pr)
 	if err != nil {
 		var pending mergePending
@@ -194,28 +212,6 @@ func (g PolicyMergeGate) Evaluate(ctx context.Context, request MergeRequest) (Me
 	if pr.Mergeable != nil && !*pr.Mergeable {
 		return g.block(ctx, request, headSHA, "pull request is not mergeable; rebase or update the branch", MergeBlockTransient)
 	}
-	if err := g.ensureStatuses(ctx, repo, int64(request.PullRequest), headSHA); err != nil {
-		var pending mergePending
-		if errors.As(err, &pending) {
-			return g.pending(ctx, request, headSHA, pending.reason)
-		}
-		var blocked mergeBlocked
-		if errors.As(err, &blocked) {
-			// An external CI FAILURE is an authoritative template-quality rejection
-			// (MergeBlockQuality, the default class). A require_external_ci empty-gate
-			// block instead carries an explicit MergeBlockTransient class: an ABSENT
-			// external CI is a repo-config/operator-policy condition, not a template
-			// defect, so the trace-harvester must not score it as a false Hard=0
-			// negative (#465 INFRA-NOISE-FILTERED).
-			class := MergeBlockQuality
-			if blocked.class != MergeBlockNone {
-				class = blocked.class
-			}
-			return g.block(ctx, request, headSHA, blocked.reason, class)
-		}
-		return MergeDecision{}, err
-	}
-
 	if _, err := g.GitHub.CreateCommitStatus(ctx, github.CommitStatusInput{
 		Repo:        repo,
 		SHA:         headSHA,
@@ -245,6 +241,36 @@ func (g PolicyMergeGate) Evaluate(ctx context.Context, request MergeRequest) (Me
 		return g.pending(ctx, request, headSHA, reason)
 	}
 	return g.finishMerged(ctx, request, pr, strings.TrimSpace(result.SHA))
+}
+
+func (g PolicyMergeGate) gateMiss(reason string) MergeDecision {
+	return MergeDecision{LeaveOpen: true, EscalateMergeGateMiss: true, Reason: strings.TrimSpace(reason)}
+}
+
+// reviewAndCIGateMiss evaluates the exact-head review-clean and CI-green gate,
+// independent of ReviewOptional (#1114 closes the review-required bypass that
+// let a repo with no reviewer-capable agent skip review entirely - see
+// mergeGateReviewRequired). isPending=true means CI is still resolving (a check
+// is genuinely in flight, or evaluation is within the #596 Actions-creation-lag
+// grace window preserved by ensureStatuses/concludeNoExternalCI) - this is not a
+// policy miss; the caller must return pendingDecision as-is without escalating.
+// A non-empty reason with isPending=false means review and/or CI were evaluated
+// to completion and at least one is missing, stale, or failed - the caller
+// escalates. Both zero-value means the gate is clean.
+func (g PolicyMergeGate) reviewAndCIGateMiss(ctx context.Context, repo github.Repository, request MergeRequest, headSHA string) (pendingDecision MergeDecision, isPending bool, reason string, err error) {
+	var reasons []string
+	if reviewErr := g.ensureFinalReviewCaptured(ctx, request, headSHA); reviewErr != nil {
+		reasons = append(reasons, "review gate: "+reviewErr.Error()+" for head "+headSHA)
+	}
+	if ciErr := g.ensureStatuses(ctx, repo, int64(request.PullRequest), headSHA); ciErr != nil {
+		var pending mergePending
+		if errors.As(ciErr, &pending) {
+			decision, dErr := g.pending(ctx, request, headSHA, pending.reason)
+			return decision, true, "", dErr
+		}
+		reasons = append(reasons, "CI gate: "+ciErr.Error()+" for head "+headSHA)
+	}
+	return MergeDecision{}, false, strings.Join(reasons, "; "), nil
 }
 
 // executePullRequestMerge is the single low-level GitHub merge path shared by
@@ -550,9 +576,9 @@ func (g PolicyMergeGate) ensureReviewMatchesHead(payload JobPayload, headSHA str
 	// branch and is validated against its own fresh HEAD, not the parent PR
 	// head. Such a review legitimately records no head SHA, so accepting it here
 	// is what lets a gate-required integration review advance instead of
-	// deadlocking. This is narrow: a normal review with a mismatched non-empty
-	// head still fails above, and a normal review missing a head SHA but lacking
-	// the integration-worktree markers still fails below.
+	// deadlocking (#388). This is narrow: a normal review with a mismatched
+	// non-empty head still fails above, and a normal review missing a head SHA
+	// but lacking the integration-worktree markers still fails below.
 	if isIntegrationWorktreeReview(payload) {
 		return nil
 	}
@@ -611,7 +637,7 @@ func (g PolicyMergeGate) evaluateStatuses(ctx context.Context, repo github.Repos
 		}
 	}
 
-	checks, err := g.GitHub.ListPullRequestChecks(ctx, repo, pullRequest)
+	checks, err := g.GitHub.ListCheckRunsForRef(ctx, repo, headSHA)
 	if err != nil {
 		return 0, err
 	}

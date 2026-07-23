@@ -8,50 +8,35 @@ import (
 	"time"
 )
 
-// DefaultMinCIWait is the grace window the merge gate waits between two
-// consecutive zero-external-CI observations at the same head before it concludes
-// a repo has no CI (#596). It is deliberately a few GitHub-Actions run-creation
-// latencies wide: the observed live race (issue #596) hit a ~4s window, so 60s
-// leaves comfortable margin while a genuinely CI-less repo merges only one grace
-// window later.
+// DefaultMinCIWait is retained for compatibility with existing merge_gate
+// configuration. The mandatory native merge gate never treats zero external CI
+// as green.
 const DefaultMinCIWait = 60 * time.Second
 
-// DefaultMaxCIWait is the upper bound the merge gate waits when `.github/workflows/`
-// exists at the head but no external check ever appears (#596, layer 2). Past this
-// window with the head unchanged and still zero external CI, the gate concludes
-// no-CI and stamps the synthetic gitmoot/ci success instead of staying pending
-// forever, so a PR whose workflows never trigger for it (docs-only under paths
-// filters, tag-only / workflow_dispatch-only workflows, or a non-targeted branch)
-// still merges. It is wide (GitHub Actions creates a check-run within seconds) yet
-// finite to restore liveness.
+// DefaultMaxCIWait is retained for compatibility with existing merge_gate
+// configuration. The mandatory native merge gate never treats zero external CI
+// as green.
 const DefaultMaxCIWait = 10 * time.Minute
 
-// MergeGatePolicy is the resolved merge-gate behavior for a repo (#596). It is
-// OFF BY DEFAULT in the sense that the historical behavior — conclude "no CI"
-// from a zero-external observation — still happens, just deferred by one grace
-// window (MinCIWait) instead of instantly, and require_external_ci defaults false.
+// MergeGatePolicy is the resolved merge-gate behavior for a repo.
 type MergeGatePolicy struct {
-	// RequireExternalCI, when true, HARD-BLOCKS a merge whose head reports zero
-	// external CI (no external commit-statuses AND no check-runs) instead of ever
-	// stamping the synthetic gitmoot/ci success. Use it for repos the operator
-	// knows always have CI. Default false.
+	// AutoMerge permits Gitmoot's native task merge gate to merge a PR that has
+	// an exact-head approval and green SHA-scoped CI. It defaults true; false is
+	// an explicit operator kill-switch.
+	AutoMerge bool
+	// RequireExternalCI is retained for config compatibility. Exact-head external
+	// CI is mandatory for native auto-merge regardless of this legacy value.
 	RequireExternalCI bool
-	// MinCIWait is the grace window between the first and second zero-external
-	// observation at the same head before the gate concludes no-CI. Default
-	// DefaultMinCIWait (60s).
+	// MinCIWait is retained for config compatibility. Default DefaultMinCIWait.
 	MinCIWait time.Duration
-	// MaxCIWait is the upper bound the gate waits when `.github/workflows/` exists at
-	// the head but no external check appears (#596, layer 2). Past it the gate
-	// concludes no-CI instead of staying pending forever. Default DefaultMaxCIWait
-	// (10m).
+	// MaxCIWait is retained for config compatibility. Default DefaultMaxCIWait.
 	MaxCIWait time.Duration
 }
 
-// DefaultMergeGatePolicy returns the off-by-default policy: no external CI is not
-// required, and the no-CI conclusion is deferred by the default grace window (and
-// bounded by the default max window when workflows exist at the head).
+// DefaultMergeGatePolicy permits native task merges only through the mandatory
+// exact-head review and SHA-scoped CI gate.
 func DefaultMergeGatePolicy() MergeGatePolicy {
-	return MergeGatePolicy{RequireExternalCI: false, MinCIWait: DefaultMinCIWait, MaxCIWait: DefaultMaxCIWait}
+	return MergeGatePolicy{AutoMerge: true, RequireExternalCI: false, MinCIWait: DefaultMinCIWait, MaxCIWait: DefaultMaxCIWait}
 }
 
 // MergeGateConfig is the parsed [merge_gate] configuration: a global default plus
@@ -67,6 +52,7 @@ type MergeGateConfig struct {
 // merges onto the global default field-by-field (a missing key inherits the
 // global value rather than resetting it to a zero value).
 type mergeGateOverride struct {
+	autoMerge         *bool
 	requireExternalCI *bool
 	minCIWait         *time.Duration
 	maxCIWait         *time.Duration
@@ -87,6 +73,9 @@ func (c MergeGateConfig) For(repo string) MergeGatePolicy {
 	if !ok {
 		return policy
 	}
+	if override.autoMerge != nil {
+		policy.AutoMerge = *override.autoMerge
+	}
 	if override.requireExternalCI != nil {
 		policy.RequireExternalCI = *override.requireExternalCI
 	}
@@ -101,8 +90,7 @@ func (c MergeGateConfig) For(repo string) MergeGatePolicy {
 
 // LoadMergeGatePolicy parses the [merge_gate] section (global) and every
 // [repos."owner/repo".merge_gate] section (per-repo override) from the config
-// file (#596). It is OFF BY DEFAULT: a config with neither section yields the
-// default policy for every repo (no external CI required, default grace window).
+// file. A config with neither section uses the mandatory review-and-CI gate.
 //
 // It reuses the same naive line-scanner shape as LoadRepoConcurrency /
 // LoadAdmissionPolicy. Unrelated sections are ignored.
@@ -191,6 +179,13 @@ func parseMergeGateSection(section string) (string, bool) {
 
 func applyMergeGateGlobalField(policy *MergeGatePolicy, key string, value string) error {
 	switch key {
+	case "auto_merge":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return err
+		}
+		policy.AutoMerge = parsed
+		return nil
 	case "require_external_ci":
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
@@ -219,6 +214,13 @@ func applyMergeGateGlobalField(policy *MergeGatePolicy, key string, value string
 
 func applyMergeGateOverrideField(override *mergeGateOverride, key string, value string) error {
 	switch key {
+	case "auto_merge":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return err
+		}
+		override.autoMerge = &parsed
+		return nil
 	case "require_external_ci":
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {

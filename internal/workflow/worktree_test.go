@@ -131,6 +131,26 @@ func TestEngineAllocateTaskWorktreeRejectsDismissedTask(t *testing.T) {
 	}
 }
 
+func TestEngineAllocateTaskWorktreeRejectsAwaitingHumanMergeTask(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	if err := store.UpsertTask(ctx, db.Task{ID: "task-awaiting-human-merge", RepoFullName: "owner/repo", State: string(TaskAwaitingHumanMerge), Branch: "feature/awaiting-human-merge", WorktreePath: "/tmp/preserved"}); err != nil {
+		t.Fatal(err)
+	}
+	manager := &fakeWorktreeManager{}
+	_, err := testEngine(store).AllocateTaskWorktree(ctx, TaskWorktreeRequest{Home: t.TempDir(), Repo: "owner/repo", TaskID: "task-awaiting-human-merge", Branch: "feature/awaiting-human-merge", Owner: "lead"}, manager)
+	if err == nil || !strings.Contains(err.Error(), "awaiting a human merge decision") {
+		t.Fatalf("AllocateTaskWorktree error = %v", err)
+	}
+	if len(manager.calls) != 0 {
+		t.Fatalf("manager calls = %+v", manager.calls)
+	}
+	task, err := store.GetTask(ctx, "task-awaiting-human-merge")
+	if err != nil || task.State != string(TaskAwaitingHumanMerge) {
+		t.Fatalf("task after refusal = %+v, err=%v", task, err)
+	}
+}
+
 func TestEngineAllocateTaskWorktreeDoesNotResurrectConcurrentPlannedTTLDismissal(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)

@@ -795,6 +795,37 @@ func TestListPullRequestChecksUsesGhChecksOutput(t *testing.T) {
 	)
 }
 
+func TestListCheckRunsForRefUsesExactCommitSHAAndPaginates(t *testing.T) {
+	runner := &fakeRunner{results: []subprocess.Result{{Stdout: `[{
+		"check_runs": [
+			{"name":"build","status":"completed","conclusion":"success","html_url":"https://example.test/build","completed_at":"2026-07-23T10:00:00Z"}
+		]
+	},{
+		"check_runs": [
+			{"name":"lint","status":"in_progress","conclusion":"","html_url":"https://example.test/lint","completed_at":null}
+		]
+	}]`}}}
+	client := GhClient{Runner: runner}
+
+	checks, err := client.ListCheckRunsForRef(
+		context.Background(),
+		Repository{Owner: "gitmoot", Name: "gitmoot"},
+		"head123",
+	)
+	if err != nil {
+		t.Fatalf("ListCheckRunsForRef: %v", err)
+	}
+	if len(checks) != 2 ||
+		checks[0].Name != "build" || checks[0].State != "success" ||
+		checks[1].Name != "lint" || checks[1].State != "in_progress" {
+		t.Fatalf("checks = %+v", checks)
+	}
+	runner.wantArgs(t, 0,
+		"api", "--paginate", "--slurp",
+		"repos/gitmoot/gitmoot/commits/head123/check-runs?per_page=100",
+	)
+}
+
 func TestListPullRequestChecksAcceptsPendingExitWithJSON(t *testing.T) {
 	runner := &fakeRunner{
 		results: []subprocess.Result{{

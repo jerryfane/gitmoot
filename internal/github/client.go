@@ -48,6 +48,7 @@ type Client interface {
 	MergePullRequest(ctx context.Context, input MergePullRequestInput) (MergeResult, error)
 	UpdatePullRequestBranch(ctx context.Context, input UpdatePullRequestBranchInput) (UpdatePullRequestBranchResult, error)
 	GetCombinedStatus(ctx context.Context, repo Repository, ref string) (CombinedStatus, error)
+	ListCheckRunsForRef(ctx context.Context, repo Repository, ref string) ([]PullRequestCheck, error)
 	CompareCommits(ctx context.Context, repo Repository, base string, head string) (CompareResult, error)
 	ListPullRequestChecks(ctx context.Context, repo Repository, number int64) ([]PullRequestCheck, error)
 	CreateCommitStatus(ctx context.Context, input CommitStatusInput) (CommitStatus, error)
@@ -1015,6 +1016,42 @@ func (c *GhClient) GetCombinedStatus(ctx context.Context, repo Repository, ref s
 	return status, err
 }
 
+func (c *GhClient) ListCheckRunsForRef(ctx context.Context, repo Repository, ref string) ([]PullRequestCheck, error) {
+	type checkRunsPage struct {
+		CheckRuns []struct {
+			Name        string `json:"name"`
+			Status      string `json:"status"`
+			Conclusion  string `json:"conclusion"`
+			HTMLURL     string `json:"html_url"`
+			CompletedAt string `json:"completed_at"`
+		} `json:"check_runs"`
+	}
+	result, err := c.run(ctx, false,
+		"api", "--paginate", "--slurp",
+		endpoint(repo, "commits", ref, "check-runs")+"?per_page=100",
+	)
+	if err != nil {
+		return nil, err
+	}
+	var pages []checkRunsPage
+	if err := json.Unmarshal([]byte(result.Stdout), &pages); err != nil {
+		return nil, fmt.Errorf("decode gh api response: %w", err)
+	}
+	checks := []PullRequestCheck{}
+	for _, page := range pages {
+		for _, run := range page.CheckRuns {
+			state := strings.TrimSpace(run.Conclusion)
+			if state == "" {
+				state = strings.TrimSpace(run.Status)
+			}
+			checks = append(checks, PullRequestCheck{
+				Name: run.Name, State: state, Link: run.HTMLURL, CompletedAt: run.CompletedAt,
+			})
+		}
+	}
+	return checks, nil
+}
+
 // WorkflowsExistAtRef reports whether the repository has a `.github/workflows`
 // directory at the given ref (#596). The merge gate uses it as a cheap, one-read
 // workflow-awareness signal: if the head tree demonstrably carries workflow
@@ -1810,6 +1847,10 @@ func (NoopClient) UpdatePullRequestBranch(context.Context, UpdatePullRequestBran
 
 func (NoopClient) GetCombinedStatus(context.Context, Repository, string) (CombinedStatus, error) {
 	return CombinedStatus{}, errors.ErrUnsupported
+}
+
+func (NoopClient) ListCheckRunsForRef(context.Context, Repository, string) ([]PullRequestCheck, error) {
+	return nil, errors.ErrUnsupported
 }
 
 func (NoopClient) CompareCommits(context.Context, Repository, string, string) (CompareResult, error) {

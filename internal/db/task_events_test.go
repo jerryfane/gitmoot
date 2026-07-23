@@ -70,6 +70,22 @@ func TestTransitionTaskStateWithEventAtomicCASAndOrdering(t *testing.T) {
 	}
 }
 
+func TestTransitionTaskStateWithEventObservedReturnsCASSourceState(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	ctx := context.Background()
+	if err := store.UpsertTask(ctx, Task{ID: "task-observed", State: "awaiting_human_merge"}); err != nil {
+		t.Fatal(err)
+	}
+	changed, observed, current, err := store.TransitionTaskStateWithEventObserved(ctx, "task-observed", []string{"pr_open", "awaiting_human_merge"}, "blocked", "pr_closed_unmerged", "closed without merge")
+	if err != nil || !changed || observed != "awaiting_human_merge" || current != "blocked" {
+		t.Fatalf("transition = changed %v observed %q current %q err %v", changed, observed, current, err)
+	}
+	events, err := store.ListTaskEvents(ctx, "task-observed")
+	if err != nil || len(events) != 1 || events[0].FromState != "awaiting_human_merge" || events[0].ToState != "blocked" {
+		t.Fatalf("events = %+v, err=%v", events, err)
+	}
+}
+
 func TestGuardedTaskTransitionRefusesMatchingActiveJob(t *testing.T) {
 	tests := []struct {
 		name    string

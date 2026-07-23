@@ -926,6 +926,8 @@ func bindLocalImplementRequestToPullRequest(ctx context.Context, store *db.Store
 	switch workflow.TaskState(strings.TrimSpace(task.State)) {
 	case workflow.TaskReviewing, workflow.TaskReadyToMerge:
 		return localAgentDispatchRequest{}, fmt.Errorf("task %s is %s; implement fix-pass is refused while review or merge is in progress", task.ID, task.State)
+	case workflow.TaskAwaitingHumanMerge:
+		return localAgentDispatchRequest{}, fmt.Errorf("task %s is awaiting a human merge decision; implement fix-pass is refused until it resolves", task.ID)
 	}
 	if err := validateFixPassTaskWorktreeHead(ctx, task, pr); err != nil {
 		return localAgentDispatchRequest{}, err

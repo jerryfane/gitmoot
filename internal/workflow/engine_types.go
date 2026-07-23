@@ -189,6 +189,10 @@ type PullRequestEvent struct {
 	LeadAgent         string
 	Sender            string
 	RequiredReviewers []string
+	// HumanMergeRequested records an explicit authorized @gitmoot merge command.
+	// It permits the native policy gate to merge even when automatic merging is
+	// disabled for the repository; ordinary daemon advancement leaves this false.
+	HumanMergeRequested bool
 	// SkipReviewFanout, when true, suppresses Gitmoot's native PR advancement in
 	// HandlePullRequestOpened: zero review jobs are enqueued, the PR baseline is
 	// recorded, and the native merge gate is not run. Council-style external
@@ -235,8 +239,12 @@ type MergeRequest struct {
 	PullRequest    int
 	HeadSHA        string
 	TaskID         string
+	WorkflowID     string
 	Reviewer       string
 	ReviewOptional bool
+	// HumanMergeRequested is an explicit, authorized human instruction. It is
+	// evaluated inside PolicyMergeGate, never by a caller-side bypass.
+	HumanMergeRequested bool
 }
 
 type MergeDecision struct {
@@ -244,6 +252,13 @@ type MergeDecision struct {
 	Merged         bool
 	MergeCommitSHA string
 	Reason         string
+	// LeaveOpen is a terminal-ish native merge-gate outcome: the pull request is
+	// deliberately left for a human action. It is distinct from Deferred, which
+	// must be retried automatically, and from a blocked quality/process failure.
+	LeaveOpen bool
+	// EscalateMergeGateMiss asks the daemon-facing adapter to journal and wake
+	// the safety escalation. It is false for deliberate operator kill-switches.
+	EscalateMergeGateMiss bool
 	// Deferred marks a transient, retry-later hold (for example, a job is in
 	// flight on the pull-request branch). Unlike a block, runMergeGate parks the
 	// task in ready_to_merge so the daemon re-evaluates it on a later tick; a

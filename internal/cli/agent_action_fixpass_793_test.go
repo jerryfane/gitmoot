@@ -368,6 +368,21 @@ func TestPrepareLocalImplementFixPassRejections(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("awaiting human merge", func(t *testing.T) {
+		fixture := newFixPassFixture(t, workflow.TaskAwaitingHumanMerge)
+		installFixPassPullRequestClient(t, fixture.pullRequest())
+		_, _, err := prepareLocalImplementDispatchRequest(context.Background(), fixture.store, fixture.record, fixture.repo, localAgentDispatchRequest{
+			Home: fixture.home, Agent: fixture.owner, Action: "implement", Instructions: "retry", PullRequest: fixture.pullNumber, ImplementBase: "HEAD",
+		})
+		if err == nil || !strings.Contains(err.Error(), "awaiting a human merge decision") {
+			t.Fatalf("error = %v, want awaiting human merge refusal", err)
+		}
+		task, err := fixture.store.GetTask(context.Background(), fixture.task.ID)
+		if err != nil || task.State != string(workflow.TaskAwaitingHumanMerge) {
+			t.Fatalf("task after refusal = %+v, err=%v; want awaiting_human_merge", task, err)
+		}
+	})
 }
 
 func TestPrepareLocalImplementFixPassPreservesWorktreeSafetyChecks(t *testing.T) {

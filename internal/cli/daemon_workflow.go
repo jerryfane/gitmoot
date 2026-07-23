@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
+	"github.com/gitmoot/gitmoot/internal/cockpit"
 	"github.com/gitmoot/gitmoot/internal/config"
 	"github.com/gitmoot/gitmoot/internal/daemon"
 	"github.com/gitmoot/gitmoot/internal/db"
@@ -41,7 +43,7 @@ func daemonWorkflowEngine(store *db.Store, gh github.Client, checkout string, ho
 		RequireWorkflowPolicy:   requireWorkflowPolicyResolverRoot(home),
 		OrgPolicy:               orgPolicyResolverRoot(home),
 		ProduceCheckDir:         checkout,
-		MergeGate:               daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout, Home: home},
+		MergeGate:               newDaemonMergeGate(store, gh, checkout, home),
 		ImplementationFinalizer: daemonImplementationFinalizer{Store: store, GitHub: gh, FallbackCheckout: checkout},
 		// escalate_human (#340): @-tag the human on the tree's PR/issue when a leg
 		// pauses awaiting a decision. Best-effort and nil-safe in the engine; the
@@ -578,8 +580,17 @@ type daemonMergeGate struct {
 	GitHub           github.Client
 	FallbackCheckout string
 	// Home is the resolved <home>/.gitmoot root (or raw --home) used to load the
-	// [merge_gate] policy (#596). Empty => the off-by-default merge-gate behavior.
+	// [merge_gate] policy (#596). Empty uses the default mandatory review-and-CI
+	// merge gate.
 	Home string
+	Wake eventWakeClient
+}
+
+func newDaemonMergeGate(store *db.Store, gh github.Client, checkout, home string) daemonMergeGate {
+	return daemonMergeGate{
+		Store: store, GitHub: gh, FallbackCheckout: checkout, Home: home,
+		Wake: cockpit.New(cockpit.Options{HerdrBin: "herdr"}, nil),
+	}
 }
 
 func (g daemonMergeGate) Evaluate(ctx context.Context, request workflow.MergeRequest) (workflow.MergeDecision, error) {
@@ -589,25 +600,10 @@ func (g daemonMergeGate) Evaluate(ctx context.Context, request workflow.MergeReq
 			Reason: "native Gitmoot merge gate disabled by GITMOOT_DISABLE_NATIVE_MERGE_GATE; use external gate",
 		}, nil
 	}
-	checkout, err := mergeGateCheckout(ctx, g.Store, request.Repo, g.FallbackCheckout)
-	if err != nil {
-		return workflow.MergeDecision{}, err
-	}
-	gate := newDaemonPolicyMergeGate(g.Store, g.githubClient(checkout), checkout)
-	applyMergeGatePolicy(&gate, g.Home, request.Repo)
-	// This last-moment check minimizes but does not eliminate the enqueue-to-merge
-	// race: gate.Evaluate still performs review/CI reads before the squash merge, so
-	// a job enqueued in that window can escape the check. A branch-activity
-	// lease/barrier is the durable follow-up; until then, defer every job already in
-	// flight and leave the task ready_to_merge for the next daemon tick.
-	//
-	// PRECONDITION (self-defer safety): the job that DROVE this evaluation must
-	// already be terminal, or the gate would match it and defer forever. It holds
-	// on every path today — AdvanceJob runs only after the mailbox transitions the
-	// driving job to succeeded/failed/blocked, and the PR-watcher ready-to-merge
-	// path is a daemon tick, not a job — so ListActiveJobs (queued/running only)
-	// never sees the driver. Keep it that way: never call the gate from within a
-	// still-running job's own execution.
+	// Never make a merge-or-human decision while a job still owns this branch.
+	// This is a local store query, so preserving the #1017 hold does not weaken
+	// the default path's zero GitHub side effects. An explicit @gitmoot merge
+	// request bypasses only the auto_merge policy, not this branch-safety hold.
 	active, found, err := findActiveJobForBranch(ctx, g.Store, request.Repo, request.Branch)
 	if err != nil {
 		return workflow.MergeDecision{}, fmt.Errorf("inspect active jobs on merge branch: %w", err)
@@ -621,7 +617,150 @@ func (g daemonMergeGate) Evaluate(ctx context.Context, request workflow.MergeReq
 			BlockClass: workflow.MergeBlockTransient,
 		}, nil
 	}
-	return gate.Evaluate(ctx, request)
+	// Resolve the policy before looking up a checkout.
+	// The actual leave-open decision remains inside PolicyMergeGate.Evaluate, whose
+	// early return guarantees no GitHub/client side effects. A config flip races
+	// safely: a false observed here waits for the next poll, while a false observed
+	// again by the fully built gate below still parks before any merge operation.
+	policy, ok := resolvedMergeGatePolicy(g.Home, request.Repo)
+	if !ok {
+		if strings.TrimSpace(g.Home) != "" {
+			return (workflow.PolicyMergeGate{}).Evaluate(ctx, request)
+		}
+		policy = config.DefaultMergeGatePolicy()
+	}
+	if !policy.AutoMerge && !request.HumanMergeRequested {
+		return (workflow.PolicyMergeGate{}).Evaluate(ctx, request)
+	}
+	checkout, err := mergeGateCheckout(ctx, g.Store, request.Repo, g.FallbackCheckout)
+	if err != nil {
+		return workflow.MergeDecision{}, err
+	}
+	gate := newDaemonPolicyMergeGate(g.Store, g.githubClient(checkout), checkout)
+	applyResolvedMergeGatePolicy(&gate, policy)
+	// The check above minimizes but does not eliminate the enqueue-to-merge race:
+	// gate.Evaluate still performs review/CI reads before the squash merge, so a job
+	// enqueued in that window can escape the check. A branch-activity lease/barrier
+	// is the durable follow-up; until then, defer every job already in flight and
+	// leave the task ready_to_merge for the next daemon tick.
+	//
+	// PRECONDITION (self-defer safety): the job that DROVE this evaluation must
+	// already be terminal, or the gate would match it and defer forever. It holds
+	// on every path today — AdvanceJob runs only after the mailbox transitions the
+	// driving job to succeeded/failed/blocked, and the PR-watcher ready-to-merge
+	// path is a daemon tick, not a job — so ListActiveJobs (queued/running only)
+	// never sees the driver. Keep it that way: never call the gate from within a
+	// still-running job's own execution.
+	decision, err := gate.Evaluate(ctx, request)
+	if err != nil || !decision.EscalateMergeGateMiss {
+		return decision, err
+	}
+	if err := g.escalateMergeGateMiss(ctx, request, decision.Reason); err != nil {
+		return workflow.MergeDecision{}, err
+	}
+	return decision, nil
+}
+
+func (g daemonMergeGate) escalateMergeGateMiss(ctx context.Context, request workflow.MergeRequest, reason string) error {
+	label := strings.TrimSpace(request.WorkflowID)
+	if label == "" {
+		resolved, err := g.Store.WorkflowIDForPullRequest(ctx, request.Repo, request.PullRequest, request.Branch)
+		if err != nil {
+			return fmt.Errorf("resolve merge-gate escalation workflow: %w", err)
+		}
+		label = strings.TrimSpace(resolved)
+	}
+	if label == "" && strings.TrimSpace(request.TaskID) != "" {
+		task, err := g.Store.GetTask(ctx, request.TaskID)
+		if err == nil {
+			label = strings.TrimSpace(task.GoalID)
+		}
+	}
+	if label == "" {
+		label = "pr-" + strings.ReplaceAll(request.Repo, "/", "-") + "-" + fmt.Sprint(request.PullRequest)
+	}
+	cfg, _ := loadMergeGateOrgConfig(g.Home)
+	from := mergeGateEscalationFrom(cfg, request.Repo)
+	body := workflow.FormatOrgEscalateNote(from, "jarvis", label, reason)
+	if body == "" {
+		return errors.New("format merge-gate escalation note")
+	}
+	notes, err := g.Store.ListWorkflowNotes(ctx, label, 0)
+	if err != nil {
+		return err
+	}
+	for _, note := range notes {
+		if note.Body == body {
+			return nil
+		}
+	}
+	if _, err := g.Store.InsertWorkflowNote(ctx, db.WorkflowNote{
+		WorkflowID: label, Author: from, Body: body, Repo: request.Repo,
+	}); err != nil {
+		return fmt.Errorf("record merge-gate escalation: %w", err)
+	}
+	g.wakeMergeGateEscalation(ctx, cfg, request, reason)
+	return nil
+}
+
+func loadMergeGateOrgConfig(home string) (config.OrgConfig, bool) {
+	path := resolveConfigFile(home)
+	if path == "" {
+		return config.OrgConfig{}, false
+	}
+	cfg, err := config.LoadOrg(config.Paths{ConfigFile: path})
+	return cfg, err == nil
+}
+
+func mergeGateEscalationFrom(cfg config.OrgConfig, repo string) string {
+	best, bestDepth := "", -1
+	for _, role := range cfg.Roles() {
+		if config.ScopeMatches(role.Scope, repo) {
+			if depth := len(cfg.Path(role.Name)); depth > bestDepth {
+				best, bestDepth = role.Name, depth
+			}
+		}
+	}
+	if best != "" {
+		return best
+	}
+	parts := strings.Split(strings.TrimSpace(repo), "/")
+	if len(parts) == 2 && parts[1] != "" {
+		return parts[1]
+	}
+	return "gitmoot"
+}
+
+func (g daemonMergeGate) wakeMergeGateEscalation(ctx context.Context, cfg config.OrgConfig, request workflow.MergeRequest, reason string) {
+	if g.Wake == nil {
+		return
+	}
+	role, ok := cfg.Role("jarvis")
+	if !ok {
+		slog.Warn("merge-gate escalation wake skipped", "reason", "jarvis role is not configured")
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, eventRuleProbeTimeout)
+	available := g.Wake.Available(probeCtx)
+	cancel()
+	if !available {
+		return
+	}
+	pane, ok := config.ResolveRolePaneBinding(ctx, role.Pane, func(resolveCtx context.Context, label string) (string, bool) {
+		bounded, cancel := context.WithTimeout(resolveCtx, eventRuleProbeTimeout)
+		defer cancel()
+		return g.Wake.ResolvePaneByLabel(bounded, label)
+	})
+	if !ok {
+		return
+	}
+	prompt := fmt.Sprintf("Merge safety escalation for %s#%d: %s", request.Repo, request.PullRequest, reason)
+	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), eventRuleWakeTimeout)
+	defer cancel()
+	delivered, stalled, err := g.Wake.AgentPrompt(callCtx, pane, prompt, "")
+	if err != nil || stalled || !delivered {
+		slog.Warn("merge-gate escalation wake not delivered", "repo", request.Repo, "pull_request", request.PullRequest, "error", err)
+	}
 }
 
 func nativeMergeGateDisabled() bool {
