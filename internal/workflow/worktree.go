@@ -115,6 +115,9 @@ func (e Engine) AllocateTaskWorktree(ctx context.Context, request TaskWorktreeRe
 	if task.State == string(TaskDismissed) {
 		return db.Task{}, fmt.Errorf("task %s is dismissed; recover it explicitly before allocating a worktree", request.TaskID)
 	}
+	if task.State == string(TaskAwaitingHumanMerge) {
+		return db.Task{}, fmt.Errorf("task %s is awaiting a human merge decision; resolve it before allocating a worktree", request.TaskID)
+	}
 	if strings.TrimSpace(task.RepoFullName) != "" && task.RepoFullName != request.Repo {
 		return db.Task{}, fmt.Errorf("task %s belongs to repo %s, not %s", request.TaskID, task.RepoFullName, request.Repo)
 	}

@@ -17,6 +17,10 @@ func applyMergeGatePolicy(gate *workflow.PolicyMergeGate, home string, repo stri
 	if !ok {
 		return
 	}
+	applyResolvedMergeGatePolicy(gate, policy)
+}
+
+func applyResolvedMergeGatePolicy(gate *workflow.PolicyMergeGate, policy config.MergeGatePolicy) {
 	gate.AutoMerge = policy.AutoMerge
 	gate.RequireExternalCI = policy.RequireExternalCI
 	gate.MinCIWait = policy.MinCIWait

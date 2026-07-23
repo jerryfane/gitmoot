@@ -620,7 +620,9 @@ func (g daemonMergeGate) Evaluate(ctx context.Context, request workflow.MergeReq
 		return workflow.MergeDecision{}, err
 	}
 	gate := newDaemonPolicyMergeGate(g.Store, g.githubClient(checkout), checkout)
-	applyMergeGatePolicy(&gate, g.Home, request.Repo)
+	if ok {
+		applyResolvedMergeGatePolicy(&gate, policy)
+	}
 	// The check above minimizes but does not eliminate the enqueue-to-merge race:
 	// gate.Evaluate still performs review/CI reads before the squash merge, so a job
 	// enqueued in that window can escape the check. A branch-activity lease/barrier

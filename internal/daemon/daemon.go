@@ -116,11 +116,10 @@ func (d Daemon) PollOnce(ctx context.Context) error {
 	if err := d.validate(); err != nil {
 		return err
 	}
-	if err := d.rearmAutoMergeDisabledTasks(ctx); err != nil {
-		return err
-	}
-
 	var firstErr error
+	if err := d.rearmAutoMergeDisabledTasks(ctx); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	pulls, err := d.GitHub.ListPullRequests(ctx, d.Repo, "open")
 	if err != nil {
 		return err

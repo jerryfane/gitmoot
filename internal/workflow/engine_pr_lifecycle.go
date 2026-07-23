@@ -313,7 +313,7 @@ func (e Engine) HandleReviewPullRequestClosed(ctx context.Context, event PullReq
 				return err
 			}
 		} else {
-			changed, _, err := e.Store.TransitionTaskStateWithEvent(ctx, task.ID,
+			changed, observedState, _, err := e.Store.TransitionTaskStateWithEventObserved(ctx, task.ID,
 				[]string{string(TaskPullRequestOpen), string(TaskReviewing), string(TaskChangesRequested), string(TaskAwaitingHumanMerge)},
 				string(TaskBlocked), "pr_closed_unmerged", "pull request closed without merging")
 			if err != nil {
@@ -324,6 +324,7 @@ func (e Engine) HandleReviewPullRequestClosed(ctx context.Context, event PullReq
 				// do not let this stale close observation rewrite the PR mirror.
 				return nil
 			}
+			taskState = TaskState(observedState)
 		}
 	}
 	pr := db.PullRequest{

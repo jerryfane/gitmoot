@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gitmoot/gitmoot/internal/db"
 	"github.com/gitmoot/gitmoot/internal/workflow"
@@ -19,10 +20,16 @@ func (d Daemon) rearmAutoMergeDisabledTasks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var firstErr error
 	for _, task := range tasks {
 		events, err := d.Store.ListTaskEvents(ctx, task.ID)
 		if err != nil {
-			return err
+			err = fmt.Errorf("read auto-merge park events for task %s: %w", task.ID, err)
+			d.logf("auto-merge re-arm skipped for task %s: %v", task.ID, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if !autoMergeDisabledParked(events) {
 			continue
@@ -30,10 +37,14 @@ func (d Daemon) rearmAutoMergeDisabledTasks(ctx context.Context) error {
 		if _, _, err := d.Store.TransitionTaskStateWithEvent(ctx, task.ID,
 			[]string{string(workflow.TaskAwaitingHumanMerge)}, string(workflow.TaskReadyToMerge),
 			"task_awaiting_human_merge_rearmed", "native auto-merge enabled"); err != nil {
-			return err
+			err = fmt.Errorf("re-arm task %s: %w", task.ID, err)
+			d.logf("auto-merge re-arm skipped for task %s: %v", task.ID, err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func autoMergeDisabledParked(events []db.TaskEvent) bool {
