@@ -12,7 +12,7 @@ import (
 	"github.com/gitmoot/gitmoot/internal/workflow"
 )
 
-func TestApplyMergeGatePolicyOffByDefault(t *testing.T) {
+func TestApplyMergeGatePolicyEnabledByDefault(t *testing.T) {
 	home := t.TempDir()
 	paths := config.PathsForHome(home)
 	if err := config.Initialize(paths); err != nil {
@@ -24,8 +24,8 @@ func TestApplyMergeGatePolicyOffByDefault(t *testing.T) {
 	if gate.RequireExternalCI {
 		t.Fatalf("RequireExternalCI = true, want off by default")
 	}
-	if gate.AutoMerge {
-		t.Fatalf("AutoMerge = true, want false by default")
+	if !gate.AutoMerge {
+		t.Fatalf("AutoMerge = false, want true by default")
 	}
 	if gate.MinCIWait != config.DefaultMinCIWait {
 		t.Fatalf("MinCIWait = %v, want default %v", gate.MinCIWait, config.DefaultMinCIWait)
@@ -132,16 +132,16 @@ func TestAutoMergeEnabledResolverRereadsConfig(t *testing.T) {
 		t.Fatalf("Initialize: %v", err)
 	}
 	resolver := autoMergeEnabledResolver(paths.Home)
-	if resolver("owner/repo") {
-		t.Fatal("default auto_merge resolved true")
+	if !resolver("owner/repo") {
+		t.Fatal("default auto_merge resolved false")
 	}
 	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+`
 [repos."owner/repo".merge_gate]
-auto_merge = true
+auto_merge = false
 `), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if !resolver("owner/repo") {
-		t.Fatal("resolver did not observe auto_merge config flip")
+	if resolver("owner/repo") {
+		t.Fatal("resolver did not observe auto_merge kill-switch")
 	}
 }

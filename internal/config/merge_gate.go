@@ -8,53 +8,35 @@ import (
 	"time"
 )
 
-// DefaultMinCIWait is the grace window the merge gate waits between two
-// consecutive zero-external-CI observations at the same head before it concludes
-// a repo has no CI (#596). It is deliberately a few GitHub-Actions run-creation
-// latencies wide: the observed live race (issue #596) hit a ~4s window, so 60s
-// leaves comfortable margin while a genuinely CI-less repo merges only one grace
-// window later.
+// DefaultMinCIWait is retained for compatibility with existing merge_gate
+// configuration. The mandatory native merge gate never treats zero external CI
+// as green.
 const DefaultMinCIWait = 60 * time.Second
 
-// DefaultMaxCIWait is the upper bound the merge gate waits when `.github/workflows/`
-// exists at the head but no external check ever appears (#596, layer 2). Past this
-// window with the head unchanged and still zero external CI, the gate concludes
-// no-CI and stamps the synthetic gitmoot/ci success instead of staying pending
-// forever, so a PR whose workflows never trigger for it (docs-only under paths
-// filters, tag-only / workflow_dispatch-only workflows, or a non-targeted branch)
-// still merges. It is wide (GitHub Actions creates a check-run within seconds) yet
-// finite to restore liveness.
+// DefaultMaxCIWait is retained for compatibility with existing merge_gate
+// configuration. The mandatory native merge gate never treats zero external CI
+// as green.
 const DefaultMaxCIWait = 10 * time.Minute
 
-// MergeGatePolicy is the resolved merge-gate behavior for a repo. Native task
-// auto-merge defaults off; when explicitly enabled, the historical no-CI handling
-// still applies with its grace window and require_external_ci defaults false.
+// MergeGatePolicy is the resolved merge-gate behavior for a repo.
 type MergeGatePolicy struct {
-	// AutoMerge permits Gitmoot's native task merge gate to merge an approved PR.
-	// It defaults false: leave the PR open for a human unless this is explicitly
-	// enabled globally or for the repository.
+	// AutoMerge permits Gitmoot's native task merge gate to merge a PR that has
+	// an exact-head approval and green SHA-scoped CI. It defaults true; false is
+	// an explicit operator kill-switch.
 	AutoMerge bool
-	// RequireExternalCI, when true, HARD-BLOCKS a merge whose head reports zero
-	// external CI (no external commit-statuses AND no check-runs) instead of ever
-	// stamping the synthetic gitmoot/ci success. Use it for repos the operator
-	// knows always have CI. Default false.
+	// RequireExternalCI is retained for config compatibility. Exact-head external
+	// CI is mandatory for native auto-merge regardless of this legacy value.
 	RequireExternalCI bool
-	// MinCIWait is the grace window between the first and second zero-external
-	// observation at the same head before the gate concludes no-CI. Default
-	// DefaultMinCIWait (60s).
+	// MinCIWait is retained for config compatibility. Default DefaultMinCIWait.
 	MinCIWait time.Duration
-	// MaxCIWait is the upper bound the gate waits when `.github/workflows/` exists at
-	// the head but no external check appears (#596, layer 2). Past it the gate
-	// concludes no-CI instead of staying pending forever. Default DefaultMaxCIWait
-	// (10m).
+	// MaxCIWait is retained for config compatibility. Default DefaultMaxCIWait.
 	MaxCIWait time.Duration
 }
 
-// DefaultMergeGatePolicy leaves native task PRs open for human merge. If an
-// operator opts in, no external CI is not required and the no-CI conclusion is
-// deferred by the default grace window (and bounded by the default max window).
+// DefaultMergeGatePolicy permits native task merges only through the mandatory
+// exact-head review and SHA-scoped CI gate.
 func DefaultMergeGatePolicy() MergeGatePolicy {
-	return MergeGatePolicy{AutoMerge: false, RequireExternalCI: false, MinCIWait: DefaultMinCIWait, MaxCIWait: DefaultMaxCIWait}
+	return MergeGatePolicy{AutoMerge: true, RequireExternalCI: false, MinCIWait: DefaultMinCIWait, MaxCIWait: DefaultMaxCIWait}
 }
 
 // MergeGateConfig is the parsed [merge_gate] configuration: a global default plus
@@ -108,8 +90,7 @@ func (c MergeGateConfig) For(repo string) MergeGatePolicy {
 
 // LoadMergeGatePolicy parses the [merge_gate] section (global) and every
 // [repos."owner/repo".merge_gate] section (per-repo override) from the config
-// file. It is safe by default: a config with neither section leaves every native
-// task PR open for a human merge.
+// file. A config with neither section uses the mandatory review-and-CI gate.
 //
 // It reuses the same naive line-scanner shape as LoadRepoConcurrency /
 // LoadAdmissionPolicy. Unrelated sections are ignored.

@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-func TestDefaultMergeGatePolicyOff(t *testing.T) {
+func TestDefaultMergeGatePolicyUsesMandatoryGate(t *testing.T) {
 	policy := DefaultMergeGatePolicy()
 	if policy.RequireExternalCI {
 		t.Fatalf("default require_external_ci = true, want false (off)")
 	}
-	if policy.AutoMerge {
-		t.Fatalf("default auto_merge = true, want false")
+	if !policy.AutoMerge {
+		t.Fatalf("default auto_merge = false, want true")
 	}
 	if policy.MinCIWait != DefaultMinCIWait {
 		t.Fatalf("default MinCIWait = %v, want %v", policy.MinCIWait, DefaultMinCIWait)

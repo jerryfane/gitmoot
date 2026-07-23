@@ -520,12 +520,12 @@ If a job is not eligible, Gitmoot keeps the old queue/wait behavior.
 8. Let the PR converge.
 
    Agents review, request fixes, and rerun work through comments and job output.
-   When required reviews are approved and the branch is ready, Gitmoot leaves the
-   PR open for a human merge by default. Set `[merge_gate] auto_merge = true`
-   globally or under `[repos."owner/repo".merge_gate]` to opt the repository into
-   daemon merges. With that explicit opt-in, the merge gate
-   checks the current PR head, local worktree cleanliness, branch freshness,
-   Gitmoot statuses, external CI if present, and mergeability. Final merge work
+   Native task auto-merge is enabled by default, but only with an approved review
+   verdict for the exact current head SHA and green SHA-scoped commit statuses
+   and check-runs. A miss leaves the PR open, records an org escalation, and wakes
+   `jarvis`. Set `[merge_gate] auto_merge = false` globally or per repository as
+   an explicit kill-switch. The merge gate also checks local worktree cleanliness,
+   branch freshness, and mergeability. Final merge work
    is serialized per repository base branch. Before the policy gate can issue
    its squash-merge-and-delete request, the daemon checks the PR branch for any
    queued or running job of any type (`ask`, `review`, or `implement`). It returns
@@ -539,21 +539,23 @@ If a job is not eligible, Gitmoot keeps the old queue/wait behavior.
    When a head reports **no** external CI at all (zero commit-statuses and zero
    check-runs), Gitmoot does not conclude "this repo has no CI" from a single
    observation — GitHub Actions creates a check-run a few seconds after a push,
-   so the gate stays **pending** and only stamps the synthetic `gitmoot/ci`
-   success after a second consecutive zero-external observation at the same head,
-   at least `[merge_gate] min_ci_wait` (default `60s`) later. When
-   `.github/workflows/` exists at the head tree it instead waits up to
-   `[merge_gate] max_ci_wait` (default `10m`) for a check to appear, then concludes
-   no-CI so a PR whose workflows never trigger for it still merges rather than
-   wedging forever. Set `[merge_gate] require_external_ci = true` (global or
-   per-repo) to hard-block an empty gate once that window elapses instead of ever
-   stamping `gitmoot/ci` (see
+   so the gate stays **pending** (a non-escalating, automatically-retried hold)
+   and only stamps the synthetic `gitmoot/ci` success after a second consecutive
+   zero-external observation at the same head, at least `[merge_gate] min_ci_wait`
+   (default `60s`) later. When `.github/workflows/` exists at the head tree it
+   instead waits up to `[merge_gate] max_ci_wait` (default `10m`) for a check to
+   appear, then concludes no-CI so a PR whose workflows never trigger for it still
+   qualifies rather than wedging forever. Set `[merge_gate] require_external_ci =
+   true` (global or per-repo) to leave an empty gate open with an escalation once
+   that window elapses instead of ever stamping `gitmoot/ci` (see
    [`skills/gitmoot/references/SAFETY.md`](../skills/gitmoot/references/SAFETY.md)).
+   A check or status that reports genuine failure (not merely absent) always
+   leaves the PR open with an escalation.
 
 9. Merge and continue.
 
-   A human GitHub merge is reconciled automatically. With `auto_merge = true`,
-   Gitmoot instead merges with a squash merge guarded by the current head SHA.
+   A human GitHub merge is reconciled automatically. When the mandatory gate
+   passes, Gitmoot merges with a squash merge guarded by the current head SHA.
    After merge it records the merged commit, releases the branch lock, removes
    the task worktree when one is recorded, updates the local base branch, and can
    enqueue the next task once the task queueing policy selects it. If worktree

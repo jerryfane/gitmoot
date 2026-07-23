@@ -21,7 +21,7 @@ func TestRearmAutoMergeDisabledTasksOnlyOnceAndOnlyForPolicyReason(t *testing.T)
 			t.Fatalf("UpsertTask(%s): %v", task.ID, err)
 		}
 	}
-	if err := store.AddTaskEvent(ctx, db.TaskEvent{TaskID: "policy-parked", Kind: "task_awaiting_human_merge", ToState: string(workflow.TaskAwaitingHumanMerge), Reason: workflow.MergeLeaveOpenAutoMergeDisabledReason}); err != nil {
+	if err := store.AddTaskEvent(ctx, db.TaskEvent{TaskID: "policy-parked", Kind: "task_awaiting_human_merge", ToState: string(workflow.TaskAwaitingHumanMerge), Reason: workflow.MergeLeaveOpenAutoMergeKillSwitchReason}); err != nil {
 		t.Fatalf("AddTaskEvent policy: %v", err)
 	}
 	if err := store.AddTaskEvent(ctx, db.TaskEvent{TaskID: "other-parked", Kind: "task_awaiting_human_merge", ToState: string(workflow.TaskAwaitingHumanMerge), Reason: "branch protection requires human merge"}); err != nil {

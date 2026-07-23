@@ -1796,10 +1796,12 @@ disables it (a negative value is rejected). Unlike `[orchestrate].escalation_ttl
 (which auto-finalizes a whole paused delegation *tree* and is on by default, 24h),
 `blocked_ttl` dismisses a *single* blocked job and is off by default.
 
-Native task PRs are left open by default. Opt a repository into daemon merges
-with `[repos."owner/repo".merge_gate] auto_merge = true`; otherwise the task is
-shown as `awaiting_human_merge` until a human merges it or sends an authorized
-`@gitmoot merge` command. Pipeline `allow_auto_merge` is independent.
+Native task auto-merge is enabled by default only behind an exact-head approved
+review and green SHA-scoped commit statuses/check-runs. A gate miss parks the
+task as `awaiting_human_merge`, records an org escalation, and wakes `jarvis`.
+Set `[repos."owner/repo".merge_gate] auto_merge = false` as an explicit
+kill-switch; that deliberate hold does not escalate. Pipeline `allow_auto_merge`
+is independent, and an authorized `@gitmoot merge` remains an explicit override.
 
 Merge-gate retries are automatic while the daemon is running. Retryable states,
 such as a busy base-branch merge queue or a GitHub branch update in progress,

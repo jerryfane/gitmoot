@@ -53,7 +53,7 @@ func autoMergeDisabledParked(events []db.TaskEvent) bool {
 		if event.ToState != string(workflow.TaskAwaitingHumanMerge) {
 			continue
 		}
-		return event.Reason == workflow.MergeLeaveOpenAutoMergeDisabledReason
+		return event.Reason == workflow.MergeLeaveOpenAutoMergeKillSwitchReason
 	}
 	return false
 }

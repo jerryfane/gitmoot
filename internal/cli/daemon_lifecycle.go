@@ -377,7 +377,7 @@ func runDaemonRun(args []string, stdout, stderr io.Writer) int {
 			// Resolve [merge_gate] inside daemonMergeGate for every evaluation so a
 			// live auto_merge flip both re-arms parked tasks and changes their next
 			// gate decision without a daemon restart.
-			MergeGate: daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout, Home: resolvedHome},
+			MergeGate: newDaemonMergeGate(store, gh, checkout, resolvedHome),
 			// Registry default model/effort fallbacks, home-aware and fail-open — see
 			// daemonWorkflowEngine. Empty by default => byte-identical.
 			RuntimeDefaultModel:  runtimeDefaultModelResolver(*home),

@@ -2777,6 +2777,10 @@ func (f *fakeGitHub) ListPullRequestChecks(context.Context, github.Repository, i
 	return nil, errors.New("not implemented")
 }
 
+func (f *fakeGitHub) ListCheckRunsForRef(context.Context, github.Repository, string) ([]github.PullRequestCheck, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (f *fakeGitHub) CreateCommitStatus(context.Context, github.CommitStatusInput) (github.CommitStatus, error) {
 	return github.CommitStatus{}, errors.New("not implemented")
 }

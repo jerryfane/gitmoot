@@ -239,6 +239,7 @@ type MergeRequest struct {
 	PullRequest    int
 	HeadSHA        string
 	TaskID         string
+	WorkflowID     string
 	Reviewer       string
 	ReviewOptional bool
 	// HumanMergeRequested is an explicit, authorized human instruction. It is
@@ -255,6 +256,9 @@ type MergeDecision struct {
 	// deliberately left for a human action. It is distinct from Deferred, which
 	// must be retried automatically, and from a blocked quality/process failure.
 	LeaveOpen bool
+	// EscalateMergeGateMiss asks the daemon-facing adapter to journal and wake
+	// the safety escalation. It is false for deliberate operator kill-switches.
+	EscalateMergeGateMiss bool
 	// Deferred marks a transient, retry-later hold (for example, a job is in
 	// flight on the pull-request branch). Unlike a block, runMergeGate parks the
 	// task in ready_to_merge so the daemon re-evaluates it on a later tick; a

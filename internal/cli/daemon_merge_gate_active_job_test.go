@@ -36,6 +36,10 @@ func (f *activeJobMergeGateGitHub) ListPullRequestChecks(context.Context, github
 	return []github.PullRequestCheck{{Name: "build", State: "SUCCESS", Bucket: "pass"}}, nil
 }
 
+func (f *activeJobMergeGateGitHub) ListCheckRunsForRef(context.Context, github.Repository, string) ([]github.PullRequestCheck, error) {
+	return []github.PullRequestCheck{{Name: "build", State: "SUCCESS", Bucket: "pass"}}, nil
+}
+
 func (f *activeJobMergeGateGitHub) CreateCommitStatus(_ context.Context, input github.CommitStatusInput) (github.CommitStatus, error) {
 	f.statuses = append(f.statuses, input)
 	return github.CommitStatus{State: input.State, Context: input.Context}, nil
@@ -88,15 +92,12 @@ func TestDaemonMergeGateHoldsHumanMergeRequestWhileJobActiveOnBranch(t *testing.
 	}
 }
 
-func TestDaemonMergeGateWithoutActiveBranchJobPreservesMergePath(t *testing.T) {
+func TestDaemonMergeGateDefaultPreservesMergePathWhenMandatoryGatePasses(t *testing.T) {
 	store, checkout, gh, request := daemonMergeGateActiveJobFixture(t)
 	home := t.TempDir()
 	paths := config.PathsForHome(home)
 	if err := config.Initialize(paths); err != nil {
 		t.Fatalf("Initialize config: %v", err)
-	}
-	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+"\n[merge_gate]\nauto_merge = true\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile config: %v", err)
 	}
 
 	decision, err := (daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout, Home: paths.Home}).Evaluate(context.Background(), request)
@@ -109,6 +110,77 @@ func TestDaemonMergeGateWithoutActiveBranchJobPreservesMergePath(t *testing.T) {
 	if len(gh.mergeInputs) != 1 || gh.mergeInputs[0].Method != "squash" || gh.mergeInputs[0].Number != 17 ||
 		!gh.mergeInputs[0].DeleteBranch || gh.mergeInputs[0].MatchHeadCommit != "head123" {
 		t.Fatalf("merge inputs = %+v, want one unchanged squash/delete request", gh.mergeInputs)
+	}
+}
+
+func TestDaemonMergeGateMissingReviewEscalatesToJarvisOnce(t *testing.T) {
+	store, checkout, gh, request := daemonMergeGateActiveJobFixture(t, false)
+	request.WorkflowID = "goal-1017"
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatal(err)
+	}
+	content := config.DefaultConfig(paths) + `
+[org.roles."owner"]
+scope = ["*"]
+[org.roles."jarvis"]
+parent = "owner"
+scope = ["*"]
+pane = "w1:p1"
+[org.roles."worker"]
+parent = "jarvis"
+scope = ["owner/repo"]
+`
+	if err := os.WriteFile(paths.ConfigFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.LoadOrg(paths); err != nil {
+		t.Fatalf("LoadOrg: %v", err)
+	}
+	wake := &fakeEventWake{}
+	gate := daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout, Home: paths.Home, Wake: wake}
+	for attempt := 0; attempt < 2; attempt++ {
+		decision, err := gate.Evaluate(context.Background(), request)
+		if err != nil {
+			t.Fatalf("Evaluate attempt %d: %v", attempt+1, err)
+		}
+		if !decision.LeaveOpen || !decision.EscalateMergeGateMiss || !strings.Contains(decision.Reason, "final agent review is not captured") {
+			t.Fatalf("decision = %+v", decision)
+		}
+	}
+	notes, err := store.ListWorkflowNotes(context.Background(), request.WorkflowID, 0)
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("notes = %+v, err=%v; want one escalation", notes, err)
+	}
+	from, to, wf, question, ok := workflow.ParseOrgEscalateNote(notes[0].Body)
+	if !ok || from != "worker" || to != "jarvis" || wf != request.WorkflowID || !strings.Contains(question, "final agent review is not captured") {
+		t.Fatalf("escalation = from=%q to=%q wf=%q question=%q ok=%v", from, to, wf, question, ok)
+	}
+	if wake.promptCalls != 1 || wake.pane != "w1:p1" || !strings.Contains(wake.prompt, question) {
+		t.Fatalf("wake = calls=%d pane=%q prompt=%q", wake.promptCalls, wake.pane, wake.prompt)
+	}
+}
+
+func TestDaemonMergeGateKillSwitchDoesNotEscalate(t *testing.T) {
+	store, checkout, gh, request := daemonMergeGateActiveJobFixture(t, false)
+	request.WorkflowID = "goal-1017"
+	home := t.TempDir()
+	paths := config.PathsForHome(home)
+	if err := config.Initialize(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(config.DefaultConfig(paths)+"\n[merge_gate]\nauto_merge = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wake := &fakeEventWake{}
+	decision, err := (daemonMergeGate{Store: store, GitHub: gh, FallbackCheckout: checkout, Home: paths.Home, Wake: wake}).Evaluate(context.Background(), request)
+	if err != nil || !decision.LeaveOpen || decision.EscalateMergeGateMiss {
+		t.Fatalf("decision = %+v, err=%v", decision, err)
+	}
+	notes, err := store.ListWorkflowNotes(context.Background(), request.WorkflowID, 0)
+	if err != nil || len(notes) != 0 || wake.promptCalls != 0 {
+		t.Fatalf("notes=%+v wake_calls=%d err=%v", notes, wake.promptCalls, err)
 	}
 }
 
@@ -157,7 +229,7 @@ func TestFindActiveImplementJobForTaskStillIgnoresOtherActiveTypes(t *testing.T)
 	}
 }
 
-func daemonMergeGateActiveJobFixture(t *testing.T) (*db.Store, string, *activeJobMergeGateGitHub, workflow.MergeRequest) {
+func daemonMergeGateActiveJobFixture(t *testing.T, seedReview ...bool) (*db.Store, string, *activeJobMergeGateGitHub, workflow.MergeRequest) {
 	t.Helper()
 	t.Setenv("GITMOOT_DISABLE_NATIVE_MERGE_GATE", "")
 	ctx := context.Background()
@@ -176,12 +248,14 @@ func daemonMergeGateActiveJobFixture(t *testing.T) (*db.Store, string, *activeJo
 	}); err != nil {
 		t.Fatalf("UpsertPullRequest: %v", err)
 	}
-	seedDaemonMergeGateJob(t, store, db.Job{
-		ID: "review-approved", Agent: "reviewer", Type: "review", State: string(workflow.JobSucceeded),
-	}, workflow.JobPayload{
-		Repo: "owner/repo", Branch: "fix-round", PullRequest: 17, HeadSHA: "head123", TaskID: "task-1017",
-		ReviewRound: "review-2", Result: &workflow.AgentResult{Decision: "approved", Summary: "ready"},
-	})
+	if len(seedReview) == 0 || seedReview[0] {
+		seedDaemonMergeGateJob(t, store, db.Job{
+			ID: "review-approved", Agent: "reviewer", Type: "review", State: string(workflow.JobSucceeded),
+		}, workflow.JobPayload{
+			Repo: "owner/repo", Branch: "fix-round", PullRequest: 17, HeadSHA: "head123", TaskID: "task-1017",
+			ReviewRound: "review-2", Result: &workflow.AgentResult{Decision: "approved", Summary: "ready"},
+		})
+	}
 	mergeable := true
 	gh := &activeJobMergeGateGitHub{pr: github.PullRequest{
 		Number: 17, Title: "Fix round", State: "open", URL: "https://github.com/owner/repo/pull/17",

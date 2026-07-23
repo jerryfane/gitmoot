@@ -71,6 +71,9 @@ func TestPolicyMergeGateMergesPassingPullRequest(t *testing.T) {
 	if len(gh.merges) != 1 || gh.merges[0].Method != "squash" || gh.merges[0].MatchHeadCommit != "head123" || !gh.merges[0].DeleteBranch {
 		t.Fatalf("merge inputs = %+v", gh.merges)
 	}
+	if gh.prCheckCalls != 0 || len(gh.checkRefs) != 1 || gh.checkRefs[0] != "head123" {
+		t.Fatalf("check calls = pr:%d refs:%v; want only exact-head check-runs", gh.prCheckCalls, gh.checkRefs)
+	}
 	// A PR with a passing external check merges through the gate WITHOUT the
 	// synthetic gitmoot/ci no-CI stamp (#596: that stamp is only for genuinely
 	// CI-less heads, and only after the grace window).
@@ -121,7 +124,7 @@ func TestPolicyMergeGateMergesPassingPullRequest(t *testing.T) {
 	}
 }
 
-func TestPolicyMergeGateDefaultLeavesOpenWithoutGitHubCalls(t *testing.T) {
+func TestPolicyMergeGateExplicitKillSwitchLeavesOpenWithoutGitHubCalls(t *testing.T) {
 	ctx := context.Background()
 	gh := &fakeMergeGateGitHub{}
 	gate := PolicyMergeGate{GitHub: gh, Git: &fakeMergeGateGit{clean: true}}
@@ -131,16 +134,16 @@ func TestPolicyMergeGateDefaultLeavesOpenWithoutGitHubCalls(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Evaluate attempt %d: %v", attempt+1, err)
 		}
-		if !decision.LeaveOpen || decision.Ready || decision.Merged || decision.Deferred || decision.Reason != MergeLeaveOpenAutoMergeDisabledReason {
+		if !decision.LeaveOpen || decision.Ready || decision.Merged || decision.Deferred || decision.Reason != MergeLeaveOpenAutoMergeKillSwitchReason {
 			t.Fatalf("decision attempt %d = %+v", attempt+1, decision)
 		}
 	}
 	if gh.getCalls != 0 || gh.statusCalls != 0 || gh.compareCalls != 0 || gh.checkCalls != 0 || len(gh.statuses) != 0 || len(gh.merges) != 0 {
-		t.Fatalf("default auto_merge=false touched GitHub: %+v", gh)
+		t.Fatalf("explicit auto_merge=false touched GitHub: %+v", gh)
 	}
 }
 
-func TestRunMergeGateDefaultParksReviewedAndUnreviewedTasks(t *testing.T) {
+func TestRunMergeGateExplicitKillSwitchParksReviewedAndUnreviewedTasks(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
 	gh := &fakeMergeGateGitHub{}
@@ -170,7 +173,7 @@ func TestRunMergeGateDefaultParksReviewedAndUnreviewedTasks(t *testing.T) {
 				if err != nil {
 					t.Fatalf("runMergeGate attempt %d: %v", attempt+1, err)
 				}
-				if !decision.LeaveOpen || decision.Reason != MergeLeaveOpenAutoMergeDisabledReason {
+				if !decision.LeaveOpen || decision.Reason != MergeLeaveOpenAutoMergeKillSwitchReason {
 					t.Fatalf("decision attempt %d = %+v", attempt+1, decision)
 				}
 			}
@@ -179,13 +182,50 @@ func TestRunMergeGateDefaultParksReviewedAndUnreviewedTasks(t *testing.T) {
 				t.Fatalf("task = %+v, err=%v; want awaiting_human_merge", task, err)
 			}
 			events, err := store.ListTaskEvents(ctx, tc.taskID)
-			if err != nil || len(events) != 1 || events[0].Kind != "task_awaiting_human_merge" || events[0].Reason != MergeLeaveOpenAutoMergeDisabledReason {
+			if err != nil || len(events) != 1 || events[0].Kind != "task_awaiting_human_merge" || events[0].Reason != MergeLeaveOpenAutoMergeKillSwitchReason {
 				t.Fatalf("events = %+v, err=%v", events, err)
 			}
 		})
 	}
 	if gh.getCalls != 0 || gh.statusCalls != 0 || gh.compareCalls != 0 || gh.checkCalls != 0 || len(gh.statuses) != 0 || len(gh.merges) != 0 {
-		t.Fatalf("default task gate touched GitHub across repeated evaluations: %+v", gh)
+		t.Fatalf("kill-switch task gate touched GitHub across repeated evaluations: %+v", gh)
+	}
+}
+
+func TestPolicyMergeGateHumanRequestBypassesKillSwitchAndMandatoryGate(t *testing.T) {
+	ctx := context.Background()
+	store := openEngineStore(t)
+	mergeable := true
+	gh := &fakeMergeGateGitHub{
+		pr: github.PullRequest{
+			Number: 9, State: "open", HeadRef: "task-9", BaseRef: "main",
+			HeadSHA: "head123", Mergeable: &mergeable,
+		},
+		mergeResult: github.MergeResult{Merged: true, SHA: "merge123"},
+		noChecks:    true,
+	}
+	gate := PolicyMergeGate{
+		AutoMerge: false,
+		Store:     store,
+		GitHub:    gh,
+		Git:       &fakeMergeGateGit{clean: true},
+	}
+
+	decision, err := gate.Evaluate(ctx, MergeRequest{
+		Repo: "gitmoot/gitmoot", PullRequest: 9, TaskID: "task-9",
+		HumanMergeRequested: true,
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if !decision.Merged || decision.LeaveOpen || decision.EscalateMergeGateMiss {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if gh.statusCalls != 0 || gh.checkCalls != 0 {
+		t.Fatalf("human override evaluated mandatory review/CI gate: status=%d checks=%d", gh.statusCalls, gh.checkCalls)
+	}
+	if len(gh.merges) != 1 || gh.merges[0].MatchHeadCommit != "head123" {
+		t.Fatalf("merge calls = %+v", gh.merges)
 	}
 }
 
@@ -537,6 +577,10 @@ func TestPolicyMergeGateDoesNotRecordPreMergeSyntheticSHA(t *testing.T) {
 func TestPolicyMergeGateBlocksDirtyWorktree(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
+	insertCompletedJob(t, store, db.Job{ID: "review-job", Agent: "audit", Type: "review"}, JobPayload{
+		Repo: "gitmoot/gitmoot", PullRequest: 9, HeadSHA: "head123", TaskID: "task-9",
+		ReviewRound: "review-1", Result: &AgentResult{Decision: "approved"},
+	})
 	gh := &fakeMergeGateGitHub{pr: github.PullRequest{Number: 9, HeadRef: "task-9", BaseRef: "main", HeadSHA: "head123"}}
 	gate := PolicyMergeGate{AutoMerge: true, Store: store, GitHub: gh, Git: &fakeMergeGateGit{clean: false}}
 
@@ -621,11 +665,8 @@ func TestPolicyMergeGateTruncatesLongStatusDescriptions(t *testing.T) {
 	if decision.Ready {
 		t.Fatalf("decision = %+v", decision)
 	}
-	if len(gh.statuses) != 1 {
-		t.Fatalf("statuses = %+v", gh.statuses)
-	}
-	if got := len([]rune(gh.statuses[0].Description)); got > 140 {
-		t.Fatalf("status description length = %d, want <= 140: %q", got, gh.statuses[0].Description)
+	if !decision.LeaveOpen || !strings.Contains(decision.Reason, "not successful") {
+		t.Fatalf("decision = %+v, want informative leave-open gate miss", decision)
 	}
 }
 
@@ -888,7 +929,7 @@ func TestPolicyMergeGateKeepsQueuedMergePending(t *testing.T) {
 	}
 }
 
-func TestPolicyMergeGateAllowsReviewOptionalPullRequest(t *testing.T) {
+func TestPolicyMergeGateReviewOptionalDoesNotBypassMandatoryReview(t *testing.T) {
 	ctx := context.Background()
 	store := openEngineStore(t)
 	mergeable := true
@@ -904,11 +945,11 @@ func TestPolicyMergeGateAllowsReviewOptionalPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate returned error: %v", err)
 	}
-	if !decision.Merged {
-		t.Fatalf("decision = %+v", decision)
+	if !decision.LeaveOpen || !decision.EscalateMergeGateMiss || !strings.Contains(decision.Reason, "final agent review is not captured") {
+		t.Fatalf("decision = %+v, want mandatory review gate miss", decision)
 	}
-	if len(gh.merges) != 1 {
-		t.Fatalf("merge inputs = %+v", gh.merges)
+	if len(gh.merges) != 0 {
+		t.Fatalf("merge inputs = %+v, want none", gh.merges)
 	}
 }
 
@@ -1039,8 +1080,11 @@ func TestPolicyMergeGateBlocksReviewForStaleHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate returned error: %v", err)
 	}
-	if decision.Ready || !strings.Contains(decision.Reason, "different head SHA") {
+	if !decision.LeaveOpen || !decision.EscalateMergeGateMiss || !strings.Contains(decision.Reason, "different head SHA") {
 		t.Fatalf("decision = %+v", decision)
+	}
+	if gh.prCheckCalls != 0 || len(gh.checkRefs) != 1 || gh.checkRefs[0] != "head123" {
+		t.Fatalf("check calls = pr:%d refs:%v; want exact current head", gh.prCheckCalls, gh.checkRefs)
 	}
 }
 
@@ -1078,7 +1122,7 @@ func TestPolicyMergeGateBlocksLegacyReviewWithoutHeadSHA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate returned error: %v", err)
 	}
-	if decision.Ready || !strings.Contains(decision.Reason, "does not record a head SHA") {
+	if !decision.LeaveOpen || !decision.EscalateMergeGateMiss || !strings.Contains(decision.Reason, "does not record a head SHA") {
 		t.Fatalf("decision = %+v", decision)
 	}
 }
@@ -1202,6 +1246,9 @@ type fakeMergeGateGitHub struct {
 	statusCalls  int
 	compareCalls int
 	checkCalls   int
+	prCheckCalls int
+	checkRefs    []string
+	noChecks     bool
 }
 
 func (f *fakeMergeGateGitHub) GetPullRequest(context.Context, github.Repository, int64) (github.PullRequest, error) {
@@ -1223,7 +1270,16 @@ func (f *fakeMergeGateGitHub) CompareCommits(context.Context, github.Repository,
 }
 
 func (f *fakeMergeGateGitHub) ListPullRequestChecks(context.Context, github.Repository, int64) ([]github.PullRequestCheck, error) {
+	f.prCheckCalls++
+	return f.checks, nil
+}
+
+func (f *fakeMergeGateGitHub) ListCheckRunsForRef(_ context.Context, _ github.Repository, ref string) ([]github.PullRequestCheck, error) {
 	f.checkCalls++
+	f.checkRefs = append(f.checkRefs, ref)
+	if !f.noChecks && f.checks == nil {
+		return []github.PullRequestCheck{{Name: "ci", State: "SUCCESS", Bucket: "pass"}}, nil
+	}
 	return f.checks, nil
 }
 

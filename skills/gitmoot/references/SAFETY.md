@@ -33,21 +33,23 @@ follow-up.) When an
 then **abstains** from its native merge gate — fail-closed, meaning it never
 merges gatelessly; the external gate makes the call.
 
-### Native merge requires opt-in (#1114)
+### Native merge requires exact-head review and CI (#1114)
 
-Gitmoot leaves native task PRs open by default. Set `auto_merge = true` only for
-repositories where the operator explicitly wants the daemon to issue the GitHub
-merge after its normal review and CI gate. It may be set globally or per repo:
+Gitmoot enables native task auto-merge by default, but only when an affirmative
+review verdict matches the exact current head SHA and all SHA-scoped commit
+statuses and check-runs are green. Missing or failing evidence parks the task in
+`awaiting_human_merge`, journals the reason, and actively wakes `jarvis`.
+Set `auto_merge = false` globally or per repo as an explicit kill-switch:
 
 ```toml
 [repos."owner/repo".merge_gate]
-auto_merge = true
+auto_merge = false
 ```
 
-With the default `false`, the task becomes `awaiting_human_merge`; this is not a
-quality block and is not stale-task reaped. A human GitHub merge is reconciled
-normally, while `@gitmoot merge` is an explicit authorized merge request. Turning
-`auto_merge` on re-arms only tasks parked for this exact disabled-policy reason.
+The kill-switch hold is not a quality block, is not stale-task reaped, and does
+not escalate. A human GitHub merge is reconciled normally, while `@gitmoot merge`
+is an explicit authorized merge request. Turning `auto_merge` back on re-arms
+only tasks parked for this exact kill-switch reason.
 Pipeline `allow_auto_merge` remains a separate double-keyed mechanism.
 
 ### No external CI: grace window, not instant pass (#596)
@@ -56,12 +58,13 @@ When a PR head reports **zero** external commit-statuses **and** zero check-runs
 Gitmoot does **not** immediately treat the repo as CI-less and stamp the
 synthetic `gitmoot/ci` success. GitHub Actions creates a check-run a few seconds
 *after* a head is pushed, so a single zero observation cannot distinguish "no CI
-configured" from "CI not created yet" — and a fast approve path could otherwise
-merge inside that window before CI exists. Instead the gate returns **pending**
-and only concludes "no CI" after a **second consecutive zero-external observation
-at the same head**, at least `min_ci_wait` (default `60s`) later. The gate is
-re-evaluated every daemon poll, so a genuinely CI-less repo merges exactly one
-grace window later. Two extra guards layer on top:
+configured" from "CI not created yet". Instead the gate returns **pending**
+(a non-escalating, automatically-retried hold — not a policy miss, so it does
+not park the task or wake `jarvis`) and only concludes "no CI" after a **second
+consecutive zero-external observation at the same head**, at least `min_ci_wait`
+(default `60s`) later. The gate is re-evaluated every daemon poll, so a
+genuinely CI-less repo merges exactly one grace window later, provided the
+exact-head review is also clean. Two extra guards layer on top:
 
 - **Workflow-aware (bounded):** if `.github/workflows/` exists at the head tree,
   the gate treats a zero observation as an Actions creation lag and stays pending
@@ -72,12 +75,13 @@ grace window later. Two extra guards layer on top:
   the ~seconds creation lag is still covered.
 - **`[merge_gate] require_external_ci`** (global, or per-repo under
   `[repos."owner/repo".merge_gate]`; default `false`): when `true`, an empty gate
-  **hard-blocks** with an actionable reason — *after* the wait window above, never
-  during the creation-lag race — instead of ever stamping `gitmoot/ci`. Use it for
-  repos you know always have CI. The block is classified transient (it is a
-  repo-config/operator-policy condition, not a template defect), so it is not
-  scored against the implement template. Optionally tune `min_ci_wait` /
-  `max_ci_wait` in the same section.
+  is left open with an escalation — *after* the wait window above, never during
+  the creation-lag race — instead of ever stamping `gitmoot/ci`. Use it for repos
+  you know always have CI. Optionally tune `min_ci_wait` / `max_ci_wait` in the
+  same section.
+
+A check or status that genuinely reports failure (not merely absent) always
+leaves the PR open with an escalation, regardless of the grace window.
 
 Useful commands:
 
