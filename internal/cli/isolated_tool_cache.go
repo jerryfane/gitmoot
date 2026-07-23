@@ -49,7 +49,13 @@ var toolCacheEnvSubdirs = []struct{ env, subdir string }{
 // redirect tools to a directory their sandbox cannot write, breaking Go builds
 // and degrading uv/pip/npm — worse than leaving the env unset. So a read-only
 // (or unrecognized) codex autonomy policy is a no-op here; danger-full-access
-// is unrestricted and proceeds like any other job.
+// is unrestricted and proceeds like any other job. A ChatSeat is ALSO a no-op:
+// codexSandboxArgs returns workspace-write for a ChatSeat WITHOUT ever reaching
+// the --add-dir loop (its only implicit writable roots are workdir/tmp), so a
+// chat seat never gets the shared directory writable regardless of policy —
+// injecting the env for it would reproduce the exact same-directory-unwritable
+// failure this gate exists to prevent (#1113 finder, confirmed against
+// TestCodexDeliverChatSeatSandbox).
 //
 // Errors here are the caller's to treat as fail-open: this is disk hygiene, not
 // a security precondition, and must never fail a job.
@@ -57,7 +63,10 @@ func applyIsolatedToolCacheGrants(paths config.Paths, payload workflow.JobPayloa
 	if strings.TrimSpace(payload.WorktreePath) == "" {
 		return nil, nil
 	}
-	if agent.Runtime == runtime.CodexRuntime && !agent.ChatSeat {
+	if agent.Runtime == runtime.CodexRuntime {
+		if agent.ChatSeat {
+			return nil, nil
+		}
 		switch runtime.NormalizeStoredAutonomyPolicy(agent.AutonomyPolicy) {
 		case runtime.AutonomyPolicyWorkspaceWrite, runtime.AutonomyPolicyDangerFullAccess:
 			// proceeds below

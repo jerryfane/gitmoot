@@ -16,8 +16,12 @@ import (
 // finding: codex only honors WritablePaths under workspace-write, so a
 // read-only (or unrecognized) codex job must get neither the grant nor the env
 // -- pointing its tools at an unwritable shared dir would be worse than doing
-// nothing. workspace-write and danger-full-access proceed; a ChatSeat always
-// proceeds regardless of policy (codex grants it workspace-write unconditionally).
+// nothing. workspace-write and danger-full-access proceed. A ChatSeat is ALSO
+// always a no-op regardless of policy: codexSandboxArgs returns workspace-write
+// for a ChatSeat WITHOUT ever reaching the --add-dir loop, so granting it here
+// would inject env pointing at a directory its sandbox still cannot write —
+// the second-pass finder caught an earlier, backwards version of this gate that
+// bypassed ChatSeat into proceeding, which reproduced the original defect.
 func TestApplyIsolatedToolCacheGrantsCodexAutonomyGate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -30,7 +34,8 @@ func TestApplyIsolatedToolCacheGrantsCodexAutonomyGate(t *testing.T) {
 		{name: "empty policy skipped", policy: "", wantNoop: true},
 		{name: "workspace-write proceeds", policy: runtime.AutonomyPolicyWorkspaceWrite, wantNoop: false},
 		{name: "danger-full-access proceeds", policy: runtime.AutonomyPolicyDangerFullAccess, wantNoop: false},
-		{name: "chat seat proceeds despite read-only policy", policy: runtime.AutonomyPolicyReadOnly, chatSeat: true, wantNoop: false},
+		{name: "chat seat skipped despite read-only policy", policy: runtime.AutonomyPolicyReadOnly, chatSeat: true, wantNoop: true},
+		{name: "chat seat skipped even with workspace-write policy", policy: runtime.AutonomyPolicyWorkspaceWrite, chatSeat: true, wantNoop: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
