@@ -243,10 +243,12 @@ func TestDashboardOrgDetectionUsesLoadedOrchestratePolicy(t *testing.T) {
 	tests := []struct {
 		name        string
 		enableKnob  bool
+		seedLive    bool
 		wantEnabled bool
 		wantHint    string
 	}{
-		{name: "configured", enableKnob: true, wantEnabled: true},
+		{name: "configured with live presence", enableKnob: true, seedLive: true, wantEnabled: true},
+		{name: "configured but no live presence yet", enableKnob: true, wantEnabled: true, wantHint: "waiting for live presence"},
 		{name: "zero knob", wantHint: "blocked_role_wake_after is disabled"},
 	}
 	for _, test := range tests {
@@ -263,6 +265,11 @@ func TestDashboardOrgDetectionUsesLoadedOrchestratePolicy(t *testing.T) {
 				ID: "org-signals", OnKind: "blocked", WakeRole: "owner", Enabled: true,
 			}); err != nil {
 				t.Fatal(err)
+			}
+			if test.seedLive {
+				if err := store.UpsertRoleLivePresence(context.Background(), "owner", "working", time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)

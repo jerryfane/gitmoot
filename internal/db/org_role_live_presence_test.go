@@ -50,6 +50,8 @@ func TestRoleLivePresenceUpsertListAndReap(t *testing.T) {
 	if len(rows) != 1 || rows[0].Role != "owner" {
 		t.Fatalf("rows after reap = %+v", rows)
 	}
+	// An empty keep-set is a no-op, NOT a wipe: a transient empty/all-blank
+	// snapshot must never erase presence for a still-live fleet.
 	if err := store.DeleteRoleLivePresenceExcept(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +59,7 @@ func TestRoleLivePresenceUpsertListAndReap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("rows after empty snapshot reap = %+v", rows)
+	if len(rows) != 1 || rows[0].Role != "owner" {
+		t.Fatalf("empty snapshot reap should be a no-op, rows = %+v", rows)
 	}
 }

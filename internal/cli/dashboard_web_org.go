@@ -107,6 +107,17 @@ type dashboardOrgInputs struct {
 	dataAsOf         time.Time
 }
 
+// hasFreshLivePresence reports whether any persisted Herdr snapshot row is still
+// within the read freshness window, i.e. the daemon is actually persisting.
+func hasFreshLivePresence(rows map[string]db.RoleLivePresence, now time.Time) bool {
+	for _, row := range rows {
+		if observedAt, ok := parseOrgPresenceTime(row.ObservedAt); ok && !observedAt.After(now) && now.Sub(observedAt) <= storeOrgLivePresenceMaxAge {
+			return true
+		}
+	}
+	return false
+}
+
 func loadDashboardOrgInputs(ctx context.Context, paths config.Paths, store *db.Store) (dashboardOrgInputs, error) {
 	shared, err := loadOrgSharedState(ctx, paths, store)
 	if err != nil {
@@ -156,6 +167,13 @@ func loadDashboardOrgInputs(ctx context.Context, paths config.Paths, store *db.S
 		hint = "blocked detection off - blocked_role_wake_after is disabled"
 	case !enabledRules:
 		hint = "blocked detection off - no enabled org event rules"
+	}
+	// Detection is configured on, but the daemon only persists live presence after
+	// passing its own Herdr-availability gate. If nothing fresh has been written,
+	// the page would otherwise show every role never-seen with no explanation, so
+	// distinguish "configured off" from "on but no data yet".
+	if enabled && !hasFreshLivePresence(shared.livePresence, time.Now().UTC()) {
+		hint = "blocked detection on, waiting for live presence (the daemon or Herdr may be unavailable)"
 	}
 
 	inputs := dashboardOrgInputs{

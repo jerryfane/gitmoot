@@ -98,20 +98,37 @@ func storeOrgLiveSource(shared *orgSharedState) orgLiveSource {
 		if err != nil {
 			return nil, time.Time{}, "", err
 		}
+		// Blocked stays sourced from org_blocked_episodes so the node dot cannot
+		// contradict the blocked_since badge, Health.Blocked, or the feed: an
+		// episode persists through a transient absent/unknown snapshot, while the
+		// live-presence row for that role is reaped or ages out of the freshness
+		// window. Working/idle come from the persisted Herdr snapshot.
+		episodes, err := shared.loadBlockedEpisodes(ctx)
+		if err != nil {
+			return nil, time.Time{}, "", err
+		}
+		blocked := make(map[string]bool, len(episodes))
+		for _, episode := range episodes {
+			if strings.HasPrefix(episode.Subject, "role:") {
+				blocked[strings.TrimPrefix(episode.Subject, "role:")] = true
+			}
+		}
 		now := time.Now().UTC()
 		var latest time.Time
 		states := make(map[string]org.RoleLiveState, len(cfg.Roles()))
 		for _, role := range cfg.Roles() {
 			state := org.StateUnknown
-			row, ok := presence[role.Name]
-			observedAt, parsed := parseOrgPresenceTime(row.ObservedAt)
-			if ok && parsed && !observedAt.After(now) && now.Sub(observedAt) <= storeOrgLivePresenceMaxAge {
-				switch org.LifecycleState(row.State) {
-				case org.StateBlocked, org.StateWorking, org.StateIdle:
-					state = org.LifecycleState(row.State)
-				}
-				if observedAt.After(latest) {
-					latest = observedAt
+			if blocked[role.Name] {
+				state = org.StateBlocked
+			} else if row, ok := presence[role.Name]; ok {
+				if observedAt, parsed := parseOrgPresenceTime(row.ObservedAt); parsed && !observedAt.After(now) && now.Sub(observedAt) <= storeOrgLivePresenceMaxAge {
+					switch org.LifecycleState(row.State) {
+					case org.StateWorking, org.StateIdle:
+						state = org.LifecycleState(row.State)
+						if observedAt.After(latest) {
+							latest = observedAt
+						}
+					}
 				}
 			}
 			states[role.Name] = org.RoleLiveState{State: state}

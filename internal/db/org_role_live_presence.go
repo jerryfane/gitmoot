@@ -70,8 +70,10 @@ func (s *Store) DeleteRoleLivePresenceExcept(ctx context.Context, roles []string
 		normalized = append(normalized, role)
 	}
 	if len(normalized) == 0 {
-		_, err := s.db.ExecContext(ctx, `DELETE FROM org_role_live_presence`)
-		return err
+		// An empty keep-set must NOT wipe the whole table: a transient empty or
+		// all-blank snapshot would erase presence for a still-live fleet. Stale
+		// rows age out of the reader's freshness window instead, so a no-op is safe.
+		return nil
 	}
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(normalized)), ",")

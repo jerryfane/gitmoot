@@ -15,9 +15,15 @@ func TestStoreOrgLiveSourcePersistedFreshness(t *testing.T) {
 		name       string
 		state      org.LifecycleState
 		observedAt time.Time
+		episode    bool // seed an open org_blocked_episodes row for role:review
 		want       org.LifecycleState
 	}{
-		{name: "fresh blocked", state: org.StateBlocked, observedAt: fresh, want: org.StateBlocked},
+		// Blocked is authoritative from org_blocked_episodes (keeps the dot in
+		// agreement with the blocked_since badge / Health.Blocked), NOT from a
+		// live-presence "blocked" row.
+		{name: "blocked from episode", episode: true, want: org.StateBlocked},
+		{name: "episode wins over live working", state: org.StateWorking, observedAt: fresh, episode: true, want: org.StateBlocked},
+		{name: "live blocked without episode is not blocked", state: org.StateBlocked, observedAt: fresh, want: org.StateUnknown},
 		{name: "fresh working", state: org.StateWorking, observedAt: fresh, want: org.StateWorking},
 		{name: "fresh idle", state: org.StateIdle, observedAt: fresh, want: org.StateIdle},
 		{name: "stale", state: org.StateWorking, observedAt: fresh.Add(-storeOrgLivePresenceMaxAge), want: org.StateUnknown},
@@ -36,6 +42,11 @@ func TestStoreOrgLiveSourcePersistedFreshness(t *testing.T) {
 			ctx := context.Background()
 			if !test.observedAt.IsZero() {
 				if err := store.UpsertRoleLivePresence(ctx, "review", string(test.state), test.observedAt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.episode {
+				if err := store.UpsertBlockedEpisode(ctx, "role:review", fresh, time.Now().UTC()); err != nil {
 					t.Fatal(err)
 				}
 			}
